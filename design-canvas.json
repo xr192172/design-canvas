@@ -1,0 +1,1529 @@
+{
+  "id": "agent_shell_context_engine_conveyor",
+  "type": "feature_diagram",
+  "feature": "conveyor",
+  "version": "1.0.0",
+  "title": "agent-shell v2 上下文引擎传送带模型",
+  "status": "done",
+  "geometry": {
+    "layout": "vertical_flow",
+    "width": 1200,
+    "height": 1240,
+    "nodes": [
+      {
+        "id": "node_l0",
+        "x": 100,
+        "y": 40,
+        "width": 900,
+        "height": 70,
+        "label": "L0 永久层",
+        "style": {
+          "bg": "#0f3460",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_l0_arch",
+        "x": 150,
+        "y": 60,
+        "width": 380,
+        "height": 30,
+        "label": "架构知识 (KV cache 优化)",
+        "style": {
+          "bg": "#1a4a7a",
+          "color": "#ffffff",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_l0_identity",
+        "x": 570,
+        "y": 60,
+        "width": 380,
+        "height": 30,
+        "label": "系统身份 + 工具清单",
+        "style": {
+          "bg": "#1a4a7a",
+          "color": "#ffffff",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_summary_zone",
+        "x": 100,
+        "y": 140,
+        "width": 900,
+        "height": 70,
+        "label": "SummaryZone（12 条摘要目录）",
+        "style": {
+          "bg": "#16213e",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_summary_1",
+        "x": 130,
+        "y": 160,
+        "width": 200,
+        "height": 30,
+        "label": "摘要 1-4",
+        "style": {
+          "bg": "#1e2d4d",
+          "color": "#b0bec5",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_summary_2",
+        "x": 350,
+        "y": 160,
+        "width": 200,
+        "height": 30,
+        "label": "摘要 5-8",
+        "style": {
+          "bg": "#1e2d4d",
+          "color": "#b0bec5",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_summary_3",
+        "x": 570,
+        "y": 160,
+        "width": 200,
+        "height": 30,
+        "label": "摘要 9-12",
+        "style": {
+          "bg": "#1e2d4d",
+          "color": "#b0bec5",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_summary_evict",
+        "x": 790,
+        "y": 160,
+        "width": 180,
+        "height": 30,
+        "label": "FIFO 淘汰策略",
+        "style": {
+          "bg": "#2a3f5f",
+          "color": "#ffc107",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_section_queue",
+        "x": 100,
+        "y": 250,
+        "width": 900,
+        "height": 150,
+        "label": "SectionQueue（FIFO 队列，N=8/K=4 非破坏性折叠）",
+        "style": {
+          "bg": "#1a1a2e",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_section_active",
+        "x": 130,
+        "y": 280,
+        "width": 280,
+        "height": 60,
+        "label": "活跃 Section (4个)",
+        "style": {
+          "bg": "#252545",
+          "color": "#ffffff",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_section_folded",
+        "x": 430,
+        "y": 280,
+        "width": 280,
+        "height": 60,
+        "label": "已折叠 Section (4个, Messages 保留可 Rollback)",
+        "style": {
+          "bg": "#2a2a4a",
+          "color": "#8b9bb4",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_rollback",
+        "x": 430,
+        "y": 350,
+        "width": 280,
+        "height": 30,
+        "label": "Rollback 恢复机制",
+        "style": {
+          "bg": "#3d2e5c",
+          "color": "#ce93d8",
+          "borderRadius": 4,
+          "border": "1px dashed #ce93d8"
+        }
+      },
+      {
+        "id": "node_section_corpus",
+        "x": 730,
+        "y": 280,
+        "width": 240,
+        "height": 60,
+        "label": "CorpusJournal 持久化",
+        "style": {
+          "bg": "#3d2e5c",
+          "color": "#ce93d8",
+          "borderRadius": 4
+        },
+        "sub_dsl": {
+          "id": "corpus_journal_detail",
+          "type": "feature_diagram",
+          "feature": "corpus_journal",
+          "version": "1.0.0",
+          "title": "CorpusJournal 内部结构",
+          "status": "in_progress",
+          "geometry": {
+            "layout": "vertical_flow",
+            "width": 800,
+            "height": 700,
+            "nodes": [
+              {
+                "id": "corpus_journal",
+                "x": 100,
+                "y": 40,
+                "width": 600,
+                "height": 70,
+                "label": "CorpusJournal（持久化层）",
+                "style": {
+                  "bg": "#4a2c6a",
+                  "color": "#ffffff",
+                  "borderRadius": 8
+                }
+              },
+              {
+                "id": "corpus_sections",
+                "x": 100,
+                "y": 150,
+                "width": 600,
+                "height": 90,
+                "label": "Section 表（所有折叠/活跃的 Section）",
+                "style": {
+                  "bg": "#5d3d82",
+                  "color": "#ffffff",
+                  "borderRadius": 6
+                }
+              },
+              {
+                "id": "section_id",
+                "x": 130,
+                "y": 180,
+                "width": 140,
+                "height": 40,
+                "label": "id (ULID)",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "section_summary",
+                "x": 290,
+                "y": 180,
+                "width": 180,
+                "height": 40,
+                "label": "summary (压缩摘要)",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "section_meta",
+                "x": 490,
+                "y": 180,
+                "width": 190,
+                "height": 40,
+                "label": "token_count / created_at",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "corpus_messages",
+                "x": 100,
+                "y": 280,
+                "width": 600,
+                "height": 90,
+                "label": "Message 表（消息内容）",
+                "style": {
+                  "bg": "#5d3d82",
+                  "color": "#ffffff",
+                  "borderRadius": 6
+                }
+              },
+              {
+                "id": "msg_section_fk",
+                "x": 130,
+                "y": 310,
+                "width": 180,
+                "height": 40,
+                "label": "section_id (外键)",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "msg_role",
+                "x": 330,
+                "y": 310,
+                "width": 120,
+                "height": 40,
+                "label": "role / content",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "msg_index",
+                "x": 470,
+                "y": 310,
+                "width": 210,
+                "height": 40,
+                "label": "msg_index (顺序号)",
+                "style": {
+                  "bg": "#6d4d92",
+                  "color": "#e1bee7",
+                  "borderRadius": 4
+                }
+              },
+              {
+                "id": "corpus_index",
+                "x": 100,
+                "y": 410,
+                "width": 600,
+                "height": 80,
+                "label": "BM25 / Vector 索引",
+                "style": {
+                  "bg": "#7b5aae",
+                  "color": "#fff59d",
+                  "borderRadius": 6
+                }
+              },
+              {
+                "id": "corpus_api",
+                "x": 100,
+                "y": 530,
+                "width": 600,
+                "height": 70,
+                "label": "API：query / appendSection / foldSection",
+                "style": {
+                  "bg": "#3d2e5c",
+                  "color": "#ce93d8",
+                  "borderRadius": 6
+                }
+              }
+            ],
+            "edges": [
+              {
+                "id": "e1",
+                "from": "corpus_journal",
+                "to": "corpus_sections",
+                "label": "↓ 包含"
+              },
+              {
+                "id": "e2",
+                "from": "corpus_sections",
+                "to": "corpus_messages",
+                "label": "↓ 1:N"
+              },
+              {
+                "id": "e3",
+                "from": "corpus_messages",
+                "to": "corpus_index",
+                "label": "↓ 建索引"
+              },
+              {
+                "id": "e4",
+                "from": "corpus_index",
+                "to": "corpus_api",
+                "label": "↓ 提供查询"
+              },
+              {
+                "id": "ec1",
+                "from": "corpus_sections",
+                "to": "section_id",
+                "label": "contains"
+              },
+              {
+                "id": "ec2",
+                "from": "corpus_sections",
+                "to": "section_summary",
+                "label": "contains"
+              },
+              {
+                "id": "ec3",
+                "from": "corpus_sections",
+                "to": "section_meta",
+                "label": "contains"
+              },
+              {
+                "id": "ec4",
+                "from": "corpus_messages",
+                "to": "msg_section_fk",
+                "label": "contains"
+              },
+              {
+                "id": "ec5",
+                "from": "corpus_messages",
+                "to": "msg_role",
+                "label": "contains"
+              },
+              {
+                "id": "ec6",
+                "from": "corpus_messages",
+                "to": "msg_index",
+                "label": "contains"
+              }
+            ]
+          },
+          "semantic": {
+            "files": [
+              {
+                "id": "corpus_journal",
+                "path": "internal/context/v2/corpus_journal.go",
+                "responsibility": "CorpusJournal 持久化层定义",
+                "expected_apis": [
+                  {
+                    "signature": "Corpus.Query(query string) ([]Section, error)"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "node_current_round",
+        "x": 100,
+        "y": 440,
+        "width": 900,
+        "height": 180,
+        "label": "CurrentRound（当前轮 + DraftZone 草稿段）",
+        "style": {
+          "bg": "#e94560",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_round_messages",
+        "x": 130,
+        "y": 470,
+        "width": 420,
+        "height": 50,
+        "label": "当前轮消息队列",
+        "style": {
+          "bg": "#f06292",
+          "color": "#ffffff",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_draft_zone",
+        "x": 570,
+        "y": 470,
+        "width": 400,
+        "height": 130,
+        "label": "DraftZone（~19K token，LLM 主动管理）",
+        "style": {
+          "bg": "#e94560",
+          "color": "#ffffff",
+          "borderRadius": 4,
+          "border": "2px dashed #ffffff"
+        }
+      },
+      {
+        "id": "node_draft_add",
+        "x": 590,
+        "y": 505,
+        "width": 170,
+        "height": 30,
+        "label": "AddDraft / DropDraft",
+        "style": {
+          "bg": "#ff758f",
+          "color": "#ffffff",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_draft_budget",
+        "x": 780,
+        "y": 505,
+        "width": 170,
+        "height": 30,
+        "label": "预算 30% × CRC",
+        "style": {
+          "bg": "#ff758f",
+          "color": "#ffeb3b",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_round_advance",
+        "x": 130,
+        "y": 530,
+        "width": 420,
+        "height": 60,
+        "label": "AdvanceConveyor()  mid-round 切分",
+        "style": {
+          "bg": "#f06292",
+          "color": "#fff9c4",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_dynamic_injection",
+        "x": 100,
+        "y": 660,
+        "width": 900,
+        "height": 130,
+        "label": "DynamicInjection（memory_retrieve 跨层检索结果）",
+        "style": {
+          "bg": "#533483",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_retrieval_section",
+        "x": 130,
+        "y": 690,
+        "width": 170,
+        "height": 70,
+        "label": "Section 层检索",
+        "style": {
+          "bg": "#6a4a9c",
+          "color": "#e1bee7",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_retrieval_corpus",
+        "x": 315,
+        "y": 690,
+        "width": 170,
+        "height": 70,
+        "label": "Corpus 层检索",
+        "style": {
+          "bg": "#6a4a9c",
+          "color": "#e1bee7",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_retrieval_graph",
+        "x": 500,
+        "y": 690,
+        "width": 170,
+        "height": 70,
+        "label": "Graph 知识图谱",
+        "style": {
+          "bg": "#6a4a9c",
+          "color": "#e1bee7",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_retrieval_skill",
+        "x": 685,
+        "y": 690,
+        "width": 170,
+        "height": 70,
+        "label": "Skill 模式库",
+        "style": {
+          "bg": "#6a4a9c",
+          "color": "#e1bee7",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_retrieval_cache",
+        "x": 870,
+        "y": 690,
+        "width": 110,
+        "height": 70,
+        "label": "RetrievalCache 防重复",
+        "style": {
+          "bg": "#7b5aae",
+          "color": "#fff59d",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_context_compose",
+        "x": 100,
+        "y": 830,
+        "width": 900,
+        "height": 70,
+        "label": "ContextComposition（最终上下文组装）",
+        "style": {
+          "bg": "#0d47a1",
+          "color": "#ffffff",
+          "borderRadius": 8
+        }
+      },
+      {
+        "id": "node_compose_order",
+        "x": 150,
+        "y": 850,
+        "width": 380,
+        "height": 30,
+        "label": "L0 → Summary → Sections → Current → Injection",
+        "style": {
+          "bg": "#1565c0",
+          "color": "#bbdefb",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_compose_token",
+        "x": 570,
+        "y": 850,
+        "width": 380,
+        "height": 30,
+        "label": "Token 预算核算  128K 上限",
+        "style": {
+          "bg": "#1565c0",
+          "color": "#ffcc80",
+          "borderRadius": 4
+        }
+      },
+      {
+        "id": "node_llm_aam",
+        "x": 1030,
+        "y": 440,
+        "width": 120,
+        "height": 120,
+        "label": "🧠 LLM / AAM",
+        "style": {
+          "bg": "#6a1b9a",
+          "color": "#e1bee7",
+          "borderRadius": 60,
+          "shape": "circle"
+        },
+        "type": "llm",
+        "description": "模拟 Agent-Aided Memory 生成结构化消息"
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_flow_1",
+        "from": "node_l0",
+        "to": "node_summary_zone",
+        "label": "↓ 流向"
+      },
+      {
+        "id": "edge_flow_2",
+        "from": "node_summary_zone",
+        "to": "node_section_queue",
+        "label": "↓ 流向"
+      },
+      {
+        "id": "edge_flow_3",
+        "from": "node_section_queue",
+        "to": "node_current_round",
+        "label": "↓ 流向"
+      },
+      {
+        "id": "edge_flow_4",
+        "from": "node_current_round",
+        "to": "node_dynamic_injection",
+        "label": "↓ 流向"
+      },
+      {
+        "id": "edge_flow_5",
+        "from": "node_dynamic_injection",
+        "to": "node_context_compose",
+        "label": "↓ 流向"
+      },
+      {
+        "id": "edge_contains_l0_arch",
+        "from": "node_l0",
+        "to": "node_l0_arch",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_l0_identity",
+        "from": "node_l0",
+        "to": "node_l0_identity",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sum_1",
+        "from": "node_summary_zone",
+        "to": "node_summary_1",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sum_2",
+        "from": "node_summary_zone",
+        "to": "node_summary_2",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sum_3",
+        "from": "node_summary_zone",
+        "to": "node_summary_3",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sum_evict",
+        "from": "node_summary_zone",
+        "to": "node_summary_evict",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sec_active",
+        "from": "node_section_queue",
+        "to": "node_section_active",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sec_folded",
+        "from": "node_section_queue",
+        "to": "node_section_folded",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_sec_corpus",
+        "from": "node_section_queue",
+        "to": "node_section_corpus",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_round_msg",
+        "from": "node_current_round",
+        "to": "node_round_messages",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_round_draft",
+        "from": "node_current_round",
+        "to": "node_draft_zone",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_round_advance",
+        "from": "node_current_round",
+        "to": "node_round_advance",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_draft_add",
+        "from": "node_draft_zone",
+        "to": "node_draft_add",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_draft_budget",
+        "from": "node_draft_zone",
+        "to": "node_draft_budget",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_inj_section",
+        "from": "node_dynamic_injection",
+        "to": "node_retrieval_section",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_inj_corpus",
+        "from": "node_dynamic_injection",
+        "to": "node_retrieval_corpus",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_inj_graph",
+        "from": "node_dynamic_injection",
+        "to": "node_retrieval_graph",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_inj_skill",
+        "from": "node_dynamic_injection",
+        "to": "node_retrieval_skill",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_inj_cache",
+        "from": "node_dynamic_injection",
+        "to": "node_retrieval_cache",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_compose_order",
+        "from": "node_context_compose",
+        "to": "node_compose_order",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_compose_token",
+        "from": "node_context_compose",
+        "to": "node_compose_token",
+        "label": "contains"
+      },
+      {
+        "id": "edge_contains_rollback",
+        "from": "node_section_queue",
+        "to": "node_rollback",
+        "label": "contains"
+      },
+      {
+        "id": "edge_rollback_flow",
+        "from": "node_rollback",
+        "to": "node_current_round",
+        "label": "可 Rollback 恢复",
+        "style": {
+          "stroke": "#ce93d8",
+          "strokeDasharray": "5 3"
+        }
+      },
+      {
+        "id": "edge_token_feedback",
+        "from": "node_context_compose",
+        "to": "node_section_queue",
+        "label": "超预算反馈触发折叠",
+        "style": {
+          "stroke": "#ff5722",
+          "strokeDasharray": "8 4"
+        }
+      },
+      {
+        "id": "edge_retrieval_cache_loop",
+        "from": "node_retrieval_cache",
+        "to": "node_dynamic_injection",
+        "label": "缓存命中跳过检索",
+        "style": {
+          "stroke": "#fff59d",
+          "strokeDasharray": "3 3"
+        }
+      }
+    ]
+  },
+  "animations_v2": {
+    "version": 1,
+    "flows": [
+      {
+        "id": "flow_l0_to_summary",
+        "trigger": {
+          "type": "periodic",
+          "interval": 5000
+        },
+        "from": "node_l0",
+        "to": "node_summary_zone",
+        "value": {
+          "type": "arch_context",
+          "label": "架构上下文",
+          "fields": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "tool_list": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "flow_summary_to_sections",
+        "trigger": {
+          "type": "periodic",
+          "interval": 6000
+        },
+        "from": "node_summary_zone",
+        "to": "node_section_queue",
+        "value": {
+          "type": "summary_entries",
+          "label": "摘要目录",
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "tokens": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "flow_sections_to_current",
+        "trigger": {
+          "type": "periodic",
+          "interval": 4500
+        },
+        "from": "node_section_queue",
+        "to": "node_current_round",
+        "value": {
+          "type": "active_sections",
+          "label": "活跃Section",
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "section_id": {
+                  "type": "string"
+                },
+                "messages": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "semantic": {
+    "files": [
+      {
+        "id": "node_l0",
+        "path": "internal/context/v2/arch_knowledge.go",
+        "responsibility": "系统身份 + 精简架构知识（~3K token，KV cache 优化）",
+        "expected_apis": [
+          {
+            "signature": "L0Content() string",
+            "notes": "返回 L0 永久层文本"
+          }
+        ],
+        "expected_deps": [],
+        "expected_behavior": "完整架构通过 index 工具按需查询 CBM，L0 只保留精简指引"
+      },
+      {
+        "id": "node_summary_zone",
+        "path": "internal/context/v2/summary_zone.go",
+        "responsibility": "12 条压缩摘要目录",
+        "expected_apis": [
+          {
+            "signature": "SummaryZone.Add(summary string) error",
+            "notes": ""
+          },
+          {
+            "signature": "SummaryZone.Format() string",
+            "notes": "格式化输出"
+          }
+        ],
+        "expected_deps": [
+          "internal/context/v2/arch_knowledge.go"
+        ],
+        "expected_behavior": "上限 12 条，超出淘汰最旧"
+      },
+      {
+        "id": "node_section_queue",
+        "path": "internal/context/v2/section_queue.go",
+        "responsibility": "FIFO 队列，非破坏性折叠，CorpusJournal 持久化",
+        "expected_apis": [
+          {
+            "signature": "SectionQueue.Push(section *Section)",
+            "notes": ""
+          },
+          {
+            "signature": "SectionQueue.Fold(n, k int)",
+            "notes": "N=8/K=4 折叠参数"
+          }
+        ],
+        "expected_deps": [
+          "internal/context/v2/corpus_journal.go"
+        ],
+        "expected_behavior": "8 个活跃 section，达阈值折叠 4 个（Messages 保留在 RAM，GC 已移除）"
+      },
+      {
+        "id": "node_current_round",
+        "path": "internal/context/v2/current_round.go",
+        "responsibility": "当前轮对话 + DraftZone 草稿段",
+        "expected_apis": [
+          {
+            "signature": "CurrentRound.AddMessage(msg Message)",
+            "notes": ""
+          },
+          {
+            "signature": "CurrentRound.AdvanceConveyor()",
+            "notes": "mid-round 切分新 section"
+          }
+        ],
+        "expected_deps": [
+          "internal/context/v2/section_queue.go"
+        ],
+        "expected_behavior": "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限切分"
+      },
+      {
+        "id": "node_draft_zone",
+        "path": "internal/context/v2/draft_zone.go",
+        "responsibility": "LLM 主动管理的草稿段（~19K token 预算）",
+        "expected_apis": [
+          {
+            "signature": "DraftZone.AddDraft(content string) (int, error)",
+            "notes": ""
+          },
+          {
+            "signature": "DraftZone.DropDraft(index int) bool",
+            "notes": ""
+          },
+          {
+            "signature": "DraftZone.ClearDraft()",
+            "notes": ""
+          }
+        ],
+        "expected_deps": [],
+        "expected_behavior": "预算 30% × CurrentRoundCap，超限 AddDraft 返回 error，LLM 需 draft_drop"
+      },
+      {
+        "id": "node_dynamic_injection",
+        "path": "internal/context/v2/dynamic_injection.go",
+        "responsibility": "memory_retrieve 跨层召回 + RetrievalCache 防重复",
+        "expected_apis": [
+          {
+            "signature": "DynamicInjection.Retrieve(types []string, query string) string",
+            "notes": "section/corpus/graph/heat/skill 五层"
+          }
+        ],
+        "expected_deps": [
+          "internal/context/v2/retrieval_cache.go"
+        ],
+        "expected_behavior": "访问缓存防止同轮重复召回；注入 [Pinned Tools] / [Known Patterns] / [Relevant Knowledge] 段"
+      },
+      {
+        "id": "node_context_compose",
+        "path": "internal/context/v2/context_composition.go",
+        "responsibility": "最终上下文组装 + Token 预算核算",
+        "expected_apis": [
+          {
+            "signature": "Compose() (string, error)",
+            "notes": "按顺序组装所有层"
+          },
+          {
+            "signature": "TokenBudget() int",
+            "notes": "128K 上限核算"
+          }
+        ],
+        "expected_deps": [
+          "internal/context/v2/current_round.go",
+          "internal/context/v2/dynamic_injection.go"
+        ],
+        "expected_behavior": "按 L0→Summary→Sections→Current→Injection 顺序组装，超出预算触发折叠淘汰"
+      }
+    ],
+    "multi_file_invariants": [
+      "SectionQueue 不直接调 Memory.VectorStore（跨层禁止）",
+      "DraftZone 必须在 CurrentRound 内，不能跨 section",
+      "DynamicInjection 注入顺序：DraftZone 之后，ContextComposition 之前"
+    ],
+    "expected_global_behavior": [
+      "上下文窗口上限 128K（DeepSeek V4 Pro），超限触发 Section 折叠淘汰",
+      "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限 mid-round 切分",
+      "DraftZone 预算 30% × CurrentRoundCap，超限 LLM 主动 draft_drop"
+    ]
+  },
+  "annotations": [
+    {
+      "id": "anno_kv_cache",
+      "target_id": "node_l0",
+      "text": "KV cache 优化的核心：prefix 稳定 + SHA256 版本检测，确保字节级一致",
+      "author": "llm",
+      "created": "2026-07-21T10:00:00Z"
+    },
+    {
+      "id": "anno_fold_params",
+      "target_id": "node_section_queue",
+      "text": "N=8/K=4 是固定值，动态自适应折叠（GC 风格）增加复杂度但无清晰收益，已弃用",
+      "author": "llm",
+      "created": "2026-07-21T10:00:00Z"
+    },
+    {
+      "id": "anno_gc_removed",
+      "target_id": "node_section_queue",
+      "text": "SectionGC 已移除——折叠的 Section 的 Messages 保留在 RAM，CorpusJournal 是持久化源",
+      "author": "llm",
+      "created": "2026-07-21T10:00:00Z"
+    }
+  ],
+  "simulation": {
+    "id": "context_engine_sim",
+    "name": "上下文引擎仿真器",
+    "description": "真实数据流入 → 规则触发 → 状态变化。点击按钮模拟事件，观察级联触发。",
+    "initial_state": [
+      {
+        "key": "sections",
+        "value": [
+          {
+            "id": "sec_1",
+            "status": "active",
+            "summary": "用户登录流程",
+            "tokens": 2500,
+            "messages": 5
+          },
+          {
+            "id": "sec_2",
+            "status": "active",
+            "summary": "订单创建逻辑",
+            "tokens": 3200,
+            "messages": 7
+          },
+          {
+            "id": "sec_3",
+            "status": "active",
+            "summary": "库存检查",
+            "tokens": 1800,
+            "messages": 3
+          },
+          {
+            "id": "sec_4",
+            "status": "active",
+            "summary": "支付处理",
+            "tokens": 4100,
+            "messages": 8
+          }
+        ],
+        "type": "array",
+        "description": "所有 Section 对象"
+      },
+      {
+        "key": "currentRoundSize",
+        "value": 3,
+        "type": "number",
+        "description": "当前轮消息数"
+      },
+      {
+        "key": "summaryCount",
+        "value": 8,
+        "type": "number",
+        "description": "SummaryZone 摘要数量"
+      },
+      {
+        "key": "tokenBudget",
+        "value": 128000,
+        "type": "number",
+        "description": "总 token 预算"
+      }
+    ],
+    "rules": [
+      {
+        "id": "user_input_arrives",
+        "name": "用户输入到达",
+        "event": "user_input",
+        "from_node": "node_current_round",
+        "to_nodes": [
+          "node_current_round"
+        ],
+        "actions": [
+          {
+            "type": "increment",
+            "target": "currentRoundSize",
+            "amount": 1
+          },
+          {
+            "type": "highlight",
+            "target": "node_current_round"
+          }
+        ],
+        "emits": [
+          "turn_done"
+        ]
+      },
+      {
+        "id": "turn_done_detect_summary",
+        "name": "TurnDone 检测 summary 标签",
+        "event": "turn_done",
+        "from_node": "node_current_round",
+        "to_nodes": [
+          "node_round_advance"
+        ],
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_round_advance"
+          }
+        ],
+        "emits": [
+          "advance_conveyor"
+        ]
+      },
+      {
+        "id": "advance_add_section",
+        "name": "AdvanceConveyor 添加 Section",
+        "event": "advance_conveyor",
+        "from_node": "node_round_advance",
+        "to_nodes": [
+          "node_section_active",
+          "node_section_queue"
+        ],
+        "actions": [
+          {
+            "type": "push",
+            "target": "sections",
+            "value": {
+              "id": "sec_${sections.length + 1}",
+              "status": "active",
+              "summary": "新 Section",
+              "tokens": "2000 + Math.floor(Math.random() * 2000)",
+              "messages": "3 + Math.floor(Math.random() * 5)"
+            }
+          },
+          {
+            "type": "set_state",
+            "target": "currentRoundSize",
+            "value": 0
+          },
+          {
+            "type": "highlight",
+            "target": "node_section_active"
+          }
+        ],
+        "emits": [
+          "threshold_check"
+        ]
+      },
+      {
+        "id": "threshold_check",
+        "name": "阈值检查",
+        "event": "threshold_check",
+        "from_node": "node_section_queue",
+        "to_nodes": [
+          "node_section_queue"
+        ],
+        "condition": "sections.filter(s => s.status === 'active').length > 8 || sections.reduce((sum, s) => sum + s.tokens, 0) > tokenBudget * 0.6",
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_section_queue"
+          },
+          {
+            "type": "log",
+            "message": "活跃 Section > 8 或 token 超预算，触发 PulseEvict"
+          }
+        ],
+        "emits": [
+          "pulse_evict"
+        ]
+      },
+      {
+        "id": "pulse_evict_fold",
+        "name": "PulseEvict 折叠（FIFO）",
+        "event": "pulse_evict",
+        "from_node": "node_section_queue",
+        "to_nodes": [
+          "node_section_folded"
+        ],
+        "actions": [
+          {
+            "type": "call",
+            "target": "foldOldestSections",
+            "value": 4
+          },
+          {
+            "type": "highlight",
+            "target": "node_section_folded"
+          }
+        ],
+        "emits": [
+          "summary_update"
+        ]
+      },
+      {
+        "id": "summary_update",
+        "name": "SummaryZone 更新",
+        "event": "summary_update",
+        "from_node": "node_section_folded",
+        "to_nodes": [
+          "node_summary_zone"
+        ],
+        "actions": [
+          {
+            "type": "increment",
+            "target": "summaryCount",
+            "amount": 4
+          },
+          {
+            "type": "highlight",
+            "target": "node_summary_zone"
+          }
+        ],
+        "emits": [
+          "corpus_backup"
+        ]
+      },
+      {
+        "id": "corpus_backup",
+        "name": "CorpusJournal 持久化",
+        "event": "corpus_backup",
+        "from_node": "node_summary_zone",
+        "to_nodes": [
+          "node_section_corpus"
+        ],
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_section_corpus"
+          },
+          {
+            "type": "log",
+            "message": "折叠的 Section 数据已持久化到 CorpusJournal"
+          }
+        ],
+        "emits": [
+          "summary_evict_check"
+        ]
+      },
+      {
+        "id": "summary_evict_check",
+        "name": "SummaryZone FIFO 淘汰检查",
+        "event": "summary_evict_check",
+        "from_node": "node_section_corpus",
+        "to_nodes": [
+          "node_summary_evict"
+        ],
+        "condition": "summaryCount > 12",
+        "actions": [
+          {
+            "type": "set_state",
+            "target": "summaryCount",
+            "value": "summaryCount - 1"
+          },
+          {
+            "type": "call",
+            "target": "evictOldestSection",
+            "value": 1
+          },
+          {
+            "type": "highlight",
+            "target": "node_summary_evict"
+          },
+          {
+            "type": "log",
+            "message": "SummaryZone 超过 12 条，FIFO 淘汰最旧摘要"
+          }
+        ]
+      },
+      {
+        "id": "rollback_restore",
+        "name": "Rollback 恢复折叠 Section",
+        "event": "rollback",
+        "from_node": "node_rollback",
+        "to_nodes": [
+          "node_current_round"
+        ],
+        "condition": "sections.filter(s => s.status === 'folded').length > 0",
+        "actions": [
+          {
+            "type": "call",
+            "target": "restoreFoldedSection",
+            "value": 1
+          },
+          {
+            "type": "highlight",
+            "target": "node_current_round"
+          },
+          {
+            "type": "log",
+            "message": "从折叠状态恢复 Section 到 CurrentRound（Messages 一直在 RAM）"
+          }
+        ]
+      },
+      {
+        "id": "token_overflow_feedback",
+        "name": "Token 超预算反馈折叠",
+        "event": "token_overflow",
+        "from_node": "node_context_compose",
+        "to_nodes": [
+          "node_section_queue"
+        ],
+        "condition": "sections.reduce((sum, s) => sum + s.tokens, 0) > tokenBudget * 0.8",
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_section_queue"
+          },
+          {
+            "type": "log",
+            "message": "ContextComposition 核算超 80% 预算，反馈触发 PulseEvict"
+          }
+        ],
+        "emits": [
+          "pulse_evict"
+        ]
+      },
+      {
+        "id": "retrieval_request",
+        "name": "memory_retrieve 跨层检索",
+        "event": "retrieval_request",
+        "from_node": "node_dynamic_injection",
+        "to_nodes": [
+          "node_retrieval_cache"
+        ],
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_retrieval_cache"
+          }
+        ],
+        "emits": [
+          "retrieval_cache_check"
+        ]
+      },
+      {
+        "id": "retrieval_cache_hit",
+        "name": "RetrievalCache 命中跳过检索",
+        "event": "retrieval_cache_check",
+        "from_node": "node_retrieval_cache",
+        "to_nodes": [
+          "node_dynamic_injection"
+        ],
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_dynamic_injection"
+          },
+          {
+            "type": "log",
+            "message": "缓存命中，直接返回结果跳过跨层检索"
+          }
+        ]
+      },
+      {
+        "id": "llm_aam_generate",
+        "name": "LLM/AAM 生成结构化摘要",
+        "event": "advance_conveyor",
+        "from_node": "node_llm_aam",
+        "to_nodes": [
+          "node_section_active",
+          "node_current_round"
+        ],
+        "condition": "sections.filter(s => s.status === 'active').length > 0",
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_llm_aam"
+          },
+          {
+            "type": "log",
+            "message": "🧠 AAM 生成结构化摘要: ![...]...[summary]"
+          }
+        ]
+      },
+      {
+        "id": "llm_aam_user_input",
+        "name": "LLM/AAM 接收用户输入",
+        "event": "user_input",
+        "from_node": "node_llm_aam",
+        "to_nodes": [
+          "node_current_round"
+        ],
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_llm_aam"
+          },
+          {
+            "type": "log",
+            "message": "🧠 AAM 处理用户输入，生成上下文响应"
+          }
+        ]
+      },
+      {
+        "id": "llm_aam_fold_section",
+        "name": "LLM/AAM 触发 Section 折叠",
+        "event": "pulse_evict",
+        "from_node": "node_llm_aam",
+        "to_nodes": [
+          "node_section_folded"
+        ],
+        "condition": "sections.filter(s => s.status === 'folded').length > 0",
+        "actions": [
+          {
+            "type": "highlight",
+            "target": "node_llm_aam"
+          },
+          {
+            "type": "log",
+            "message": "🧠 AAM 生成折叠 Section 的摘要: [summary]"
+          }
+        ]
+      }
+    ],
+    "mappings": [
+      {
+        "stateKey": "sections",
+        "nodeId": "node_section_active",
+        "labelTemplate": "活跃 Section (${sections.filter(s => s.status === 'active').length}个)"
+      },
+      {
+        "stateKey": "sections",
+        "nodeId": "node_section_folded",
+        "labelTemplate": "已折叠 Section (${sections.filter(s => s.status === 'folded').length}个)"
+      },
+      {
+        "stateKey": "summaryCount",
+        "nodeId": "node_summary_zone",
+        "labelTemplate": "SummaryZone（${summaryCount} 条摘要目录）"
+      },
+      {
+        "stateKey": "sections",
+        "nodeId": "node_section_queue",
+        "labelTemplate": "SectionQueue（${sections.length} 个，${sections.reduce((sum, s) => sum + s.tokens, 0).toLocaleString()} tokens）",
+        "styleMap": [
+          {
+            "when": "sections.filter(s => s.status === 'active').length > 8",
+            "style": {
+              "border": "2px solid #f44336"
+            }
+          }
+        ]
+      },
+      {
+        "stateKey": "currentRoundSize",
+        "nodeId": "node_current_round",
+        "labelTemplate": "CurrentRound（当前轮 + DraftZone 草稿段）",
+        "styleMap": [
+          {
+            "when": "currentRoundSize > 0",
+            "style": {
+              "border": "2px solid #ffc107"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "_sync": {
+    "saved_at": "2026-07-23T13:56:18.207Z",
+    "source": "mcp",
+    "feature": "conveyor"
+  }
+}

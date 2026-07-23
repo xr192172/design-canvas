@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://design-canvas.dev/schema/design_dsl.schema.json",
+  "title": "design-canvas DSL",
+  "description": "双层 DSL：几何层（位置/样式）+ 语义层（文件/API/依赖）",
+  "type": "object",
+  "required": ["id", "type", "feature", "geometry"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "图纸唯一 ID（URL 安全）",
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "type": {
+      "type": "string",
+      "const": "feature_diagram"
+    },
+    "feature": {
+      "type": "string",
+      "description": "feature 名，用于 get_dsl / list_features",
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "version": {
+      "type": "string",
+      "description": "DSL 版本（语义化版本号）"
+    },
+    "title": {
+      "type": "string",
+      "description": "人类可读标题"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "in_progress", "done"]
+    },
+    "geometry": {
+      "$ref": "#/definitions/Geometry"
+    },
+    "semantic": {
+      "$ref": "#/definitions/Semantic"
+    },
+    "annotations": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Annotation" }
+    },
+    "theme": {
+      "type": "string",
+      "enum": ["blue", "sakura", "forest", "ocean"],
+      "description": "主题 ID"
+    },
+    "simulation": {
+      "$ref": "#/definitions/Simulation"
+    }
+  },
+  "definitions": {
+    "Geometry": {
+      "type": "object",
+      "required": ["nodes"],
+      "properties": {
+        "layout": {
+          "type": "string",
+          "enum": ["grid", "vertical_flow", "horizontal_flow", "free"],
+          "description": "自动排版策略，free=完全用 x/y"
+        },
+        "width": { "type": "number", "description": "画布宽度（px）" },
+        "height": { "type": "number", "description": "画布高度（px）" },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "grid 布局列数"
+        },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Node" }
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Edge" }
+        }
+      }
+    },
+    "Node": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "节点 ID，语义层 file.id 通过它锚定"
+        },
+        "label": { "type": "string" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "style": {
+          "type": "object",
+          "properties": {
+            "bg": { "type": "string", "description": "背景色" },
+            "color": { "type": "string", "description": "前景色" },
+            "border": { "type": "string" },
+            "borderRadius": { "type": "number" }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "Edge": {
+      "type": "object",
+      "required": ["id", "from", "to"],
+      "properties": {
+        "id": { "type": "string" },
+        "from": { "type": "string", "description": "源节点 ID" },
+        "to": { "type": "string", "description": "目标节点 ID" },
+        "label": { "type": "string" },
+        "style": {
+          "type": "object",
+          "properties": {
+            "stroke": { "type": "string" },
+            "strokeWidth": { "type": "number" }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "Semantic": {
+      "type": "object",
+      "required": ["files"],
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/File" }
+        },
+        "multi_file_invariants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "不变式规则，design_check 会验证"
+        },
+        "expected_global_behavior": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "File": {
+      "type": "object",
+      "required": ["id", "path", "responsibility"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "与 geometry.nodes.id 对应"
+        },
+        "path": { "type": "string" },
+        "responsibility": { "type": "string" },
+        "expected_apis": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["signature"],
+            "properties": {
+              "signature": { "type": "string" },
+              "notes": { "type": "string" }
+            }
+          }
+        },
+        "expected_deps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expected_behavior": { "type": "string" }
+      }
+    },
+    "Annotation": {
+      "type": "object",
+      "required": ["id", "target_id", "text"],
+      "properties": {
+        "id": { "type": "string" },
+        "target_id": { "type": "string", "description": "指向 node.id 或 edge.id" },
+        "text": { "type": "string" },
+        "author": { "type": "string", "enum": ["human", "llm"] },
+        "created": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Simulation": {
+      "type": "object",
+      "required": ["id", "initial_state", "rules"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "initial_state": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SimulationStateDef" }
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SimulationRule" }
+        },
+        "mappings": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SimulationNodeMapping" }
+        }
+      }
+    },
+    "SimulationStateDef": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": {},
+        "type": { "type": "string", "enum": ["number", "string", "boolean", "array", "object"] },
+        "description": { "type": "string" }
+      }
+    },
+    "SimulationRule": {
+      "type": "object",
+      "required": ["id", "event", "actions"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "event": { "type": "string" },
+        "condition": { "type": "string" },
+        "actions": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SimulationAction" }
+        },
+        "emits": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "SimulationAction": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["set_state", "increment", "decrement", "push", "pop", "move", "highlight", "log", "call"] },
+        "target": { "type": "string" },
+        "value": {},
+        "amount": { "type": "number" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "SimulationNodeMapping": {
+      "type": "object",
+      "required": ["stateKey", "nodeId"],
+      "properties": {
+        "stateKey": { "type": "string" },
+        "nodeId": { "type": "string" },
+        "labelTemplate": { "type": "string" },
+        "styleMap": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["when", "style"],
+            "properties": {
+              "when": { "type": "string" },
+              "style": { "type": "object" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+

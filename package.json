@@ -1,0 +1,33 @@
+{
+  "name": "design-canvas",
+  "version": "0.1.0",
+  "description": "人机共享的可视化协议层。LLM 输出 DSL → 渲染成自包含 HTML → 人看图改 JSON → LLM 读 JSON 理解。作为 MCP 服务对外开放。",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "design-canvas": "dist/src/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "serve": "node dist/src/tools/serve.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.1",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-go": "^0.21.2",
+    "tree-sitter-javascript": "^0.21.4",
+    "tree-sitter-python": "^0.21.0",
+    "tree-sitter-typescript": "^0.21.2",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

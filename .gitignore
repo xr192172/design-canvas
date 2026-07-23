@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# 渲染产物（HTML 文件）
+output/*.html
+
+# 运行时持久化的 DSL（用户实际使用时生成；examples/ 目录的示例需要提交）
+.design-canvas/
+
+# 测试覆盖率
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+
+# 环境变量
+.env
+.env.local
+
+# 临时文件
+*.tmp
+*.bak
+
