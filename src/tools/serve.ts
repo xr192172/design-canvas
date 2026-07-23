@@ -344,7 +344,9 @@ export async function startServer(port?: number): Promise<void> {
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+import { pathToFileURL } from 'node:url';
+
+if (import.meta.url === pathToFileURL(path.resolve(process.argv[1] ?? '')).href) {
   startServer().catch((e) => {
     console.error('Server error:', e);
     process.exit(1);

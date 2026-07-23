@@ -47,6 +47,9 @@
       "enum": ["blue", "sakura", "forest", "ocean"],
       "description": "主题 ID"
     },
+    "animations_v2": {
+      "$ref": "#/definitions/AnimationSystem"
+    },
     "simulation": {
       "$ref": "#/definitions/Simulation"
     }
@@ -260,6 +263,115 @@
           }
         }
       }
+    },
+    "AnimationSystem": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": { "type": "number" },
+        "flows": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/AnimationFlow" }
+        },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["mock", "live"] },
+            "code_dir": { "type": "string" },
+            "entry": { "type": "string" },
+            "timeout": { "type": "number" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "AnimationFlow": {
+      "type": "object",
+      "required": ["id", "trigger", "from"],
+      "properties": {
+        "id": { "type": "string" },
+        "trigger": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["periodic", "event", "state_change", "manual"] },
+            "interval": { "type": "number" },
+            "event": { "type": "string" },
+            "watch": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "from": { "type": "string", "description": "源节点 ID" },
+        "to": { "type": "string", "description": "目标节点 ID（L2 直连；L3 用 branches 替代）" },
+        "value": { "$ref": "#/definitions/AnimationValue" },
+        "branches": {
+          "type": "array",
+          "description": "L3 条件分支，与 to 互斥；按声明顺序求值，第一个命中者生效",
+          "items": {
+            "type": "object",
+            "required": ["to"],
+            "properties": {
+              "condition": { "type": "string", "description": "JS 表达式（访问 value）；else/true/default/空 为兜底" },
+              "to": { "type": "string" },
+              "value": { "$ref": "#/definitions/AnimationValue" },
+              "effect": { "type": "string", "description": "particle_red / particle_green 等颜色提示" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "mock_values": {
+          "type": "array",
+          "description": "L3 mock 数据源：periodic 触发时轮流播放的求值上下文 value",
+          "items": { "type": "object" }
+        },
+        "handler": {
+          "type": "object",
+          "description": "L4 函数绑定",
+          "required": ["file_id", "api"],
+          "properties": {
+            "file_id": { "type": "string" },
+            "api": { "type": "string" },
+            "input_mapping": { "type": "object", "additionalProperties": { "type": "string" } },
+            "output_mapping": { "type": "object", "additionalProperties": { "type": "string" } },
+            "errors": {
+              "type": "array",
+              "description": "L4.5 异常声明",
+              "items": {
+                "type": "object",
+                "required": ["type", "condition", "severity", "to"],
+                "properties": {
+                  "type": { "type": "string" },
+                  "condition": { "type": "string" },
+                  "severity": { "type": "string", "enum": ["expected", "unexpected"] },
+                  "to": { "type": "string" },
+                  "value": { "$ref": "#/definitions/AnimationValue" },
+                  "effect": { "type": "string" },
+                  "log": { "type": "string" }
+                },
+                "additionalProperties": true
+              }
+            },
+            "live": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        },
+        "effect": { "type": "string" },
+        "on_arrive": { "type": "string" },
+        "source_key": { "type": "string" },
+        "layout": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "AnimationValue": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "label": { "type": "string" },
+        "fields": { "type": "object", "description": "JSON Schema 格式的字段结构" }
+      },
+      "additionalProperties": true
     }
   }
 }

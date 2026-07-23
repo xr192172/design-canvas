@@ -1,0 +1,107 @@
+{
+  "id": "branch_test",
+  "type": "feature_diagram",
+  "feature": "branch_test",
+  "version": "1.0.0",
+  "title": "L3 条件分支测试：API 状态码分流",
+  "status": "draft",
+  "geometry": {
+    "layout": "vertical_flow",
+    "width": 900,
+    "height": 560,
+    "nodes": [
+      {
+        "id": "node_api",
+        "x": 320,
+        "y": 40,
+        "width": 260,
+        "height": 60,
+        "label": "API Gateway（判断处）",
+        "style": { "bg": "#0f3460", "color": "#ffffff", "borderRadius": 8 }
+      },
+      {
+        "id": "node_handler",
+        "x": 60,
+        "y": 220,
+        "width": 220,
+        "height": 60,
+        "label": "业务处理器 (200)",
+        "style": { "bg": "#1b5e20", "color": "#ffffff", "borderRadius": 8 }
+      },
+      {
+        "id": "node_auth",
+        "x": 340,
+        "y": 220,
+        "width": 220,
+        "height": 60,
+        "label": "认证重试 (401)",
+        "style": { "bg": "#b71c1c", "color": "#ffffff", "borderRadius": 8 }
+      },
+      {
+        "id": "node_retry",
+        "x": 620,
+        "y": 220,
+        "width": 220,
+        "height": 60,
+        "label": "限流退避 (429)",
+        "style": { "bg": "#e65100", "color": "#ffffff", "borderRadius": 8 }
+      },
+      {
+        "id": "node_fallback",
+        "x": 340,
+        "y": 380,
+        "width": 220,
+        "height": 60,
+        "label": "兜底降级 (else)",
+        "style": { "bg": "#37474f", "color": "#ffffff", "borderRadius": 8 }
+      }
+    ],
+    "edges": [
+      { "id": "e_api_handler", "from": "node_api", "to": "node_handler", "label": "200", "style": { "stroke": "#4CAF50" } },
+      { "id": "e_api_auth", "from": "node_api", "to": "node_auth", "label": "401", "style": { "stroke": "#e94560" } },
+      { "id": "e_api_retry", "from": "node_api", "to": "node_retry", "label": "429", "style": { "stroke": "#FF9800" } },
+      { "id": "e_api_fallback", "from": "node_api", "to": "node_fallback", "label": "else", "style": { "stroke": "#78909c" } }
+    ]
+  },
+  "animations_v2": {
+    "version": 1,
+    "flows": [
+      {
+        "id": "flow_request",
+        "trigger": { "type": "periodic", "interval": 1800 },
+        "from": "node_api",
+        "branches": [
+          {
+            "condition": "value.status == 200",
+            "to": "node_handler",
+            "value": { "type": "success_response", "label": "成功响应" },
+            "effect": "particle_green"
+          },
+          {
+            "condition": "value.status == 401",
+            "to": "node_auth",
+            "value": { "type": "auth_error", "label": "认证失败" },
+            "effect": "particle_red"
+          },
+          {
+            "condition": "value.status == 429",
+            "to": "node_retry",
+            "value": { "type": "rate_limited", "label": "限流退避" }
+          },
+          {
+            "condition": "else",
+            "to": "node_fallback",
+            "value": { "type": "fallback_response", "label": "兜底降级" }
+          }
+        ],
+        "mock_values": [
+          { "status": 200 },
+          { "status": 401 },
+          { "status": 429 },
+          { "status": 503 }
+        ]
+      }
+    ],
+    "runtime": { "mode": "mock" }
+  }
+}

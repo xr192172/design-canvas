@@ -14,6 +14,7 @@
  */
 
 import type { DesignDSL } from '../dsl/types.js';
+import { ANIM_CORE_SOURCE } from './anim_core_bundle.gen.js';
 
 /**
  * 生成浏览器端动画执行器 JS 代码
@@ -69,6 +70,9 @@ export function buildAnimationScript(dsl: DesignDSL): string {
 // ========== Animation Engine V2 (L0-L5) ==========
 (function() {
   'use strict';
+
+  // ---- AnimCore 纯逻辑（构建期从 anim_core.ts 内联，单源双消费，勿手改）----
+${ANIM_CORE_SOURCE}
 
   var ANIM_VERSION = 2;
   var HAS_EXPLICIT_FLOWS = ${hasAnimationsV2};
@@ -197,6 +201,43 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     setTimeout(function() {
       if (el.parentNode) el.parentNode.removeChild(el);
     }, 300);
+  }
+
+  // ---- 通用节点高亮（L3 判断处闪烁 / L4.5 异常警报共用） ----
+  // 直接操作 shape 属性，不依赖 CSS 类；连续调用时清除旧定时器避免状态残留
+  function flashNode(nodeId, color, duration) {
+    var el = document.querySelector('.node[data-id="' + nodeId + '"]');
+    if (!el) return;
+    var shape = el.querySelector('[data-shape="true"]');
+    if (!shape) return;
+    if (el.__flashTimer) {
+      clearTimeout(el.__flashTimer);
+      el.__flashTimer = null;
+    }
+    if (el.__flashOrig == null) {
+      el.__flashOrig = {
+        stroke: shape.getAttribute('stroke'),
+        width: shape.getAttribute('stroke-width')
+      };
+    }
+    shape.setAttribute('stroke', color || '#ffeb3b');
+    shape.setAttribute('stroke-width', '3');
+    el.__flashTimer = setTimeout(function() {
+      var orig = el.__flashOrig || {};
+      shape.setAttribute('stroke', orig.stroke || '#1f2a4d');
+      shape.setAttribute('stroke-width', orig.width || '1');
+      el.__flashTimer = null;
+      el.__flashOrig = null;
+    }, duration || 600);
+  }
+
+  // L3 分支调色板：按命中分支索引取色（branch.effect 显式指定时优先）
+  var BRANCH_PALETTE = ['#4CAF50', '#e94560', '#FF9800', '#9b59b6', '#4fc3f7', '#ffeb3b'];
+
+  function branchColor(branch, index) {
+    if (branch && branch.effect === 'particle_red') return '#e94560';
+    if (branch && branch.effect === 'particle_green') return '#4CAF50';
+    return BRANCH_PALETTE[(index || 0) % BRANCH_PALETTE.length];
   }
 
   // ========== 卡片系统（card_* effects 共用） ==========
@@ -728,7 +769,38 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     }
   }
 
-  function spawnDefaultParticle(flow) {
+  function spawnDefaultParticle(flow, payloadData) {
+    // ---- L3 条件分支：branches 非空时先求值选路 ----
+    // 求值上下文 value 按触发器类型自动构造：
+    //   event → payload；state_change → simState 全量；periodic → mock_values 轮换
+    if (flow.branches && flow.branches.length > 0) {
+      var evalValue = payloadData !== undefined ? payloadData
+        : (flow.mockRotator ? flow.mockRotator()
+        : (flow.rawFlow ? flow.rawFlow.value : undefined));
+      var picked = pickBranch(flow.branches, evalValue, undefined);
+      if (!picked) {
+        // 全部未命中：判断处灰闪提示，不发粒子
+        flashNode(flow.from, '#666', 400);
+        return;
+      }
+      var bColor = branchColor(picked.branch, picked.index);
+      flashNode(flow.from, bColor, 600);
+      var bVal = picked.branch.value;
+      spawnParticleAlongPath({
+        pathEl: findFlowPathEl({ from: flow.from, to: picked.branch.to }),
+        from: flow.from,
+        to: picked.branch.to,
+        color: bColor,
+        label: flow.label,
+        valueLabel: bVal ? (bVal.label || bVal.type) : flow.valueLabel,
+        valueType: bVal ? bVal.type : flow.valueType,
+        flowId: flow.id + '::' + picked.branch.to,
+        onArrive: flow.onArrive,
+        explicit: flow.explicit
+      });
+      return;
+    }
+
     // 优先检查注册的 effect（L2+ 显式 flow 可指定 effect）
     // effect 返回 true 表示已处理，不再触发默认粒子流
     var effectName = flow.effect || 'particle_flow';
@@ -1035,6 +1107,7 @@ export function buildAnimationScript(dsl: DesignDSL): string {
           valueType: f.value ? f.value.type : '',
           valueLabel: f.value ? (f.value.label || f.value.type) : '',
           branches: f.branches || null,
+          mockRotator: (f.mock_values && f.mock_values.length > 0) ? createMockRotator(f.mock_values) : null,
           effect: f.effect || 'particle_flow',
           onArrive: f.on_arrive || 'fade',
           explicit: true,
@@ -1102,14 +1175,16 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       for (var key in watchers) {
         var data = window.simState[key];
         if (data === undefined) continue;
-        var snap;
-        try { snap = JSON.stringify(data); } catch (e) { continue; }
+        // AnimCore 统一快照逻辑：序列化失败（循环引用等）本轮跳过
+        var snap = makeSnapshot(data);
+        if (snap === null) continue;
         if (prevSnapshots[key] === snap) continue;
         prevSnapshots[key] = snap;
         var configs = watchers[key];
         for (var i = 0; i < configs.length; i++) {
           try {
-            spawnDefaultParticle(configs[i]);
+            // L3 求值上下文：state_change 触发时传入 simState 全量（只读）
+            spawnDefaultParticle(configs[i], window.simState);
           } catch (e) {
             console.error('[animV2] state watcher flow failed:', e);
           }
@@ -1137,7 +1212,8 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       var configs = listeners[eventName];
       if (!configs) return;
       for (var i = 0; i < configs.length; i++) {
-        spawnDefaultParticle(configs[i]);
+        // L3 求值上下文：event 触发时传入仿真器事件载荷
+        spawnDefaultParticle(configs[i], payload);
       }
     };
 

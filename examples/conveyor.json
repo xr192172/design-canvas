@@ -446,6 +446,34 @@
             }
           }
         }
+      },
+      {
+        "id": "flow_section_cards_sync",
+        "trigger": { "type": "state_change", "watch": "sections" },
+        "from": "node_section_queue",
+        "to": "node_section_queue",
+        "effect": "card_sync",
+        "source_key": "sections",
+        "layout": { "padX": 30, "padY": 140, "gap": 6, "activeH": 46, "foldedH": 24 }
+      },
+      {
+        "id": "flow_budget_check",
+        "trigger": { "type": "state_change", "watch": "sections" },
+        "from": "node_context_compose",
+        "branches": [
+          {
+            "condition": "Array.isArray(value.sections) && value.sections.reduce(function(sum, s){ return sum + (s.tokens || 0); }, 0) > (value.tokenBudget || 128000) * 0.8",
+            "to": "node_section_queue",
+            "value": { "type": "overflow_signal", "label": "超80%预算→PulseEvict" },
+            "effect": "particle_red"
+          },
+          {
+            "condition": "else",
+            "to": "node_current_round",
+            "value": { "type": "compose_ok", "label": "预算内正常组装" },
+            "effect": "particle_green"
+          }
+        ]
       }
     ]
   },

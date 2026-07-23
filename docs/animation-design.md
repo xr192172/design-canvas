@@ -598,7 +598,10 @@ src/renderer/
 | **C** L2 数据流执行器 | ✅ 完成 | 显式 flow 支持（periodic / event 触发器）、粒子值类型标签（粒子上方显示）、节点 IO 提示浮层（输入: xxx / 输出: ???）、仿真器事件桥接（`window.__simEventListener__`） | conveyor.json 3 个 L2 flow 验证通过 |
 | **D** 内置 effect 注册 | ✅ 完成 | card_create / card_fold / card_evict 三个 effect 注册；通用卡片容器机制（`ensureCardContainer` 自动创建 `<g data-card-container>`）；`triggerEffect` 手动触发接口 | 浏览器实测：创建/折叠/淘汰三步链路全通过 |
 | **E** conveyor.json 迁移 | ✅ 完成 | conveyor.json 声明 `card_sync` flow（state_change 触发器监听 `sections`）+ `runtime.sim_particles`（on_arrive: chip）；scripts.ts 删除全部专用动画代码（消息流面板/粒子系统/卡片动画，processEvent 改为 `__simRuleFired__` 通知引擎 + 暴露 `window.simState`）；引擎新增 sim-edge 粒子流、card_sync effect、state_change 轮询（300ms 快照对比）；html_renderer 删消息流按钮、sim-panel 加动画控制按钮（⏸暂停/⏭步进/▶继续/↺重置） | 浏览器全链路 PASS，见下方验证记录 |
-| **F-H** | ⏳ 计划 | L3 条件分支 / L4 函数绑定 / L4.5 异常 / L5 反向提取 | — |
+| **F** L3 条件分支 | ✅ 完成 | [anim_core.ts](file:///d:/project_develop/design-canvas/src/renderer/anim_core.ts) 纯逻辑核心（evalCondition / pickBranch / createMockRotator / resolvePath / setPath / input/output mapping / matchError / makeSnapshot），构建期经 [gen_anim_core_bundle.mjs](file:///d:/project_develop/design-canvas/scripts/gen_anim_core_bundle.mjs) 内联进引擎（单源双消费：vitest + 浏览器）；引擎 `spawnDefaultParticle` 分支选路 + 判断处闪烁 + 分支调色板（particle_red/green 显式指定优先）；schema/types 新增 `branches` / `mock_values` / `handler`（含 L4.5 errors） | vitest 28 用例全绿 + 浏览器双例验证，见下方验证记录 |
+| **G** L4 函数绑定 | ⏳ 计划 | 节点显示函数调用详情 | — |
+| **G2** L4.5 异常语义 | ⏳ 计划 | handler.errors 声明 + expected/unexpected 分档 + 未声明异常警报 | — |
+| **H** L5 反向提取 | ⏳ 计划 | 从代码提取动画 DSL + 异常声明 | — |
 | **I** 播放控制 | ✅ 基础完成 | sim-panel 动画控制按钮接线引擎 pause/step/resume/reset（`setupControlButtons`） | 浏览器点击验证无报错 |
 
 **阶段 D 验证记录**（2026-07-24）：
@@ -628,6 +631,17 @@ src/renderer/
 架构变化要点：
 - scripts.ts 不再包含任何项目特定动画代码，仿真器只负责状态机（processEvent → simState），动画完全由引擎消费 `__simRuleFired__` 事件 + 轮询 simState 驱动
 - 动画 DOM（粒子/chip/卡片）统一由引擎管理，reset 时清理并重新执行 card_sync flows
+
+**阶段 F 验证记录**（2026-07-24）：
+
+1. **单测**——`tests/renderer/anim_core.test.ts` 28 用例全绿（evalCondition 空/else/表达式/异常安全、pickBranch 顺序命中与兜底、mock 轮换、路径解析/设置、input/output mapping、matchError、makeSnapshot 变更检测）
+2. **构建**——`npm run build`（gen_anim_core_bundle + tsc）通过；bundle 5454 字符内联
+3. **branch_test.html 多分支**——periodic(1800ms) + mock_values 轮换 status=200/401/429/503，浏览器观察到绿/红/橙/紫四色粒子分别流向 handler/auth/retry/fallback 四节点，判断处闪烁正常，console 无错误
+4. **conveyor.html 真实条件流**——`flow_budget_check`（state_change 监听 sections，阈值 tokenBudget×0.8）：仿真推进后观察到 node_context_compose 绿色闪烁 + 绿色粒子流向 node_current_round（预算内分支）；tokens 未超阈值走红分支未触发属预期
+5. **card_sync 回归**——初始 4 卡片渲染、sections 4→13 增长同步、超 8 个触发 PulseEvict 后折叠动画（46→24px）与淘汰左滑消失均正常，最终 active:6 与卡片数一致
+6. **serve.ts 修复**——Windows 下 `import.meta.url === file://argv[1]` 判断失效导致 CLI 直启退出，改用 `pathToFileURL(path.resolve(...))` 比较
+
+数据丢失教训：阶段 D/F 对 `.design-canvas/features/conveyor.json`（git 未跟踪目录）的修改随目录删除丢失，本次已将 `flow_section_cards_sync` 与 `flow_budget_check` 两个流重写进 `examples/conveyor.json`（git 跟踪）。**后续所有 DSL 示例修改必须落在 examples/ 或已跟踪路径。**
 
 ---
 

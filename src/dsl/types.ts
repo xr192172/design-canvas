@@ -467,6 +467,9 @@ export interface AnimationFlow {
   handler?: AnimationHandler;
   /** 条件分支（L3，与 to 互斥） */
   branches?: AnimationBranch[];
+  /** L3 mock 数据源：periodic 触发时轮流播放的示例值，作为条件求值上下文 value。
+   *  event 触发时优先用事件 payload，state_change 触发时优先用 simState 全量 */
+  mock_values?: Record<string, unknown>[];
   /** 视觉效果（如 particle_flow / card_create / card_fold / card_evict） */
   effect?: string;
 }
