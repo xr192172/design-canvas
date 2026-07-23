@@ -394,6 +394,10 @@
         "trigger": { "type": "periodic", "interval": 5000 },
         "from": "node_l0",
         "to": "node_summary_zone",
+        "handler": {
+          "file_id": "node_l0",
+          "api": "L0Content"
+        },
         "value": {
           "type": "arch_context",
           "label": "架构上下文",
@@ -411,6 +415,10 @@
         "trigger": { "type": "periodic", "interval": 6000 },
         "from": "node_summary_zone",
         "to": "node_section_queue",
+        "handler": {
+          "file_id": "node_summary_zone",
+          "api": "Format"
+        },
         "value": {
           "type": "summary_entries",
           "label": "摘要目录",
@@ -460,6 +468,11 @@
         "id": "flow_budget_check",
         "trigger": { "type": "state_change", "watch": "sections" },
         "from": "node_context_compose",
+        "handler": {
+          "file_id": "node_context_compose",
+          "api": "Compose",
+          "input_mapping": { "budget": "$value.tokenBudget" }
+        },
         "branches": [
           {
             "condition": "Array.isArray(value.sections) && value.sections.reduce(function(sum, s){ return sum + (s.tokens || 0); }, 0) > (value.tokenBudget || 128000) * 0.8",

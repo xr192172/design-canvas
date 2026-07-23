@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateDSLJson } from '../dsl/validator.js';
-import { saveDSL } from '../storage.js';
+import { saveDSL, getDataHome } from '../storage.js';
 import { renderHTML } from '../renderer/html_renderer.js';
 
 export interface RenderDslInput {
@@ -30,9 +30,9 @@ export interface RenderDslResult {
   message: string;
 }
 
-/** 默认输出路径：<cwd>/output/<feature>.html */
+/** 默认输出路径：<dataHome>/output/<feature>.html（测试时指向临时目录） */
 function defaultOutputPath(feature: string): string {
-  return path.join(process.cwd(), 'output', `${feature}.html`);
+  return path.join(getDataHome(), 'output', `${feature}.html`);
 }
 
 /** 确保 output 目录存在 */

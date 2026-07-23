@@ -15,6 +15,7 @@
 
 import type { DesignDSL } from '../dsl/types.js';
 import { ANIM_CORE_SOURCE } from './anim_core_bundle.gen.js';
+import { parseApiName } from './anim_core.js';
 
 /**
  * 生成浏览器端动画执行器 JS 代码
@@ -61,10 +62,23 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     .filter((n) => n.status)
     .map((n) => ({ id: n.id, status: n.status as string }));
 
+  // L4 handler 元数据：file_id → { path, apis: { apiName: signature } }
+  // 引擎在粒子出发前查表展示函数调用浮层（ƒ Api(args) + signature）
+  const handlerMeta: Record<string, { path: string; apis: Record<string, string> }> = {};
+  for (const file of dsl.semantic?.files ?? []) {
+    const apis: Record<string, string> = {};
+    for (const api of file.expected_apis ?? []) {
+      const name = parseApiName(api.signature);
+      if (name) apis[name] = api.signature;
+    }
+    handlerMeta[file.id] = { path: file.path, apis };
+  }
+
   const defaultFlowsJson = JSON.stringify(defaultFlows);
   const statusNodesJson = JSON.stringify(statusNodes);
   const simRulesJson = JSON.stringify(simRules);
   const simParticleCfgJson = JSON.stringify(simParticleCfg);
+  const handlerMetaJson = JSON.stringify(handlerMeta);
 
   return `
 // ========== Animation Engine V2 (L0-L5) ==========
@@ -81,6 +95,7 @@ ${ANIM_CORE_SOURCE}
   var SIM_PARTICLE_CFG = ${simParticleCfgJson};
   var DEFAULT_FLOWS = ${defaultFlowsJson};
   var STATUS_NODES = ${statusNodesJson};
+  var HANDLER_META = ${handlerMetaJson};
 
   // ---- Effect 注册表 ----
   // 约定 effect 函数签名：function(ctx) {}
@@ -769,15 +784,113 @@ ${ANIM_CORE_SOURCE}
     }
   }
 
+  // ---- L4 函数绑定：粒子出发前在 handler.file_id 节点展示函数调用 ----
+  // 返回 { value, result } 供后续分支求值使用；无 handler 时返回 null
+  // mock 模式：result 取 handler.mock_result（若声明）否则 { $mock: api }
+  // live 模式（L5b）留待阶段 H，当前回退 mock 并 warn
+  function executeHandler(flow, payloadData) {
+    var h = flow.handler;
+    if (!h || !h.file_id || !h.api) return null;
+    var meta = HANDLER_META[h.file_id] || null;
+    var signature = meta && meta.apis ? (meta.apis[h.api] || null) : null;
+
+    // 求值上下文 value：与分支求值同源（event→payload / state_change→simState / periodic→mock 轮换）
+    var evalValue = payloadData !== undefined ? payloadData
+      : (flow.mockRotator ? flow.mockRotator()
+      : (flow.rawFlow ? flow.rawFlow.value : undefined));
+
+    var args = applyInputMapping(h.input_mapping, evalValue, undefined);
+    showHandlerCall(h.file_id, h.api, args, signature);
+    flashNode(h.file_id, '#ffeb3b', 700);
+
+    if (h.live) {
+      console.warn('[animV2] handler.live 未实现（阶段H），回退 mock:', h.api);
+    }
+    var result = h.mock_result !== undefined ? h.mock_result : { $mock: h.api };
+    var newValue = applyOutputMapping(h.output_mapping, evalValue, result);
+    return { value: newValue, result: result };
+  }
+
+  // 函数调用浮层：节点上方显示 ƒ Api(args) + signature（金色主题区分 IO 浮层）
+  function showHandlerCall(nodeId, api, args, signature) {
+    var rect = getNodeRect(nodeId);
+    if (!rect) return;
+    var layer = ensureAnimLayer();
+    if (!layer) return;
+    var ns = 'http://www.w3.org/2000/svg';
+
+    var argStr = formatHandlerArgs(args || {});
+    if (argStr.length > 42) argStr = argStr.substring(0, 41) + '…';
+
+    var g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'anim-handler-call');
+    g.style.opacity = '0';
+    g.style.transition = 'opacity 0.25s';
+    g.style.pointerEvents = 'none';
+
+    var callText = 'ƒ ' + api + '(' + argStr + ')';
+    var w = Math.max(140, callText.length * 6.4 + 16);
+    var h = signature ? 36 : 22;
+    var x = rect.x + rect.w / 2 - w / 2;
+    var y = rect.y - h - 6;
+    if (y < 4) y = rect.y + rect.h + 6;
+
+    var bg = document.createElementNS(ns, 'rect');
+    bg.setAttribute('x', x);
+    bg.setAttribute('y', y);
+    bg.setAttribute('width', w);
+    bg.setAttribute('height', h);
+    bg.setAttribute('rx', '4');
+    bg.setAttribute('fill', '#1a1a2e');
+    bg.setAttribute('stroke', '#ffeb3b');
+    bg.setAttribute('stroke-width', '1');
+    bg.setAttribute('opacity', '0.95');
+    g.appendChild(bg);
+
+    var text1 = document.createElementNS(ns, 'text');
+    text1.setAttribute('x', x + 8);
+    text1.setAttribute('y', y + 14);
+    text1.setAttribute('fill', '#ffeb3b');
+    text1.setAttribute('style', 'font-size:10px;font-weight:600;font-family:monospace;');
+    text1.textContent = callText;
+    g.appendChild(text1);
+
+    if (signature) {
+      var sig = String(signature);
+      if (sig.length > 60) sig = sig.substring(0, 59) + '…';
+      var text2 = document.createElementNS(ns, 'text');
+      text2.setAttribute('x', x + 8);
+      text2.setAttribute('y', y + 28);
+      text2.setAttribute('fill', '#8b9bb4');
+      text2.setAttribute('style', 'font-size:9px;font-family:monospace;');
+      text2.textContent = sig;
+      g.appendChild(text2);
+    }
+
+    layer.appendChild(g);
+    requestAnimationFrame(function() { g.style.opacity = '1'; });
+    setTimeout(function() {
+      g.style.opacity = '0';
+      setTimeout(function() {
+        if (g.parentNode) g.parentNode.removeChild(g);
+      }, 300);
+    }, 1800);
+  }
+
   function spawnDefaultParticle(flow, payloadData) {
+    // ---- L4 函数绑定：先于分支求值执行，result 参与条件判断 ----
+    var handlerCtx = executeHandler(flow, payloadData);
+
     // ---- L3 条件分支：branches 非空时先求值选路 ----
     // 求值上下文 value 按触发器类型自动构造：
-    //   event → payload；state_change → simState 全量；periodic → mock_values 轮换
+    //   event → payload；state_change → simState 全量；periodic → mock 轮换
     if (flow.branches && flow.branches.length > 0) {
-      var evalValue = payloadData !== undefined ? payloadData
+      var evalValue = handlerCtx ? handlerCtx.value
+        : (payloadData !== undefined ? payloadData
         : (flow.mockRotator ? flow.mockRotator()
-        : (flow.rawFlow ? flow.rawFlow.value : undefined));
-      var picked = pickBranch(flow.branches, evalValue, undefined);
+        : (flow.rawFlow ? flow.rawFlow.value : undefined)));
+      var evalResult = handlerCtx ? handlerCtx.result : undefined;
+      var picked = pickBranch(flow.branches, evalValue, evalResult);
       if (!picked) {
         // 全部未命中：判断处灰闪提示，不发粒子
         flashNode(flow.from, '#666', 400);
@@ -1108,6 +1221,7 @@ ${ANIM_CORE_SOURCE}
           valueLabel: f.value ? (f.value.label || f.value.type) : '',
           branches: f.branches || null,
           mockRotator: (f.mock_values && f.mock_values.length > 0) ? createMockRotator(f.mock_values) : null,
+          handler: f.handler || null,
           effect: f.effect || 'particle_flow',
           onArrive: f.on_arrive || 'fade',
           explicit: true,

@@ -833,6 +833,10 @@
         },
         "from": "node_l0",
         "to": "node_summary_zone",
+        "handler": {
+          "file_id": "node_l0",
+          "api": "L0Content"
+        },
         "value": {
           "type": "arch_context",
           "label": "架构上下文",
@@ -860,6 +864,10 @@
         },
         "from": "node_summary_zone",
         "to": "node_section_queue",
+        "handler": {
+          "file_id": "node_summary_zone",
+          "api": "Format"
+        },
         "value": {
           "type": "summary_entries",
           "label": "摘要目录",
@@ -908,6 +916,59 @@
             }
           }
         }
+      },
+      {
+        "id": "flow_section_cards_sync",
+        "trigger": {
+          "type": "state_change",
+          "watch": "sections"
+        },
+        "from": "node_section_queue",
+        "to": "node_section_queue",
+        "effect": "card_sync",
+        "source_key": "sections",
+        "layout": {
+          "padX": 30,
+          "padY": 140,
+          "gap": 6,
+          "activeH": 46,
+          "foldedH": 24
+        }
+      },
+      {
+        "id": "flow_budget_check",
+        "trigger": {
+          "type": "state_change",
+          "watch": "sections"
+        },
+        "from": "node_context_compose",
+        "handler": {
+          "file_id": "node_context_compose",
+          "api": "Compose",
+          "input_mapping": {
+            "budget": "$value.tokenBudget"
+          }
+        },
+        "branches": [
+          {
+            "condition": "Array.isArray(value.sections) && value.sections.reduce(function(sum, s){ return sum + (s.tokens || 0); }, 0) > (value.tokenBudget || 128000) * 0.8",
+            "to": "node_section_queue",
+            "value": {
+              "type": "overflow_signal",
+              "label": "超80%预算→PulseEvict"
+            },
+            "effect": "particle_red"
+          },
+          {
+            "condition": "else",
+            "to": "node_current_round",
+            "value": {
+              "type": "compose_ok",
+              "label": "预算内正常组装"
+            },
+            "effect": "particle_green"
+          }
+        ]
       }
     ]
   },
@@ -924,7 +985,13 @@
           }
         ],
         "expected_deps": [],
-        "expected_behavior": "完整架构通过 index 工具按需查询 CBM，L0 只保留精简指引"
+        "expected_behavior": "完整架构通过 index 工具按需查询 CBM，L0 只保留精简指引",
+        "actual_apis": [
+          {
+            "signature": "L0Content() string",
+            "notes": "line 6"
+          }
+        ]
       },
       {
         "id": "node_summary_zone",
@@ -943,7 +1010,17 @@
         "expected_deps": [
           "internal/context/v2/arch_knowledge.go"
         ],
-        "expected_behavior": "上限 12 条，超出淘汰最旧"
+        "expected_behavior": "上限 12 条，超出淘汰最旧",
+        "actual_apis": [
+          {
+            "signature": "SummaryZone.Add(summary string) error",
+            "notes": "line 13"
+          },
+          {
+            "signature": "SummaryZone.Format() string",
+            "notes": "line 19"
+          }
+        ]
       },
       {
         "id": "node_section_queue",
@@ -962,7 +1039,17 @@
         "expected_deps": [
           "internal/context/v2/corpus_journal.go"
         ],
-        "expected_behavior": "8 个活跃 section，达阈值折叠 4 个（Messages 保留在 RAM，GC 已移除）"
+        "expected_behavior": "8 个活跃 section，达阈值折叠 4 个（Messages 保留在 RAM，GC 已移除）",
+        "actual_apis": [
+          {
+            "signature": "SectionQueue.Push(section *Section)",
+            "notes": "line 13"
+          },
+          {
+            "signature": "SectionQueue.Fold(n, k int)",
+            "notes": "line 18"
+          }
+        ]
       },
       {
         "id": "node_current_round",
@@ -981,7 +1068,17 @@
         "expected_deps": [
           "internal/context/v2/section_queue.go"
         ],
-        "expected_behavior": "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限切分"
+        "expected_behavior": "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限切分",
+        "actual_apis": [
+          {
+            "signature": "CurrentRound.AddMessage(msg Message)",
+            "notes": "line 13"
+          },
+          {
+            "signature": "CurrentRound.AdvanceConveyor()",
+            "notes": "line 18"
+          }
+        ]
       },
       {
         "id": "node_draft_zone",
@@ -1002,7 +1099,21 @@
           }
         ],
         "expected_deps": [],
-        "expected_behavior": "预算 30% × CurrentRoundCap，超限 AddDraft 返回 error，LLM 需 draft_drop"
+        "expected_behavior": "预算 30% × CurrentRoundCap，超限 AddDraft 返回 error，LLM 需 draft_drop",
+        "actual_apis": [
+          {
+            "signature": "DraftZone.AddDraft(content string) (int, error)",
+            "notes": "line 9"
+          },
+          {
+            "signature": "DraftZone.DropDraft(index int) bool",
+            "notes": "line 14"
+          },
+          {
+            "signature": "DraftZone.ClearDraft()",
+            "notes": "line 19"
+          }
+        ]
       },
       {
         "id": "node_dynamic_injection",
@@ -1017,7 +1128,13 @@
         "expected_deps": [
           "internal/context/v2/retrieval_cache.go"
         ],
-        "expected_behavior": "访问缓存防止同轮重复召回；注入 [Pinned Tools] / [Known Patterns] / [Relevant Knowledge] 段"
+        "expected_behavior": "访问缓存防止同轮重复召回；注入 [Pinned Tools] / [Known Patterns] / [Relevant Knowledge] 段",
+        "actual_apis": [
+          {
+            "signature": "DynamicInjection.Retrieve(types []string, query string) string",
+            "notes": "line 14"
+          }
+        ]
       },
       {
         "id": "node_context_compose",
@@ -1037,7 +1154,17 @@
           "internal/context/v2/current_round.go",
           "internal/context/v2/dynamic_injection.go"
         ],
-        "expected_behavior": "按 L0→Summary→Sections→Current→Injection 顺序组装，超出预算触发折叠淘汰"
+        "expected_behavior": "按 L0→Summary→Sections→Current→Injection 顺序组装，超出预算触发折叠淘汰",
+        "actual_apis": [
+          {
+            "signature": "Compose() (string, error)",
+            "notes": "line 11"
+          },
+          {
+            "signature": "TokenBudget() int",
+            "notes": "line 17"
+          }
+        ]
       }
     ],
     "multi_file_invariants": [
@@ -1522,7 +1649,7 @@
     ]
   },
   "_sync": {
-    "saved_at": "2026-07-23T13:56:18.207Z",
+    "saved_at": "2026-07-23T22:04:27.929Z",
     "source": "mcp",
     "feature": "conveyor"
   }

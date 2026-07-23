@@ -194,6 +194,57 @@ export function applyOutputMapping(
 }
 
 // ─────────────────────────────────────────────────────────────
+// L4 函数绑定辅助
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 从 API signature 解析函数名
+ * 兼容形式：
+ *   "Compose() (string, error)"        → "Compose"
+ *   "SectionQueue.Push(section *Section)" → "Push"
+ *   "func Authenticate(token string) (*Claims, error)" → "Authenticate"
+ *   "DraftZone.AddDraft(content string) (int, error)"  → "AddDraft"
+ */
+export function parseApiName(signature: string | undefined | null): string {
+  if (!signature) return '';
+  var s = String(signature).trim();
+  s = s.replace(/^func\s+/, '');
+  // 方法接收者形式：func (r *SectionQueue) Push(...) → Push
+  s = s.replace(/^\([^)]*\)\s*/, '');
+  var parenIdx = s.indexOf('(');
+  if (parenIdx > 0) s = s.substring(0, parenIdx);
+  var parts = s.trim().split('.');
+  var name = parts[parts.length - 1] || '';
+  return name.trim();
+}
+
+/**
+ * 格式化 handler 调用参数为短字符串（用于浮层展示）
+ * { token: "abc123", n: 4 } → "token=\"abc123\", n=4"（单值超 maxLen 截断）
+ */
+export function formatHandlerArgs(
+  args: Record<string, unknown>,
+  maxLen?: number,
+): string {
+  var limit = maxLen || 16;
+  var parts: string[] = [];
+  for (var key in args) {
+    if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+    var v = args[key];
+    var s: string;
+    try {
+      s = JSON.stringify(v);
+    } catch (e) {
+      s = String(v);
+    }
+    if (s == null) s = String(v);
+    if (s.length > limit) s = s.substring(0, limit - 1) + '…';
+    parts.push(key + '=' + s);
+  }
+  return parts.join(', ');
+}
+
+// ─────────────────────────────────────────────────────────────
 // L4.5 异常匹配
 // ─────────────────────────────────────────────────────────────
 

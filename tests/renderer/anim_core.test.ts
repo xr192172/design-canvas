@@ -16,6 +16,8 @@ import {
   applyOutputMapping,
   matchError,
   makeSnapshot,
+  parseApiName,
+  formatHandlerArgs,
 } from '../../src/renderer/anim_core';
 
 describe('evalCondition - 条件表达式求值', () => {
@@ -208,5 +210,51 @@ describe('makeSnapshot - 状态快照', () => {
     const a: Record<string, unknown> = {};
     a.self = a;
     expect(makeSnapshot(a)).toBeNull();
+  });
+});
+
+describe('parseApiName - 从 signature 解析函数名', () => {
+  it('简单函数形式', () => {
+    expect(parseApiName('Compose() (string, error)')).toBe('Compose');
+    expect(parseApiName('L0Content() string')).toBe('L0Content');
+  });
+
+  it('方法形式（Type.Method）', () => {
+    expect(parseApiName('SectionQueue.Push(section *Section)')).toBe('Push');
+    expect(parseApiName('DraftZone.AddDraft(content string) (int, error)')).toBe('AddDraft');
+  });
+
+  it('Go func 前缀与接收者形式', () => {
+    expect(parseApiName('func Authenticate(token string) (*Claims, error)')).toBe('Authenticate');
+    expect(parseApiName('func (r *SectionQueue) Fold(n, k int)')).toBe('Fold');
+  });
+
+  it('空输入 → 空串', () => {
+    expect(parseApiName('')).toBe('');
+    expect(parseApiName(null)).toBe('');
+    expect(parseApiName(undefined)).toBe('');
+  });
+});
+
+describe('formatHandlerArgs - handler 调用参数格式化', () => {
+  it('基本类型混合', () => {
+    expect(formatHandlerArgs({ token: 'abc', n: 4, ok: true })).toBe('token="abc", n=4, ok=true');
+  });
+
+  it('长值截断', () => {
+    const out = formatHandlerArgs({ data: 'x'.repeat(40) });
+    expect(out.length).toBeLessThan(30);
+    expect(out).toContain('…');
+  });
+
+  it('对象值 JSON 序列化 + 截断', () => {
+    expect(formatHandlerArgs({ sec: { id: 's1' } })).toBe('sec={"id":"s1"}');
+  });
+
+  it('空对象 → 空串；不可序列化回退 String()', () => {
+    expect(formatHandlerArgs({})).toBe('');
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(formatHandlerArgs({ c: circular })).toContain('c=');
   });
 });

@@ -15,10 +15,12 @@ import path from 'node:path';
 import { renderDsl } from '../../src/tools/render_dsl';
 import { getDsl } from '../../src/tools/get_dsl';
 import { listFeatures } from '../../src/tools/list_features';
-import { clearAllFeatures, getFeatureFile } from '../../src/storage';
+import { clearAllFeatures, getFeatureFile, getDataHome } from '../../src/storage';
 
 const CONVEYOR_PATH = path.resolve(process.cwd(), 'examples/conveyor.json');
-const OUTPUT_DIR = path.resolve(process.cwd(), 'output');
+// 输出目录跟随数据主目录：测试 setup 把 DESIGN_CANVAS_HOME 指向临时目录，
+// renderDsl 默认输出到 <dataHome>/output，这里读取同一位置
+const OUTPUT_DIR = path.join(getDataHome(), 'output');
 const CONVEYOR_HTML = path.join(OUTPUT_DIR, 'conveyor.html');
 
 function cleanup(): void {

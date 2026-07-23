@@ -15,9 +15,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DesignDSL } from './dsl/types.js';
 
-/** 设计存储根目录：<cwd>/.design-canvas */
+/**
+ * 数据主目录：所有持久化路径的根
+ *
+ * 默认 = process.cwd()。测试通过 DESIGN_CANVAS_HOME 指向临时目录，
+ * 避免 saveDSL / renderDsl 覆盖项目根目录的活态 design-canvas.json。
+ * 注意：必须在调用时读取 env（不能模块加载时缓存），保证 vitest setup 生效。
+ */
+export function getDataHome(): string {
+  return process.env.DESIGN_CANVAS_HOME || process.cwd();
+}
+
+/** 设计存储根目录：<dataHome>/.design-canvas */
 export function getStorageRoot(): string {
-  return path.join(process.cwd(), '.design-canvas');
+  return path.join(getDataHome(), '.design-canvas');
 }
 
 /** feature 持久化目录：<cwd>/.design-canvas/features */
@@ -25,9 +36,9 @@ export function getFeaturesDir(): string {
   return path.join(getStorageRoot(), 'features');
 }
 
-/** 活态 DSL 文件：<cwd>/design-canvas.json */
+/** 活态 DSL 文件：<dataHome>/design-canvas.json */
 export function getLiveDslFile(): string {
-  return path.join(process.cwd(), 'design-canvas.json');
+  return path.join(getDataHome(), 'design-canvas.json');
 }
 
 /** 单个 feature 文件路径 */
