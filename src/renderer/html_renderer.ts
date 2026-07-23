@@ -652,6 +652,12 @@ ${dsl.simulation.initial_state.map(s => `          <div class="sim-state-row" da
           <button id="sim-advance" class="sim-btn">Advance</button>
           <button id="sim-reset" class="sim-btn sim-btn-secondary">重置</button>
         </div>
+        <div class="sim-triggers anim-controls" title="动画引擎控制">
+          <button id="anim-pause" class="sim-btn">⏸ 暂停</button>
+          <button id="anim-step" class="sim-btn">⏭ 步进</button>
+          <button id="anim-resume" class="sim-btn">▶ 继续</button>
+          <button id="anim-reset" class="sim-btn sim-btn-secondary">↺ 重置动画</button>
+        </div>
         <div class="sim-trace-wrap">
           <h3>触发日志</h3>
           <div id="sim-trace" class="sim-trace"></div>
@@ -677,7 +683,6 @@ ${
       <button id="rerender" type="button">重新渲染</button>
       <button id="export-json" type="button">📥 导出 design-canvas.json</button>
       <button id="import-json" type="button">📤 导入 DSL</button>
-      <button id="msg-flow-toggle" type="button">📝 消息流</button>
     </div>
   </footer>
   <div id="tooltip"></div>

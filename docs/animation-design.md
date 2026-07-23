@@ -597,8 +597,9 @@ src/renderer/
 | **B** L0-L1 默认行为 | ✅ 完成 | [animation_engine.ts](file:///d:/project_develop/design-canvas/src/renderer/animation_engine.ts) 实现粒子流自动推导（跳过 sim-edge / contains 边）、状态变化闪烁（300ms）、in_progress 呼吸效果 | conveyor 验证：8 条默认流，浅蓝粒子 |
 | **C** L2 数据流执行器 | ✅ 完成 | 显式 flow 支持（periodic / event 触发器）、粒子值类型标签（粒子上方显示）、节点 IO 提示浮层（输入: xxx / 输出: ???）、仿真器事件桥接（`window.__simEventListener__`） | conveyor.json 3 个 L2 flow 验证通过 |
 | **D** 内置 effect 注册 | ✅ 完成 | card_create / card_fold / card_evict 三个 effect 注册；通用卡片容器机制（`ensureCardContainer` 自动创建 `<g data-card-container>`）；`triggerEffect` 手动触发接口 | 浏览器实测：创建/折叠/淘汰三步链路全通过 |
-| **E** conveyor.json 迁移 | ⏳ 待做 | 在 conveyor.json 显式声明 card_* flow；删除 scripts.ts 专用动画代码 | — |
-| **F-I** | ⏳ 计划 | L3 条件分支 / L4 函数绑定 / L4.5 异常 / L5 反向提取 / 播放控制 | — |
+| **E** conveyor.json 迁移 | ✅ 完成 | conveyor.json 声明 `card_sync` flow（state_change 触发器监听 `sections`）+ `runtime.sim_particles`（on_arrive: chip）；scripts.ts 删除全部专用动画代码（消息流面板/粒子系统/卡片动画，processEvent 改为 `__simRuleFired__` 通知引擎 + 暴露 `window.simState`）；引擎新增 sim-edge 粒子流、card_sync effect、state_change 轮询（300ms 快照对比）；html_renderer 删消息流按钮、sim-panel 加动画控制按钮（⏸暂停/⏭步进/▶继续/↺重置） | 浏览器全链路 PASS，见下方验证记录 |
+| **F-H** | ⏳ 计划 | L3 条件分支 / L4 函数绑定 / L4.5 异常 / L5 反向提取 | — |
+| **I** 播放控制 | ✅ 基础完成 | sim-panel 动画控制按钮接线引擎 pause/step/resume/reset（`setupControlButtons`） | 浏览器点击验证无报错 |
 
 **阶段 D 验证记录**（2026-07-24）：
 
@@ -612,6 +613,21 @@ src/renderer/
 - 三个 effect 均返回 `true`，未触发默认粒子流回退
 - `layoutCards` 重排机制工作正常，多卡片场景下 y 坐标自动累加
 - effect 抛错时由 try/catch 兜底，不会中断动画引擎
+
+**阶段 E 验证记录**（2026-07-24）：
+
+迁移完成后浏览器全链路验证（http://127.0.0.1:8080/conveyor.html）：
+
+1. **无残留报错**——console 无 ReferenceError / TypeError，已删除的 `updateSectionVisuals` / `convertParticleToContainer` / 消息流代码无任何悬空调用
+2. **引擎启动正常**——`[animV2] started, flows: 8`；`[animV2] state watchers registered: [sections]`
+3. **接口完整**——`window.__animV2__` 暴露 start / pause / resume / step / reset / spawnParticle / triggerEffect
+4. **UI 变更到位**——sim-panel 存在 anim-pause / anim-step / anim-resume / anim-reset 四个按钮；页脚 msg-flow-toggle 按钮已移除
+5. **card_sync 生效**——仿真器发送"测试消息"后 sections 状态 4→5，SectionQueue 区域新卡片自动出现（state_change 轮询捕获 simState 变化 → 全量同步）
+6. **播放控制生效**——点击暂停/继续/重置动画均无报错
+
+架构变化要点：
+- scripts.ts 不再包含任何项目特定动画代码，仿真器只负责状态机（processEvent → simState），动画完全由引擎消费 `__simRuleFired__` 事件 + 轮询 simState 驱动
+- 动画 DOM（粒子/chip/卡片）统一由引擎管理，reset 时清理并重新执行 card_sync flows
 
 ---
 

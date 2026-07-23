@@ -5,13 +5,15 @@
  * - L0-L1 零成本：无 animations_v2 字段时，从 geometry/semantic 自动推导默认动画
  * - L2+ 显式声明：有 animations_v2.flows 时，显式 flow 覆盖同路径默认粒子流
  * - 不硬编码项目特定 ID：通过 effect 注册表扩展
- * - 与 simulation 联动：监听仿真器事件触发对应 flow
+ * - 与 simulation 联动：监听仿真器规则触发（__simRuleFired__）→ sim-edge 粒子流
+ * - 内置 effect：card_create / card_fold / card_evict / card_sync（状态数组全量同步）
+ * - 粒子到达终点可转为可拖拽 chip 容器（on_arrive: 'chip'）
  *
  * 本模块导出 buildAnimationScript(dsl) → 浏览器端 JS 字符串
  * 由 html_renderer.ts 拼接为独立 <script> 块注入
  */
 
-import type { DesignDSL, Edge, Node } from '../dsl/types.js';
+import type { DesignDSL } from '../dsl/types.js';
 
 /**
  * 生成浏览器端动画执行器 JS 代码
@@ -20,7 +22,12 @@ import type { DesignDSL, Edge, Node } from '../dsl/types.js';
 export function buildAnimationScript(dsl: DesignDSL): string {
   const hasAnimationsV2 = !!dsl.animations_v2;
   const flowsJson = JSON.stringify(dsl.animations_v2?.flows ?? []);
-  const runtimeJson = JSON.stringify(dsl.animations_v2?.runtime ?? null) || 'null';
+  const runtimeRaw = (dsl.animations_v2?.runtime ?? {}) as Record<string, unknown>;
+  const simParticlesRaw = (runtimeRaw.sim_particles ?? {}) as Record<string, unknown>;
+  const simParticleCfg = {
+    on_arrive: simParticlesRaw.on_arrive === 'chip' ? 'chip' : 'fade',
+    label: simParticlesRaw.label === 'rule' ? 'rule' : 'event',
+  };
 
   // 提取 geometry 中的 edges 用于 L0 默认粒子流推导
   const edges = dsl.geometry.edges ?? [];
@@ -43,23 +50,31 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     });
   }
 
+  // 仿真规则（用于 sim-edge 粒子流：规则触发时沿对应 sim-edge 发送粒子）
+  const simRules = (dsl.simulation?.rules ?? [])
+    .filter((r) => r.from_node && r.to_nodes && r.to_nodes.length > 0)
+    .map((r) => ({ id: r.id, name: r.name ?? r.event, event: r.event }));
+
   // L1 默认状态高亮：提取所有有 status 的节点
   const statusNodes = nodes
-    .filter(n => n.status)
-    .map(n => ({ id: n.id, status: n.status as string }));
+    .filter((n) => n.status)
+    .map((n) => ({ id: n.id, status: n.status as string }));
 
   const defaultFlowsJson = JSON.stringify(defaultFlows);
   const statusNodesJson = JSON.stringify(statusNodes);
+  const simRulesJson = JSON.stringify(simRules);
+  const simParticleCfgJson = JSON.stringify(simParticleCfg);
 
   return `
 // ========== Animation Engine V2 (L0-L5) ==========
 (function() {
   'use strict';
 
-  var ANIM_VERSION = 1;
+  var ANIM_VERSION = 2;
   var HAS_EXPLICIT_FLOWS = ${hasAnimationsV2};
   var EXPLICIT_FLOWS = ${flowsJson};
-  var RUNTIME_CONFIG = ${runtimeJson};
+  var SIM_RULES = ${simRulesJson};
+  var SIM_PARTICLE_CFG = ${simParticleCfgJson};
   var DEFAULT_FLOWS = ${defaultFlowsJson};
   var STATUS_NODES = ${statusNodesJson};
 
@@ -74,8 +89,7 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     has: function(name) { return !!this._effects[name]; }
   };
 
-  // ---- 内置 Effect：card_create / card_fold / card_evict ----
-  // 卡片通用样式常量（与 scripts.ts 中的 Section 卡片保持视觉一致）
+  // ---- 卡片通用样式常量 ----
   var CARD_STYLE = {
     activeH: 50,
     foldedH: 26,
@@ -91,254 +105,22 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     bodyColor: '#8b9bb4'
   };
 
-  // 获取/创建卡片容器（flow.to 指向的节点内的 <g data-card-container>)
-  // 若节点内没有显式容器，则在节点下创建一个并返回
-  function ensureCardContainer(nodeId) {
-    var nodeEl = document.querySelector('.node[data-id="' + nodeId + '"]');
-    if (!nodeEl) return null;
-    var container = nodeEl.querySelector('[data-card-container="true"]');
-    if (!container) {
-      var ns = 'http://www.w3.org/2000/svg';
-      container = document.createElementNS(ns, 'g');
-      container.setAttribute('data-card-container', 'true');
-      container.setAttribute('class', 'card-container-v2');
-      nodeEl.appendChild(container);
-    }
-    return container;
+  // flow.layout 覆盖默认卡片布局
+  function getCardLayout(flow) {
+    var o = (flow && flow.rawFlow && flow.rawFlow.layout) || {};
+    return {
+      padX: o.padX != null ? o.padX : CARD_STYLE.padX,
+      padY: o.padY != null ? o.padY : CARD_STYLE.padY,
+      gap: o.gap != null ? o.gap : CARD_STYLE.gap,
+      activeH: o.activeH != null ? o.activeH : CARD_STYLE.activeH,
+      foldedH: o.foldedH != null ? o.foldedH : CARD_STYLE.foldedH
+    };
   }
-
-  // 计算容器内所有卡片的目标布局（按 DOM 顺序）
-  function layoutCards(container, nodeRect) {
-    var cards = container.querySelectorAll('g.card-v2:not(.evicting)');
-    var yCursor = nodeRect.y + CARD_STYLE.padY;
-    var cardX = nodeRect.x + CARD_STYLE.padX;
-    var cardW = nodeRect.w - CARD_STYLE.padX * 2;
-    cards.forEach(function(card) {
-      var folded = card.classList.contains('folded');
-      var h = folded ? CARD_STYLE.foldedH : CARD_STYLE.activeH;
-      card.setAttribute('transform', 'translate(0,0)');
-      var rect = card.querySelector('rect');
-      if (rect) {
-        rect.setAttribute('x', cardX);
-        rect.setAttribute('y', yCursor);
-        rect.setAttribute('width', cardW);
-        rect.setAttribute('height', h);
-      }
-      // 同步文字 y
-      var title = card.querySelector('.card-title');
-      if (title) title.setAttribute('y', yCursor + 17);
-      var body = card.querySelector('.body-text');
-      if (body) body.setAttribute('y', yCursor + 34);
-      var badge = card.querySelector('.fold-badge');
-      if (badge) badge.setAttribute('y', yCursor + 17);
-      yCursor += h + CARD_STYLE.gap;
-    });
-    return yCursor;
-  }
-
-  // 创建一张卡片 SVG 元素（不附加到 DOM）
-  function buildCardElement(value) {
-    var ns = 'http://www.w3.org/2000/svg';
-    var g = document.createElementNS(ns, 'g');
-    var folded = (value && value.status === 'folded');
-    g.setAttribute('class', 'card-v2' + (folded ? ' folded' : ''));
-    g.setAttribute('data-card-id', value && value.id ? value.id : ('card_' + Date.now()));
-    g.setAttribute('opacity', '0');
-
-    var rect = document.createElementNS(ns, 'rect');
-    rect.setAttribute('rx', '4');
-    rect.setAttribute('fill', folded ? CARD_STYLE.foldedFill : CARD_STYLE.activeFill);
-    rect.setAttribute('stroke', folded ? CARD_STYLE.foldedStroke : CARD_STYLE.activeStroke);
-    rect.setAttribute('stroke-width', '1');
-    g.appendChild(rect);
-
-    var title = document.createElementNS(ns, 'text');
-    title.setAttribute('class', 'card-title');
-    title.setAttribute('x', '0');
-    title.setAttribute('y', '17');
-    title.setAttribute('fill', folded ? CARD_STYLE.foldedTitleColor : CARD_STYLE.titleColor);
-    title.setAttribute('font-size', '11');
-    title.setAttribute('font-weight', folded ? '600' : '500');
-    var titleStr = (value && (value.summary || value.id)) || 'Untitled';
-    if (titleStr.length > 42) titleStr = titleStr.substring(0, 40) + '...';
-    title.textContent = (folded ? '📦 ' : '📝 ') + titleStr;
-    g.appendChild(title);
-
-    if (!folded) {
-      var body = document.createElementNS(ns, 'text');
-      body.setAttribute('class', 'body-text');
-      body.setAttribute('x', '0');
-      body.setAttribute('y', '34');
-      body.setAttribute('fill', CARD_STYLE.bodyColor);
-      body.setAttribute('font-size', '10');
-      var msg = (value && value.messages) || 0;
-      var tok = (value && value.tokens) || 0;
-      body.textContent = '... ' + msg + ' msg · ' + tok + ' tok ...';
-      g.appendChild(body);
-    } else {
-      var badge = document.createElementNS(ns, 'text');
-      badge.setAttribute('class', 'fold-badge');
-      badge.setAttribute('text-anchor', 'end');
-      badge.setAttribute('fill', CARD_STYLE.bodyColor);
-      badge.setAttribute('font-size', '10');
-      badge.textContent = '✂ folded';
-      g.appendChild(badge);
-    }
-    return g;
-  }
-
-  // effect: card_create —— 在 flow.to 节点内创建一张新卡片（淡入）
-  EffectRegistry.register('card_create', function(ctx) {
-    var flow = ctx.flow;
-    var value = ctx.value || (flow && flow.rawFlow && flow.rawFlow.value) || {};
-    var container = ensureCardContainer(flow.to);
-    if (!container) return false;
-
-    var nodeRect = getNodeRect(flow.to);
-    if (!nodeRect) return false;
-
-    var card = buildCardElement(value);
-    container.appendChild(card);
-
-    // 重排所有卡片位置
-    layoutCards(container, nodeRect);
-
-    // 设置 badge 的 x（依赖 width，需要在 layout 之后）
-    var cardW = nodeRect.w - CARD_STYLE.padX * 2;
-    var badge = card.querySelector('.fold-badge');
-    if (badge) badge.setAttribute('x', nodeRect.x + CARD_STYLE.padX + cardW - 8);
-    // 设置 title/body 的 x
-    var title = card.querySelector('.card-title');
-    if (title) title.setAttribute('x', nodeRect.x + CARD_STYLE.padX + 10);
-    var body = card.querySelector('.body-text');
-    if (body) body.setAttribute('x', nodeRect.x + CARD_STYLE.padX + 10);
-
-    // 淡入动画（从下方上移）
-    var startTime = performance.now();
-    var duration = 300;
-    function tick(now) {
-      var progress = Math.min((now - startTime) / duration, 1);
-      var ease = 1 - Math.pow(1 - progress, 3);
-      card.setAttribute('opacity', String(ease));
-      card.setAttribute('transform', 'translate(0,' + ((1 - ease) * 12) + ')');
-      if (progress < 1) requestAnimationFrame(tick);
-      else { card.setAttribute('opacity', '1'); card.removeAttribute('transform'); }
-    }
-    requestAnimationFrame(tick);
-    return true;
-  });
-
-  // effect: card_fold —— 折叠指定卡片（cardId 通过 value.cardId 或 value.id 传入）
-  EffectRegistry.register('card_fold', function(ctx) {
-    var flow = ctx.flow;
-    var value = ctx.value || (flow && flow.rawFlow && flow.rawFlow.value) || {};
-    var cardId = value.cardId || value.id;
-    if (!cardId) return false;
-
-    var container = ensureCardContainer(flow.to);
-    if (!container) return false;
-
-    var card = container.querySelector('g.card-v2[data-card-id="' + cardId + '"]');
-    if (!card || card.classList.contains('folded')) return false;
-
-    var nodeRect = getNodeRect(flow.to);
-    if (!nodeRect) return false;
-
-    var rect = card.querySelector('rect');
-    if (!rect) return false;
-    var fromH = CARD_STYLE.activeH;
-    var toH = CARD_STYLE.foldedH;
-
-    // 切换样式
-    card.classList.add('folded');
-    rect.setAttribute('fill', CARD_STYLE.foldedFill);
-    rect.setAttribute('stroke', CARD_STYLE.foldedStroke);
-
-    // 切换 title 颜色/前缀，移除 body，添加 badge
-    var title = card.querySelector('.card-title');
-    if (title) {
-      title.setAttribute('fill', CARD_STYLE.foldedTitleColor);
-      title.setAttribute('font-weight', '600');
-      var titleStr = title.textContent.replace(/^[📝📦] /, '');
-      title.textContent = '📦 ' + titleStr;
-    }
-    var body = card.querySelector('.body-text');
-    if (body) body.remove();
-
-    var existingBadge = card.querySelector('.fold-badge');
-    if (!existingBadge) {
-      var ns = 'http://www.w3.org/2000/svg';
-      var badge = document.createElementNS(ns, 'text');
-      badge.setAttribute('class', 'fold-badge');
-      badge.setAttribute('text-anchor', 'end');
-      badge.setAttribute('fill', CARD_STYLE.bodyColor);
-      badge.setAttribute('font-size', '10');
-      badge.textContent = '✂ folded';
-      card.appendChild(badge);
-    }
-
-    // 高度过渡动画
-    var startTime = performance.now();
-    var duration = 300;
-    var baseY = parseFloat(rect.getAttribute('y')) || 0;
-    var cardW = nodeRect.w - CARD_STYLE.padX * 2;
-    function tick(now) {
-      var progress = Math.min((now - startTime) / duration, 1);
-      var ease = 1 - Math.pow(1 - progress, 3);
-      rect.setAttribute('height', String(fromH + (toH - fromH) * ease));
-      if (title) title.setAttribute('y', baseY + 17);
-      var badge2 = card.querySelector('.fold-badge');
-      if (badge2) {
-        badge2.setAttribute('y', baseY + 17);
-        badge2.setAttribute('x', nodeRect.x + CARD_STYLE.padX + cardW - 8);
-      }
-      if (progress < 1) requestAnimationFrame(tick);
-      else {
-        // 动画结束后重排所有卡片位置
-        layoutCards(container, nodeRect);
-      }
-    }
-    requestAnimationFrame(tick);
-    return true;
-  });
-
-  // effect: card_evict —— 淘汰容器内最旧（DOM 顺序第一张）的卡片（左滑+淡出）
-  EffectRegistry.register('card_evict', function(ctx) {
-    var flow = ctx.flow;
-    var container = ensureCardContainer(flow.to);
-    if (!container) return false;
-
-    var nodeRect = getNodeRect(flow.to);
-    if (!nodeRect) return false;
-
-    var cards = container.querySelectorAll('g.card-v2:not(.evicting)');
-    if (cards.length === 0) return false;
-
-    var card = cards[0];
-    card.classList.add('evicting');
-    var cardW = nodeRect.w - CARD_STYLE.padX * 2;
-
-    var startTime = performance.now();
-    var duration = 400;
-    function tick(now) {
-      var progress = Math.min((now - startTime) / duration, 1);
-      var ease = 1 - Math.pow(1 - progress, 3);
-      card.setAttribute('transform', 'translate(' + (-ease * (cardW + 30)) + ',0)');
-      card.setAttribute('opacity', String(1 - ease));
-      if (progress < 1) requestAnimationFrame(tick);
-      else {
-        if (card.parentNode) card.parentNode.removeChild(card);
-        // 淘汰后重排剩余卡片
-        layoutCards(container, nodeRect);
-      }
-    }
-    requestAnimationFrame(tick);
-    return true;
-  });
 
   // ---- 状态管理 ----
   var state = {
     activeParticles: [],
+    chips: [],
     animFrame: null,
     paused: false,
     stepMode: false,
@@ -409,101 +191,541 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     return { x: cx + dx * t, y: cy + dy * t };
   }
 
-  // ---- L0/L2 默认行为与显式流 ----
-  function startDefaultFlows() {
-    var periodicFlows = [];
-    var eventFlows = [];
+  function fadeOutEl(el) {
+    el.style.transition = 'opacity 0.3s';
+    el.style.opacity = '0';
+    setTimeout(function() {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 300);
+  }
 
-    // 处理显式 flows（L2+）
-    if (HAS_EXPLICIT_FLOWS && EXPLICIT_FLOWS.length > 0) {
-      for (var i = 0; i < EXPLICIT_FLOWS.length; i++) {
-        var f = EXPLICIT_FLOWS[i];
-        if (!f.trigger) continue;
+  // ========== 卡片系统（card_* effects 共用） ==========
 
-        var flowConfig = {
-          id: f.id,
-          from: f.from,
-          to: f.to,
-          interval: f.trigger.interval || 4000,
-          color: '#4fc3f7',
-          label: f.value ? (f.value.label || f.value.type) : '',
-          valueType: f.value ? f.value.type : '',
-          valueLabel: f.value ? (f.value.label || f.value.type) : '',
-          branches: f.branches || null,
-          effect: f.effect || 'particle_flow',
-          explicit: true,
-          rawFlow: f
-        };
-
-        if (f.trigger.type === 'periodic') {
-          periodicFlows.push(flowConfig);
-        } else if (f.trigger.type === 'event') {
-          eventFlows.push({ config: flowConfig, eventName: f.trigger.event });
-        }
-        // state_change 和 manual 暂不在启动时注册，由其他机制触发
-      }
+  // 为容器节点创建/更新 clipPath（防止卡片滑出节点边界）
+  function ensureCardClip(nodeId) {
+    var clipId = 'card-clip-' + nodeId;
+    var nodeRect = getNodeRect(nodeId);
+    if (!nodeRect) return clipId;
+    var svg = getSvgCanvas();
+    if (!svg) return clipId;
+    var ns = 'http://www.w3.org/2000/svg';
+    var defs = svg.querySelector('defs');
+    if (!defs) {
+      defs = document.createElementNS(ns, 'defs');
+      svg.insertBefore(defs, svg.firstChild);
     }
+    var old = document.getElementById(clipId);
+    if (old) old.remove();
+    var clip = document.createElementNS(ns, 'clipPath');
+    clip.setAttribute('id', clipId);
+    var clipRect = document.createElementNS(ns, 'rect');
+    clipRect.setAttribute('x', nodeRect.x);
+    clipRect.setAttribute('y', nodeRect.y);
+    clipRect.setAttribute('width', nodeRect.w);
+    clipRect.setAttribute('height', nodeRect.h);
+    clip.appendChild(clipRect);
+    defs.appendChild(clip);
+    return clipId;
+  }
 
-    // 补充默认流（未被显式覆盖的 edge）
-    var explicitPaths = {};
-    periodicFlows.forEach(function(f) {
-      explicitPaths[f.from + '->' + f.to] = true;
-    });
-    eventFlows.forEach(function(e) {
-      explicitPaths[e.config.from + '->' + e.config.to] = true;
-    });
-
-    for (var j = 0; j < DEFAULT_FLOWS.length; j++) {
-      var df = DEFAULT_FLOWS[j];
-      var key = df.from + '->' + df.to;
-      if (!explicitPaths[key]) {
-        periodicFlows.push(df);
-      }
+  // 获取/创建卡片容器（flow.to 指向的节点内的 <g data-card-container>）
+  function ensureCardContainer(nodeId) {
+    var nodeEl = document.querySelector('.node[data-id="' + nodeId + '"]');
+    if (!nodeEl) return null;
+    var container = nodeEl.querySelector('[data-card-container="true"]');
+    if (!container) {
+      var ns = 'http://www.w3.org/2000/svg';
+      container = document.createElementNS(ns, 'g');
+      container.setAttribute('data-card-container', 'true');
+      container.setAttribute('class', 'card-container-v2');
+      nodeEl.appendChild(container);
     }
+    return container;
+  }
 
-    // 启动 periodic 流
-    periodicFlows.forEach(function(flow) {
-      startFlowTimer(flow);
-    });
+  // 容器标题（可选，flow.title_template 驱动）
+  function ensureContainerTitle(container, nodeRect) {
+    var title = container.querySelector('.container-title');
+    if (!title) {
+      var ns = 'http://www.w3.org/2000/svg';
+      title = document.createElementNS(ns, 'text');
+      title.setAttribute('class', 'container-title');
+      title.setAttribute('fill', '#7aa0c4');
+      title.setAttribute('font-size', '10');
+      title.setAttribute('font-weight', '600');
+      container.appendChild(title);
+    }
+    title.setAttribute('x', nodeRect.x + 10);
+    title.setAttribute('y', nodeRect.y + 16);
+    return title;
+  }
 
-    // 注册 event 触发流
-    if (eventFlows.length > 0) {
-      setupEventTriggers(eventFlows);
+  function renderTitleTemplate(template, data) {
+    var active = 0, folded = 0;
+    for (var i = 0; i < data.length; i++) {
+      if (data[i] && data[i].status === 'folded') folded++;
+      else active++;
+    }
+    return template
+      .replace(/\\$\\{active\\}/g, String(active))
+      .replace(/\\$\\{folded\\}/g, String(folded))
+      .replace(/\\$\\{total\\}/g, String(data.length));
+  }
+
+  // 定位单张卡片（rect + 内部文字）
+  function positionCard(g, nodeRect, layout, y, h) {
+    var cardX = nodeRect.x + layout.padX;
+    var cardW = nodeRect.w - layout.padX * 2;
+    var rect = g.querySelector('rect');
+    if (rect) {
+      rect.setAttribute('x', cardX);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', cardW);
+      rect.setAttribute('height', h);
+    }
+    var title = g.querySelector('.card-title');
+    if (title) {
+      title.setAttribute('x', cardX + 10);
+      title.setAttribute('y', y + 17);
+    }
+    var body = g.querySelector('.body-text');
+    if (body) {
+      body.setAttribute('x', cardX + 10);
+      body.setAttribute('y', y + 34);
+    }
+    var badge = g.querySelector('.fold-badge');
+    if (badge) {
+      badge.setAttribute('x', cardX + cardW - 8);
+      badge.setAttribute('y', y + 17);
     }
   }
 
-  // ---- L2 事件触发：监听仿真器事件 ----
-  function setupEventTriggers(eventFlows) {
-    // 监听 window.__sim__ 的事件触发
-    // 仿真器在触发事件时会调用 window.__simEventListener__(eventName, payload)
-    var listeners = {};
+  // 重排容器内所有卡片（按 DOM 顺序）
+  function layoutCards(container, nodeRect, layout) {
+    var cards = container.querySelectorAll('g.card-v2:not(.evicting)');
+    var yCursor = nodeRect.y + layout.padY;
+    cards.forEach(function(card) {
+      var folded = card.classList.contains('folded');
+      var h = folded ? layout.foldedH : layout.activeH;
+      card.setAttribute('transform', 'translate(0,0)');
+      positionCard(card, nodeRect, layout, yCursor, h);
+      yCursor += h + layout.gap;
+    });
+    return yCursor;
+  }
 
-    eventFlows.forEach(function(ef) {
-      var eventName = ef.eventName;
-      if (!listeners[eventName]) listeners[eventName] = [];
-      listeners[eventName].push(ef.config);
+  // 生成卡片内部文字元素（title + body/badge），不定位
+  function appendCardContent(g, sec, folded) {
+    var ns = 'http://www.w3.org/2000/svg';
+    var title = document.createElementNS(ns, 'text');
+    title.setAttribute('class', 'card-title');
+    title.setAttribute('fill', folded ? CARD_STYLE.foldedTitleColor : CARD_STYLE.titleColor);
+    title.setAttribute('font-size', '11');
+    title.setAttribute('font-weight', folded ? '600' : '500');
+    var titleStr = (sec && (sec.summary || sec.id)) || 'Untitled';
+    if (titleStr.length > 42) titleStr = titleStr.substring(0, 40) + '...';
+    title.textContent = (folded ? '📦 ' : '📝 ') + titleStr;
+    g.appendChild(title);
+
+    if (!folded) {
+      var body = document.createElementNS(ns, 'text');
+      body.setAttribute('class', 'body-text');
+      body.setAttribute('fill', CARD_STYLE.bodyColor);
+      body.setAttribute('font-size', '10');
+      var msg = (sec && sec.messages) || 0;
+      var tok = (sec && sec.tokens) || 0;
+      body.textContent = '... ' + msg + ' msg · ' + tok + ' tok ...';
+      g.appendChild(body);
+    } else {
+      var badge = document.createElementNS(ns, 'text');
+      badge.setAttribute('class', 'fold-badge');
+      badge.setAttribute('text-anchor', 'end');
+      badge.setAttribute('fill', CARD_STYLE.bodyColor);
+      badge.setAttribute('font-size', '10');
+      badge.textContent = '✂ folded';
+      g.appendChild(badge);
+    }
+  }
+
+  // 创建一张卡片 SVG 元素（不附加到 DOM，不定位）
+  function buildCardElement(sec, folded, clipId) {
+    var ns = 'http://www.w3.org/2000/svg';
+    var g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'card-v2' + (folded ? ' folded' : ''));
+    g.setAttribute('data-card-id', sec && sec.id ? sec.id : ('card_' + Date.now()));
+    g.setAttribute('opacity', '0');
+    if (clipId) g.setAttribute('clip-path', 'url(#' + clipId + ')');
+
+    var rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('rx', '4');
+    rect.setAttribute('fill', folded ? CARD_STYLE.foldedFill : CARD_STYLE.activeFill);
+    rect.setAttribute('stroke', folded ? CARD_STYLE.foldedStroke : CARD_STYLE.activeStroke);
+    rect.setAttribute('stroke-width', '1');
+    g.appendChild(rect);
+
+    appendCardContent(g, sec, folded);
+    return g;
+  }
+
+  // 状态切换（折叠↔展开）时重建卡片内容与样式
+  function rebuildCardContent(g, sec, folded) {
+    var texts = g.querySelectorAll('text');
+    for (var i = 0; i < texts.length; i++) texts[i].remove();
+    var rect = g.querySelector('rect');
+    if (rect) {
+      rect.setAttribute('fill', folded ? CARD_STYLE.foldedFill : CARD_STYLE.activeFill);
+      rect.setAttribute('stroke', folded ? CARD_STYLE.foldedStroke : CARD_STYLE.activeStroke);
+    }
+    appendCardContent(g, sec, folded);
+  }
+
+  // 更新卡片文字内容（无状态变化时）
+  function updateCardContent(g, sec, folded) {
+    var title = g.querySelector('.card-title');
+    if (title) {
+      var titleStr = (sec && (sec.summary || sec.id)) || 'Untitled';
+      if (titleStr.length > 42) titleStr = titleStr.substring(0, 40) + '...';
+      title.textContent = (folded ? '📦 ' : '📝 ') + titleStr;
+    }
+    var body = g.querySelector('.body-text');
+    if (body && !folded) {
+      var msg = (sec && sec.messages) || 0;
+      var tok = (sec && sec.tokens) || 0;
+      body.textContent = '... ' + msg + ' msg · ' + tok + ' tok ...';
+    }
+  }
+
+  // 新卡片淡入（从下方上移）
+  function animateCardFadeIn(g) {
+    var startTime = performance.now();
+    var duration = 300;
+    function tick(now) {
+      var progress = Math.min((now - startTime) / duration, 1);
+      var ease = 1 - Math.pow(1 - progress, 3);
+      g.setAttribute('opacity', String(ease));
+      g.setAttribute('transform', 'translate(0,' + ((1 - ease) * 12) + ')');
+      if (progress < 1) requestAnimationFrame(tick);
+      else { g.setAttribute('opacity', '1'); g.removeAttribute('transform'); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // 折叠/展开过渡：rect height + text y 同步
+  function animateFoldTransition(g, fromH, toH, baseY, done) {
+    var rect = g.querySelector('rect');
+    if (!rect) { if (done) done(); return; }
+    var startTime = performance.now();
+    var duration = 300;
+    function tick(now) {
+      var progress = Math.min((now - startTime) / duration, 1);
+      var ease = 1 - Math.pow(1 - progress, 3);
+      rect.setAttribute('height', String(fromH + (toH - fromH) * ease));
+      var title = g.querySelector('.card-title');
+      if (title) title.setAttribute('y', baseY + 17);
+      var body = g.querySelector('.body-text');
+      if (body) body.setAttribute('y', baseY + 34);
+      var badge = g.querySelector('.fold-badge');
+      if (badge) badge.setAttribute('y', baseY + 17);
+      if (progress < 1) requestAnimationFrame(tick);
+      else if (done) done();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // 淘汰卡片左滑+淡出
+  function animateCardSlideOut(g, cardW, done) {
+    g.classList.add('evicting');
+    var startTime = performance.now();
+    var duration = 400;
+    function tick(now) {
+      var progress = Math.min((now - startTime) / duration, 1);
+      var ease = 1 - Math.pow(1 - progress, 3);
+      g.setAttribute('transform', 'translate(' + (-ease * (cardW + 30)) + ',0)');
+      g.setAttribute('opacity', String(1 - ease));
+      if (progress < 1) requestAnimationFrame(tick);
+      else {
+        if (g.parentNode) g.parentNode.removeChild(g);
+        if (done) done();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ---- effect: card_create —— 在 flow.to 节点内创建一张新卡片（淡入） ----
+  EffectRegistry.register('card_create', function(ctx) {
+    var flow = ctx.flow;
+    var value = ctx.value || (flow && flow.rawFlow && flow.rawFlow.value) || {};
+    var container = ensureCardContainer(flow.to);
+    if (!container) return false;
+    var nodeRect = getNodeRect(flow.to);
+    if (!nodeRect) return false;
+    var layout = getCardLayout(flow);
+    var clipId = ensureCardClip(flow.to);
+    var card = buildCardElement(value, value.status === 'folded', clipId);
+    container.appendChild(card);
+    layoutCards(container, nodeRect, layout);
+    animateCardFadeIn(card);
+    return true;
+  });
+
+  // ---- effect: card_fold —— 折叠指定卡片（cardId 通过 value.cardId 或 value.id 传入） ----
+  EffectRegistry.register('card_fold', function(ctx) {
+    var flow = ctx.flow;
+    var value = ctx.value || (flow && flow.rawFlow && flow.rawFlow.value) || {};
+    var cardId = value.cardId || value.id;
+    if (!cardId) return false;
+    var container = ensureCardContainer(flow.to);
+    if (!container) return false;
+    var card = container.querySelector('g.card-v2[data-card-id="' + cardId + '"]');
+    if (!card || card.classList.contains('folded')) return false;
+    var nodeRect = getNodeRect(flow.to);
+    if (!nodeRect) return false;
+    var layout = getCardLayout(flow);
+    card.classList.add('folded');
+    rebuildCardContent(card, value, true);
+    var rect = card.querySelector('rect');
+    var baseY = rect ? parseFloat(rect.getAttribute('y')) || 0 : 0;
+    animateFoldTransition(card, layout.activeH, layout.foldedH, baseY, function() {
+      layoutCards(container, nodeRect, layout);
+    });
+    return true;
+  });
+
+  // ---- effect: card_evict —— 淘汰容器内最旧（DOM 顺序第一张）的卡片（左滑+淡出） ----
+  EffectRegistry.register('card_evict', function(ctx) {
+    var flow = ctx.flow;
+    var container = ensureCardContainer(flow.to);
+    if (!container) return false;
+    var nodeRect = getNodeRect(flow.to);
+    if (!nodeRect) return false;
+    var layout = getCardLayout(flow);
+    var cards = container.querySelectorAll('g.card-v2:not(.evicting)');
+    if (cards.length === 0) return false;
+    animateCardSlideOut(cards[0], nodeRect.w - layout.padX * 2, function() {
+      layoutCards(container, nodeRect, layout);
+    });
+    return true;
+  });
+
+  // ---- effect: card_sync —— 全量同步状态数组到卡片（快照对比 → 创建/折叠/淘汰） ----
+  // 数据源：window.simState[flow.source_key || 'sections']
+  EffectRegistry.register('card_sync', function(ctx) {
+    var flow = ctx.flow;
+    var raw = (flow && flow.rawFlow) || {};
+    var sourceKey = raw.source_key || 'sections';
+    var data = (window.simState && window.simState[sourceKey]) || [];
+    if (!Array.isArray(data)) return false;
+    var container = ensureCardContainer(flow.to);
+    if (!container) return false;
+    var nodeRect = getNodeRect(flow.to);
+    if (!nodeRect) return false;
+    var layout = getCardLayout(flow);
+    var clipId = ensureCardClip(flow.to);
+
+    // 容器标题（可选）
+    if (raw.title_template) {
+      var titleEl = ensureContainerTitle(container, nodeRect);
+      titleEl.textContent = renderTitleTemplate(raw.title_template, data);
+    }
+
+    // 第一遍：计算目标布局
+    var yCursor = nodeRect.y + layout.padY;
+    var layouts = {};
+    for (var i = 0; i < data.length; i++) {
+      var sec = data[i];
+      if (!sec || sec.id == null) continue;
+      var folded = sec.status === 'folded';
+      var h = folded ? layout.foldedH : layout.activeH;
+      layouts[sec.id] = { y: yCursor, h: h, folded: folded };
+      yCursor += h + layout.gap;
+    }
+
+    // 收集现有卡片
+    var existingMap = {};
+    container.querySelectorAll('g.card-v2').forEach(function(card) {
+      existingMap[card.getAttribute('data-card-id')] = card;
     });
 
-    window.__simEventListener__ = function(eventName, payload) {
-      var configs = listeners[eventName];
-      if (!configs) return;
-      for (var i = 0; i < configs.length; i++) {
-        spawnDefaultParticle(configs[i]);
+    // 第二遍：创建/更新卡片
+    var keptIds = {};
+    for (var j = 0; j < data.length; j++) {
+      var sec2 = data[j];
+      if (!sec2 || sec2.id == null) continue;
+      var sid = sec2.id;
+      keptIds[sid] = true;
+      var lo = layouts[sid];
+      var existing = existingMap[sid];
+      if (existing) {
+        var wasFolded = existing.classList.contains('folded');
+        if (wasFolded !== lo.folded) {
+          // 状态变化：折叠 ↔ 展开
+          existing.classList.toggle('folded', lo.folded);
+          rebuildCardContent(existing, sec2, lo.folded);
+          var oldH = wasFolded ? layout.foldedH : layout.activeH;
+          animateFoldTransition(existing, oldH, lo.h, lo.y, null);
+        } else {
+          updateCardContent(existing, sec2, lo.folded);
+          positionCard(existing, nodeRect, layout, lo.y, lo.h);
+        }
+      } else {
+        var g = buildCardElement(sec2, lo.folded, clipId);
+        positionCard(g, nodeRect, layout, lo.y, lo.h);
+        container.appendChild(g);
+        animateCardFadeIn(g);
       }
+    }
+
+    // 第三遍：淘汰不再存在的卡片（左滑+淡出）
+    var cardW = nodeRect.w - layout.padX * 2;
+    Object.keys(existingMap).forEach(function(id) {
+      if (keptIds[id]) return;
+      animateCardSlideOut(existingMap[id], cardW, null);
+    });
+    return true;
+  });
+
+  // 对所有声明了 card_sync 的 flow 执行一次同步（启动与 reset 时调用）
+  function runCardSyncFlows() {
+    if (!HAS_EXPLICIT_FLOWS) return;
+    for (var i = 0; i < EXPLICIT_FLOWS.length; i++) {
+      var f = EXPLICIT_FLOWS[i];
+      if (f.effect === 'card_sync' && f.to) {
+        try {
+          EffectRegistry.get('card_sync')({
+            flow: { to: f.to, effect: 'card_sync', rawFlow: f },
+            value: null,
+            targetNodeId: f.to
+          });
+        } catch (e) {
+          console.error('[animV2] card_sync run failed:', e);
+        }
+      }
+    }
+  }
+
+  // ========== 粒子系统 ==========
+
+  // 查找 flow 对应的 SVG path 元素（优先 edgeId，其次 from/to 匹配）
+  function findFlowPathEl(flow) {
+    if (flow.edgeId) {
+      var g = document.querySelector('.edge[data-id="' + flow.edgeId + '"]');
+      if (g) {
+        var p = g.querySelector('path');
+        if (p) return p;
+      }
+    }
+    if (flow.from && flow.to) {
+      var g2 = document.querySelector('.edge[data-from="' + flow.from + '"][data-to="' + flow.to + '"]');
+      if (g2) {
+        var p2 = g2.querySelector('path');
+        if (p2) return p2;
+      }
+    }
+    return null;
+  }
+
+  // 统一粒子发射：可沿 SVG path（getPointAtLength）或直线插值
+  function spawnParticleAlongPath(opts) {
+    var layer = ensureAnimLayer();
+    if (!layer) return;
+
+    var pathEl = opts.pathEl || null;
+    var pathLen = 0;
+    if (pathEl) {
+      try { pathLen = pathEl.getTotalLength(); } catch (e) { pathEl = null; }
+    }
+
+    var start = null, end = null;
+    if (!pathEl) {
+      var fromCenter = getNodeCenter(opts.from);
+      var toCenter = getNodeCenter(opts.to);
+      if (!fromCenter || !toCenter) return;
+      var fromRect = getNodeRect(opts.from);
+      var toRect = getNodeRect(opts.to);
+      if (!fromRect || !toRect) return;
+      start = intersectRect(fromCenter, toCenter, fromRect);
+      end = intersectRect(toCenter, fromCenter, toRect);
+    }
+
+    var ns = 'http://www.w3.org/2000/svg';
+    var g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'anim-particle-v2');
+    g.style.opacity = '0';
+    g.style.transition = 'opacity 0.3s';
+
+    var circle = document.createElementNS(ns, 'circle');
+    circle.setAttribute('r', '6');
+    circle.setAttribute('fill', opts.color || '#4fc3f7');
+    circle.setAttribute('opacity', '0.9');
+    circle.setAttribute('stroke', '#ffffff');
+    circle.setAttribute('stroke-width', '1');
+    g.appendChild(circle);
+
+    if (opts.valueLabel) {
+      var labelBg = document.createElementNS(ns, 'rect');
+      var labelText = opts.valueLabel;
+      var labelWidth = Math.max(labelText.length * 6 + 8, 30);
+      labelBg.setAttribute('x', -labelWidth / 2);
+      labelBg.setAttribute('y', -22);
+      labelBg.setAttribute('width', labelWidth);
+      labelBg.setAttribute('height', '14');
+      labelBg.setAttribute('rx', '3');
+      labelBg.setAttribute('fill', opts.color || '#4fc3f7');
+      labelBg.setAttribute('opacity', '0.85');
+      g.appendChild(labelBg);
+
+      var text = document.createElementNS(ns, 'text');
+      text.setAttribute('x', '0');
+      text.setAttribute('y', '-12');
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('fill', '#ffffff');
+      text.setAttribute('style', 'font-size:9px;font-weight:500;pointer-events:none;');
+      text.textContent = labelText;
+      g.appendChild(text);
+    } else if (opts.label) {
+      var text0 = document.createElementNS(ns, 'text');
+      text0.setAttribute('x', '0');
+      text0.setAttribute('y', '-10');
+      text0.setAttribute('text-anchor', 'middle');
+      text0.setAttribute('fill', '#ffffff');
+      text0.setAttribute('style', 'font-size:10px;pointer-events:none;');
+      text0.textContent = opts.label;
+      g.appendChild(text0);
+    }
+
+    layer.appendChild(g);
+
+    var particle = {
+      el: g,
+      pathEl: pathEl,
+      pathLen: pathLen,
+      startX: start ? start.x : 0,
+      startY: start ? start.y : 0,
+      endX: end ? end.x : 0,
+      endY: end ? end.y : 0,
+      t: 0,
+      speed: opts.speed || 0.012,
+      color: opts.color,
+      label: opts.valueLabel || opts.label,
+      valueType: opts.valueType,
+      flowId: opts.flowId,
+      targetNodeId: opts.to,
+      branches: opts.branches,
+      onArrive: opts.onArrive || 'fade',
+      onComplete: null
     };
 
-    console.log('[animV2] event triggers registered:', Object.keys(listeners));
-  }
+    if (opts.explicit && opts.valueType) {
+      particle.onComplete = function(p) {
+        showNodeIOPrompt(p.targetNodeId, p.valueType, p.label);
+      };
+    }
 
-  function startFlowTimer(flow) {
-    // 立即跑一次
-    spawnDefaultParticle(flow);
-
-    // 周期触发
-    state.flowTimers[flow.id] = setInterval(function() {
-      if (state.paused && !state.stepMode) return;
-      spawnDefaultParticle(flow);
-    }, flow.interval);
+    state.activeParticles.push(particle);
+    requestAnimationFrame(function() { g.style.opacity = '1'; });
+    if (!state.animFrame) {
+      tickParticles();
+    }
   }
 
   function spawnDefaultParticle(flow) {
@@ -524,105 +746,158 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       }
     }
 
-    var fromCenter = getNodeCenter(flow.from);
-    var toCenter = getNodeCenter(flow.to);
-    if (!fromCenter || !toCenter) {
-      return;
+    spawnParticleAlongPath({
+      pathEl: findFlowPathEl(flow),
+      from: flow.from,
+      to: flow.to,
+      color: flow.color || '#4fc3f7',
+      label: flow.label,
+      valueLabel: flow.valueLabel,
+      valueType: flow.valueType,
+      flowId: flow.id,
+      branches: flow.branches,
+      onArrive: flow.onArrive,
+      explicit: flow.explicit
+    });
+  }
+
+  // ---- sim-edge 粒子流：仿真规则触发时沿对应 sim-edge 发送粒子 ----
+  function spawnSimRuleParticles(ruleId, eventName, depth) {
+    var rule = null;
+    for (var i = 0; i < SIM_RULES.length; i++) {
+      if (SIM_RULES[i].id === ruleId) { rule = SIM_RULES[i]; break; }
     }
+    if (!rule) return;
+    var edges = document.querySelectorAll('.sim-edge[data-rule="' + ruleId + '"]');
+    var delayBase = (depth || 0) * 450;
+    for (var j = 0; j < edges.length; j++) {
+      (function(edgeEl, idx) {
+        var pathEl = edgeEl.querySelector('.sim-edge-path');
+        if (!pathEl) return;
+        var toId = edgeEl.getAttribute('data-to');
+        setTimeout(function() {
+          var stroke = pathEl.getAttribute('stroke') || '#9b59b6';
+          var label = SIM_PARTICLE_CFG.label === 'rule' ? rule.name : eventName;
+          spawnParticleAlongPath({
+            pathEl: pathEl,
+            from: edgeEl.getAttribute('data-from'),
+            to: toId,
+            color: stroke,
+            label: label,
+            flowId: 'sim_' + ruleId,
+            onArrive: SIM_PARTICLE_CFG.on_arrive,
+            speed: 0.02
+          });
+        }, delayBase + idx * 150);
+      })(edges[j], j);
+    }
+  }
 
-    var fromRect = getNodeRect(flow.from);
-    var toRect = getNodeRect(flow.to);
-    if (!fromRect || !toRect) return;
+  // 仿真器规则触发钩子（scripts.ts 的 processEvent 调用）
+  window.__simRuleFired__ = function(ruleId, eventName, depth) {
+    try {
+      spawnSimRuleParticles(ruleId, eventName, depth);
+    } catch (e) {
+      console.error('[animV2] sim rule particle failed:', e);
+    }
+  };
 
-    var start = intersectRect(fromCenter, toCenter, fromRect);
-    var end = intersectRect(toCenter, fromCenter, toRect);
+  // ---- 粒子到达终点 → 转为可拖拽 chip 容器 ----
+  var chipSeq = 0;
+  var CHIP_MAX = 18;
 
+  function convertParticleToChip(p) {
     var layer = ensureAnimLayer();
-    if (!layer) return;
+    if (!layer) { fadeOutEl(p.el); return; }
+    var svg = getSvgCanvas();
+    var vb = svg ? svg.getAttribute('viewBox') : null;
+    var canvasW = vb ? parseFloat(vb.split(' ')[2]) : 1200;
 
     var ns = 'http://www.w3.org/2000/svg';
+    chipSeq++;
+    var label = p.label || 'msg';
+    if (label.length > 24) label = label.substring(0, 22) + '..';
+    var w = Math.max(label.length * 6.5 + 18, 50);
+    var h = 20;
+
+    // 停靠区：画布右侧竖排（不遮挡节点内容）
+    var dockX = canvasW - w - 14;
+    var slot = (chipSeq - 1) % CHIP_MAX;
+    var dockY = 40 + slot * 26;
+
     var g = document.createElementNS(ns, 'g');
-    g.setAttribute('class', 'anim-particle-v2');
+    g.setAttribute('class', 'anim-chip');
+    g.setAttribute('transform', 'translate(' + dockX + ',' + dockY + ')');
+    g.style.pointerEvents = 'auto';
+    g.style.cursor = 'grab';
     g.style.opacity = '0';
     g.style.transition = 'opacity 0.3s';
 
-    // 粒子主体：带值类型标签的圆形
-    var circle = document.createElementNS(ns, 'circle');
-    circle.setAttribute('r', '6');
-    circle.setAttribute('fill', flow.color || '#4fc3f7');
-    circle.setAttribute('opacity', '0.9');
-    circle.setAttribute('stroke', '#ffffff');
-    circle.setAttribute('stroke-width', '1');
-    g.appendChild(circle);
+    var rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('data-shape', 'true');
+    rect.setAttribute('x', '0');
+    rect.setAttribute('y', '0');
+    rect.setAttribute('width', String(w));
+    rect.setAttribute('height', String(h));
+    rect.setAttribute('rx', '6');
+    rect.setAttribute('fill', p.color || '#4fc3f7');
+    rect.setAttribute('opacity', '0.85');
+    g.appendChild(rect);
 
-    // L2 值类型标签（显示在粒子上方）
-    if (flow.valueLabel) {
-      var labelBg = document.createElementNS(ns, 'rect');
-      var labelText = flow.valueLabel;
-      var labelWidth = Math.max(labelText.length * 6 + 8, 30);
-      labelBg.setAttribute('x', -labelWidth / 2);
-      labelBg.setAttribute('y', -22);
-      labelBg.setAttribute('width', labelWidth);
-      labelBg.setAttribute('height', '14');
-      labelBg.setAttribute('rx', '3');
-      labelBg.setAttribute('fill', flow.color || '#4fc3f7');
-      labelBg.setAttribute('opacity', '0.85');
-      g.appendChild(labelBg);
-
-      var text = document.createElementNS(ns, 'text');
-      text.setAttribute('x', '0');
-      text.setAttribute('y', '-12');
-      text.setAttribute('text-anchor', 'middle');
-      text.setAttribute('fill', '#ffffff');
-      text.setAttribute('style', 'font-size:9px;font-weight:500;pointer-events:none;');
-      text.textContent = labelText;
-      g.appendChild(text);
-    } else if (flow.label) {
-      // L0 默认标签（较简朴）
-      var text0 = document.createElementNS(ns, 'text');
-      text0.setAttribute('x', '0');
-      text0.setAttribute('y', '-10');
-      text0.setAttribute('text-anchor', 'middle');
-      text0.setAttribute('fill', '#ffffff');
-      text0.setAttribute('style', 'font-size:10px;pointer-events:none;');
-      text0.textContent = flow.label;
-      g.appendChild(text0);
-    }
+    var text = document.createElementNS(ns, 'text');
+    text.setAttribute('x', String(w / 2));
+    text.setAttribute('y', '14');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('fill', '#ffffff');
+    text.setAttribute('style', 'font-size:10px;font-weight:500;pointer-events:none;');
+    text.textContent = label;
+    g.appendChild(text);
 
     layer.appendChild(g);
-
-    var particle = {
-      el: g,
-      startX: start.x,
-      startY: start.y,
-      endX: end.x,
-      endY: end.y,
-      t: 0,
-      speed: 0.012,
-      color: flow.color,
-      label: flow.valueLabel || flow.label,
-      valueType: flow.valueType,
-      flowId: flow.id,
-      targetNodeId: flow.to,
-      branches: flow.branches,
-      onComplete: null
-    };
-
-    // L2: 粒子到达终点时显示输入/输出提示
-    if (flow.explicit && flow.valueType) {
-      particle.onComplete = function(p) {
-        showNodeIOPrompt(p.targetNodeId, p.valueType, p.label);
-      };
-    }
-
-    state.activeParticles.push(particle);
-
-    // 淡入
+    if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
     requestAnimationFrame(function() { g.style.opacity = '1'; });
 
-    if (!state.animFrame) {
-      tickParticles();
+    state.chips.push({ el: g, born: Date.now() });
+    while (state.chips.length > CHIP_MAX) {
+      var oldest = state.chips.shift();
+      fadeOutEl(oldest.el);
     }
+
+    bindChipDrag(g);
+  }
+
+  // chip 拖拽（独立于节点拖拽，避免与主交互耦合）
+  function bindChipDrag(g) {
+    g.addEventListener('mousedown', function(e) {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      var svg = getSvgCanvas();
+      if (!svg) return;
+      g.style.cursor = 'grabbing';
+      document.body.style.userSelect = 'none';
+
+      var moveHandler = function(ev) {
+        var svgRect = svg.getBoundingClientRect();
+        var viewBox = svg.getAttribute('viewBox').split(' ').map(Number);
+        var scaleX = viewBox[2] / svgRect.width;
+        var scaleY = viewBox[3] / svgRect.height;
+        var mouseX = (ev.clientX - svgRect.left) * scaleX + viewBox[0];
+        var mouseY = (ev.clientY - svgRect.top) * scaleY + viewBox[1];
+        var rect = g.querySelector('rect');
+        var w = rect ? parseFloat(rect.getAttribute('width')) || 0 : 0;
+        var h = rect ? parseFloat(rect.getAttribute('height')) || 0 : 0;
+        g.setAttribute('transform', 'translate(' + (mouseX - w / 2) + ',' + (mouseY - h / 2) + ')');
+      };
+      var upHandler = function() {
+        g.style.cursor = 'grab';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', moveHandler);
+        document.removeEventListener('mouseup', upHandler);
+      };
+      document.addEventListener('mousemove', moveHandler);
+      document.addEventListener('mouseup', upHandler);
+    });
   }
 
   // ---- L2 节点处输入/输出提示 ----
@@ -639,7 +914,6 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     g.style.opacity = '0';
     g.style.transition = 'opacity 0.3s';
 
-    // 定位在节点右侧上方
     var promptX = rect.x + rect.w + 8;
     var promptY = rect.y - 4;
 
@@ -673,7 +947,6 @@ export function buildAnimationScript(dsl: DesignDSL): string {
 
     layer.appendChild(g);
 
-    // 淡入 → 停留 1.5s → 淡出
     requestAnimationFrame(function() { g.style.opacity = '1'; });
     setTimeout(function() {
       g.style.opacity = '0';
@@ -694,24 +967,39 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       var p = state.activeParticles[i];
       p.t += p.speed * (state.stepMode ? 0.1 : 1);
 
+      var x, y;
       if (p.t >= 1) {
-        // 到达终点
         p.t = 1;
-        var x = p.endX;
-        var y = p.endY;
+        if (p.pathEl) {
+          try {
+            var endPt = p.pathEl.getPointAtLength(p.pathLen);
+            x = endPt.x; y = endPt.y;
+          } catch (e) { x = p.endX; y = p.endY; }
+        } else {
+          x = p.endX; y = p.endY;
+        }
         p.el.setAttribute('transform', 'translate(' + x + ',' + y + ')');
 
-        // 触发完成回调（L4 handler 处理）
         if (p.onComplete) {
           p.onComplete(p);
+        } else if (p.onArrive === 'chip') {
+          convertParticleToChip(p);
         } else {
-          // 默认：淡出移除
-          fadeOutParticle(p);
+          fadeOutEl(p.el);
         }
       } else {
-        // 沿直线插值
-        var x = p.startX + (p.endX - p.startX) * p.t;
-        var y = p.startY + (p.endY - p.startY) * p.t;
+        if (p.pathEl) {
+          try {
+            var pt = p.pathEl.getPointAtLength(p.t * p.pathLen);
+            x = pt.x; y = pt.y;
+          } catch (e) {
+            x = p.startX + (p.endX - p.startX) * p.t;
+            y = p.startY + (p.endY - p.startY) * p.t;
+          }
+        } else {
+          x = p.startX + (p.endX - p.startX) * p.t;
+          y = p.startY + (p.endY - p.startY) * p.t;
+        }
         p.el.setAttribute('transform', 'translate(' + x + ',' + y + ')');
         remaining.push(p);
       }
@@ -725,23 +1013,155 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     }
   }
 
-  function fadeOutParticle(p) {
-    p.el.style.transition = 'opacity 0.3s';
-    p.el.style.opacity = '0';
-    setTimeout(function() {
-      if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
+  // ---- L0/L2 默认行为与显式流 ----
+  function startDefaultFlows() {
+    var periodicFlows = [];
+    var eventFlows = [];
+    var stateChangeFlows = [];
+
+    // 处理显式 flows（L2+）
+    if (HAS_EXPLICIT_FLOWS && EXPLICIT_FLOWS.length > 0) {
+      for (var i = 0; i < EXPLICIT_FLOWS.length; i++) {
+        var f = EXPLICIT_FLOWS[i];
+        if (!f.trigger) continue;
+
+        var flowConfig = {
+          id: f.id,
+          from: f.from,
+          to: f.to,
+          interval: f.trigger.interval || 4000,
+          color: '#4fc3f7',
+          label: f.value ? (f.value.label || f.value.type) : '',
+          valueType: f.value ? f.value.type : '',
+          valueLabel: f.value ? (f.value.label || f.value.type) : '',
+          branches: f.branches || null,
+          effect: f.effect || 'particle_flow',
+          onArrive: f.on_arrive || 'fade',
+          explicit: true,
+          rawFlow: f
+        };
+
+        if (f.trigger.type === 'periodic') {
+          periodicFlows.push(flowConfig);
+        } else if (f.trigger.type === 'event') {
+          eventFlows.push({ config: flowConfig, eventName: f.trigger.event });
+        } else if (f.trigger.type === 'state_change') {
+          stateChangeFlows.push({ config: flowConfig, watchKey: f.trigger.watch || f.source_key || 'sections' });
+        }
+        // manual 暂不在启动时注册，由其他机制触发
+      }
+    }
+
+    // 补充默认流（未被显式覆盖的 edge）
+    var explicitPaths = {};
+    periodicFlows.forEach(function(f) {
+      explicitPaths[f.from + '->' + f.to] = true;
+    });
+    eventFlows.forEach(function(e) {
+      explicitPaths[e.config.from + '->' + e.config.to] = true;
+    });
+
+    for (var j = 0; j < DEFAULT_FLOWS.length; j++) {
+      var df = DEFAULT_FLOWS[j];
+      var key = df.from + '->' + df.to;
+      if (!explicitPaths[key]) {
+        periodicFlows.push(df);
+      }
+    }
+
+    // 启动 periodic 流
+    periodicFlows.forEach(function(flow) {
+      startFlowTimer(flow);
+    });
+
+    // 注册 event 触发流
+    if (eventFlows.length > 0) {
+      setupEventTriggers(eventFlows);
+    }
+
+    // 注册 state_change 触发流（轮询 window.simState 快照对比）
+    if (stateChangeFlows.length > 0) {
+      setupStateWatchers(stateChangeFlows);
+    }
+  }
+
+  // ---- L2 状态变化触发：监听仿真器状态键 ----
+  // 通用机制：任何 trigger.type=state_change 的 flow 都可声明 watch 状态键
+  // 引擎每 300ms 对比 JSON 快照，变化时触发 flow（如 card_sync 全量同步卡片）
+  function setupStateWatchers(scFlows) {
+    var watchers = {};
+    scFlows.forEach(function(sf) {
+      var key = sf.watchKey;
+      if (!watchers[key]) watchers[key] = [];
+      watchers[key].push(sf.config);
+    });
+    var prevSnapshots = {};
+    setInterval(function() {
+      if (state.paused) return;
+      if (!window.simState) return;
+      for (var key in watchers) {
+        var data = window.simState[key];
+        if (data === undefined) continue;
+        var snap;
+        try { snap = JSON.stringify(data); } catch (e) { continue; }
+        if (prevSnapshots[key] === snap) continue;
+        prevSnapshots[key] = snap;
+        var configs = watchers[key];
+        for (var i = 0; i < configs.length; i++) {
+          try {
+            spawnDefaultParticle(configs[i]);
+          } catch (e) {
+            console.error('[animV2] state watcher flow failed:', e);
+          }
+        }
+      }
     }, 300);
+    console.log('[animV2] state watchers registered:', Object.keys(watchers));
+  }
+
+  // ---- L2 事件触发：监听仿真器事件 ----
+  function setupEventTriggers(eventFlows) {
+    var listeners = {};
+
+    eventFlows.forEach(function(ef) {
+      var eventName = ef.eventName;
+      if (!listeners[eventName]) listeners[eventName] = [];
+      listeners[eventName].push(ef.config);
+    });
+
+    var prevListener = window.__simEventListener__;
+    window.__simEventListener__ = function(eventName, payload) {
+      if (typeof prevListener === 'function') {
+        try { prevListener(eventName, payload); } catch (e) {}
+      }
+      var configs = listeners[eventName];
+      if (!configs) return;
+      for (var i = 0; i < configs.length; i++) {
+        spawnDefaultParticle(configs[i]);
+      }
+    };
+
+    console.log('[animV2] event triggers registered:', Object.keys(listeners));
+  }
+
+  function startFlowTimer(flow) {
+    // 立即跑一次
+    spawnDefaultParticle(flow);
+
+    // 周期触发
+    state.flowTimers[flow.id] = setInterval(function() {
+      if (state.paused && !state.stepMode) return;
+      spawnDefaultParticle(flow);
+    }, flow.interval);
   }
 
   // ---- L1 默认行为：状态变化高亮 ----
   function startStatusWatch() {
-    // 初始化快照
     for (var i = 0; i < STATUS_NODES.length; i++) {
       var sn = STATUS_NODES[i];
       state.prevStatusSnapshot[sn.id] = sn.status;
     }
 
-    // 定期检查节点 status 变化（DOM 上的 data-status 属性）
     setInterval(function() {
       if (state.paused) return;
       for (var j = 0; j < STATUS_NODES.length; j++) {
@@ -755,7 +1175,6 @@ export function buildAnimationScript(dsl: DesignDSL): string {
           triggerStatusChangeEffect(node.id, prevStatus, currentStatus);
         }
 
-        // in_progress 呼吸效果
         if (currentStatus === 'in_progress') {
           applyBreathingEffect(node.id);
         }
@@ -774,7 +1193,6 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     else if (newStatus === 'done') flashColor = '#4CAF50';
     else if (newStatus === 'draft') flashColor = '#666';
 
-    // 闪烁动画
     var originalStroke = shape.getAttribute('stroke');
     var originalWidth = shape.getAttribute('stroke-width');
 
@@ -790,16 +1208,14 @@ export function buildAnimationScript(dsl: DesignDSL): string {
   function applyBreathingEffect(nodeId) {
     var el = document.querySelector('.node[data-id="' + nodeId + '"]');
     if (!el) return;
-    if (el.dataset.breathingApplied) return; // 避免重复应用
+    if (el.dataset.breathingApplied) return;
     el.dataset.breathingApplied = 'true';
 
     var shape = el.querySelector('rect[data-shape="true"], circle[data-shape="true"], polygon[data-shape="true"]');
     if (!shape) return;
 
-    // 用 CSS animation 实现呼吸
     shape.style.animation = 'anim-v2-breathing 2s ease-in-out infinite';
 
-    // 注入 keyframes（只注入一次）
     if (!document.getElementById('anim-v2-breathing-style')) {
       var style = document.createElement('style');
       style.id = 'anim-v2-breathing-style';
@@ -807,7 +1223,6 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       document.head.appendChild(style);
     }
 
-    // 监听 status 变化，移除呼吸效果
     var observer = new MutationObserver(function(mutations) {
       mutations.forEach(function(m) {
         if (m.attributeName === 'data-status') {
@@ -823,7 +1238,7 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     observer.observe(el, { attributes: true });
   }
 
-  // ---- 暂停/步进控制 ----
+  // ---- 暂停/步进/重置控制 ----
   function pause() {
     state.paused = true;
     state.stepMode = false;
@@ -845,17 +1260,51 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     }
   }
 
+  // 重置：清除粒子/chip/卡片，重新同步 card_sync flows
+  function reset() {
+    for (var i = 0; i < state.activeParticles.length; i++) {
+      var p = state.activeParticles[i];
+      if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el);
+    }
+    state.activeParticles = [];
+    for (var j = 0; j < state.chips.length; j++) {
+      var c = state.chips[j];
+      if (c.el && c.el.parentNode) c.el.parentNode.removeChild(c.el);
+    }
+    state.chips = [];
+    var containers = document.querySelectorAll('[data-card-container="true"]');
+    for (var k = 0; k < containers.length; k++) {
+      var cards = containers[k].querySelectorAll('g.card-v2');
+      for (var m = 0; m < cards.length; m++) cards[m].remove();
+    }
+    runCardSyncFlows();
+  }
+
+  // ---- 控制按钮接线（sim-panel 中的动画控制按钮） ----
+  function setupControlButtons() {
+    function bind(id, fn) {
+      var btn = document.getElementById(id);
+      if (btn) btn.addEventListener('click', function() { try { fn(); } catch (e) { console.error('[animV2] control "' + id + '" failed:', e); } });
+    }
+    bind('anim-pause', pause);
+    bind('anim-step', step);
+    bind('anim-resume', resume);
+    bind('anim-reset', reset);
+  }
+
   // ---- 启动 ----
   function start() {
     if (state.started) return;
     state.started = true;
+    setupControlButtons();
 
     // 等待 DOM 渲染完成（scripts.ts 可能在动画脚本之后才渲染节点）
     setTimeout(function() {
       try {
         startDefaultFlows();
         startStatusWatch();
-        console.log('[animV2] started, flows:', Object.keys(state.flowTimers).length, 'statusNodes:', STATUS_NODES.length);
+        runCardSyncFlows();
+        console.log('[animV2] started, flows:', Object.keys(state.flowTimers).length, 'statusNodes:', STATUS_NODES.length, 'simRules:', SIM_RULES.length);
       } catch (e) {
         console.error('[animV2] start failed:', e);
       }
@@ -869,6 +1318,7 @@ export function buildAnimationScript(dsl: DesignDSL): string {
     pause: pause,
     resume: resume,
     step: step,
+    reset: reset,
     spawnParticle: spawnDefaultParticle,
     // 手动触发 effect（调试 / L5 运行时调用）
     // 用法：__animV2__.triggerEffect('card_create', { to: 'node_section_queue', value: { id, summary, ... } })
