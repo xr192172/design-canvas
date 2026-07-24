@@ -145,7 +145,8 @@ ${ANIM_CORE_SOURCE}
     stepMode: false,
     flowTimers: {},
     prevStatusSnapshot: {},
-    started: false
+    started: false,
+    debug: { watcherFires: 0, handlerRuns: 0, lastResult: null }
   };
 
   // ---- 工具函数 ----
@@ -785,8 +786,8 @@ ${ANIM_CORE_SOURCE}
   }
 
   // ---- L4 函数绑定：粒子出发前在 handler.file_id 节点展示函数调用 ----
-  // 返回 { value, result } 供后续分支求值使用；无 handler 时返回 null
-  // mock 模式：result 取 handler.mock_result（若声明）否则 { $mock: api }
+  // 返回 { value, result, classification } 供后续分支/异常处理使用；无 handler 时返回 null
+  // mock 模式：result 优先取 mock_results 轮换，其次 mock_result，否则 { $mock: api }
   // live 模式（L5b）留待阶段 H，当前回退 mock 并 warn
   function executeHandler(flow, payloadData) {
     var h = flow.handler;
@@ -806,9 +807,86 @@ ${ANIM_CORE_SOURCE}
     if (h.live) {
       console.warn('[animV2] handler.live 未实现（阶段H），回退 mock:', h.api);
     }
-    var result = h.mock_result !== undefined ? h.mock_result : { $mock: h.api };
+    var result = flow.handlerRotator ? flow.handlerRotator()
+      : (h.mock_result !== undefined ? h.mock_result : { $mock: h.api });
+    state.debug.handlerRuns++;
+    state.debug.lastResult = result;
     var newValue = applyOutputMapping(h.output_mapping, evalValue, result);
-    return { value: newValue, result: result };
+    // ---- L4.5 异常分类：declared → 异常路径；undeclared → 警报；none → 正常流 ----
+    var classification = classifyError(h.errors, result);
+    console.log('[animV2][dbg] handler', h.api, 'result=', JSON.stringify(result), 'class=', classification.kind);
+    return { value: newValue, result: result, classification: classification };
+  }
+
+  // ---- L4.5 异常日志（写入 sim-panel 的 #anim-log；面板不存在时回退 console） ----
+  var ANIM_LOG_MAX = 30;
+  function animLog(level, msg) {
+    var container = document.getElementById('anim-log');
+    if (!container) {
+      if (level === 'critical' || level === 'error') console.error('[animV2][' + level + ']', msg);
+      else console.warn('[animV2][' + level + ']', msg);
+      return;
+    }
+    var item = document.createElement('div');
+    item.className = 'sim-trace-item anim-log-' + level;
+    var t = new Date();
+    var hh = ('0' + t.getHours()).slice(-2);
+    var mm = ('0' + t.getMinutes()).slice(-2);
+    var ss = ('0' + t.getSeconds()).slice(-2);
+    var head = document.createElement('span');
+    head.className = 'trace-event';
+    head.textContent = hh + ':' + mm + ':' + ss + ' ' + level.toUpperCase() + ' ';
+    var body = document.createElement('span');
+    body.className = 'anim-log-msg';
+    body.textContent = msg;
+    item.appendChild(head);
+    item.appendChild(body);
+    container.insertBefore(item, container.firstChild);
+    while (container.children.length > ANIM_LOG_MAX) {
+      container.removeChild(container.lastChild);
+    }
+  }
+
+  // ---- L4.5 异常路径处理 ----
+  // 异常粒子统一红色，从 handler 节点（异常发生处）流向 decl.to
+  function spawnErrorParticle(fromId, decl) {
+    if (!decl.to) return;
+    spawnParticleAlongPath({
+      pathEl: findFlowPathEl({ from: fromId, to: decl.to }),
+      from: fromId,
+      to: decl.to,
+      color: '#e94560',
+      valueLabel: decl.value ? (decl.value.label || decl.value.type) : decl.type,
+      valueType: decl.value ? decl.value.type : 'error',
+      flowId: 'error_' + decl.type,
+      speed: 0.016
+    });
+  }
+
+  // 已声明异常：expected 走红色路径不报警；unexpected 节点红闪 + 日志标红
+  function handleDeclaredError(flow, decl, result) {
+    var h = flow.handler;
+    var fromId = (h && h.file_id) || flow.from;
+    if (decl.severity === 'unexpected') {
+      flashNode(fromId, '#ff1744', 1600);
+      animLog('error', decl.log || ('unexpected 异常 ' + decl.type + ' @ ' + (h ? h.api : flow.id)));
+      if (decl.effect === 'particle_red') spawnErrorParticle(fromId, decl);
+      return;
+    }
+    flashNode(fromId, '#e94560', 500);
+    if (decl.log) animLog('warn', decl.log);
+    spawnErrorParticle(fromId, decl);
+  }
+
+  // 未声明异常：结果像异常但未命中任何 errors 声明 → 疑似 bug，critical 警报
+  function handleUndeclaredError(flow, result) {
+    var h = flow.handler;
+    var fromId = (h && h.file_id) || flow.from;
+    flashNode(fromId, '#ff1744', 2000);
+    var summary;
+    try { summary = JSON.stringify(result); } catch (e) { summary = String(result); }
+    if (summary && summary.length > 60) summary = summary.substring(0, 59) + '…';
+    animLog('critical', '未声明异常 @ ' + (h ? h.api : flow.id) + ': ' + summary + '（疑似 bug，请补 errors 声明）');
   }
 
   // 函数调用浮层：节点上方显示 ƒ Api(args) + signature（金色主题区分 IO 浮层）
@@ -880,6 +958,19 @@ ${ANIM_CORE_SOURCE}
   function spawnDefaultParticle(flow, payloadData) {
     // ---- L4 函数绑定：先于分支求值执行，result 参与条件判断 ----
     var handlerCtx = executeHandler(flow, payloadData);
+
+    // ---- L4.5 异常短路：异常路径优先于一切正常流/分支（结果不可信，不再继续） ----
+    if (handlerCtx && handlerCtx.classification) {
+      var cls = handlerCtx.classification;
+      if (cls.kind === 'declared') {
+        handleDeclaredError(flow, cls.decl, handlerCtx.result);
+        return;
+      }
+      if (cls.kind === 'undeclared') {
+        handleUndeclaredError(flow, handlerCtx.result);
+        return;
+      }
+    }
 
     // ---- L3 条件分支：branches 非空时先求值选路 ----
     // 求值上下文 value 按触发器类型自动构造：
@@ -1222,6 +1313,9 @@ ${ANIM_CORE_SOURCE}
           branches: f.branches || null,
           mockRotator: (f.mock_values && f.mock_values.length > 0) ? createMockRotator(f.mock_values) : null,
           handler: f.handler || null,
+          // L4.5：handler.mock_results 轮换（可混入 { error } / { panic: true } 演示异常路径）
+          handlerRotator: (f.handler && f.handler.mock_results && f.handler.mock_results.length > 0)
+            ? createMockRotator(f.handler.mock_results) : null,
           effect: f.effect || 'particle_flow',
           onArrive: f.on_arrive || 'fade',
           explicit: true,
@@ -1297,6 +1391,8 @@ ${ANIM_CORE_SOURCE}
         var configs = watchers[key];
         for (var i = 0; i < configs.length; i++) {
           try {
+            state.debug.watcherFires++;
+            console.log('[animV2][dbg] watcher fire:', key, 'flow=', configs[i].id);
             // L3 求值上下文：state_change 触发时传入 simState 全量（只读）
             spawnDefaultParticle(configs[i], window.simState);
           } catch (e) {
@@ -1510,6 +1606,7 @@ ${ANIM_CORE_SOURCE}
     step: step,
     reset: reset,
     spawnParticle: spawnDefaultParticle,
+    debug: state.debug,
     // 手动触发 effect（调试 / L5 运行时调用）
     // 用法：__animV2__.triggerEffect('card_create', { to: 'node_section_queue', value: { id, summary, ... } })
     triggerEffect: function(effectName, options) {

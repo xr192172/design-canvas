@@ -1518,6 +1518,36 @@ footer button:active {
   color: #ffc107;
   font-size: 10px;
 }
+/* 异常日志（L4.5）：expected=黄 / unexpected=红 / critical=深红底 */
+.anim-log-wrap {
+  max-height: 160px;
+  overflow-y: auto;
+}
+.sim-trace-item.anim-log-warn {
+  border-left-color: #ffc107;
+}
+.sim-trace-item.anim-log-warn .trace-event {
+  color: #ffc107;
+}
+.sim-trace-item.anim-log-error {
+  border-left-color: #ff1744;
+  background: rgba(255, 23, 68, 0.12);
+}
+.sim-trace-item.anim-log-error .trace-event {
+  color: #ff5252;
+}
+.sim-trace-item.anim-log-critical {
+  border-left-color: #ff1744;
+  background: rgba(255, 23, 68, 0.25);
+  animation: animLogCriticalPulse 1.2s ease-in-out 3;
+}
+.sim-trace-item.anim-log-critical .trace-event {
+  color: #ff1744;
+}
+@keyframes animLogCriticalPulse {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 8px rgba(255, 23, 68, 0.7); }
+}
 
 @media (max-width: 768px) {
   main { grid-template-columns: 1fr; }

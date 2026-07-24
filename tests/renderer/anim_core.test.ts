@@ -15,6 +15,8 @@ import {
   applyInputMapping,
   applyOutputMapping,
   matchError,
+  isErrorResult,
+  classifyError,
   makeSnapshot,
   parseApiName,
   formatHandlerArgs,
@@ -198,6 +200,59 @@ describe('matchError - L4.5 异常匹配', () => {
   it('空声明 → null', () => {
     expect(matchError([], { panic: true })).toBeNull();
     expect(matchError(undefined, { panic: true })).toBeNull();
+  });
+});
+
+describe('isErrorResult - L4.5 异常形态判定', () => {
+  it('error 字段非空 → true', () => {
+    expect(isErrorResult({ error: { code: 401 } })).toBe(true);
+    expect(isErrorResult({ error: 'boom' })).toBe(true);
+  });
+
+  it('panic === true → true', () => {
+    expect(isErrorResult({ panic: true, message: 'nil pointer' })).toBe(true);
+  });
+
+  it('正常业务数据 → false', () => {
+    expect(isErrorResult({ compose: 'ok', tokens: 1200 })).toBe(false);
+    expect(isErrorResult({ $mock: 'Compose' })).toBe(false);
+    expect(isErrorResult({ panic: false, error: null })).toBe(false);
+  });
+
+  it('非对象 / null → false', () => {
+    expect(isErrorResult(null)).toBe(false);
+    expect(isErrorResult(undefined)).toBe(false);
+    expect(isErrorResult(42)).toBe(false);
+    expect(isErrorResult('error')).toBe(false);
+  });
+});
+
+describe('classifyError - L4.5 异常分类', () => {
+  const errors = [
+    { type: 'ErrBudget', condition: "result.error && result.error.code === 'BUDGET'", severity: 'expected' as const, to: 'node_draft' },
+    { type: 'panic', condition: 'result.panic === true', severity: 'unexpected' as const, to: 'node_handler' },
+  ];
+
+  it('命中声明 → declared 带 decl', () => {
+    const c = classifyError(errors, { error: { code: 'BUDGET' } });
+    expect(c.kind).toBe('declared');
+    expect(c.decl?.type).toBe('ErrBudget');
+    expect(classifyError(errors, { panic: true }).kind).toBe('declared');
+  });
+
+  it('像异常但未命中声明 → undeclared', () => {
+    expect(classifyError(errors, { error: { code: 'NETWORK_TIMEOUT' } }).kind).toBe('undeclared');
+    expect(classifyError(errors, { panic: false, error: { code: 500 } }).kind).toBe('undeclared');
+  });
+
+  it('无声明时异常结果仍 → undeclared', () => {
+    expect(classifyError(undefined, { error: { code: 1 } }).kind).toBe('undeclared');
+    expect(classifyError([], { panic: true }).kind).toBe('undeclared');
+  });
+
+  it('正常结果 → none', () => {
+    expect(classifyError(errors, { compose: 'ok' }).kind).toBe('none');
+    expect(classifyError(undefined, { compose: 'ok' }).kind).toBe('none');
   });
 });
 

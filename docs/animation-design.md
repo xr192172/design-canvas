@@ -599,8 +599,8 @@ src/renderer/
 | **D** 内置 effect 注册 | ✅ 完成 | card_create / card_fold / card_evict 三个 effect 注册；通用卡片容器机制（`ensureCardContainer` 自动创建 `<g data-card-container>`）；`triggerEffect` 手动触发接口 | 浏览器实测：创建/折叠/淘汰三步链路全通过 |
 | **E** conveyor.json 迁移 | ✅ 完成 | conveyor.json 声明 `card_sync` flow（state_change 触发器监听 `sections`）+ `runtime.sim_particles`（on_arrive: chip）；scripts.ts 删除全部专用动画代码（消息流面板/粒子系统/卡片动画，processEvent 改为 `__simRuleFired__` 通知引擎 + 暴露 `window.simState`）；引擎新增 sim-edge 粒子流、card_sync effect、state_change 轮询（300ms 快照对比）；html_renderer 删消息流按钮、sim-panel 加动画控制按钮（⏸暂停/⏭步进/▶继续/↺重置） | 浏览器全链路 PASS，见下方验证记录 |
 | **F** L3 条件分支 | ✅ 完成 | [anim_core.ts](file:///d:/project_develop/design-canvas/src/renderer/anim_core.ts) 纯逻辑核心（evalCondition / pickBranch / createMockRotator / resolvePath / setPath / input/output mapping / matchError / makeSnapshot），构建期经 [gen_anim_core_bundle.mjs](file:///d:/project_develop/design-canvas/scripts/gen_anim_core_bundle.mjs) 内联进引擎（单源双消费：vitest + 浏览器）；引擎 `spawnDefaultParticle` 分支选路 + 判断处闪烁 + 分支调色板（particle_red/green 显式指定优先）；schema/types 新增 `branches` / `mock_values` / `handler`（含 L4.5 errors） | vitest 28 用例全绿 + 浏览器双例验证，见下方验证记录 |
-| **G** L4 函数绑定 | ⏳ 计划 | 节点显示函数调用详情 | — |
-| **G2** L4.5 异常语义 | ⏳ 计划 | handler.errors 声明 + expected/unexpected 分档 + 未声明异常警报 | — |
+| **G** L4 函数绑定 | ✅ 完成 | AnimCore 新增 parseApiName / formatHandlerArgs；引擎 `executeHandler`（粒子出发前查 HANDLER_META 表）+ `showHandlerCall` 金色函数调用浮层（ƒ Api(args) + signature，1.8s 淡出）+ handler 节点黄色闪烁；flowConfig 装配 handlerRotator（mock_results 轮换优先于 mock_result）；storage.ts 引入 DESIGN_CANVAS_HOME 修复测试污染活态 DSL | 见下方验证记录 |
+| **G2** L4.5 异常语义 | ✅ 完成 | AnimCore 新增 isErrorResult / classifyError（declared/undeclared/none 三分）；引擎异常短路（优先于分支与正常流）+ handleDeclaredError（expected 红路径不报警 / unexpected 红闪+error 日志）+ handleUndeclaredError（critical 警报"疑似 bug"）+ spawnErrorParticle；sim-panel 新增"异常日志（L4.5）"面板（#anim-log，warn/error/critical 三级样式，critical 脉冲动画，上限 30 条）；types/schema 新增 mock_result/mock_results | vitest 44 用例全绿 + Playwright 全链路验证，见下方验证记录 |
 | **H** L5 反向提取 | ⏳ 计划 | 从代码提取动画 DSL + 异常声明 | — |
 | **I** 播放控制 | ✅ 基础完成 | sim-panel 动画控制按钮接线引擎 pause/step/resume/reset（`setupControlButtons`） | 浏览器点击验证无报错 |
 
@@ -642,6 +642,20 @@ src/renderer/
 6. **serve.ts 修复**——Windows 下 `import.meta.url === file://argv[1]` 判断失效导致 CLI 直启退出，改用 `pathToFileURL(path.resolve(...))` 比较
 
 数据丢失教训：阶段 D/F 对 `.design-canvas/features/conveyor.json`（git 未跟踪目录）的修改随目录删除丢失，本次已将 `flow_section_cards_sync` 与 `flow_budget_check` 两个流重写进 `examples/conveyor.json`（git 跟踪）。**后续所有 DSL 示例修改必须落在 examples/ 或已跟踪路径。**
+
+**阶段 G/G2 验证记录**（2026-07-24）：
+
+1. **单测**——`tests/renderer/anim_core.test.ts` 44 用例全绿（新增 parseApiName 函数名解析、formatHandlerArgs 参数格式化/截断、isErrorResult 异常形态判定、classifyError 三分分类）
+2. **全量测试**——171 用例 9 文件全绿；`npm run build`（gen_anim_core_bundle + tsc）通过
+3. **Playwright 全链路验证**（conveyor.html?v=l45pw1，headless Chromium）：连点 6 次 `sim-advance` 按钮推进 sections 状态，flow_budget_check 的 mock_results 轮换序列精确命中预期：
+   - 第1次 `{compose:"ok",tokens:1200}` → class=none（正常流）
+   - 第2次 `{error:{code:"BUDGET_EXCEEDED"}}` → class=declared（expected）
+   - 第3次 `{compose:"ok",tokens:980}` → class=none
+   - 第4次 `{error:{code:"NETWORK_TIMEOUT"}}` → class=undeclared（未声明异常）
+   - 第5次 `{panic:true}` → class=declared（unexpected）
+   - 第6次回到第1项循环，轮换器状态正确
+4. **anim-log 面板 DOM 验证**——4 条日志级别与内容全部正确：WARN "Compose: 预算超限，走草稿清理路径"×2、CRITICAL "未声明异常 @ Compose: ...（疑似 bug，请补 errors 声明）"、ERROR "CRITICAL: Compose panicked — 潜在 bug"
+5. **验证方法修正**——此前误判"mock_results 轮换顺序异常"，实为 simulator 不会自动推进 sections（需手动点击 sim-advance 触发 advance_conveyor → push section），轮换逻辑本身一直正确
 
 ---
 

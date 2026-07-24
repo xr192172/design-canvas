@@ -947,7 +947,55 @@
           "api": "Compose",
           "input_mapping": {
             "budget": "$value.tokenBudget"
-          }
+          },
+          "errors": [
+            {
+              "type": "ErrBudgetExceeded",
+              "condition": "result.error && result.error.code === 'BUDGET_EXCEEDED'",
+              "severity": "expected",
+              "to": "node_draft_zone",
+              "value": {
+                "type": "budget_error",
+                "label": "预算超限→清理草稿"
+              },
+              "effect": "particle_red",
+              "log": "Compose: 预算超限，走草稿清理路径"
+            },
+            {
+              "type": "panic",
+              "condition": "result.panic === true",
+              "severity": "unexpected",
+              "to": "node_context_compose",
+              "effect": "node_flash_red",
+              "log": "CRITICAL: Compose panicked — 潜在 bug"
+            }
+          ],
+          "mock_results": [
+            {
+              "compose": "ok",
+              "tokens": 1200
+            },
+            {
+              "error": {
+                "code": "BUDGET_EXCEEDED",
+                "message": "token 预算超限"
+              }
+            },
+            {
+              "compose": "ok",
+              "tokens": 980
+            },
+            {
+              "error": {
+                "code": "NETWORK_TIMEOUT",
+                "message": "检索超时（未声明）"
+              }
+            },
+            {
+              "panic": true,
+              "message": "nil pointer dereference"
+            }
+          ]
         },
         "branches": [
           {
@@ -985,13 +1033,7 @@
           }
         ],
         "expected_deps": [],
-        "expected_behavior": "完整架构通过 index 工具按需查询 CBM，L0 只保留精简指引",
-        "actual_apis": [
-          {
-            "signature": "L0Content() string",
-            "notes": "line 6"
-          }
-        ]
+        "expected_behavior": "完整架构通过 index 工具按需查询 CBM，L0 只保留精简指引"
       },
       {
         "id": "node_summary_zone",
@@ -1010,17 +1052,7 @@
         "expected_deps": [
           "internal/context/v2/arch_knowledge.go"
         ],
-        "expected_behavior": "上限 12 条，超出淘汰最旧",
-        "actual_apis": [
-          {
-            "signature": "SummaryZone.Add(summary string) error",
-            "notes": "line 13"
-          },
-          {
-            "signature": "SummaryZone.Format() string",
-            "notes": "line 19"
-          }
-        ]
+        "expected_behavior": "上限 12 条，超出淘汰最旧"
       },
       {
         "id": "node_section_queue",
@@ -1039,17 +1071,7 @@
         "expected_deps": [
           "internal/context/v2/corpus_journal.go"
         ],
-        "expected_behavior": "8 个活跃 section，达阈值折叠 4 个（Messages 保留在 RAM，GC 已移除）",
-        "actual_apis": [
-          {
-            "signature": "SectionQueue.Push(section *Section)",
-            "notes": "line 13"
-          },
-          {
-            "signature": "SectionQueue.Fold(n, k int)",
-            "notes": "line 18"
-          }
-        ]
+        "expected_behavior": "8 个活跃 section，达阈值折叠 4 个（Messages 保留在 RAM，GC 已移除）"
       },
       {
         "id": "node_current_round",
@@ -1068,17 +1090,7 @@
         "expected_deps": [
           "internal/context/v2/section_queue.go"
         ],
-        "expected_behavior": "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限切分",
-        "actual_apis": [
-          {
-            "signature": "CurrentRound.AddMessage(msg Message)",
-            "notes": "line 13"
-          },
-          {
-            "signature": "CurrentRound.AdvanceConveyor()",
-            "notes": "line 18"
-          }
-        ]
+        "expected_behavior": "单轮消息上限 CurrentRoundCap（EB×0.25，floor 64K），超限切分"
       },
       {
         "id": "node_draft_zone",
@@ -1099,21 +1111,7 @@
           }
         ],
         "expected_deps": [],
-        "expected_behavior": "预算 30% × CurrentRoundCap，超限 AddDraft 返回 error，LLM 需 draft_drop",
-        "actual_apis": [
-          {
-            "signature": "DraftZone.AddDraft(content string) (int, error)",
-            "notes": "line 9"
-          },
-          {
-            "signature": "DraftZone.DropDraft(index int) bool",
-            "notes": "line 14"
-          },
-          {
-            "signature": "DraftZone.ClearDraft()",
-            "notes": "line 19"
-          }
-        ]
+        "expected_behavior": "预算 30% × CurrentRoundCap，超限 AddDraft 返回 error，LLM 需 draft_drop"
       },
       {
         "id": "node_dynamic_injection",
@@ -1128,13 +1126,7 @@
         "expected_deps": [
           "internal/context/v2/retrieval_cache.go"
         ],
-        "expected_behavior": "访问缓存防止同轮重复召回；注入 [Pinned Tools] / [Known Patterns] / [Relevant Knowledge] 段",
-        "actual_apis": [
-          {
-            "signature": "DynamicInjection.Retrieve(types []string, query string) string",
-            "notes": "line 14"
-          }
-        ]
+        "expected_behavior": "访问缓存防止同轮重复召回；注入 [Pinned Tools] / [Known Patterns] / [Relevant Knowledge] 段"
       },
       {
         "id": "node_context_compose",
@@ -1154,17 +1146,7 @@
           "internal/context/v2/current_round.go",
           "internal/context/v2/dynamic_injection.go"
         ],
-        "expected_behavior": "按 L0→Summary→Sections→Current→Injection 顺序组装，超出预算触发折叠淘汰",
-        "actual_apis": [
-          {
-            "signature": "Compose() (string, error)",
-            "notes": "line 11"
-          },
-          {
-            "signature": "TokenBudget() int",
-            "notes": "line 17"
-          }
-        ]
+        "expected_behavior": "按 L0→Summary→Sections→Current→Injection 顺序组装，超出预算触发折叠淘汰"
       }
     ],
     "multi_file_invariants": [
@@ -1649,8 +1631,8 @@
     ]
   },
   "_sync": {
-    "saved_at": "2026-07-23T22:04:27.929Z",
-    "source": "mcp",
+    "saved_at": "2026-07-24T01:52:05.625Z",
+    "source": "browser",
     "feature": "conveyor"
   }
 }

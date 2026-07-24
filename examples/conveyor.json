@@ -471,7 +471,33 @@
         "handler": {
           "file_id": "node_context_compose",
           "api": "Compose",
-          "input_mapping": { "budget": "$value.tokenBudget" }
+          "input_mapping": { "budget": "$value.tokenBudget" },
+          "errors": [
+            {
+              "type": "ErrBudgetExceeded",
+              "condition": "result.error && result.error.code === 'BUDGET_EXCEEDED'",
+              "severity": "expected",
+              "to": "node_draft_zone",
+              "value": { "type": "budget_error", "label": "预算超限→清理草稿" },
+              "effect": "particle_red",
+              "log": "Compose: 预算超限，走草稿清理路径"
+            },
+            {
+              "type": "panic",
+              "condition": "result.panic === true",
+              "severity": "unexpected",
+              "to": "node_context_compose",
+              "effect": "node_flash_red",
+              "log": "CRITICAL: Compose panicked — 潜在 bug"
+            }
+          ],
+          "mock_results": [
+            { "compose": "ok", "tokens": 1200 },
+            { "error": { "code": "BUDGET_EXCEEDED", "message": "token 预算超限" } },
+            { "compose": "ok", "tokens": 980 },
+            { "error": { "code": "NETWORK_TIMEOUT", "message": "检索超时（未声明）" } },
+            { "panic": true, "message": "nil pointer dereference" }
+          ]
         },
         "branches": [
           {

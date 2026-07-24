@@ -662,6 +662,10 @@ ${dsl.simulation.initial_state.map(s => `          <div class="sim-state-row" da
           <h3>触发日志</h3>
           <div id="sim-trace" class="sim-trace"></div>
         </div>
+        <div class="sim-trace-wrap anim-log-wrap">
+          <h3>异常日志（L4.5）</h3>
+          <div id="anim-log" class="sim-trace"></div>
+        </div>
       </div>`
     : ''
 }

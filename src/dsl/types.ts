@@ -435,6 +435,10 @@ export interface AnimationHandler {
   output_mapping?: AnimationHandlerMapping;
   /** 异常声明（L4.5） */
   errors?: AnimationError[];
+  /** mock 模式固定返回值（mock_results 为空时生效；不声明则返回 { $mock: api }） */
+  mock_result?: unknown;
+  /** mock 模式轮换返回值（优先于 mock_result，按序轮流返回；可混入 { error } / { panic: true } 演示 L4.5 异常路径） */
+  mock_results?: unknown[];
   /** L5b 动态执行：true 时真正调用代码 */
   live?: boolean;
 }

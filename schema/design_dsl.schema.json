@@ -352,7 +352,13 @@
                 "additionalProperties": true
               }
             },
-            "live": { "type": "boolean" }
+            "live": { "type": "boolean" },
+            "mock_result": { "description": "mock 模式固定返回值（mock_results 为空时生效）" },
+            "mock_results": {
+              "type": "array",
+              "description": "mock 模式轮换返回值（优先于 mock_result；可混入 { error } / { panic: true } 演示 L4.5 异常路径）",
+              "items": { "type": "object" }
+            }
           },
           "additionalProperties": true
         },

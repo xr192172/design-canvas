@@ -13,7 +13,7 @@
  * 覆盖能力：
  * - L3  条件分支：evalCondition / pickBranch / createMockRotator
  * - L4  函数绑定：resolvePath / applyInputMapping / applyOutputMapping
- * - L4.5 异常语义：matchError
+ * - L4.5 异常语义：matchError / isErrorResult / classifyError
  * - 通用：makeSnapshot（状态快照对比）
  */
 
@@ -261,6 +261,51 @@ export function matchError(
     if (evalCondition(errors[i].condition, undefined, result)) return errors[i];
   }
   return null;
+}
+
+/**
+ * 结果是否"看起来像异常"（L4.5 未声明异常检测的判定约定）
+ *
+ * 约定（与 L5 live 模式的异常对象结构对齐）：
+ * - result.error != null  → 业务/系统错误对象（如 { error: { code: 401 } }）
+ * - result.panic === true → panic 级故障（如 { panic: true, message: 'nil pointer' }）
+ *
+ * 非对象 / null / 正常业务数据 → false
+ */
+export function isErrorResult(result: unknown): boolean {
+  if (result == null || typeof result !== 'object') return false;
+  var r = result as Record<string, unknown>;
+  if (r.error != null) return true;
+  if (r.panic === true) return true;
+  return false;
+}
+
+/** 异常分类结果（L4.5） */
+export interface ErrorClassification {
+  /**
+   * none       —— 正常结果（或未命中任何异常形态），走正常流
+   * declared   —— 命中 errors 声明，按声明的 severity 处理
+   * undeclared —— 结果像异常但未命中任何声明 → 未声明异常警报（发现 bug）
+   */
+  kind: 'none' | 'declared' | 'undeclared';
+  /** kind === 'declared' 时命中的声明 */
+  decl?: ErrorDeclLike;
+}
+
+/**
+ * 异常分类（L4.5 核心判定）：
+ * 1. 先按声明顺序匹配 errors
+ * 2. 未命中但结果像异常 → undeclared（无论 errors 是否为空）
+ * 3. 否则 → none
+ */
+export function classifyError(
+  errors: ErrorDeclLike[] | undefined | null,
+  result: unknown,
+): ErrorClassification {
+  var decl = matchError(errors, result);
+  if (decl) return { kind: 'declared', decl: decl };
+  if (isErrorResult(result)) return { kind: 'undeclared' };
+  return { kind: 'none' };
 }
 
 // ─────────────────────────────────────────────────────────────
