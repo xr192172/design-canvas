@@ -950,7 +950,7 @@ ${EDGE_GEOM_SOURCE}
         const rect = nodeEl.querySelector('rect');
         card.addEventListener('mouseenter', () => {
           if (rect && !state.selectedId) {
-            rect.style.filter = 'brightness(1.3) drop-shadow(0 0 12px rgba(233, 69, 96, 0.8))';
+            rect.style.filter = 'brightness(1.3) drop-shadow(0 0 12px rgba(var(--theme-primary-rgb), 0.8))';
           }
         });
         card.addEventListener('mouseleave', () => {
@@ -979,9 +979,9 @@ ${EDGE_GEOM_SOURCE}
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'annotation-panel';
-      panel.style.cssText = 'position:fixed;top:50px;right:10px;width:320px;max-height:70vh;background:rgba(22,33,62,0.96);color:#fff;border:1px solid #1f2a4d;border-radius:8px;padding:12px;font-size:13px;z-index:1000;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.4);display:none;';
+      panel.style.cssText = 'position:fixed;top:50px;right:10px;width:320px;max-height:70vh;background:var(--theme-panel-bg);color:#fff;border:1px solid var(--theme-border);border-radius:8px;padding:12px;font-size:13px;z-index:1000;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.4);display:none;';
       const header = document.createElement('div');
-      header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;border-bottom:1px solid #1f2a4d;padding-bottom:8px;';
+      header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;border-bottom:1px solid var(--theme-border);padding-bottom:8px;';
       header.innerHTML = '<span style="font-weight:600;">📝 审查标注</span>';
       const closeBtn = document.createElement('button');
       closeBtn.textContent = '×';
@@ -1001,7 +1001,7 @@ ${EDGE_GEOM_SOURCE}
     const annotations = dsl.annotations || [];
     if (annotations.length === 0) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'color:#8b9bb4;font-style:italic;padding:8px 0;';
+      empty.style.cssText = 'color:var(--theme-text-sub);font-style:italic;padding:8px 0;';
       empty.textContent = '暂无标注。双击节点可添加标注。';
       list.appendChild(empty);
       return;
@@ -1019,7 +1019,7 @@ ${EDGE_GEOM_SOURCE}
       title.textContent = typeLabel + ' ' + (anno.node_id || '通用');
       const delBtn = document.createElement('button');
       delBtn.textContent = '×';
-      delBtn.style.cssText = 'background:transparent;border:none;color:#8b9bb4;cursor:pointer;font-size:16px;padding:0 4px;';
+      delBtn.style.cssText = 'background:transparent;border:none;color:var(--theme-text-sub);cursor:pointer;font-size:16px;padding:0 4px;';
       delBtn.onclick = () => {
         dsl.annotations = (dsl.annotations || []).filter(a => a.id !== anno.id);
         saveLocal();
@@ -1030,13 +1030,13 @@ ${EDGE_GEOM_SOURCE}
       card.appendChild(titleRow);
 
       const text = document.createElement('div');
-      text.style.cssText = 'color:#cfd8e3;font-size:12px;line-height:1.5;white-space:pre-wrap;';
+      text.style.cssText = 'color:var(--theme-text);font-size:12px;line-height:1.5;white-space:pre-wrap;';
       text.textContent = anno.text;
       card.appendChild(text);
 
       if (anno.author) {
         const author = document.createElement('div');
-        author.style.cssText = 'color:#8b9bb4;font-size:11px;margin-top:4px;';
+        author.style.cssText = 'color:var(--theme-text-sub);font-size:11px;margin-top:4px;';
         author.textContent = '— ' + anno.author + ' · ' + (anno.timestamp || '');
         card.appendChild(author);
       }
@@ -1067,7 +1067,7 @@ ${EDGE_GEOM_SOURCE}
       toggleBtn = document.createElement('button');
       toggleBtn.id = 'anno-toggle-btn';
       toggleBtn.textContent = '📝 标注';
-      toggleBtn.style.cssText = 'position:fixed;top:10px;right:10px;padding:8px 14px;background:rgba(22,33,62,0.95);color:#fff;border:1px solid #1f2a4d;border-radius:6px;font-size:13px;cursor:pointer;z-index:999;';
+      toggleBtn.style.cssText = 'position:fixed;top:10px;right:10px;padding:8px 14px;background:var(--theme-panel-bg);color:#fff;border:1px solid var(--theme-border);border-radius:6px;font-size:13px;cursor:pointer;z-index:999;';
       toggleBtn.onclick = () => {
         const panel = document.getElementById('annotation-panel');
         if (panel) {
@@ -1109,7 +1109,7 @@ ${EDGE_GEOM_SOURCE}
       // Style fields
       const style = node.style || {};
       document.getElementById('editor-shape').value = style.shape || 'rounded';
-      const bg = style.bg || '#16213e';
+      const bg = style.bg || '#152141';
       document.getElementById('editor-bg-color').value = bg;
       document.getElementById('editor-bg-text').value = bg;
       document.getElementById('editor-radius').value = style.borderRadius ?? 8;
@@ -1252,8 +1252,8 @@ ${EDGE_GEOM_SOURCE}
       const btnGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       btnGroup.setAttribute('class', 'collapse-btn');
       btnGroup.setAttribute('data-parent', parentId);
-      btnGroup.innerHTML = '<circle cx="' + btnX + '" cy="' + btnY + '" r="10" fill="rgba(15,52,96,0.8)" stroke="#e94560" stroke-width="1.5"/>' +
-        '<path d="M ' + (btnX - 4) + ' ' + (btnY - 3) + ' L ' + (btnX + 4) + ' ' + btnY + ' L ' + (btnX - 4) + ' ' + (btnY + 3) + ' Z" fill="#e94560"/>';
+      btnGroup.innerHTML = '<circle cx="' + btnX + '" cy="' + btnY + '" r="10" style="fill:var(--theme-panel-bg);stroke:var(--theme-primary)" stroke-width="1.5"/>' +
+        '<path d="M ' + (btnX - 4) + ' ' + (btnY - 3) + ' L ' + (btnX + 4) + ' ' + btnY + ' L ' + (btnX - 4) + ' ' + (btnY + 3) + ' Z" style="fill:var(--theme-primary)"/>';
 
       btnGroup.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -1983,7 +1983,7 @@ ${EDGE_GEOM_SOURCE}
     line.setAttribute('y1', startY);
     line.setAttribute('x2', startX);
     line.setAttribute('y2', startY);
-    line.setAttribute('stroke', '#e94560');
+    line.style.stroke = 'var(--theme-primary)';
     line.setAttribute('stroke-width', '2');
     line.setAttribute('stroke-dasharray', '5,5');
     line.setAttribute('pointer-events', 'none');
@@ -2085,7 +2085,7 @@ ${EDGE_GEOM_SOURCE}
 
           const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
           path.setAttribute('d', 'M ' + fx + ' ' + fy + ' L ' + tx + ' ' + ty);
-          path.setAttribute('stroke', '#e94560');
+          path.setAttribute('class', 'edge-themed');
           path.setAttribute('stroke-width', '2');
           path.setAttribute('fill', 'none');
           edgeGroup.appendChild(path);
@@ -2452,7 +2452,7 @@ ${EDGE_GEOM_SOURCE}
           html += '<div style="font-size:11px;color:var(--theme-text-sub);margin-bottom:4px;">来源 → 目标: <code>' + escapeHtml(detail.from) + ' → ' + escapeHtml(detail.to) + '</code></div>';
           if (detail.condition) {
             html += '<div style="font-size:11px;color:var(--theme-text-sub);margin-bottom:4px;">条件:</div>';
-            html += '<pre style="font-size:10px;color:#4fc3f7;background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;margin:4px 0;white-space:pre-wrap;word-break:break-all;">' + escapeHtml(detail.condition) + '</pre>';
+            html += '<pre style="font-size:10px;color:var(--theme-accent);background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;margin:4px 0;white-space:pre-wrap;word-break:break-all;">' + escapeHtml(detail.condition) + '</pre>';
           }
           if (detail.emits && detail.emits.length > 0) {
             html += '<div style="font-size:11px;color:var(--theme-text-sub);margin-bottom:4px;">发射事件: <span style="color:#4caf50;">' + escapeHtml(detail.emits.join(', ')) + '</span></div>';
@@ -3410,9 +3410,9 @@ ${EDGE_GEOM_SOURCE}
         if (up.style) {
           var shape = node.querySelector('rect, circle, polygon');
           if (shape) {
-            if (up.style.bg) shape.setAttribute('fill', up.style.bg);
+            if (up.style.bg) { shape.setAttribute('fill', up.style.bg); shape.style.fill = ''; }
             if (up.style.color) node.querySelector('text').setAttribute('fill', up.style.color);
-            if (up.style.border) shape.setAttribute('stroke', up.style.border);
+            if (up.style.border) { shape.setAttribute('stroke', up.style.border); shape.style.stroke = ''; }
             if (up.style.opacity !== undefined) shape.setAttribute('opacity', up.style.opacity);
           }
         }
@@ -3654,7 +3654,7 @@ ${EDGE_GEOM_SOURCE}
           (reason ? '<span class="trace-reason">' + reason + '</span>' : '') +
           '</div>';
       }
-      container.innerHTML = html || '<div style="color:#5a6a88;font-size:11px;">暂无触发记录</div>';
+      container.innerHTML = html || '<div style="color:var(--theme-text-dim);font-size:11px;">暂无触发记录</div>';
       if (count > 0) {
         container.scrollTop = 0;
       }

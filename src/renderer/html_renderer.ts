@@ -120,7 +120,7 @@ function renderContentBlocks(blocks: import('../dsl/types.js').ContentBlock[]): 
         case 'divider':
           return `<div class="cb-divider"></div>`;
         case 'badge':
-          return `<div class="cb-badge" style="background:${block.badgeColor ?? '#e94560'}">${esc(block.value ?? '')}</div>`;
+          return `<div class="cb-badge" style="background:${block.badgeColor ?? 'var(--theme-primary)'}">${esc(block.value ?? '')}</div>`;
         default:
           return '';
       }
@@ -131,8 +131,16 @@ function renderContentBlocks(blocks: import('../dsl/types.js').ContentBlock[]): 
 function renderNode(n: Node, parentIds?: Set<string>): string {
   const b = nodeBox(n);
   const style = n.style ?? {};
-  const fill = style.bg ?? '#16213e';
-  const stroke = (style.border ?? '1px solid #1f2a4d').split(' ').pop() ?? '#1f2a4d';
+  const fill = style.bg ?? '';
+  const stroke = (style.border ?? '').split(' ').pop() ?? '';
+  // 未显式指定配色的节点跟随主题：走 inline style（支持 var()），
+  // 选中/状态/动画等 CSS 规则带 !important 或更高优先级，可正常覆盖
+  const themedCss: string[] = [];
+  if (!fill) themedCss.push('fill:var(--theme-card-bg)');
+  if (!stroke) themedCss.push('stroke:var(--theme-border)');
+  const themedAttr = themedCss.length ? ` style="${themedCss.join(';')}"` : '';
+  const fillAttr = fill ? ` fill="${esc(fill)}"` : '';
+  const strokeAttr = ` stroke-width="1"${stroke ? ` stroke="${esc(stroke)}"` : ''}`;
   const rx = style.borderRadius ?? 8;
   const shape = style.shape ?? 'rounded';
 
@@ -171,25 +179,25 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
     const r = Math.min(b.w, b.h) / 2;
-    shapeSvg = `<circle data-shape="true" cx="${cx}" cy="${cy}" r="${r}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<circle data-shape="true" cx="${cx}" cy="${cy}" r="${r}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   } else if (shape === 'diamond') {
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
-    shapeSvg = `<polygon data-shape="true" points="${cx},${b.y} ${b.x + b.w},${cy} ${cx},${b.y + b.h} ${b.x},${cy}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<polygon data-shape="true" points="${cx},${b.y} ${b.x + b.w},${cy} ${cx},${b.y + b.h} ${b.x},${cy}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   } else if (shape === 'parallelogram') {
     const skew = 30;
-    shapeSvg = `<polygon data-shape="true" points="${b.x + skew},${b.y} ${b.x + b.w + skew},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<polygon data-shape="true" points="${b.x + skew},${b.y} ${b.x + b.w + skew},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   } else if (shape === 'hexagon') {
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
     const rx = b.w / 2;
     const ry = b.h / 2;
-    shapeSvg = `<polygon data-shape="true" points="${cx},${b.y} ${cx + rx},${b.y + ry * 0.4} ${cx + rx},${b.y + ry * 1.6} ${cx},${b.y + b.h} ${cx - rx},${b.y + ry * 1.6} ${cx - rx},${b.y + ry * 0.4}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<polygon data-shape="true" points="${cx},${b.y} ${cx + rx},${b.y + ry * 0.4} ${cx + rx},${b.y + ry * 1.6} ${cx},${b.y + b.h} ${cx - rx},${b.y + ry * 1.6} ${cx - rx},${b.y + ry * 0.4}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   } else if (shape === 'triangle') {
-    shapeSvg = `<polygon data-shape="true" points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<polygon data-shape="true" points="${b.x + b.w / 2},${b.y} ${b.x + b.w},${b.y + b.h} ${b.x},${b.y + b.h}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   } else {
     // rect / rounded / freeform
-    shapeSvg = `<rect data-shape="true" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="${rx}" fill="${esc(fill)}" stroke="${esc(stroke)}" stroke-width="1" ${shadowAttr}/>`;
+    shapeSvg = `<rect data-shape="true" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="${rx}" ${fillAttr}${strokeAttr}${themedAttr} ${shadowAttr}/>`;
   }
 
   // 内容渲染
@@ -243,7 +251,8 @@ function renderEdge(
   const obstacles = !isContains && obstaclesFor ? obstaclesFor(e.from, e.to) : undefined;
   const geom = computeEdgeGeom(from, to, edgeType, pathOffset, obstacles);
   const d = geom.d;
-  const stroke = e.style?.stroke ?? '#e94560';
+  // 未显式指定颜色的边跟随主题边色（edge-themed class 优先级低于 .edge.selected 规则）
+  const strokeAttr = e.style?.stroke ? `stroke="${esc(e.style.stroke)}"` : 'class="edge-themed"';
   const strokeWidth = e.style?.strokeWidth ?? 2;
   const arrowDir = e.arrow ?? 'forward';
   const isDashed = edgeType === 'dashed';
@@ -267,7 +276,7 @@ function renderEdge(
 
   return `    <g class="edge" data-id="${esc(e.id)}" data-label="${esc(labelText)}" data-type="${esc(edgeType)}">
       <path d="${d}" stroke="transparent" stroke-width="15" fill="none" pointer-events="stroke"/>
-      <path d="${d}" stroke="${esc(stroke)}" stroke-width="${strokeWidth}" ${markerStart} ${markerEnd} ${dashAttr} fill="none" pointer-events="none"/>
+      <path d="${d}" ${strokeAttr} stroke-width="${strokeWidth}" ${markerStart} ${markerEnd} ${dashAttr} fill="none" pointer-events="none"/>
       ${labelXml}
     </g>`;
 }
@@ -382,7 +391,7 @@ function renderSwimlanes(dsl: DesignDSL): string {
     swimlaneNodes.get(laneId)!.push(n);
   });
 
-  const defaultColors = ['#16213e', '#1a1f3c', '#141f38', '#1c2747'];
+  const defaultColors = ['#152141', '#1a1f3c', '#141f38', '#1c2747'];
   const xml: string[] = [];
 
   swimlanes.forEach((lane, i) => {
@@ -580,10 +589,10 @@ export function renderHTML(dsl: DesignDSL): string {
             <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="rgba(0,0,0,0.3)"/>
           </filter>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#e94560"/>
+            <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--theme-primary)"/>
           </marker>
           <marker id="arrow-reverse" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-            <path d="M 10 0 L 0 5 L 10 10 z" fill="#e94560"/>
+            <path d="M 10 0 L 0 5 L 10 10 z" style="fill:var(--theme-primary)"/>
           </marker>
           <marker id="sim-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#9b59b6"/>
@@ -716,8 +725,8 @@ ${
       <div class="form-group">
         <label>背景色 (bg)</label>
         <div class="color-row">
-          <input type="color" id="editor-bg-color" value="#16213e">
-          <input type="text" id="editor-bg-text" placeholder="#16213e">
+          <input type="color" id="editor-bg-color" value="#152141">
+          <input type="text" id="editor-bg-text" placeholder="#152141">
         </div>
       </div>
       <div class="form-group">

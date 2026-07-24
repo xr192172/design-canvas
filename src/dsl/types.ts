@@ -14,7 +14,7 @@ export interface NodeStyle {
   bg?: string;
   /** 前景色（文字） */
   color?: string;
-  /** 边框，如 "1px solid #e94560" */
+  /** 边框，如 "1px solid #4f8df7" */
   border?: string;
   /** 圆角半径（px） */
   borderRadius?: number;

@@ -83,7 +83,7 @@ const LANG_COLORS: Record<string, { bg: string; color: string }> = {
   py: { bg: '#1a5f3a', color: '#ffffff' },
 };
 const DEFAULT_FILE_COLOR = { bg: '#37474f', color: '#eceff1' };
-const DIR_STYLE = { bg: '#16213e', color: '#90caf9' };
+const DIR_STYLE = { bg: '#152141', color: '#90caf9' };
 
 // ─────────────────────────────────────────────────────────────
 // 文件扫描

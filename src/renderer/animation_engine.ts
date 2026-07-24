@@ -47,7 +47,7 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       from: edge.from,
       to: edge.to,
       interval: 4000,
-      color: edge.style?.stroke ?? '#4fc3f7',
+      color: edge.style?.stroke ?? '',
       edgeId: edge.id,
     });
   }
@@ -221,6 +221,12 @@ ${ANIM_CORE_SOURCE}
 
   // ---- 通用节点高亮（L3 判断处闪烁 / L4.5 异常警报共用） ----
   // 直接操作 shape 属性，不依赖 CSS 类；连续调用时清除旧定时器避免状态残留
+  // 解析 CSS 变量（主题感知的运行时取色；动画结束时主题已切换也能取到当前值）
+  function cssVar(name, fallback) {
+    var v = getComputedStyle(document.body).getPropertyValue(name).trim();
+    return v || fallback;
+  }
+
   function flashNode(nodeId, color, duration) {
     var el = document.querySelector('.node[data-id="' + nodeId + '"]');
     if (!el) return;
@@ -232,16 +238,21 @@ ${ANIM_CORE_SOURCE}
     }
     if (el.__flashOrig == null) {
       el.__flashOrig = {
-        stroke: shape.getAttribute('stroke'),
-        width: shape.getAttribute('stroke-width')
+        attrStroke: shape.getAttribute('stroke'),
+        attrWidth: shape.getAttribute('stroke-width'),
+        styleStroke: shape.style.stroke,
+        styleWidth: shape.style.strokeWidth
       };
     }
-    shape.setAttribute('stroke', color || '#ffeb3b');
-    shape.setAttribute('stroke-width', '3');
+    // 走 inline style：主题节点的描边在 style 属性里，presentation attribute 无法覆盖
+    shape.style.stroke = color || '#ffeb3b';
+    shape.style.strokeWidth = '3';
     el.__flashTimer = setTimeout(function() {
       var orig = el.__flashOrig || {};
-      shape.setAttribute('stroke', orig.stroke || '#1f2a4d');
-      shape.setAttribute('stroke-width', orig.width || '1');
+      shape.style.stroke = orig.styleStroke || '';
+      shape.style.strokeWidth = orig.styleWidth || '';
+      if (orig.attrStroke != null) shape.setAttribute('stroke', orig.attrStroke);
+      if (orig.attrWidth != null) shape.setAttribute('stroke-width', orig.attrWidth);
       el.__flashTimer = null;
       el.__flashOrig = null;
     }, duration || 600);
@@ -712,7 +723,7 @@ ${ANIM_CORE_SOURCE}
 
     var circle = document.createElementNS(ns, 'circle');
     circle.setAttribute('r', '6');
-    circle.setAttribute('fill', opts.color || '#4fc3f7');
+    circle.setAttribute('fill', opts.color || cssVar('--theme-accent', '#4fc3f7'));
     circle.setAttribute('opacity', '0.9');
     circle.setAttribute('stroke', '#ffffff');
     circle.setAttribute('stroke-width', '1');
@@ -727,7 +738,7 @@ ${ANIM_CORE_SOURCE}
       labelBg.setAttribute('width', labelWidth);
       labelBg.setAttribute('height', '14');
       labelBg.setAttribute('rx', '3');
-      labelBg.setAttribute('fill', opts.color || '#4fc3f7');
+      labelBg.setAttribute('fill', opts.color || cssVar('--theme-accent', '#4fc3f7'));
       labelBg.setAttribute('opacity', '0.85');
       g.appendChild(labelBg);
 
@@ -1026,7 +1037,7 @@ ${ANIM_CORE_SOURCE}
       pathEl: findFlowPathEl(flow),
       from: flow.from,
       to: flow.to,
-      color: flow.color || '#4fc3f7',
+      color: flow.color || cssVar('--theme-accent', '#4fc3f7'),
       label: flow.label,
       valueLabel: flow.valueLabel,
       valueType: flow.valueType,
@@ -1116,7 +1127,7 @@ ${ANIM_CORE_SOURCE}
     rect.setAttribute('width', String(w));
     rect.setAttribute('height', String(h));
     rect.setAttribute('rx', '6');
-    rect.setAttribute('fill', p.color || '#4fc3f7');
+    rect.setAttribute('fill', p.color || cssVar('--theme-accent', '#4fc3f7'));
     rect.setAttribute('opacity', '0.85');
     g.appendChild(rect);
 
@@ -1200,7 +1211,7 @@ ${ANIM_CORE_SOURCE}
     bg.setAttribute('height', '32');
     bg.setAttribute('rx', '4');
     bg.setAttribute('fill', '#1a1a2e');
-    bg.setAttribute('stroke', '#4fc3f7');
+    bg.setAttribute('stroke', cssVar('--theme-accent', '#4fc3f7'));
     bg.setAttribute('stroke-width', '1');
     bg.setAttribute('opacity', '0.95');
     g.appendChild(bg);
@@ -1208,7 +1219,7 @@ ${ANIM_CORE_SOURCE}
     var text1 = document.createElementNS(ns, 'text');
     text1.setAttribute('x', promptX + 8);
     text1.setAttribute('y', promptY + 13);
-    text1.setAttribute('fill', '#4fc3f7');
+    text1.setAttribute('fill', cssVar('--theme-accent', '#4fc3f7'));
     text1.setAttribute('style', 'font-size:10px;font-weight:600;');
     text1.textContent = '输入: ' + (inputLabel || inputType);
     g.appendChild(text1);
@@ -1306,7 +1317,7 @@ ${ANIM_CORE_SOURCE}
           from: f.from,
           to: f.to,
           interval: f.trigger.interval || 4000,
-          color: '#4fc3f7',
+          color: '',
           label: f.value ? (f.value.label || f.value.type) : '',
           valueType: f.value ? f.value.type : '',
           valueLabel: f.value ? (f.value.label || f.value.type) : '',
@@ -1481,13 +1492,18 @@ ${ANIM_CORE_SOURCE}
 
     var originalStroke = shape.getAttribute('stroke');
     var originalWidth = shape.getAttribute('stroke-width');
+    var originalStyleStroke = shape.style.stroke;
+    var originalStyleWidth = shape.style.strokeWidth;
 
-    shape.setAttribute('stroke', flashColor);
-    shape.setAttribute('stroke-width', '4');
+    // 走 inline style：主题节点的描边在 style 属性里，presentation attribute 无法覆盖
+    shape.style.stroke = flashColor;
+    shape.style.strokeWidth = '4';
 
     setTimeout(function() {
-      shape.setAttribute('stroke', originalStroke || '#1f2a4d');
-      shape.setAttribute('stroke-width', originalWidth || '1');
+      shape.style.stroke = originalStyleStroke || '';
+      shape.style.strokeWidth = originalStyleWidth || '';
+      if (originalStroke != null) shape.setAttribute('stroke', originalStroke);
+      if (originalWidth != null) shape.setAttribute('stroke-width', originalWidth);
     }, 300);
   }
 

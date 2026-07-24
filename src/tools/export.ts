@@ -36,8 +36,8 @@ function renderNodeSvg(n: Node): string {
   const w = n.width ?? 200;
   const h = n.height ?? 80;
   const label = n.label ?? n.id;
-  const fill = n.style?.bg ?? '#1a1f3a';
-  const stroke = n.style?.border ?? '#e94560';
+  const fill = n.style?.bg ?? '#152141';
+  const stroke = n.style?.border ?? '#243459';
   const textColor = n.style?.color ?? '#ffffff';
 
   const shape = n.style?.shape ?? 'rounded';
@@ -79,10 +79,10 @@ function renderEdgeSvg(e: Edge, nodeMap: Map<string, Node>): string {
   const midX = (x1 + x2) / 2;
   const midY = (y1 + y2) / 2;
 
-  const labelEl = label ? `<text x="${midX}" y="${midY - 5}" text-anchor="middle" fill="#5a6a88" font-size="12" font-family="sans-serif">${escapeXml(label)}</text>` : '';
+  const labelEl = label ? `<text x="${midX}" y="${midY - 5}" text-anchor="middle" fill="#8ea3c8" font-size="12" font-family="sans-serif">${escapeXml(label)}</text>` : '';
 
   return `  <g class="edge">
-    <path d="M ${x1} ${y1} L ${x2} ${y2}" stroke="#e94560" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <path d="M ${x1} ${y1} L ${x2} ${y2}" stroke="#4f8df7" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
     ${labelEl}
   </g>`;
 }
@@ -126,10 +126,10 @@ export function exportSvg(input: ExportSvgInput): ExportSvgResult {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e94560"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f8df7"/>
     </marker>
   </defs>
-  <rect width="100%" height="100%" fill="#0a0e27"/>
+  <rect width="100%" height="100%" fill="#0a1128"/>
 ${edgesXml}
 ${nodesXml}
 </svg>`;
