@@ -13,17 +13,14 @@ import type { DesignDSL, Node, Edge, SemanticFile } from '../dsl/types.js';
 import { buildStyles } from './styles.js';
 import { buildScript } from './scripts.js';
 import { buildAnimationScript } from './animation_engine.js';
+import { computeEdgePath } from './edge_geom.js';
+import type { GRect } from './edge_geom.js';
 
-/** 计算节点中心点 */
-function nodeCenter(n: Node): { x: number; y: number } {
-  return {
-    x: (n.x ?? 0) + (n.width ?? 0) / 2,
-    y: (n.y ?? 0) + (n.height ?? 0) / 2,
-  };
-}
+/** 障碍矩形（edge_geom.GRect 的本地别名，保持调用处可读性） */
+type RectBox = GRect;
 
 /** 计算节点矩形边界（带默认尺寸） */
-function nodeBox(n: Node): { x: number; y: number; w: number; h: number } {
+function nodeBox(n: Node): GRect {
   return {
     x: n.x ?? 0,
     y: n.y ?? 0,
@@ -32,86 +29,16 @@ function nodeBox(n: Node): { x: number; y: number; w: number; h: number } {
   };
 }
 
-/** 计算边 path：from 节点边框 → to 节点边框（不穿透节点）
- *  offset > 0 时，路径沿垂直方向偏移，用于多条边共享起终点的退避
- */
-function edgePath(from: Node, to: Node, edgeType?: string, offset: number = 0): string {
-  // 自环边：from === to 时画一个小圆弧，避免除以 0 产生 NaN
-  if (from.id === to.id) {
-    const a = nodeBox(from);
-    const cx = a.x + a.w / 2;
-    const topY = a.y;
-    const sx = cx - 15;
-    const ex = cx + 15;
-    const loopH = 50;
-    return `M ${sx} ${topY} C ${sx - 20} ${topY - loopH} ${ex + 20} ${topY - loopH} ${ex} ${topY}`;
-  }
-
-  const a = nodeBox(from);
-  const b = nodeBox(to);
-  const ca = nodeCenter(from);
-  const cb = nodeCenter(to);
-
-  const start = intersectRect(ca, cb, a);
-  const end = intersectRect(cb, ca, b);
-
-  if (edgeType === 'curve') {
-    // 贝塞尔曲线：控制点在起终点中点偏移
-    const midX = (start.x + end.x) / 2;
-    const midY = (start.y + end.y) / 2;
-    // 垂直偏移量
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    const offsetAmt = Math.min(len * 0.25, 80);
-    const perpX = -dy / len * offsetAmt;
-    const perpY = dx / len * offsetAmt;
-    // 额外加上 offset（边退避）
-    const extraPerpX = offset !== 0 ? -dy / len * offset : 0;
-    const extraPerpY = offset !== 0 ? dx / len * offset : 0;
-    const cpX = midX + perpX + extraPerpX;
-    const cpY = midY + perpY + extraPerpY;
-    // 起终点也沿垂直方向偏移一半，保证曲线对称
-    const sX = start.x + extraPerpX * 0.3;
-    const sY = start.y + extraPerpY * 0.3;
-    const eX = end.x + extraPerpX * 0.3;
-    const eY = end.y + extraPerpY * 0.3;
-    return `M ${sX} ${sY} Q ${cpX} ${cpY} ${eX} ${eY}`;
-  }
-
-  if (offset !== 0) {
-    // 直线偏移：用二次贝塞尔实现微弯
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    const perpX = -dy / len * offset;
-    const perpY = dx / len * offset;
-    const midX = (start.x + end.x) / 2 + perpX;
-    const midY = (start.y + end.y) / 2 + perpY;
-    return `M ${start.x} ${start.y} Q ${midX} ${midY} ${end.x} ${end.y}`;
-  }
-
-  return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
-}
-
-/** 射线 (from→to) 与 rect 边框的交点（rect 中心是 from） */
-function intersectRect(
-  from: { x: number; y: number },
-  to: { x: number; y: number },
-  rect: { x: number; y: number; w: number; h: number },
-): { x: number; y: number } {
-  const cx = rect.x + rect.w / 2;
-  const cy = rect.y + rect.h / 2;
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (dx === 0 && dy === 0) return { x: cx, y: cy };
-  const halfW = rect.w / 2;
-  const halfH = rect.h / 2;
-  // 用 t 让 (cx + t*dx, cy + t*dy) 落在 rect 边框上
-  const tX = dx === 0 ? Infinity : halfW / Math.abs(dx);
-  const tY = dy === 0 ? Infinity : halfH / Math.abs(dy);
-  const t = Math.min(tX, tY);
-  return { x: cx + dx * t, y: cy + dy * t };
+/** 计算边 path：委托 edge_geom.computeEdgePath（单源，浏览器运行时共用同一实现） */
+function computeEdgeGeom(from: Node, to: Node, edgeType?: string, offset: number = 0, obstacles?: RectBox[]) {
+  return computeEdgePath({
+    fromBox: nodeBox(from),
+    toBox: nodeBox(to),
+    selfLoop: from.id === to.id,
+    edgeType,
+    offset,
+    obstacles,
+  });
 }
 
 /** HTML 转义 */
@@ -293,7 +220,12 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
 }
 
 /** 渲染单条 SVG 边 */
-function renderEdge(e: Edge, nodeMap: Map<string, Node>, offsetInfo?: { index: number; total: number }): string {
+function renderEdge(
+  e: Edge,
+  nodeMap: Map<string, Node>,
+  offsetInfo?: { index: number; total: number },
+  obstaclesFor?: (fromId: string, toId: string) => RectBox[],
+): string {
   const from = nodeMap.get(e.from);
   const to = nodeMap.get(e.to);
   if (!from || !to) return '';
@@ -305,7 +237,12 @@ function renderEdge(e: Edge, nodeMap: Map<string, Node>, offsetInfo?: { index: n
     // 居中分配：index=0 最负，index=total-1 最正
     pathOffset = (offsetInfo.index - (offsetInfo.total - 1) / 2) * 18;
   }
-  const d = edgePath(from, to, edgeType, pathOffset);
+  // contains 边（隐藏）不做绕障；其余边自动绕开障碍节点
+  const label0 = (e.label ?? '').toLowerCase();
+  const isContains = label0 === 'contains' || label0 === '包含';
+  const obstacles = !isContains && obstaclesFor ? obstaclesFor(e.from, e.to) : undefined;
+  const geom = computeEdgeGeom(from, to, edgeType, pathOffset, obstacles);
+  const d = geom.d;
   const stroke = e.style?.stroke ?? '#e94560';
   const strokeWidth = e.style?.strokeWidth ?? 2;
   const arrowDir = e.arrow ?? 'forward';
@@ -316,17 +253,9 @@ function renderEdge(e: Edge, nodeMap: Map<string, Node>, offsetInfo?: { index: n
   const markerEnd = (arrowDir === 'forward' || arrowDir === 'both') ? 'marker-end="url(#arrow)"' : '';
   const dashAttr = isDashed ? 'stroke-dasharray="6 4"' : '';
 
-  // 标签位置：路径中点（同样应用偏移）
-  const a = nodeBox(from);
-  const b = nodeBox(to);
-  const midX = (a.x + a.w / 2 + b.x + b.w / 2) / 2;
-  const midY = (a.y + a.h / 2 + b.y + b.h / 2) / 2;
-  // 垂直流向的边偏移 x，水平流向的偏移 y
-  const dx = (b.x + b.w / 2) - (a.x + a.w / 2);
-  const dy = (b.y + b.h / 2) - (a.y + a.h / 2);
-  const len = Math.sqrt(dx * dx + dy * dy) || 1;
-  const labelX = midX + (-dy / len) * pathOffset;
-  const labelY = midY + (dx / len) * pathOffset;
+  // 标签位置：曲线控制点（与运行时 updateConnectedEdges 行为一致）
+  const labelX = geom.cpX;
+  const labelY = geom.cpY;
 
   const labelText = e.label ?? '';
   // 流向边（↓ 流向）标签默认显示；其他边标签 hover 显示
@@ -336,7 +265,7 @@ function renderEdge(e: Edge, nodeMap: Map<string, Node>, offsetInfo?: { index: n
     ? `<text class="edge-label" x="${labelX}" y="${labelY}" text-anchor="middle" dy="-4" opacity="${labelOpacity}">${esc(labelText)}</text>`
     : '';
 
-  return `    <g class="edge" data-id="${esc(e.id)}" data-label="${esc(labelText)}">
+  return `    <g class="edge" data-id="${esc(e.id)}" data-label="${esc(labelText)}" data-type="${esc(edgeType)}">
       <path d="${d}" stroke="transparent" stroke-width="15" fill="none" pointer-events="stroke"/>
       <path d="${d}" stroke="${esc(stroke)}" stroke-width="${strokeWidth}" ${markerStart} ${markerEnd} ${dashAttr} fill="none" pointer-events="none"/>
       ${labelXml}
@@ -344,7 +273,11 @@ function renderEdge(e: Edge, nodeMap: Map<string, Node>, offsetInfo?: { index: n
 }
 
 /** 渲染仿真依赖边：从规则的 from_node -> to_nodes 生成可视化连线 */
-function renderSimEdges(dsl: DesignDSL, nodeMap: Map<string, Node>): string {
+function renderSimEdges(
+  dsl: DesignDSL,
+  nodeMap: Map<string, Node>,
+  obstaclesFor?: (fromId: string, toId: string) => RectBox[],
+): string {
   if (!dsl.simulation?.rules) return '';
   const rules = dsl.simulation.rules;
   const edges: string[] = [];
@@ -358,12 +291,12 @@ function renderSimEdges(dsl: DesignDSL, nodeMap: Map<string, Node>): string {
       if (!to) continue;
       idx++;
       const edgeId = 'sim-edge-' + idx;
-      const d = edgePath(from, to, 'curve');
+      const geom = computeEdgeGeom(from, to, 'curve', 0, obstaclesFor ? obstaclesFor(rule.from_node, toId) : undefined);
+      const d = geom.d;
       const label = rule.name || rule.event;
-      const a = nodeBox(from);
-      const b = nodeBox(to);
-      const midX = (a.x + a.w / 2 + b.x + b.w / 2) / 2;
-      const midY = (a.y + a.h / 2 + b.y + b.h / 2) / 2;
+      // 标签定位到控制点（与运行时行为一致）
+      const midX = geom.cpX;
+      const midY = geom.cpY;
       // 编码规则详情供 tooltip 使用（HTML 转义 + base64 避免 quote 冲突）
       const detail = {
         id: rule.id,
@@ -483,12 +416,53 @@ export function renderHTML(dsl: DesignDSL): string {
 
   // 计算"父节点"集合（通过 contains 边推断）：平铺布局下父节点文字上移到顶部
   const parentIds = new Set<string>();
+  const parentOfMap = new Map<string, string>();
+  const childrenOfMap = new Map<string, string[]>();
   for (const e of (dsl.geometry.edges ?? [])) {
     const label = (e.label ?? '').toLowerCase();
     if (label === 'contains' || label === '包含') {
       parentIds.add(e.from);
+      parentOfMap.set(e.to, e.from);
+      const arr = childrenOfMap.get(e.from) ?? [];
+      arr.push(e.to);
+      childrenOfMap.set(e.from, arr);
     }
   }
+
+  // 边绕障：收集除 from/to 及其祖先/后代外的所有节点矩形作为障碍
+  const ancestorsOf = (id: string): string[] => {
+    const out: string[] = [];
+    let cur = parentOfMap.get(id);
+    let guard = 0;
+    while (cur && guard++ < 50) {
+      out.push(cur);
+      cur = parentOfMap.get(cur);
+    }
+    return out;
+  };
+  const descendantsOf = (id: string): string[] => {
+    const out: string[] = [];
+    const stack = [...(childrenOfMap.get(id) ?? [])];
+    while (stack.length) {
+      const x = stack.pop()!;
+      out.push(x);
+      stack.push(...(childrenOfMap.get(x) ?? []));
+    }
+    return out;
+  };
+  const obstaclesFor = (fromId: string, toId: string): RectBox[] => {
+    const excluded = new Set<string>([
+      fromId, toId,
+      ...ancestorsOf(fromId), ...ancestorsOf(toId),
+      ...descendantsOf(fromId), ...descendantsOf(toId),
+    ]);
+    const obs: RectBox[] = [];
+    for (const n of dsl.geometry.nodes) {
+      if (excluded.has(n.id)) continue;
+      obs.push(nodeBox(n));
+    }
+    return obs;
+  };
 
   const nodesXml = dsl.geometry.nodes.map((n) => renderNode(n, parentIds)).join('\n');
 
@@ -505,9 +479,9 @@ export function renderHTML(dsl: DesignDSL): string {
     const total = edgeGroupCount.get(key) ?? 1;
     const index = edgeGroupCurrent.get(key) ?? 0;
     edgeGroupCurrent.set(key, index + 1);
-    return renderEdge(e, nodeMap, { index, total });
+    return renderEdge(e, nodeMap, { index, total }, obstaclesFor);
   }).join('\n');
-  const simEdgesXml = renderSimEdges(dsl, nodeMap);
+  const simEdgesXml = renderSimEdges(dsl, nodeMap, obstaclesFor);
   const swimlanesXml = renderSwimlanes(dsl);
   const cardsXml = (dsl.semantic?.files ?? []).map(renderCard).join('\n');
   const invariantsXml = (dsl.semantic?.multi_file_invariants ?? [])

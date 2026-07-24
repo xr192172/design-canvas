@@ -1,3 +1,5 @@
+import { EDGE_GEOM_SOURCE } from './edge_geom_bundle.gen.js';
+
 export function buildScript(dsl: unknown): string {
   const dslJson = JSON.stringify(dsl).replace(/</g, '\\u003c');
   return `
@@ -6,6 +8,9 @@ window.__DSL__ = ${dslJson};
 /* __DSL_END__ */
 
 (function() {
+  // ---- 边几何纯逻辑（构建期从 edge_geom.ts 内联，单源双消费，勿手改）----
+${EDGE_GEOM_SOURCE}
+
   const tooltip = document.getElementById('tooltip');
   const dsl = window.__DSL__;
 
@@ -1319,18 +1324,40 @@ window.__DSL__ = ${dslJson};
   }
 
   // ==== 节点拖拽 ====
-  function intersectRect(from, to, rect) {
-    var cx = rect.x + rect.w / 2;
-    var cy = rect.y + rect.h / 2;
-    var dx = to.x - from.x;
-    var dy = to.y - from.y;
-    if (dx === 0 && dy === 0) return { x: cx, y: cy };
-    var halfW = rect.w / 2;
-    var halfH = rect.h / 2;
-    var tX = dx === 0 ? Infinity : halfW / Math.abs(dx);
-    var tY = dy === 0 ? Infinity : halfH / Math.abs(dy);
-    var t = Math.min(tX, tY);
-    return { x: cx + dx * t, y: cy + dy * t };
+  // intersectRect / countQuadHits / countCubicHits / chooseAvoidCp / chooseAvoidCubic /
+  // computeEdgePath 由顶部内联的 edge_geom.ts 提供（单源，勿在此重复定义）
+
+  // ==== 边绕障：检测曲线与无关节点的碰撞，自动选择绕开的控制点 ====
+  function getAncestors(nodeId) {
+    var out = [];
+    var cur = parentOf[nodeId];
+    var guard = 0;
+    while (cur && guard < 50) { out.push(cur); cur = parentOf[cur]; guard++; }
+    return out;
+  }
+
+  // 障碍排除集：from/to 本身 + 双方祖先（容器）+ 双方后代
+  function obstacleExcludeMap(fromId, toId) {
+    var map = {};
+    map[fromId] = true;
+    map[toId] = true;
+    getAncestors(fromId).forEach(function(id) { map[id] = true; });
+    getAncestors(toId).forEach(function(id) { map[id] = true; });
+    getAllDescendants(fromId).forEach(function(id) { map[id] = true; });
+    getAllDescendants(toId).forEach(function(id) { map[id] = true; });
+    return map;
+  }
+
+  function collectObstacles(excludeMap) {
+    var obs = [];
+    var els = document.querySelectorAll('.node');
+    for (var i = 0; i < els.length; i++) {
+      var id = els[i].getAttribute('data-id');
+      if (excludeMap[id]) continue;
+      var pos = getNodePos(els[i]);
+      if (pos) obs.push({ x: pos.x, y: pos.y, w: pos.w, h: pos.h });
+    }
+    return obs;
   }
 
   // 辅助：获取节点位置（通过 data-shape 标记识别形状元素，兼容 rect/circle/polygon）
@@ -1746,51 +1773,29 @@ window.__DSL__ = ${dslJson};
       var toPos = getNodePos(toNode);
       if (!fromPos || !toPos) return;
 
-      var fromCenter = { x: fromPos.x + fromPos.w / 2, y: fromPos.y + fromPos.h / 2 };
-      var toCenter = { x: toPos.x + toPos.w / 2, y: toPos.y + toPos.h / 2 };
-
-      var startPt = intersectRect(fromCenter, toCenter, fromPos);
-      var endPt = intersectRect(toCenter, fromCenter, toPos);
-
-      var fx = startPt.x, fy = startPt.y;
-      var tx = endPt.x, ty = endPt.y;
-      var midX = (fx + tx) / 2;
-      var midY = (fy + ty) / 2;
-
-      var edgeDx = tx - fx;
-      var edgeDy = ty - fy;
-      var edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy) || 1;
-      var offsetAmt = Math.min(edgeLen * 0.25, 80);
-      var perpX = -edgeDy / edgeLen * offsetAmt;
-      var perpY = edgeDx / edgeLen * offsetAmt;
-      var cpX = midX + perpX;
-      var cpY = midY + perpY;
-
+      // 路径计算全部委托 edge_geom.computeEdgePath（与服务端渲染同一实现）
+      var ctrlOff = state.edgeCtrlOffset[e.id] || null;
+      var isContains = isContainsEdge(e.id);
       var idxInfo = edgeIndexMap[e.id];
-      if (idxInfo && idxInfo.total > 1) {
-        var pathOffset = (idxInfo.index - (idxInfo.total - 1) / 2) * 18;
-        var extraPerpX = -edgeDy / edgeLen * pathOffset;
-        var extraPerpY = edgeDx / edgeLen * pathOffset;
-        cpX += extraPerpX;
-        cpY += extraPerpY;
-        fx += extraPerpX * 0.3;
-        fy += extraPerpY * 0.3;
-        tx += extraPerpX * 0.3;
-        ty += extraPerpY * 0.3;
-      }
+      var pathOffset = (idxInfo && idxInfo.total > 1) ? (idxInfo.index - (idxInfo.total - 1) / 2) * 18 : 0;
+      var geom = computeEdgePath({
+        fromBox: fromPos,
+        toBox: toPos,
+        selfLoop: e.from === e.to,
+        edgeType: edgeEl.getAttribute('data-type') || 'curve',
+        offset: pathOffset,
+        obstacles: isContains ? undefined : collectObstacles(obstacleExcludeMap(e.from, e.to)),
+        manualCtrl: ctrlOff ? { dx: ctrlOff.dx, dy: ctrlOff.dy } : null,
+      });
 
-      var ctrlOff = state.edgeCtrlOffset[e.id];
-      if (ctrlOff) { cpX += ctrlOff.dx; cpY += ctrlOff.dy; }
-
-      var newPathD = 'M ' + fx + ' ' + fy + ' Q ' + cpX + ' ' + cpY + ' ' + tx + ' ' + ty;
       edgeEl.querySelectorAll('path').forEach(function(p) {
-        p.setAttribute('d', newPathD);
+        p.setAttribute('d', geom.d);
       });
 
       var text = edgeEl.querySelector('text');
       if (text) {
-        text.setAttribute('x', cpX);
-        text.setAttribute('y', cpY - 4);
+        text.setAttribute('x', geom.cpX);
+        text.setAttribute('y', geom.cpY - 4);
       }
     });
 
@@ -1820,72 +1825,33 @@ window.__DSL__ = ${dslJson};
       var toId = simEl.getAttribute('data-to');
       var simId = simEl.getAttribute('data-id');
 
-      // 自环边：画小圆弧，避免 from===to 时除以 0 产生 NaN
-      if (fromId === toId) {
-        var selfEl = document.querySelector('.node[data-id="' + fromId + '"]');
-        var selfPos = getNodePos(selfEl);
-        if (!selfPos) return;
-        var scx = selfPos.x + selfPos.w / 2;
-        var stopY = selfPos.y;
-        var ssx = scx - 15, sex = scx + 15;
-        var loopH = 50;
-        var selfPath = 'M ' + ssx + ' ' + stopY + ' C ' + (ssx - 20) + ' ' + (stopY - loopH) + ' ' + (sex + 20) + ' ' + (stopY - loopH) + ' ' + sex + ' ' + stopY;
-        simEl.querySelectorAll('path').forEach(function(p) {
-          p.setAttribute('d', selfPath);
-        });
-        var slabel = simEl.querySelector('.sim-edge-label');
-        if (slabel) {
-          slabel.setAttribute('x', scx);
-          slabel.setAttribute('y', stopY - loopH - 6);
-        }
-        return;
-      }
-
       var fromNodeEl = document.querySelector('.node[data-id="' + fromId + '"]');
       var toNodeEl = document.querySelector('.node[data-id="' + toId + '"]');
       var fromPos = getNodePos(fromNodeEl);
       var toPos = getNodePos(toNodeEl);
       if (!fromPos || !toPos) return;
-      var fromCenter = { x: fromPos.x + fromPos.w / 2, y: fromPos.y + fromPos.h / 2 };
-      var toCenter = { x: toPos.x + toPos.w / 2, y: toPos.y + toPos.h / 2 };
-      var startPt = intersectRect(fromCenter, toCenter, fromPos);
-      var endPt = intersectRect(toCenter, fromCenter, toPos);
-      var fx = startPt.x, fy = startPt.y;
-      var tx = endPt.x, ty = endPt.y;
-      var midX = (fx + tx) / 2;
-      var midY = (fy + ty) / 2;
-      var sDx = tx - fx;
-      var sDy = ty - fy;
-      var sLen = Math.sqrt(sDx * sDx + sDy * sDy) || 1;
-      var sOffset = Math.min(sLen * 0.25, 80);
-      var sPerpX = -sDy / sLen * sOffset;
-      var sPerpY = sDx / sLen * sOffset;
-      var sCpX = midX + sPerpX;
-      var sCpY = midY + sPerpY;
 
+      // 路径计算全部委托 edge_geom.computeEdgePath（与服务端渲染同一实现）
+      var simCtrlOff = state.edgeCtrlOffset[simId] || null;
       var simIdxInfo = simEdgeIndexMap[simId];
-      if (simIdxInfo && simIdxInfo.total > 1) {
-        var simPathOffset = (simIdxInfo.index - (simIdxInfo.total - 1) / 2) * 18;
-        var simExtraX = -sDy / sLen * simPathOffset;
-        var simExtraY = sDx / sLen * simPathOffset;
-        sCpX += simExtraX;
-        sCpY += simExtraY;
-        fx += simExtraX * 0.3;
-        fy += simExtraY * 0.3;
-        tx += simExtraX * 0.3;
-        ty += simExtraY * 0.3;
-      }
+      var simPathOffset = (simIdxInfo && simIdxInfo.total > 1) ? (simIdxInfo.index - (simIdxInfo.total - 1) / 2) * 18 : 0;
+      var sGeom = computeEdgePath({
+        fromBox: fromPos,
+        toBox: toPos,
+        selfLoop: fromId === toId,
+        edgeType: 'curve',
+        offset: simPathOffset,
+        obstacles: collectObstacles(obstacleExcludeMap(fromId, toId)),
+        manualCtrl: simCtrlOff ? { dx: simCtrlOff.dx, dy: simCtrlOff.dy } : null,
+      });
 
-      var simCtrlOff = state.edgeCtrlOffset[simId];
-      if (simCtrlOff) { sCpX += simCtrlOff.dx; sCpY += simCtrlOff.dy; }
-      var newPath = 'M ' + fx + ' ' + fy + ' Q ' + sCpX + ' ' + sCpY + ' ' + tx + ' ' + ty;
       simEl.querySelectorAll('path').forEach(function(p) {
-        p.setAttribute('d', newPath);
+        p.setAttribute('d', sGeom.d);
       });
       var label = simEl.querySelector('.sim-edge-label');
       if (label) {
-        label.setAttribute('x', sCpX);
-        label.setAttribute('y', sCpY - 6);
+        label.setAttribute('x', sGeom.cpX);
+        label.setAttribute('y', sGeom.cpY - 6);
       }
     });
   }

@@ -68,7 +68,7 @@ const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\
 const FILE_W = 240;
 const FILE_H = 64;
 const COL_GAP = 110;
-const ROW_GAP = 18;
+const ROW_GAP = 40; // 给边绕障留出穿行通道（障碍检测 margin=10×2 + 线宽）
 const PAD = 20;
 const TITLE_H = 30;
 const MARGIN = 60;
