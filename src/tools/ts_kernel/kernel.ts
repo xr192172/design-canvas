@@ -35,6 +35,15 @@ export interface ParsedSymbol {
   parent?: string;
 }
 
+/** import 依赖（用于 import_project 的跨文件边推导） */
+export interface ParsedImport {
+  /** 原始 import 路径（如 './foo/bar'、'myproject/internal/x'、'os.path'；Python 相对导入保留前导点如 '..pkg'） */
+  source: string;
+  /** relative = 相对路径（./ ../ 或 Python 前导点）；package = 包路径 */
+  kind: 'relative' | 'package';
+  line: number;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 节点类型 → 通用 Symbol kind 映射
 // ─────────────────────────────────────────────────────────────
@@ -194,29 +203,166 @@ function traverseAndExtract(
 }
 
 // ─────────────────────────────────────────────────────────────
+// import 提取（逐语言）
+// ─────────────────────────────────────────────────────────────
+
+function stripQuotes(s: string): string {
+  s = s.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")) || (s.startsWith('`') && s.endsWith('`'))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+/** 从 import 节点提取 source 列表（一个节点可能含多个 source，如 Python `import a, b`） */
+function extractImportSources(node: SyntaxNodeLike, langName: string): string[] {
+  if (langName === 'go') {
+    // import_spec → path 字段（interpreted_string_literal）
+    const p = fieldText(node, 'path');
+    return p ? [stripQuotes(p)] : [];
+  }
+  if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript' || langName === 'jsx') {
+    // import_statement → source 字段（string）
+    const s = fieldText(node, 'source');
+    return s ? [stripQuotes(s)] : [];
+  }
+  if (langName === 'python') {
+    if (node.type === 'import_statement') {
+      // import a, b as c, d.e —— 收集所有 dotted_name（含 aliased_import 内嵌的）
+      const out: string[] = [];
+      const collect = (n: SyntaxNodeLike): void => {
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (!c) continue;
+          if (c.type === 'dotted_name') out.push(c.text);
+          else if (c.type === 'aliased_import') collect(c);
+        }
+      };
+      collect(node);
+      return out;
+    }
+    if (node.type === 'import_from_statement') {
+      // from .foo import x / from pkg.mod import y —— 用节点文本解析前导点（AST 中 relative_import 结构不稳定）
+      const m = node.text.match(/^\s*from\s+(\.*)([\w.]*)\s+import/);
+      if (!m) return [];
+      const dots = m[1] || '';
+      const mod = m[2] || '';
+      if (dots) return [dots + mod];
+      return mod ? [mod] : [];
+    }
+  }
+  return [];
+}
+
+function traverseAndExtractImports(
+  node: SyntaxNodeLike,
+  lang: LanguageEntry,
+  imports: ParsedImport[],
+  depth: number = 0
+): void {
+  if (depth > 100 || !lang.import_nodes || lang.import_nodes.length === 0) return;
+  if (lang.import_nodes.includes(node.type)) {
+    const sources = extractImportSources(node, lang.name);
+    for (const src of sources) {
+      imports.push({
+        source: src,
+        kind: src.startsWith('.') ? 'relative' : 'package',
+        line: node.startPosition.row + 1,
+      });
+    }
+    return; // import 节点内部不再递归
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child) traverseAndExtractImports(child, lang, imports, depth + 1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // 公开 API
 // ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// 大文件解析：node-tree-sitter 的 parse(string) 在内容 ≥ 32768 字符时
+// 抛 "Invalid argument"（内部 UTF-16 缓冲限制）。规避方式：
+// 改用 callback 输入（parse((byteOffset) => string)）。
+//
+// 编码语义（实测 + node_modules/tree-sitter/src/parser.cc）：
+//   parser 以 UTF-16 编码读取，callback 收到的 offset 就是 UTF-16 码元索引，
+//   可直接作为 JS 字符串索引（代理对占 2 码元，与 JS string 一致，天然对齐）。
+// ─────────────────────────────────────────────────────────────
+
+/** 字符串 parse 的字符数上限（node-tree-sitter 限制 2^15） */
+const STRING_PARSE_LIMIT = 32768;
+/** callback 每次返回的块大小（字符数，避免 O(n²) 全量返回） */
+const CALLBACK_CHUNK = 8192;
+
+interface TreeLike {
+  rootNode: SyntaxNodeLike;
+}
+type ParserLike = { parse: (input: string | ((byteOffset: number) => string)) => TreeLike };
+
+/** 用 callback 方式解析（规避 32KB 限制；offset 即 UTF-16 码元索引） */
+function parseViaCallback(parser: ParserLike, content: string): TreeLike {
+  const len = content.length;
+  return parser.parse((offset: number): string => {
+    const lo = Math.min(offset, len);
+    if (lo >= len) return '';
+    let end = Math.min(lo + CALLBACK_CHUNK, len);
+    // 不在代理对中间截断（高代理结尾则少送一个字符）
+    if (end < len) {
+      const tail = content.charCodeAt(end - 1);
+      if (tail >= 0xd800 && tail <= 0xdbff) end--;
+    }
+    return content.slice(lo, end);
+  });
+}
+
+/** 统一 parse 入口：小文件走快速 string 路径，大文件走 callback 路径 */
+function parseContent(parser: ParserLike, content: string): TreeLike {
+  if (content.length < STRING_PARSE_LIMIT) {
+    return parser.parse(content);
+  }
+  return parseViaCallback(parser, content);
+}
+
+/** 单文件完整解析结果（一次 parse，符号 + import 双产出） */
+export interface ParsedFile {
+  symbols: ParsedSymbol[];
+  imports: ParsedImport[];
+}
+
+/**
+ * 解析文件的符号与 import 依赖（单次 AST parse）。
+ * 返回空数组字段表示：文件类型不支持 / 解析失败 / 无对应内容。
+ */
+export async function parseFileFull(filePath: string, content: string): Promise<ParsedFile> {
+  const empty: ParsedFile = { symbols: [], imports: [] };
+  const ext = '.' + (filePath.split('.').pop() || '');
+  const lang = isExtSupported(ext);
+  if (!lang) return empty;
+
+  const parser = await getParser(ext, lang);
+  if (!parser) return empty;
+
+  try {
+    const tree = parseContent(parser as ParserLike, content);
+    const symbols: ParsedSymbol[] = [];
+    const imports: ParsedImport[] = [];
+    traverseAndExtract(tree.rootNode, lang, symbols, undefined);
+    traverseAndExtractImports(tree.rootNode, lang, imports);
+    return { symbols, imports };
+  } catch (e) {
+    console.warn(`[ts_kernel] parse ${filePath} failed: ${(e as Error).message}`);
+    return empty;
+  }
+}
 
 /**
  * 解析文件的符号。返回空数组表示：文件类型不支持 / 解析失败 / 文件为空。
  */
 export async function parseFile(filePath: string, content: string): Promise<ParsedSymbol[]> {
-  const ext = '.' + (filePath.split('.').pop() || '');
-  const lang = isExtSupported(ext);
-  if (!lang) return [];
-
-  const parser = await getParser(ext, lang);
-  if (!parser) return [];
-
-  try {
-    const tree = (parser as { parse: (input: string) => { rootNode: SyntaxNodeLike } }).parse(content);
-    const symbols: ParsedSymbol[] = [];
-    traverseAndExtract(tree.rootNode, lang, symbols, undefined);
-    return symbols;
-  } catch (e) {
-    console.warn(`[ts_kernel] parse ${filePath} failed: ${(e as Error).message}`);
-    return [];
-  }
+  return (await parseFileFull(filePath, content)).symbols;
 }
 
 /** 检查扩展名是否被支持（且已安装对应语言包） */

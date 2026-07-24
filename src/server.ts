@@ -27,6 +27,7 @@ import { exportSvg, exportMarkdown } from './tools/export.js';
 import { submitApproval, reviewAnnotation, listApprovals, getApprovalHistory } from './tools/approval.js';
 import { saveSnapshot, listSnapshots, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
 import { listTemplates, createFromTemplate } from './tools/templates.js';
+import { importProject } from './tools/import_project.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -973,6 +974,41 @@ server.registerTool(
         v_gap: args.v_gap,
         width: args.width,
         respect_swimlanes: args.respect_swimlanes,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// import_project：扫描现有项目 → 自动生成设计图 DSL
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'import_project',
+  {
+    title: 'Import Project as DSL',
+    description:
+      '扫描一个现有代码项目（Go/TypeScript/JavaScript/Python），自动生成 design-canvas 设计图：' +
+      '目录→容器节点、文件→节点（含 tree-sitter 解析的 API 签名）、import→依赖边。' +
+      '降低工具门槛——新用户无需手写 DSL，指向项目目录即可得到初始架构图，随后在画布上迭代。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径或相对 cwd）'),
+      feature: z.string().describe('新 feature 名（^[a-zA-Z0-9_-]+$）'),
+      title: z.string().optional().describe('显示标题（默认等于 feature）'),
+      max_files: z.number().optional().describe('最多解析文件数（默认 200）'),
+      include_tests: z.boolean().optional().describe('是否包含测试文件（默认 false）'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await importProject({
+        project_dir: args.project_dir,
+        feature: args.feature,
+        title: args.title,
+        max_files: args.max_files,
+        include_tests: args.include_tests,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

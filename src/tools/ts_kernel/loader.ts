@@ -38,10 +38,14 @@ export async function loadLanguage(lang: LanguageEntry): Promise<Language | null
     // 部分包导出 default，部分导出命名
     const language = (mod as { default?: unknown }).default ?? mod;
 
-    // tree-sitter-typescript 特殊处理（导出 { typescript, tsx }）
+    // tree-sitter-typescript 特殊处理（导出 { typescript, tsx }；
+    // 真实 Node ESM 下 CJS 命名导出不可见，{typescript, tsx} 位于 default 内）
     if (lang.pkg === 'typescript' || lang.pkg === 'tsx') {
-      const ts = mod as { typescript?: unknown; tsx?: unknown };
-      return (lang.pkg === 'tsx' ? ts.tsx : ts.typescript) ?? null;
+      const ns = mod as { typescript?: unknown; tsx?: unknown; default?: { typescript?: unknown; tsx?: unknown } };
+      const bag = (ns.typescript || ns.tsx) ? ns : (ns.default ?? ns);
+      const picked = (lang.pkg === 'tsx' ? bag.tsx : bag.typescript) ?? null;
+      if (!picked) throw new Error(`tree-sitter-${lang.pkg} 导出结构中未找到 ${lang.pkg} 语言对象`);
+      return picked as Language;
     }
 
     return language as Language;

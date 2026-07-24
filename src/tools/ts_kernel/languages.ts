@@ -23,6 +23,8 @@ export interface LanguageEntry {
   exts: string[];
   /** tree-sitter 节点类型，对应"符号定义" */
   symbol_nodes: string[];
+  /** tree-sitter 节点类型，对应"import 声明"（可选，用于依赖提取） */
+  import_nodes?: string[];
   /** 字段名映射（tree-sitter 字段 → ParsedSymbol 字段） */
   field_map: {
     name: string;
@@ -36,10 +38,10 @@ export interface LanguageEntry {
 /** 150+ 语言注册表（npm 包名已与官方仓库对齐） */
 export const LANGUAGES: LanguageEntry[] = [
   // === Web/JS 生态 ===
-  { name: 'typescript', pkg: 'typescript', exts: ['.ts'], symbol_nodes: ['function_declaration', 'class_declaration', 'interface_declaration', 'method_definition'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
-  { name: 'tsx', pkg: 'tsx', exts: ['.tsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
-  { name: 'javascript', pkg: 'javascript', exts: ['.js', '.mjs', '.cjs'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], field_map: { name: 'name', parameters: 'parameters' } },
-  { name: 'jsx', pkg: 'jsx', exts: ['.jsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], field_map: { name: 'name', parameters: 'parameters' } },
+  { name: 'typescript', pkg: 'typescript', exts: ['.ts'], symbol_nodes: ['function_declaration', 'class_declaration', 'interface_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  { name: 'tsx', pkg: 'tsx', exts: ['.tsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  { name: 'javascript', pkg: 'javascript', exts: ['.js', '.mjs', '.cjs'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters' } },
+  { name: 'jsx', pkg: 'jsx', exts: ['.jsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'vue', pkg: 'vue', exts: ['.vue'], symbol_nodes: ['export_statement'], field_map: { name: 'name' } },
   { name: 'html', pkg: 'html', exts: ['.html', '.htm'], symbol_nodes: ['script_element'], field_map: { name: 'name' } },
   { name: 'css', pkg: 'css', exts: ['.css'], symbol_nodes: ['rule_set'], field_map: { name: 'name' } },
@@ -47,8 +49,8 @@ export const LANGUAGES: LanguageEntry[] = [
   { name: 'less', pkg: 'less', exts: ['.less'], symbol_nodes: ['rule_set'], field_map: { name: 'name' } },
 
   // === 后端语言 ===
-  { name: 'go', pkg: 'go', exts: ['.go'], symbol_nodes: ['function_declaration', 'method_declaration', 'type_declaration', 'type_spec'], field_map: { name: 'name', parameters: 'parameters', return_type: 'result', receiver: 'receiver' } },
-  { name: 'python', pkg: 'python', exts: ['.py'], symbol_nodes: ['function_definition', 'class_definition'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  { name: 'go', pkg: 'go', exts: ['.go'], symbol_nodes: ['function_declaration', 'method_declaration', 'type_declaration', 'type_spec'], import_nodes: ['import_spec'], field_map: { name: 'name', parameters: 'parameters', return_type: 'result', receiver: 'receiver' } },
+  { name: 'python', pkg: 'python', exts: ['.py'], symbol_nodes: ['function_definition', 'class_definition'], import_nodes: ['import_statement', 'import_from_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
   { name: 'java', pkg: 'java', exts: ['.java'], symbol_nodes: ['class_declaration', 'method_declaration', 'interface_declaration'], field_map: { name: 'name', parameters: 'parameters', return_type: 'type' } },
   { name: 'c', pkg: 'c', exts: ['.c', '.h'], symbol_nodes: ['function_definition', 'struct_specifier'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'cpp', pkg: 'cpp', exts: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx'], symbol_nodes: ['function_definition', 'class_specifier', 'struct_specifier', 'namespace_definition'], field_map: { name: 'name', parameters: 'parameters' } },

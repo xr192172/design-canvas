@@ -62,6 +62,27 @@ describe('ts_kernel - parseFile', () => {
     _reset();
   });
 
+  it('大文件（≥32KB）应通过 callback 路径解析，且多字节字符不错位', async () => {
+    // 构造超过 32768 字符的 TS 文件：中文注释（3 字节/字符）+ 大量函数
+    const header = '// 设计画布内核：大文件解析回归测试。中文注释占三字节，验证 UTF-8 字节偏移映射。\n';
+    const fnCount = 900; // 900 × ~40 字符 ≈ 36KB，确保触发 callback 路径
+    let body = header;
+    for (let i = 0; i < fnCount; i++) {
+      body += `export function fn_${i}(x: number): number { // 函数 ${i} 中文备注\n  return x + ${i};\n}\n`;
+    }
+    expect(body.length).toBeGreaterThan(32768);
+
+    const symbols = await parseFile('big.ts', body);
+    expect(symbols.length).toBe(fnCount);
+    // 抽查首/中/尾函数名与行号无错位（错位说明字节映射有误）
+    expect(symbols[0].name).toBe('fn_0');
+    expect(symbols[450].name).toBe('fn_450');
+    expect(symbols[fnCount - 1].name).toBe(`fn_${fnCount - 1}`);
+    expect(symbols[fnCount - 1].start_line).toBeGreaterThan(symbols[0].start_line);
+    // 签名中的中文不应出现替换字符 U+FFFD
+    expect(JSON.stringify(symbols)).not.toContain('�');
+  });
+
   it('Go: 解析 function + method', async () => {
     const goCode = `
 package main
