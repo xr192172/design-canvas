@@ -28,6 +28,7 @@ import { submitApproval, reviewAnnotation, listApprovals, getApprovalHistory } f
 import { saveSnapshot, listSnapshots, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
 import { listTemplates, createFromTemplate } from './tools/templates.js';
 import { importProject } from './tools/import_project.js';
+import { checkMonolith } from './tools/monolith.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -51,6 +52,7 @@ const server = new McpServer(
       '\n\n6. 自动布局：dag_layout（拓扑排序）/ force_layout（力导向）/ grid_align（网格对齐）一键整理画布，避免连线混乱。' +
       '\n\n7. 仿真器：run_simulation 批量传入事件验证事件级联和条件触发 → get_simulation_state 读取当前状态 → reset_simulation 重置。' +
       '\n   仿真器是事件驱动状态机，不是动画播放器。用于验证"数据流入 → 规则触发 → 状态变化"是否符合预期。' +
+      '\n\n8. 单文件监控：check_monolith 扫描文件行数，超阈值文件自动做 Louvain 社区发现，给出功能内聚拆分建议（仅建议不改代码）。' +
       '\n\n增量模式让你逐步完善设计，避免每次重写整个 JSON。所有修改自动保存到 .design-canvas/features/。',
   },
 );
@@ -1009,6 +1011,50 @@ server.registerTool(
         title: args.title,
         max_files: args.max_files,
         include_tests: args.include_tests,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// check_monolith：监控文件行数，识别单文件化风险并给出功能内聚拆分建议
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'check_monolith',
+  {
+    title: 'Check monolithic files & suggest splits',
+    description:
+      '监控文件行数：超阈值（默认 warning≥300 / critical≥600 行）的文件自动跑 tree-sitter 声明提取 + 引用图 + Louvain 社区发现，' +
+      '把互相引用紧密的声明聚成"功能内聚社区"，给出拆分建议（新文件名 + 每社区声明清单 + 社区间引用边）。' +
+      '三种输入模式：project_dir 扫描目录 / feature 读 semantic.files / files 显式列表。' +
+      'save_preview=true 时把拆分后视图保存为新 feature（社区为子节点），render_dsl 即可预览。仅建议，不改代码。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('模式1：扫描项目目录（与 feature/files 三选一）'),
+      feature: z.string().optional().describe('模式2：从已存 feature 的 semantic.files 取文件列表'),
+      base_dir: z.string().optional().describe('feature 模式下解析相对路径的项目根（默认 cwd）'),
+      files: z.array(z.string()).optional().describe('模式3：显式文件路径列表'),
+      warn_lines: z.number().optional().describe('warning 阈值（默认 300 行）'),
+      crit_lines: z.number().optional().describe('critical 阈值（默认 600 行）'),
+      max_files: z.number().optional().describe('扫描模式最多文件数（默认 200）'),
+      save_preview: z.boolean().optional().describe('是否生成拆分预览 DSL 并保存为 feature（默认 false）'),
+      preview_feature: z.string().optional().describe('预览 DSL 的 feature 名（默认 <feature|monolith>_split_preview）'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await checkMonolith({
+        project_dir: args.project_dir,
+        feature: args.feature,
+        base_dir: args.base_dir,
+        files: args.files,
+        warn_lines: args.warn_lines,
+        crit_lines: args.crit_lines,
+        max_files: args.max_files,
+        save_preview: args.save_preview,
+        preview_feature: args.preview_feature,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

@@ -25,6 +25,7 @@ import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi } from '../dsl/ty
 import { saveDSL } from '../storage.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
+import { countLines, assessLines } from './monolith.js';
 
 export interface ImportProjectInput {
   /** 目标项目根目录（绝对路径或相对 cwd） */
@@ -335,8 +336,9 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const index = buildIndex(files);
   const goModule = readGoModule(root);
 
-  // 2. 解析符号 + import
+  // 2. 解析符号 + import（顺带统计行数，零成本复用已读内容做单文件监控）
   const parsed = new Map<string, { symbols: ExpectedApi[]; imports: ParsedImport[] }>();
+  const lineCounts = new Map<string, number>();
   let symbolsFound = 0;
   for (const f of files) {
     let content: string;
@@ -346,6 +348,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       skipped.push(`读取失败: ${f.rel}`);
       continue;
     }
+    lineCounts.set(f.rel, countLines(content));
     const full = await parseFileFull(f.abs, content);
     // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
     const apis: ExpectedApi[] = full.symbols.slice(0, 50).map((s) => ({
@@ -592,11 +595,21 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   saveDSL(dsl);
 
   const dirCount = nodes.filter((n) => n.type === 'module').length;
+  // 单文件化预警：行数超阈值的文件点名（仅行数统计，详细拆分建议走 check_monolith）
+  const oversized = files
+    .map((f) => ({ rel: f.rel, lines: lineCounts.get(f.rel) ?? 0 }))
+    .filter((x) => assessLines(x.lines) !== 'ok')
+    .sort((a, b) => b.lines - a.lines);
   const message = [
     `已导入项目 → feature "${feature}"`,
     `项目根: ${root}`,
     `文件: ${files.length} 个（符号 ${symbolsFound} 个，依赖边 ${fileDeps.length} 条，目录容器 ${dirCount} 个）`,
     goModule ? `Go module: ${goModule}` : null,
+    oversized.length > 0
+      ? `⚠ 单文件化预警 ${oversized.length} 个:\n  - ${oversized
+          .map((x) => `${x.rel}（${x.lines} 行${x.lines >= 600 ? '，严重' : ''}）`)
+          .join('\n  - ')}\n  → 运行 check_monolith 获取功能内聚拆分建议`
+      : null,
     skipped.length > 0 ? `跳过/截断:\n  - ${skipped.join('\n  - ')}` : null,
     `下一步: render_dsl 渲染预览，或 get_dsl 查看/修改。`,
   ].filter(Boolean).join('\n');
