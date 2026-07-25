@@ -641,6 +641,22 @@ ${dsl.simulation.initial_state.map(s => `          <div class="sim-state-row" da
           <button id="anim-resume" class="sim-btn">▶ 继续</button>
           <button id="anim-reset" class="sim-btn sim-btn-secondary">↺ 重置动画</button>
         </div>
+        <div class="anim-speed" title="动画速度（0.25x - 2x）">
+          <span class="anim-speed-label">速度</span>
+          <input type="range" id="anim-speed" min="0.25" max="2" step="0.25" value="1">
+          <span id="anim-speed-val" class="anim-speed-val">1x</span>
+        </div>
+        <details class="anim-legend">
+          <summary>图例</summary>
+          <div class="anim-legend-body">
+            <div><i class="lg-dot lg-explicit"></i>显式数据流（带标签）</div>
+            <div><i class="lg-dot lg-default"></i>L0 氛围流（无标签）</div>
+            <div><i class="lg-flash lg-yellow"></i>黄闪：函数调用（ƒ）</div>
+            <div><i class="lg-flash lg-green"></i>彩闪：分支命中（按分支着色）</div>
+            <div><i class="lg-flash lg-gray"></i>灰闪：分支全未命中</div>
+            <div><i class="lg-flash lg-red"></i>红闪：异常（长闪=未声明）</div>
+          </div>
+        </details>
         <div class="sim-trace-wrap">
           <h3>触发日志</h3>
           <div id="sim-trace" class="sim-trace"></div>

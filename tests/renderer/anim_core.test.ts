@@ -20,6 +20,7 @@ import {
   makeSnapshot,
   parseApiName,
   formatHandlerArgs,
+  formatValueShort,
 } from '../../src/renderer/anim_core';
 
 describe('evalCondition - 条件表达式求值', () => {
@@ -311,5 +312,24 @@ describe('formatHandlerArgs - handler 调用参数格式化', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     expect(formatHandlerArgs({ c: circular })).toContain('c=');
+  });
+});
+
+describe('formatValueShort - IO 浮层输出预览格式化', () => {
+  it('null/undefined → 空串', () => {
+    expect(formatValueShort(null)).toBe('');
+    expect(formatValueShort(undefined)).toBe('');
+  });
+
+  it('字符串原样；对象 JSON 序列化', () => {
+    expect(formatValueShort('ok')).toBe('ok');
+    expect(formatValueShort({ token: 't1' })).toBe('{"token":"t1"}');
+    expect(formatValueShort(42)).toBe('42');
+  });
+
+  it('超 maxLen 截断带省略号', () => {
+    const out = formatValueShort({ data: 'x'.repeat(60) }, 32);
+    expect(out.length).toBeLessThanOrEqual(32);
+    expect(out).toContain('…');
   });
 });

@@ -244,6 +244,28 @@ export function formatHandlerArgs(
   return parts.join(', ');
 }
 
+/**
+ * 格式化任意值为短字符串（用于 IO 浮层输出预览、步进器数据展示）
+ * 对象/数组走 JSON.stringify，超 maxLen 截断；null/undefined → ''
+ */
+export function formatValueShort(v: unknown, maxLen?: number): string {
+  if (v === null || v === undefined) return '';
+  var limit = maxLen || 32;
+  var s: string;
+  if (typeof v === 'string') {
+    s = v;
+  } else {
+    try {
+      s = JSON.stringify(v);
+    } catch (e) {
+      s = String(v);
+    }
+  }
+  if (s == null) s = String(v);
+  if (s.length > limit) s = s.substring(0, limit - 1) + '…';
+  return s;
+}
+
 // ─────────────────────────────────────────────────────────────
 // L4.5 异常匹配
 // ─────────────────────────────────────────────────────────────

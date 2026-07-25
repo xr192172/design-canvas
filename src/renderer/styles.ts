@@ -26,6 +26,14 @@ export function buildStyles(): string {
   --theme-success: #4caf50;
   --theme-warning: #ff9800;
   --theme-error: #f44336;
+  /* 动画卡片（数据 chip/折叠卡）语义令牌 */
+  --anim-card-active-bg: #1e3a5f;
+  --anim-card-active-border: #3a5a8a;
+  --anim-card-folded-bg: #1a2440;
+  --anim-card-folded-border: #33456e;
+  --anim-card-title: #ffffff;
+  --anim-card-folded-title: #8ea3c8;
+  --anim-card-body: #8ea3c8;
 }
 
 [data-theme="sakura"] {
@@ -49,6 +57,13 @@ export function buildStyles(): string {
   --theme-success: #4caf50;
   --theme-warning: #ff9800;
   --theme-error: #f44336;
+  --anim-card-active-bg: #4a2c56;
+  --anim-card-active-border: #6a3e78;
+  --anim-card-folded-bg: #33203e;
+  --anim-card-folded-border: #4a2c50;
+  --anim-card-title: #ffffff;
+  --anim-card-folded-title: #c495b8;
+  --anim-card-body: #c495b8;
 }
 
 [data-theme="forest"] {
@@ -72,6 +87,13 @@ export function buildStyles(): string {
   --theme-success: #4caf50;
   --theme-warning: #ff9800;
   --theme-error: #f44336;
+  --anim-card-active-bg: #2f5230;
+  --anim-card-active-border: #4a7a4c;
+  --anim-card-folded-bg: #1f381f;
+  --anim-card-folded-border: #2d4d2d;
+  --anim-card-title: #ffffff;
+  --anim-card-folded-title: #81c784;
+  --anim-card-body: #81c784;
 }
 
 [data-theme="ocean"] {
@@ -95,6 +117,13 @@ export function buildStyles(): string {
   --theme-success: #4caf50;
   --theme-warning: #ff9800;
   --theme-error: #f44336;
+  --anim-card-active-bg: #1e4a7a;
+  --anim-card-active-border: #2e5f94;
+  --anim-card-folded-bg: #113155;
+  --anim-card-folded-border: #1a3f6b;
+  --anim-card-title: #ffffff;
+  --anim-card-folded-title: #64b5f6;
+  --anim-card-body: #64b5f6;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1505,6 +1534,61 @@ footer button:active {
   flex-wrap: wrap;
   margin-bottom: 8px;
 }
+/* 动画速度控制 */
+.anim-speed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--theme-text-sub);
+}
+.anim-speed input[type="range"] {
+  flex: 1;
+  height: 4px;
+  accent-color: var(--theme-primary);
+  cursor: pointer;
+}
+.anim-speed-val {
+  min-width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--theme-text);
+}
+/* 动画图例 */
+.anim-legend {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--theme-text-sub);
+}
+.anim-legend summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  color: var(--theme-text-dim);
+}
+.anim-legend summary:hover { color: var(--theme-text); }
+.anim-legend-body {
+  padding: 6px 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.anim-legend-body i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.lg-dot.lg-explicit { background: var(--theme-accent); box-shadow: 0 0 0 1px #fff inset; }
+.lg-dot.lg-default { background: var(--theme-accent); opacity: 0.45; width: 7px; height: 7px; }
+.anim-legend-body i.lg-flash { border-radius: 2px; }
+.lg-flash.lg-yellow { background: #ffeb3b; }
+.lg-flash.lg-green { background: #4CAF50; }
+.lg-flash.lg-gray { background: #666; }
+.lg-flash.lg-red { background: #ff1744; }
 .sim-btn {
   background: var(--theme-border);
   border: none;

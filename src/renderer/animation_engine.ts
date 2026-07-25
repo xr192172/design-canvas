@@ -48,6 +48,8 @@ export function buildAnimationScript(dsl: DesignDSL): string {
       to: edge.to,
       interval: 4000,
       color: edge.style?.stroke ?? '',
+      // L0 氛围层粒子不带标签（explicit=false），label 仅用于聚焦匹配
+      label: edge.label ?? '',
       edgeId: edge.id,
     });
   }
@@ -109,19 +111,20 @@ ${ANIM_CORE_SOURCE}
   };
 
   // ---- 卡片通用样式常量 ----
+  // 颜色走 getter 运行时读 cssVar：主题切换即时生效，且消除硬编码紫色残留
   var CARD_STYLE = {
     activeH: 50,
     foldedH: 26,
     padX: 8,
     padY: 6,
     gap: 4,
-    activeFill: '#1e3a5f',
-    foldedFill: '#2d2d5a',
-    activeStroke: '#3a5a8a',
-    foldedStroke: '#5a4a8a',
-    titleColor: '#ffffff',
-    foldedTitleColor: '#b39ddb',
-    bodyColor: '#8b9bb4'
+    get activeFill() { return cssVar('--anim-card-active-bg', '#1e3a5f'); },
+    get foldedFill() { return cssVar('--anim-card-folded-bg', '#1a2440'); },
+    get activeStroke() { return cssVar('--anim-card-active-border', '#3a5a8a'); },
+    get foldedStroke() { return cssVar('--anim-card-folded-border', '#33456e'); },
+    get titleColor() { return cssVar('--anim-card-title', '#ffffff'); },
+    get foldedTitleColor() { return cssVar('--anim-card-folded-title', '#8ea3c8'); },
+    get bodyColor() { return cssVar('--anim-card-body', '#8ea3c8'); }
   };
 
   // flow.layout 覆盖默认卡片布局
@@ -143,6 +146,7 @@ ${ANIM_CORE_SOURCE}
     animFrame: null,
     paused: false,
     stepMode: false,
+    speedMul: 1,
     flowTimers: {},
     prevStatusSnapshot: {},
     started: false,
@@ -718,50 +722,55 @@ ${ANIM_CORE_SOURCE}
     var ns = 'http://www.w3.org/2000/svg';
     var g = document.createElementNS(ns, 'g');
     g.setAttribute('class', 'anim-particle-v2');
+    if (opts.flowId) g.setAttribute('data-flow-id', opts.flowId);
     g.style.opacity = '0';
     g.style.transition = 'opacity 0.3s';
 
+    // L0 默认流（氛围层：小、淡、无标签）与 L2+ 显式流（信息层：大、亮、带标签）视觉分层
+    var isExplicit = !!opts.explicit;
     var circle = document.createElementNS(ns, 'circle');
-    circle.setAttribute('r', '6');
+    circle.setAttribute('r', isExplicit ? '6' : '4');
     circle.setAttribute('fill', opts.color || cssVar('--theme-accent', '#4fc3f7'));
-    circle.setAttribute('opacity', '0.9');
-    circle.setAttribute('stroke', '#ffffff');
-    circle.setAttribute('stroke-width', '1');
+    circle.setAttribute('opacity', isExplicit ? '0.95' : '0.45');
+    if (isExplicit) {
+      circle.setAttribute('stroke', '#ffffff');
+      circle.setAttribute('stroke-width', '1');
+    }
     g.appendChild(circle);
 
-    if (opts.valueLabel) {
+    // 数据/流标签：统一渲染为带背景胶囊（valueLabel 优先，其次 label），
+    // 10.5px 字号 + 背景底板，画布缩小时仍可读；仅显式流渲染，L0 氛围层不带标签
+    var tagText = isExplicit ? (opts.valueLabel || opts.label) : '';
+    if (tagText) {
       var labelBg = document.createElementNS(ns, 'rect');
-      var labelText = opts.valueLabel;
-      var labelWidth = Math.max(labelText.length * 6 + 8, 30);
+      var labelWidth = Math.max(tagText.length * 7 + 10, 34);
       labelBg.setAttribute('x', -labelWidth / 2);
-      labelBg.setAttribute('y', -22);
+      labelBg.setAttribute('y', '-26');
       labelBg.setAttribute('width', labelWidth);
-      labelBg.setAttribute('height', '14');
-      labelBg.setAttribute('rx', '3');
+      labelBg.setAttribute('height', '16');
+      labelBg.setAttribute('rx', '4');
       labelBg.setAttribute('fill', opts.color || cssVar('--theme-accent', '#4fc3f7'));
-      labelBg.setAttribute('opacity', '0.85');
+      labelBg.setAttribute('opacity', '0.9');
       g.appendChild(labelBg);
 
       var text = document.createElementNS(ns, 'text');
       text.setAttribute('x', '0');
-      text.setAttribute('y', '-12');
+      text.setAttribute('y', '-14');
       text.setAttribute('text-anchor', 'middle');
       text.setAttribute('fill', '#ffffff');
-      text.setAttribute('style', 'font-size:9px;font-weight:500;pointer-events:none;');
-      text.textContent = labelText;
+      text.setAttribute('style', 'font-size:10.5px;font-weight:600;pointer-events:none;');
+      text.textContent = tagText;
       g.appendChild(text);
-    } else if (opts.label) {
-      var text0 = document.createElementNS(ns, 'text');
-      text0.setAttribute('x', '0');
-      text0.setAttribute('y', '-10');
-      text0.setAttribute('text-anchor', 'middle');
-      text0.setAttribute('fill', '#ffffff');
-      text0.setAttribute('style', 'font-size:10px;pointer-events:none;');
-      text0.textContent = opts.label;
-      g.appendChild(text0);
     }
 
     layer.appendChild(g);
+
+    // 匀速运动：pxPerFrame（px/帧）按路径长度换算 t 增量，长短线速度一致
+    var dist = pathLen;
+    if (!pathEl && start && end) {
+      dist = Math.sqrt((end.x - start.x) * (end.x - start.x) + (end.y - start.y) * (end.y - start.y));
+    }
+    if (!dist || dist < 1) dist = 1;
 
     var particle = {
       el: g,
@@ -772,10 +781,12 @@ ${ANIM_CORE_SOURCE}
       endX: end ? end.x : 0,
       endY: end ? end.y : 0,
       t: 0,
-      speed: opts.speed || 0.012,
+      pxPerFrame: opts.speedPx || 2.2,
+      dist: dist,
       color: opts.color,
       label: opts.valueLabel || opts.label,
       valueType: opts.valueType,
+      outputPreview: opts.outputPreview || null,
       flowId: opts.flowId,
       targetNodeId: opts.to,
       branches: opts.branches,
@@ -785,7 +796,7 @@ ${ANIM_CORE_SOURCE}
 
     if (opts.explicit && opts.valueType) {
       particle.onComplete = function(p) {
-        showNodeIOPrompt(p.targetNodeId, p.valueType, p.label);
+        showNodeIOPrompt(p.targetNodeId, p.valueType, p.label, p.outputPreview);
       };
     }
 
@@ -813,7 +824,8 @@ ${ANIM_CORE_SOURCE}
 
     var args = applyInputMapping(h.input_mapping, evalValue, undefined);
     showHandlerCall(h.file_id, h.api, args, signature);
-    flashNode(h.file_id, '#ffeb3b', 700);
+    // 闪烁时长收敛（与浮层 3.2s 错峰，降低视觉噪音）
+    flashNode(h.file_id, '#ffeb3b', 450);
 
     if (h.live) {
       console.warn('[animV2] handler.live 未实现（阶段H），回退 mock:', h.api);
@@ -918,8 +930,8 @@ ${ANIM_CORE_SOURCE}
     g.style.pointerEvents = 'none';
 
     var callText = 'ƒ ' + api + '(' + argStr + ')';
-    var w = Math.max(140, callText.length * 6.4 + 16);
-    var h = signature ? 36 : 22;
+    var w = Math.max(150, callText.length * 7.6 + 16);
+    var h = signature ? 42 : 24;
     var x = rect.x + rect.w / 2 - w / 2;
     var y = rect.y - h - 6;
     if (y < 4) y = rect.y + rect.h + 6;
@@ -938,9 +950,9 @@ ${ANIM_CORE_SOURCE}
 
     var text1 = document.createElementNS(ns, 'text');
     text1.setAttribute('x', x + 8);
-    text1.setAttribute('y', y + 14);
+    text1.setAttribute('y', y + 16);
     text1.setAttribute('fill', '#ffeb3b');
-    text1.setAttribute('style', 'font-size:10px;font-weight:600;font-family:monospace;');
+    text1.setAttribute('style', 'font-size:12px;font-weight:600;font-family:monospace;');
     text1.textContent = callText;
     g.appendChild(text1);
 
@@ -949,9 +961,9 @@ ${ANIM_CORE_SOURCE}
       if (sig.length > 60) sig = sig.substring(0, 59) + '…';
       var text2 = document.createElementNS(ns, 'text');
       text2.setAttribute('x', x + 8);
-      text2.setAttribute('y', y + 28);
+      text2.setAttribute('y', y + 32);
       text2.setAttribute('fill', '#8b9bb4');
-      text2.setAttribute('style', 'font-size:9px;font-family:monospace;');
+      text2.setAttribute('style', 'font-size:10px;font-family:monospace;');
       text2.textContent = sig;
       g.appendChild(text2);
     }
@@ -963,7 +975,7 @@ ${ANIM_CORE_SOURCE}
       setTimeout(function() {
         if (g.parentNode) g.parentNode.removeChild(g);
       }, 300);
-    }, 1800);
+    }, 3200);
   }
 
   function spawnDefaultParticle(flow, payloadData) {
@@ -1009,6 +1021,7 @@ ${ANIM_CORE_SOURCE}
         label: flow.label,
         valueLabel: bVal ? (bVal.label || bVal.type) : flow.valueLabel,
         valueType: bVal ? bVal.type : flow.valueType,
+        outputPreview: handlerCtx ? formatValueShort(handlerCtx.result, 32) : null,
         flowId: flow.id + '::' + picked.branch.to,
         onArrive: flow.onArrive,
         explicit: flow.explicit
@@ -1041,6 +1054,7 @@ ${ANIM_CORE_SOURCE}
       label: flow.label,
       valueLabel: flow.valueLabel,
       valueType: flow.valueType,
+      outputPreview: handlerCtx ? formatValueShort(handlerCtx.result, 32) : null,
       flowId: flow.id,
       branches: flow.branches,
       onArrive: flow.onArrive,
@@ -1188,7 +1202,7 @@ ${ANIM_CORE_SOURCE}
   }
 
   // ---- L2 节点处输入/输出提示 ----
-  function showNodeIOPrompt(nodeId, inputType, inputLabel) {
+  function showNodeIOPrompt(nodeId, inputType, inputLabel, outputPreview) {
     var rect = getNodeRect(nodeId);
     if (!rect) return;
 
@@ -1207,8 +1221,8 @@ ${ANIM_CORE_SOURCE}
     var bg = document.createElementNS(ns, 'rect');
     bg.setAttribute('x', promptX);
     bg.setAttribute('y', promptY);
-    bg.setAttribute('width', '160');
-    bg.setAttribute('height', '32');
+    bg.setAttribute('width', '180');
+    bg.setAttribute('height', '36');
     bg.setAttribute('rx', '4');
     bg.setAttribute('fill', '#1a1a2e');
     bg.setAttribute('stroke', cssVar('--theme-accent', '#4fc3f7'));
@@ -1218,18 +1232,21 @@ ${ANIM_CORE_SOURCE}
 
     var text1 = document.createElementNS(ns, 'text');
     text1.setAttribute('x', promptX + 8);
-    text1.setAttribute('y', promptY + 13);
+    text1.setAttribute('y', promptY + 15);
     text1.setAttribute('fill', cssVar('--theme-accent', '#4fc3f7'));
-    text1.setAttribute('style', 'font-size:10px;font-weight:600;');
+    text1.setAttribute('style', 'font-size:11px;font-weight:600;');
     text1.textContent = '输入: ' + (inputLabel || inputType);
     g.appendChild(text1);
 
+    // 输出展示 handler 真实返回（mock 模式下为 mock 值），无结果时提示无输出
+    var outText = outputPreview ? String(outputPreview) : '(无输出)';
+    if (outText.length > 26) outText = outText.substring(0, 25) + '…';
     var text2 = document.createElementNS(ns, 'text');
     text2.setAttribute('x', promptX + 8);
-    text2.setAttribute('y', promptY + 26);
-    text2.setAttribute('fill', '#888');
-    text2.setAttribute('style', 'font-size:10px;');
-    text2.textContent = '输出: ???';
+    text2.setAttribute('y', promptY + 29);
+    text2.setAttribute('fill', outputPreview ? '#8ea3c8' : '#5a6f94');
+    text2.setAttribute('style', 'font-size:11px;');
+    text2.textContent = '输出: ' + outText;
     g.appendChild(text2);
 
     layer.appendChild(g);
@@ -1240,7 +1257,7 @@ ${ANIM_CORE_SOURCE}
       setTimeout(function() {
         if (g.parentNode) g.parentNode.removeChild(g);
       }, 300);
-    }, 1500);
+    }, 2800);
   }
 
   function tickParticles() {
@@ -1250,9 +1267,11 @@ ${ANIM_CORE_SOURCE}
     }
 
     var remaining = [];
+    var speedMul = state.speedMul || 1;
     for (var i = 0; i < state.activeParticles.length; i++) {
       var p = state.activeParticles[i];
-      p.t += p.speed * (state.stepMode ? 0.1 : 1);
+      // 像素匀速：t 增量 = px/帧 ÷ 路径长度，乘全局速度倍率；步进模式 0.1x
+      p.t += (p.pxPerFrame * speedMul * (state.stepMode ? 0.1 : 1)) / p.dist;
 
       var x, y;
       if (p.t >= 1) {
@@ -1592,6 +1611,74 @@ ${ANIM_CORE_SOURCE}
     bind('anim-step', step);
     bind('anim-resume', resume);
     bind('anim-reset', reset);
+
+    // 速度滑块：0.25x - 2x，实时作用于全局倍率
+    var speedInput = document.getElementById('anim-speed');
+    var speedVal = document.getElementById('anim-speed-val');
+    if (speedInput) {
+      speedInput.addEventListener('input', function() {
+        state.speedMul = parseFloat(speedInput.value) || 1;
+        if (speedVal) speedVal.textContent = speedInput.value + 'x';
+      });
+    }
+  }
+
+  // ---- 单流聚焦：hover 边时，非该流粒子降噪（opacity 0.12），移开恢复 ----
+  // 匹配规则：默认流 flowId=default_flow_<edgeId>；显式流按 from->to 与边匹配
+  var edgeFlowMap = null;
+  function buildEdgeFlowMap() {
+    edgeFlowMap = {};
+    var add = function(edgeId, flowId) {
+      if (!edgeFlowMap[edgeId]) edgeFlowMap[edgeId] = {};
+      edgeFlowMap[edgeId][flowId] = true;
+    };
+    var pairIndex = {};
+    DEFAULT_FLOWS.forEach(function(f) {
+      add(f.edgeId, f.id);
+      pairIndex[f.from + '->' + f.to] = f.edgeId;
+    });
+    EXPLICIT_FLOWS.forEach(function(f) {
+      var eid = pairIndex[(f.from || '') + '->' + (f.to || '')];
+      if (eid) add(eid, f.id);
+    });
+  }
+
+  function setFlowFocus(edgeId) {
+    var layer = ensureAnimLayer();
+    if (!layer) return;
+    if (!edgeFlowMap) buildEdgeFlowMap();
+    var matchSet = edgeId ? (edgeFlowMap[edgeId] || null) : null;
+    var particles = layer.querySelectorAll('.anim-particle-v2');
+    for (var i = 0; i < particles.length; i++) {
+      var fid = particles[i].getAttribute('data-flow-id') || '';
+      if (!matchSet) {
+        particles[i].style.opacity = '';
+      } else {
+        var hit = !!matchSet[fid];
+        if (!hit && fid.indexOf('::') > 0) hit = !!matchSet[fid.split('::')[0]];
+        particles[i].style.opacity = hit ? '1' : '0.12';
+      }
+    }
+  }
+
+  function setupFlowFocus() {
+    var svg = getSvgCanvas();
+    if (!svg || svg.__flowFocusBound) return;
+    svg.__flowFocusBound = true;
+    svg.addEventListener('mouseover', function(e) {
+      var t = e.target;
+      var edgeG = (t && t.closest) ? t.closest('.edge') : null;
+      if (edgeG) setFlowFocus(edgeG.getAttribute('data-id'));
+    });
+    svg.addEventListener('mouseout', function(e) {
+      var t = e.target;
+      var edgeG = (t && t.closest) ? t.closest('.edge') : null;
+      if (!edgeG) return;
+      var to = e.relatedTarget;
+      var toEdge = (to && to.closest) ? to.closest('.edge') : null;
+      if (toEdge === edgeG) return;
+      setFlowFocus(toEdge ? toEdge.getAttribute('data-id') : null);
+    });
   }
 
   // ---- 启动 ----
@@ -1606,6 +1693,7 @@ ${ANIM_CORE_SOURCE}
         startDefaultFlows();
         startStatusWatch();
         runCardSyncFlows();
+        setupFlowFocus();
         console.log('[animV2] started, flows:', Object.keys(state.flowTimers).length, 'statusNodes:', STATUS_NODES.length, 'simRules:', SIM_RULES.length);
       } catch (e) {
         console.error('[animV2] start failed:', e);
@@ -1668,5 +1756,6 @@ interface DefaultFlowConfig {
   to: string;
   interval: number;
   color: string;
+  label: string;
   edgeId: string;
 }
