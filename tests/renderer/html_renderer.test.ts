@@ -235,3 +235,139 @@ describe('renderHTML - 安全性', () => {
     expect(html).not.toMatch(/<\/script><script>alert/);
   });
 });
+
+describe('renderHTML - 职责分层', () => {
+  function makeLayeredDSL(): DesignDSL {
+    const dsl = makeMinimalDSL();
+    dsl.geometry.nodes.push(
+      { id: 'err1', x: 10, y: 200, width: 100, height: 50, label: '异常处理', layer: 'error', host: 'n1' },
+      { id: 'det1', x: 200, y: 200, width: 100, height: 50, label: '实现细节', layer: 'detail', host: 'n2' },
+    );
+    dsl.geometry.edges!.push(
+      { id: 'e_err', from: 'n1', to: 'err1', label: 'on error' },
+      { id: 'e_det', from: 'n2', to: 'det1', label: '内部步骤' },
+    );
+    return dsl;
+  }
+
+  it('深层节点渲染 display:none + data-layer + data-host', () => {
+    const html = renderHTML(makeLayeredDSL());
+    // error 节点
+    expect(html).toMatch(/<g class="node[^"]*" data-id="err1"[^>]*data-layer="error"/);
+    expect(html).toMatch(/data-id="err1"[^>]*data-host="n1"/);
+    expect(html).toMatch(/data-id="err1"[^>]*style="display:none"/);
+    // detail 节点
+    expect(html).toMatch(/data-id="det1"[^>]*data-layer="detail"/);
+    expect(html).toMatch(/data-id="det1"[^>]*style="display:none"/);
+  });
+
+  it('main 节点不带 data-layer / display:none', () => {
+    const html = renderHTML(makeLayeredDSL());
+    const n1Match = html.match(/<g class="node[^"]*" data-id="n1"[^>]*>/);
+    expect(n1Match).toBeTruthy();
+    expect(n1Match![0]).not.toContain('data-layer');
+    expect(n1Match![0]).not.toContain('display:none');
+  });
+
+  it('边层自动推导：跟随端点较深层', () => {
+    const html = renderHTML(makeLayeredDSL());
+    // n1(main)→err1(error) 的边推导为 error 层并隐藏
+    expect(html).toMatch(/data-id="e_err"[^>]*data-layer="error"[^>]*style="display:none"/);
+    expect(html).toMatch(/data-id="e_det"[^>]*data-layer="detail"[^>]*style="display:none"/);
+    // main 边不受影响
+    const e1Match = html.match(/<g class="edge" data-id="e1"[^>]*>/);
+    expect(e1Match).toBeTruthy();
+    expect(e1Match![0]).not.toContain('data-layer');
+    expect(e1Match![0]).not.toContain('display:none');
+  });
+
+  it('边显式 layer 优先于端点推导', () => {
+    const dsl = makeLayeredDSL();
+    // 显式把 main→main 的边标为 error（罕见但合法）
+    dsl.geometry.edges![0].layer = 'error';
+    const html = renderHTML(dsl);
+    expect(html).toMatch(/data-id="e1"[^>]*data-layer="error"[^>]*style="display:none"/);
+  });
+
+  it('有深层节点时渲染层开关按钮（带计数），无则不渲染', () => {
+    const html = renderHTML(makeLayeredDSL());
+    expect(html).toContain('id="layer-error-toggle"');
+    expect(html).toContain('id="layer-detail-toggle"');
+    expect(html).toContain('🛡 1');
+    expect(html).toContain('🧩 1');
+
+    // 注意：scripts 内联代码里也有同名字符串，必须匹配 HTML 按钮形式
+    const plain = renderHTML(makeMinimalDSL());
+    expect(plain).not.toContain('id="layer-error-toggle"');
+    expect(plain).not.toContain('id="layer-detail-toggle"');
+  });
+
+  it('F3：flow 激活门控注入内联脚本（端点隐藏时 flow 整体不执行）', () => {
+    const html = renderHTML(makeMinimalDSL());
+    // 门控函数 + spawnDefaultParticle 入口检查都在内联动画脚本里
+    expect(html).toContain('function flowDomVisible(flow)');
+    expect(html).toContain('if (!flowDomVisible(flow)) return;');
+  });
+
+  it('F2 推导：handler.errors.to 节点自动 error 层 + host=flow.from', () => {
+    const dsl = makeMinimalDSL();
+    dsl.geometry.nodes.push({ id: 'err_sink', x: 10, y: 200, width: 100, height: 50, label: '错误池' });
+    dsl.animations_v2 = {
+      version: 1,
+      flows: [
+        {
+          id: 'f1',
+          trigger: { type: 'periodic', interval: 3000 },
+          from: 'n1',
+          to: 'n2',
+          handler: {
+            file_id: 'n1',
+            api: 'Do',
+            errors: [{ type: 'panic', condition: 'result.panic', severity: 'unexpected', to: 'err_sink' }],
+          },
+        },
+      ],
+    };
+    const html = renderHTML(dsl);
+    // err_sink 无显式 layer → 推导为 error，host=n1
+    expect(html).toMatch(/data-id="err_sink"[^>]*data-layer="error"/);
+    expect(html).toMatch(/data-id="err_sink"[^>]*data-host="n1"/);
+    // 注入的 DSL JSON 也被烘焙（浏览器端单源消费）
+    expect(html).toMatch(/"id":"err_sink"[^}]*"layer":"error"/);
+  });
+
+  it('F2 推导：显式 layer 不被覆盖；host 指向不存在节点时丢弃 host', () => {
+    const dsl = makeMinimalDSL();
+    dsl.geometry.nodes.push(
+      { id: 'err_a', x: 10, y: 200, width: 100, height: 50, label: '显式 detail', layer: 'detail' },
+      { id: 'err_b', x: 200, y: 200, width: 100, height: 50, label: '孤儿' },
+    );
+    dsl.animations_v2 = {
+      version: 1,
+      flows: [
+        {
+          id: 'f1',
+          trigger: { type: 'periodic', interval: 3000 },
+          from: 'ghost', // 不存在的节点
+          to: 'n1',
+          handler: {
+            file_id: 'n1',
+            api: 'Do',
+            errors: [
+              { type: 'e1', condition: 'x', severity: 'expected', to: 'err_a' },
+              { type: 'e2', condition: 'y', severity: 'expected', to: 'err_b' },
+            ],
+          },
+        },
+      ],
+    };
+    const html = renderHTML(dsl);
+    // 显式 detail 不被推导覆盖
+    expect(html).toMatch(/data-id="err_a"[^>]*data-layer="detail"/);
+    expect(html).not.toMatch(/data-id="err_a"[^>]*data-layer="error"/);
+    // host=ghost 不存在 → err_b 推导为 error 但无 data-host
+    expect(html).toMatch(/data-id="err_b"[^>]*data-layer="error"/);
+    const bMatch = html.match(/<g class="node[^"]*" data-id="err_b"[^>]*>/);
+    expect(bMatch![0]).not.toContain('data-host');
+  });
+});

@@ -49,6 +49,20 @@ ${EDGE_GEOM_SOURCE}
     }
   });
 
+  // ==== 职责分层：层索引 ====
+  // layerOf: nodeId → 'main'|'error'|'detail'（缺省 main）
+  // hostChildren: hostId → { error: [ids], detail: [ids] }（仅 host 指向已存在节点的才挂角标）
+  const layerOf = {};
+  const hostChildren = {};
+  (dsl.geometry?.nodes || []).forEach(n => {
+    const layer = n.layer || 'main';
+    layerOf[n.id] = layer;
+    if (layer !== 'main' && n.host && nodeById[n.host]) {
+      if (!hostChildren[n.host]) hostChildren[n.host] = { error: [], detail: [] };
+      hostChildren[n.host][layer].push(n.id);
+    }
+  });
+
   // 递归获取所有后代节点
   function getAllDescendants(nodeId) {
     const result = [];
@@ -65,6 +79,8 @@ ${EDGE_GEOM_SOURCE}
   const state = {
     selectedId: null,
     collapsed: new Set(),
+    expandedLayers: new Set(),  // 'hostId:layer' 宿主角标展开的层
+    globalLayers: { error: false, detail: false },  // 全局层开关
     dragging: null,
     dragOffset: { x: 0, y: 0 },
     connecting: null,
@@ -873,10 +889,11 @@ ${EDGE_GEOM_SOURCE}
     const isCollapsed = state.collapsed.has(nodeId);
 
     if (isCollapsed) {
-      // 展开
+      // 展开（跳过职责分层判定为不可见的深层节点）
       state.collapsed.delete(nodeId);
       nodeEl.classList.remove('collapsed');
       descendants.forEach(did => {
+        if (!isNodeVisible(did)) return;
         const descEl = document.querySelector('.node[data-id="' + did + '"]');
         if (descEl) {
           descEl.style.display = '';
@@ -884,12 +901,15 @@ ${EDGE_GEOM_SOURCE}
           setTimeout(() => descEl.classList.remove('node-enter'), 300);
         }
       });
-      // 显示相关边（但 contains 边始终隐藏）
+      // 显示相关边（但 contains 边始终隐藏；深层边跟随层可见性）
       document.querySelectorAll('.edge').forEach(edgeEl => {
         const edgeId = edgeEl.getAttribute('data-id');
         const from = edgeEl.getAttribute('data-from');
         const to = edgeEl.getAttribute('data-to');
         if ((descendants.includes(from) || descendants.includes(to)) && !isContainsEdge(edgeId)) {
+          if (!isNodeVisible(from) || !isNodeVisible(to)) return;
+          const el = edgeEl.getAttribute('data-layer') || 'main';
+          if (el !== 'main' && !isLayerExpanded(el, edgeHostOf(from, to))) return;
           edgeEl.style.display = '';
         }
       });
@@ -931,6 +951,139 @@ ${EDGE_GEOM_SOURCE}
       vb[3] = maxY + 50;
       svg.setAttribute('viewBox', vb.join(' '));
     }
+  }
+
+  // ==== 职责分层：可见性判定与展开交互 ====
+  // 层是否已展开（宿主角标 OR 全局开关）
+  function isLayerExpanded(layer, host) {
+    if (state.globalLayers[layer]) return true;
+    if (host && state.expandedLayers.has(host + ':' + layer)) return true;
+    return false;
+  }
+
+  // 节点层可见性：main 恒可见；深层看层展开；宿主本身深层时需递归可见（防环）
+  function isNodeVisible(id, visited) {
+    const layer = layerOf[id] || 'main';
+    if (layer === 'main') return true;
+    const n = nodeById[id];
+    const host = n && n.host;
+    if (!isLayerExpanded(layer, host)) return false;
+    if (host && (layerOf[host] || 'main') !== 'main') {
+      visited = visited || new Set();
+      if (visited.has(id)) return false;
+      visited.add(id);
+      return isNodeVisible(host, visited);
+    }
+    return true;
+  }
+
+  // 边的宿主推导：取深层端点的 host（两端都深层时取 from 端）
+  function edgeHostOf(from, to) {
+    if ((layerOf[from] || 'main') !== 'main') return (nodeById[from] || {}).host;
+    if ((layerOf[to] || 'main') !== 'main') return (nodeById[to] || {}).host;
+    return undefined;
+  }
+
+  // 节点 DOM 实际可见（含 collapse 维度）
+  function domVisible(id) {
+    const el = document.querySelector('.node[data-id="' + id + '"]');
+    return el ? el.style.display !== 'none' : true;
+  }
+
+  // 全量应用层可见性：深层节点按层判定（main 节点不动，归 collapse 系统管）；
+  // 边可见 = 边层已展开 且 两端点 DOM 可见（尊重 collapse）
+  function applyLayerVisibility() {
+    (dsl.geometry?.nodes || []).forEach(n => {
+      if ((layerOf[n.id] || 'main') === 'main') return;
+      const vis = isNodeVisible(n.id);
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      if (!el) return;
+      const cur = el.style.display !== 'none';
+      if (vis === cur) return;
+      el.style.display = vis ? '' : 'none';
+      if (vis) {
+        el.classList.add('node-enter');
+        setTimeout(() => el.classList.remove('node-enter'), 300);
+      }
+    });
+    document.querySelectorAll('.edge').forEach(edgeEl => {
+      const from = edgeEl.getAttribute('data-from');
+      const to = edgeEl.getAttribute('data-to');
+      const edgeLayer = edgeEl.getAttribute('data-layer') || 'main';
+      let vis = edgeLayer === 'main' || isLayerExpanded(edgeLayer, edgeHostOf(from, to));
+      if (vis && from && to) vis = domVisible(from) && domVisible(to);
+      edgeEl.style.display = vis ? '' : 'none';
+    });
+    updateCanvasViewBox();
+  }
+
+  // 生成层角标：error=⚠n（橙红）/ detail=▸n（主题色），宿主节点左上角
+  function makeLayerBadge(hostId, layer, count, cx, cy) {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'layer-badge layer-' + layer);
+    g.setAttribute('data-host', hostId);
+    g.setAttribute('data-layer', layer);
+    const icon = layer === 'error' ? '⚠' : '▸';
+    g.innerHTML = '<circle class="badge-bg" cx="' + cx + '" cy="' + cy + '" r="11"/>' +
+      '<text class="badge-text" x="' + cx + '" y="' + cy + '" text-anchor="middle" dy="0.35em">' + icon + count + '</text>';
+    g.addEventListener('click', ev => {
+      ev.stopPropagation();
+      toggleHostLayer(hostId, layer);
+    });
+    return g;
+  }
+
+  function toggleHostLayer(hostId, layer) {
+    const key = hostId + ':' + layer;
+    if (state.expandedLayers.has(key)) state.expandedLayers.delete(key);
+    else state.expandedLayers.add(key);
+    updateBadgeStates();
+    applyLayerVisibility();
+  }
+
+  function updateBadgeStates() {
+    document.querySelectorAll('.layer-badge').forEach(b => {
+      const key = b.getAttribute('data-host') + ':' + b.getAttribute('data-layer');
+      b.classList.toggle('expanded', state.expandedLayers.has(key));
+    });
+  }
+
+  // 给有深层孩子的宿主节点挂角标（左上，error 在前 detail 在后）
+  function setupLayerBadges() {
+    Object.keys(hostChildren).forEach(hostId => {
+      const nodeEl = document.querySelector('.node[data-id="' + hostId + '"]');
+      if (!nodeEl) return;
+      const rect = nodeEl.querySelector('rect');
+      if (!rect) return;
+      const x = parseFloat(rect.getAttribute('x'));
+      const y = parseFloat(rect.getAttribute('y'));
+      const groups = hostChildren[hostId];
+      let bx = x + 14;
+      if (groups.error.length > 0) {
+        nodeEl.appendChild(makeLayerBadge(hostId, 'error', groups.error.length, bx, y + 16));
+        bx += 26;
+      }
+      if (groups.detail.length > 0) {
+        nodeEl.appendChild(makeLayerBadge(hostId, 'detail', groups.detail.length, bx, y + 16));
+        bx += 26;
+      }
+    });
+  }
+
+  // 全局层开关（工具栏按钮）
+  function setupLayerControls() {
+    const errBtn = document.getElementById('layer-error-toggle');
+    const detBtn = document.getElementById('layer-detail-toggle');
+    if (errBtn) errBtn.addEventListener('click', () => {
+      state.globalLayers.error = !state.globalLayers.error;
+      errBtn.classList.toggle('active', state.globalLayers.error);
+      applyLayerVisibility();
+    });
+    if (detBtn) detBtn.addEventListener('click', () => {
+      state.globalLayers.detail = !state.globalLayers.detail;
+      detBtn.classList.toggle('active', state.globalLayers.detail);
+      applyLayerVisibility();
+    });
   }
 
   // ==== 卡片交互 ====
@@ -2606,7 +2759,12 @@ ${EDGE_GEOM_SOURCE}
       const nodes = dsl.geometry?.nodes || [];
       if (nodes.length === 0) return;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let visibleCount = 0;
       nodes.forEach(n => {
+        // 跳过不可见节点（深层折叠 / collapse 折叠），避免幽灵占位撑大画布
+        const el = document.querySelector('.node[data-id="' + n.id + '"]');
+        if (el && el.style.display === 'none') return;
+        visibleCount++;
         const x = n.x || 0, y = n.y || 0;
         const w = n.width || 120, h = n.height || 60;
         minX = Math.min(minX, x);
@@ -2614,6 +2772,7 @@ ${EDGE_GEOM_SOURCE}
         maxX = Math.max(maxX, x + w);
         maxY = Math.max(maxY, y + h);
       });
+      if (visibleCount === 0) return;
       const padding = 50;
       const fw = maxX - minX + padding * 2;
       const fh = maxY - minY + padding * 2;
@@ -3765,6 +3924,8 @@ ${EDGE_GEOM_SOURCE}
   // ==== 初始化 ====
   setupEdgeData();
   setupCollapseButtons();
+  setupLayerBadges();
+  setupLayerControls();
   setupSubDslButtons();
   hideContainsEdges();
   initCollapsedState();

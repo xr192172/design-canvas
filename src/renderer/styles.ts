@@ -958,6 +958,67 @@ footer button:active {
   opacity: 0.3;
   cursor: not-allowed;
 }
+/* 职责分层：层开关按钮 */
+.layer-controls {
+  display: flex;
+  gap: 4px;
+}
+.layer-controls button {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--theme-border);
+  background: var(--theme-card-bg);
+  color: var(--theme-text);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+.layer-controls button:hover {
+  border-color: var(--theme-primary);
+}
+.layer-controls button.active {
+  background: var(--theme-primary);
+  color: #fff;
+  border-color: var(--theme-primary);
+}
+/* 层角标（SVG 内，宿主节点左上角） */
+.layer-badge {
+  cursor: pointer;
+}
+.layer-badge .badge-bg {
+  fill: var(--theme-panel-bg);
+  stroke: var(--theme-primary);
+  stroke-width: 1.5;
+}
+.layer-badge .badge-text {
+  fill: var(--theme-primary);
+  font-size: 10px;
+  font-weight: bold;
+  pointer-events: none;
+}
+.layer-badge.layer-error .badge-bg {
+  stroke: #f0883e;
+}
+.layer-badge.layer-error .badge-text {
+  fill: #f0883e;
+}
+.layer-badge.expanded .badge-bg {
+  fill: var(--theme-primary);
+}
+.layer-badge.expanded .badge-text {
+  fill: #fff;
+}
+.layer-badge.layer-error.expanded .badge-bg {
+  fill: #f0883e;
+  stroke: #f0883e;
+}
+.layer-badge.layer-error.expanded .badge-text {
+  fill: #fff;
+}
 .history-indicator {
   font-size: 11px;
   color: var(--theme-text-dim);

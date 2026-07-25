@@ -82,6 +82,58 @@ describe('edit_dsl - 节点增强属性', () => {
     expect(node.description).toBe('用户数据库');
     expect(node.style?.shape).toBe('circle');
   });
+
+  it('add_node / update_node 支持 layer 与 host（职责分层）', () => {
+    createFeature({ feature: 'test_layer' });
+    addNode({ feature: 'test_layer', node_id: 'main1', label: '主干' });
+    addNode({
+      feature: 'test_layer',
+      node_id: 'err1',
+      label: '异常处理',
+      layer: 'error',
+      host: 'main1',
+    });
+
+    let dsl = getDSL('test_layer')!;
+    const err = dsl.geometry.nodes.find((n) => n.id === 'err1')!;
+    expect(err.layer).toBe('error');
+    expect(err.host).toBe('main1');
+
+    // update：改层 + 换宿主
+    addNode({ feature: 'test_layer', node_id: 'main2', label: '主干2' });
+    updateNode({ feature: 'test_layer', node_id: 'err1', layer: 'detail', host: 'main2' });
+    dsl = getDSL('test_layer')!;
+    const err2 = dsl.geometry.nodes.find((n) => n.id === 'err1')!;
+    expect(err2.layer).toBe('detail');
+    expect(err2.host).toBe('main2');
+
+    // null 清除 layer/host → 回到 main 层
+    updateNode({ feature: 'test_layer', node_id: 'err1', layer: null, host: null });
+    dsl = getDSL('test_layer')!;
+    const err3 = dsl.geometry.nodes.find((n) => n.id === 'err1')!;
+    expect(err3.layer).toBeUndefined();
+    expect(err3.host).toBeUndefined();
+  });
+
+  it('add_node / update_node 校验 host 必须存在', () => {
+    createFeature({ feature: 'test_layer_host' });
+    addNode({ feature: 'test_layer_host', node_id: 'm', label: '主干' });
+    expect(() =>
+      addNode({ feature: 'test_layer_host', node_id: 'x', layer: 'error', host: 'ghost' }),
+    ).toThrow(/host 节点 "ghost" 不存在/);
+    expect(() =>
+      updateNode({ feature: 'test_layer_host', node_id: 'm', host: 'ghost' }),
+    ).toThrow(/host 节点 "ghost" 不存在/);
+  });
+
+  it('add_edge 支持显式 layer', () => {
+    createFeature({ feature: 'test_edge_layer' });
+    addNode({ feature: 'test_edge_layer', node_id: 'a' });
+    addNode({ feature: 'test_edge_layer', node_id: 'b', layer: 'error', host: 'a' });
+    addEdge({ feature: 'test_edge_layer', edge_id: 'e1', from: 'a', to: 'b', layer: 'error' });
+    const dsl = getDSL('test_edge_layer')!;
+    expect(dsl.geometry.edges![0].layer).toBe('error');
+  });
 });
 
 describe('edit_dsl - 语义层编辑', () => {

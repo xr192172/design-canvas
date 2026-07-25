@@ -234,6 +234,8 @@ ${ANIM_CORE_SOURCE}
   function flashNode(nodeId, color, duration) {
     var el = document.querySelector('.node[data-id="' + nodeId + '"]');
     if (!el) return;
+    // 职责分层：节点折叠隐藏时不做视觉高亮（语义执行不受影响）
+    if (el.style.display === 'none') return;
     var shape = el.querySelector('[data-shape="true"]');
     if (!shape) return;
     if (el.__flashTimer) {
@@ -702,6 +704,21 @@ ${ANIM_CORE_SOURCE}
     if (!layer) return;
 
     var pathEl = opts.pathEl || null;
+    // 职责分层：路径所在边隐藏时不发粒子（语义执行不受影响）
+    if (pathEl) {
+      var edgeG = pathEl.closest ? pathEl.closest('.edge') : null;
+      if (edgeG && edgeG.style.display === 'none') return;
+    }
+    // 职责分层：端点节点隐藏时不发粒子
+    if (opts.from) {
+      var fromEl = document.querySelector('.node[data-id="' + opts.from + '"]');
+      if (fromEl && fromEl.style.display === 'none') return;
+    }
+    if (opts.to) {
+      var toEl = document.querySelector('.node[data-id="' + opts.to + '"]');
+      if (toEl && toEl.style.display === 'none') return;
+    }
+
     var pathLen = 0;
     if (pathEl) {
       try { pathLen = pathEl.getTotalLength(); } catch (e) { pathEl = null; }
@@ -981,7 +998,20 @@ ${ANIM_CORE_SOURCE}
     }, 3200);
   }
 
+  // 职责分层：flow 端点节点隐藏（深层折叠/collapse）时整体不激活——
+  // 无语义执行、无粒子、无异常日志。展开后下个周期自动恢复。
+  function flowDomVisible(flow) {
+    var fromEl = document.querySelector('.node[data-id="' + flow.from + '"]');
+    if (fromEl && fromEl.style.display === 'none') return false;
+    var toEl = document.querySelector('.node[data-id="' + flow.to + '"]');
+    if (toEl && toEl.style.display === 'none') return false;
+    return true;
+  }
+
   function spawnDefaultParticle(flow, payloadData) {
+    // ---- 职责分层激活门控：深层 flow 跟随层展开状态 ----
+    if (!flowDomVisible(flow)) return;
+
     // ---- L4 函数绑定：先于分支求值执行，result 参与条件判断 ----
     var handlerCtx = executeHandler(flow, payloadData);
 

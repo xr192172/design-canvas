@@ -201,6 +201,8 @@ server.registerTool(
       description: z.string().optional().describe('节点描述/备注'),
       status: z.enum(['draft', 'in_progress', 'done']).optional().describe('实现状态'),
       swimlane: z.string().optional().describe('所属泳道 ID'),
+      layer: z.enum(['main', 'error', 'detail']).optional().describe('职责分层：main=主干(默认显示) / error=异常处理(折叠) / detail=实现细节(折叠)'),
+      host: z.string().optional().describe('深层节点的宿主主干节点 ID（角标挂载点）'),
     },
   },
   async (args) => {
@@ -222,6 +224,8 @@ server.registerTool(
         description: args.description,
         status: args.status,
         swimlane: args.swimlane,
+        layer: args.layer,
+        host: args.host,
       });
       return {
         content: [{ type: 'text', text: result.message }],
@@ -260,6 +264,8 @@ server.registerTool(
       description: z.string().optional().describe('节点描述/备注'),
       status: z.enum(['draft', 'in_progress', 'done']).optional().describe('实现状态'),
       swimlane: z.string().optional().describe('所属泳道 ID'),
+      layer: z.enum(['main', 'error', 'detail']).nullable().optional().describe('职责分层：main=主干(默认) / error=异常(折叠) / detail=细节(折叠)；null=清除回到 main'),
+      host: z.string().nullable().optional().describe('深层节点的宿主节点 ID；null=清除'),
     },
   },
   async (args) => {
@@ -281,6 +287,8 @@ server.registerTool(
         description: args.description,
         status: args.status,
         swimlane: args.swimlane,
+        layer: args.layer,
+        host: args.host,
       });
       return {
         content: [{ type: 'text', text: result.message }],
@@ -341,6 +349,7 @@ server.registerTool(
       label: z.string().optional().describe('边上的标签文字'),
       edge_type: z.enum(['straight', 'curve', 'dashed']).optional().describe('边类型：直线(默认)/曲线/虚线'),
       arrow: z.enum(['forward', 'reverse', 'both', 'none']).optional().describe('箭头方向：正向(默认)/反向/双向/无'),
+      layer: z.enum(['main', 'error', 'detail']).optional().describe('职责分层：缺省时自动推导——任一端点为深层节点则跟随较深层'),
     },
   },
   async (args) => {
@@ -353,6 +362,7 @@ server.registerTool(
         label: args.label,
         edge_type: args.edge_type,
         arrow: args.arrow,
+        layer: args.layer,
       });
       return {
         content: [{ type: 'text', text: result.message }],

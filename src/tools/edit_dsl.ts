@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DesignDSL, Node, Edge, NodeStyle, NodeContent, DiagramStatus, SemanticFile, ExpectedApi } from '../dsl/types.js';
+import type { DesignDSL, Node, Edge, NodeStyle, NodeContent, DiagramStatus, SemanticFile, ExpectedApi, NodeLayer } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -99,10 +99,12 @@ export interface AddNodeInput {
   swimlane?: string;
   content?: NodeContent;
   sub_dsl?: DesignDSL;
+  layer?: NodeLayer;
+  host?: string;
 }
 
 export function addNode(input: AddNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -111,6 +113,9 @@ export function addNode(input: AddNodeInput): EditResult {
 
   if (dsl.geometry.nodes.find(n => n.id === node_id)) {
     throw new Error(`节点 "${node_id}" 已存在，使用 update_node 修改`);
+  }
+  if (host && !dsl.geometry.nodes.find(n => n.id === host)) {
+    throw new Error(`host 节点 "${host}" 不存在`);
   }
 
   const style: NodeStyle = {};
@@ -136,6 +141,8 @@ export function addNode(input: AddNodeInput): EditResult {
     swimlane,
     content,
     sub_dsl,
+    layer,
+    host,
   };
 
   dsl.geometry.nodes.push(node);
@@ -151,6 +158,7 @@ export function addNode(input: AddNodeInput): EditResult {
   if (status) lines.push(`状态: ${status}`);
   if (shape) lines.push(`形状: ${shape}`);
   if (swimlane) lines.push(`泳道: ${swimlane}`);
+  if (layer && layer !== 'main') lines.push(`分层: ${layer}${host ? ` (宿主: ${host})` : ''}`);
   lines.push(`当前节点数: ${dsl.geometry.nodes.length}`);
 
   return { message: lines.join('\n'), feature };
@@ -181,10 +189,12 @@ export interface UpdateNodeInput {
   swimlane?: string;
   content?: NodeContent;
   sub_dsl?: DesignDSL;
+  layer?: NodeLayer | null;
+  host?: string | null;
 }
 
 export function updateNode(input: UpdateNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -207,6 +217,20 @@ export function updateNode(input: UpdateNodeInput): EditResult {
   if (swimlane !== undefined) node.swimlane = swimlane;
   if (content !== undefined) node.content = content;
   if (sub_dsl !== undefined) node.sub_dsl = sub_dsl;
+  // layer/host：null 表示清除（回到 main 层）
+  if (layer !== undefined) {
+    if (layer === null) delete node.layer;
+    else node.layer = layer;
+  }
+  if (host !== undefined) {
+    if (host === null) delete node.host;
+    else {
+      if (!dsl.geometry.nodes.find(n => n.id === host)) {
+        throw new Error(`host 节点 "${host}" 不存在`);
+      }
+      node.host = host;
+    }
+  }
 
   if (!node.style) node.style = {};
   if (bg !== undefined) node.style.bg = bg;
@@ -283,10 +307,11 @@ export interface AddEdgeInput {
   label?: string;
   edge_type?: 'straight' | 'curve' | 'dashed';
   arrow?: 'forward' | 'reverse' | 'both' | 'none';
+  layer?: NodeLayer;
 }
 
 export function addEdge(input: AddEdgeInput): EditResult {
-  const { feature, edge_id, from, to, label, edge_type, arrow } = input;
+  const { feature, edge_id, from, to, label, edge_type, arrow, layer } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -311,6 +336,7 @@ export function addEdge(input: AddEdgeInput): EditResult {
     label,
     ...(edge_type ? { type: edge_type } : {}),
     ...(arrow ? { arrow } : {}),
+    ...(layer ? { layer } : {}),
   };
 
   if (!dsl.geometry.edges) dsl.geometry.edges = [];

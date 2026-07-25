@@ -6,6 +6,14 @@
 /** 图纸/节点状态 */
 export type DiagramStatus = 'draft' | 'in_progress' | 'done';
 
+/**
+ * 职责分层：节点/边按职责分三层，渲染时渐进披露（默认只显示 main 层）
+ * - main：主干数据流转（默认显示）
+ * - error：异常处理（深层，默认折叠，宿主节点 ⚠ 角标展开）
+ * - detail：实现细节（深层，默认折叠，宿主节点 ▸ 角标展开）
+ */
+export type NodeLayer = 'main' | 'error' | 'detail';
+
 /** 节点 CSS 样式（几何层） */
 export interface NodeStyle {
   /** 形状：rect=矩形, rounded=圆角矩形, circle=圆形, diamond=菱形, freeform=自由形, parallelogram=平行四边形, hexagon=六边形, triangle=三角形 */
@@ -108,6 +116,10 @@ export interface Node {
   type?: string;
   /** 节点描述/备注 */
   description?: string;
+  /** 职责分层：main=主干（默认显示）；error/detail=深层（默认折叠，角标展开）。缺省 main */
+  layer?: NodeLayer;
+  /** 深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关 */
+  host?: string;
 }
 
 /** 边 SVG 样式 */
@@ -130,6 +142,8 @@ export interface Edge {
   type?: 'straight' | 'curve' | 'dashed';
   /** 箭头方向：正向(默认)/反向/双向/无 */
   arrow?: 'forward' | 'reverse' | 'both' | 'none';
+  /** 职责分层：缺省时自动推导——任一端点为深层节点则跟随较深层（detail > error > main） */
+  layer?: NodeLayer;
 }
 
 /** 泳道（横向分组） */

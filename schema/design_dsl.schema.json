@@ -94,6 +94,15 @@
         "y": { "type": "number" },
         "width": { "type": "number" },
         "height": { "type": "number" },
+        "layer": {
+          "type": "string",
+          "enum": ["main", "error", "detail"],
+          "description": "职责分层：main=主干（默认显示）；error/detail=深层（默认折叠，角标展开）。缺省 main"
+        },
+        "host": {
+          "type": "string",
+          "description": "深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关"
+        },
         "style": {
           "type": "object",
           "properties": {
@@ -114,6 +123,11 @@
         "from": { "type": "string", "description": "源节点 ID" },
         "to": { "type": "string", "description": "目标节点 ID" },
         "label": { "type": "string" },
+        "layer": {
+          "type": "string",
+          "enum": ["main", "error", "detail"],
+          "description": "职责分层：缺省时自动推导——任一端点为深层节点则跟随较深层"
+        },
         "style": {
           "type": "object",
           "properties": {

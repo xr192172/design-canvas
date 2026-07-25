@@ -162,6 +162,12 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
   if (n.content && n.content.type !== 'text') classes.push('rich-node');
   const nodeClass = classes.join(' ');
 
+  // 职责分层：深层节点初始隐藏，运行时由角标/全局开关展开
+  const layer = n.layer ?? 'main';
+  const layerAttr = layer !== 'main' ? ` data-layer="${layer}"` : '';
+  const hostAttr = n.host ? ` data-host="${esc(n.host)}"` : '';
+  const hiddenAttr = layer !== 'main' ? ' style="display:none"' : '';
+
   // 状态指示器：右上角小圆点
   const statusColors: Record<string, string> = {
     draft: '#666',
@@ -220,7 +226,7 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
     contentSvg = `<text x="${textX}" y="${textY}" text-anchor="middle" dy="${dy}" fill="${esc(textColor)}" style="font-size:${fontSize}px" ${isParent ? 'class="label-top"' : ''}>${esc(label)}</text>`;
   }
 
-  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}">
+  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${layerAttr}${hostAttr}${hiddenAttr}>
       ${shapeSvg}
       ${contentSvg}
       <circle cx="${dotX}" cy="${dotY}" r="4" fill="${dotColor}" stroke="#ffffff" stroke-width="0.5"/>
@@ -274,7 +280,16 @@ function renderEdge(
     ? `<text class="edge-label" x="${labelX}" y="${labelY}" text-anchor="middle" dy="-4" opacity="${labelOpacity}">${esc(labelText)}</text>`
     : '';
 
-  return `    <g class="edge" data-id="${esc(e.id)}" data-label="${esc(labelText)}" data-type="${esc(edgeType)}">
+  // 职责分层：显式 layer 优先，否则跟随端点较深层（detail > error > main）
+  const layerRank = (l?: string): number => (l === 'detail' ? 2 : l === 'error' ? 1 : 0);
+  const fromLayer = from.layer ?? 'main';
+  const toLayer = to.layer ?? 'main';
+  const derived = layerRank(fromLayer) >= layerRank(toLayer) ? fromLayer : toLayer;
+  const edgeLayer = e.layer ?? derived;
+  const layerAttr = edgeLayer !== 'main' ? ` data-layer="${edgeLayer}"` : '';
+  const hiddenAttr = edgeLayer !== 'main' ? ' style="display:none"' : '';
+
+  return `    <g class="edge" data-id="${esc(e.id)}" data-label="${esc(labelText)}" data-type="${esc(edgeType)}"${layerAttr}${hiddenAttr}>
       <path d="${d}" stroke="transparent" stroke-width="15" fill="none" pointer-events="stroke"/>
       <path d="${d}" ${strokeAttr} stroke-width="${strokeWidth}" ${markerStart} ${markerEnd} ${dashAttr} fill="none" pointer-events="none"/>
       ${labelXml}
@@ -417,8 +432,55 @@ function renderSwimlanes(dsl: DesignDSL): string {
   return xml.join('\n');
 }
 
+/**
+ * 职责分层自动推导（F2）：无显式 layer 的节点按规则推导。
+ * 规则：animations_v2 flows[].handler.errors[].to → error 层，host=flow.from（异常从哪来挂哪）。
+ * 豁免：该节点若同时承担主干流转职责（任一 flow 的 from/to/branches.to），不折叠——
+ *   异常出口只是它的职责之一（如 conveyor 的草稿区），折叠会隐藏主干组件。
+ * 显式 layer 优先，不覆盖；host 指向不存在的节点时丢弃（跟随全局开关）。
+ * 名字模式推导有意不做——import_project 产物中 errors.go 等文件名会误伤。
+ * 返回加工副本（存储文件不动），浏览器端 window.__DSL__ 单源消费推导结果。
+ */
+function deriveLayers(dsl: DesignDSL): DesignDSL {
+  const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+  const flows = dsl.animations_v2?.flows ?? [];
+
+  // 主干职责节点：任一 flow 的正常流转端点
+  const mainDuty = new Set<string>();
+  for (const f of flows) {
+    if (nodeIds.has(f.from)) mainDuty.add(f.from);
+    if (f.to && nodeIds.has(f.to)) mainDuty.add(f.to);
+    for (const b of f.branches ?? []) {
+      if (nodeIds.has(b.to)) mainDuty.add(b.to);
+    }
+  }
+
+  const derived = new Map<string, { host?: string }>();
+  for (const f of flows) {
+    for (const err of f.handler?.errors ?? []) {
+      if (!nodeIds.has(err.to) || mainDuty.has(err.to) || derived.has(err.to)) continue;
+      derived.set(err.to, { host: nodeIds.has(f.from) ? f.from : undefined });
+    }
+  }
+  if (derived.size === 0) return dsl;
+
+  let touched = false;
+  const nodes = dsl.geometry.nodes.map((n) => {
+    if (n.layer) return n;
+    const d = derived.get(n.id);
+    if (!d) return n;
+    touched = true;
+    return { ...n, layer: 'error' as const, ...(d.host && !n.host ? { host: d.host } : {}) };
+  });
+  if (!touched) return dsl;
+  return { ...dsl, geometry: { ...dsl.geometry, nodes } };
+}
+
 /** 主渲染入口：DSL → 完整 HTML 字符串 */
 export function renderHTML(dsl: DesignDSL): string {
+  // 职责分层自动推导（F2）：L4.5 handler.errors 声明的流向节点 → error 层（host=flow.from）
+  // 烘焙进注入副本，存储文件不动；显式 layer 优先不覆盖
+  dsl = deriveLayers(dsl);
   const canvas = computeCanvasSize(dsl);
   const nodeMap = new Map<string, Node>();
   for (const n of dsl.geometry.nodes) nodeMap.set(n.id, n);
@@ -468,6 +530,8 @@ export function renderHTML(dsl: DesignDSL): string {
     const obs: RectBox[] = [];
     for (const n of dsl.geometry.nodes) {
       if (excluded.has(n.id)) continue;
+      // 深层节点初始隐藏，不作为障碍（避免 main 层边绕开"幽灵障碍"）
+      if (n.layer && n.layer !== 'main') continue;
       obs.push(nodeBox(n));
     }
     return obs;
@@ -534,6 +598,19 @@ export function renderHTML(dsl: DesignDSL): string {
           <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶</button>
           <button id="btn-redo" type="button" title="重做 (Ctrl+Y)" disabled>↷</button>
         </div>
+        ${(() => {
+          // 职责分层：统计深层节点，有才显示层开关
+          const errCount = dsl.geometry.nodes.filter((n) => n.layer === 'error').length;
+          const detCount = dsl.geometry.nodes.filter((n) => n.layer === 'detail').length;
+          if (errCount === 0 && detCount === 0) return '';
+          const errBtn = errCount > 0
+            ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})">🛡 ${errCount}</button>`
+            : '';
+          const detBtn = detCount > 0
+            ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})">🧩 ${detCount}</button>`
+            : '';
+          return `<div class="layer-controls">${errBtn}${detBtn}</div>`;
+        })()}
         <span id="history-indicator" class="history-indicator" title="历史记录"></span>
         <div class="layout-controls">
           <button id="layout-dag" type="button" title="拓扑排序布局">🗺️</button>
