@@ -131,17 +131,47 @@ function toPosix(p: string): string {
   return p.split(path.sep).join('/');
 }
 
-/** 读取 Go module 名（go.mod 第一行 module xxx） */
-function readGoModule(root: string): string | null {
-  const gomod = path.join(root, 'go.mod');
-  if (!fs.existsSync(gomod)) return null;
-  try {
-    const content = fs.readFileSync(gomod, 'utf-8');
-    const m = content.match(/^\s*module\s+(\S+)/m);
-    return m ? m[1] : null;
-  } catch {
-    return null;
+/** Go module 条目：module 路径 + go.mod 所在目录（相对项目根，'' 表示根） */
+interface GoModule {
+  module: string;
+  dir: string;
+}
+
+/**
+ * 读取项目内全部 go.mod（支持多模块/monorepo）。
+ * 按 module 路径长度降序，保证最长前缀优先匹配
+ * （如 example.com/a/v2 优先于 example.com/a）。
+ */
+function readGoModules(root: string): GoModule[] {
+  const mods: GoModule[] = [];
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) stack.push(full);
+      } else if (e.isFile() && e.name === 'go.mod') {
+        try {
+          const content = fs.readFileSync(full, 'utf-8');
+          const m = content.match(/^\s*module\s+(\S+)/m);
+          if (m) {
+            const rel = toPosix(path.relative(root, dir));
+            mods.push({ module: m[1], dir: rel === '.' ? '' : rel });
+          }
+        } catch {
+          /* 忽略读取失败的 go.mod */
+        }
+      }
+    }
   }
+  return mods.sort((a, b) => b.module.length - a.module.length);
 }
 
 /** 构建查找索引：无扩展名路径 / 目录路径 → 文件 rel 列表 */
@@ -178,7 +208,7 @@ function resolveImport(
   imp: ParsedImport,
   importer: FileEntry,
   index: { byNoExt: Map<string, FileEntry>; byDir: Map<string, FileEntry[]> },
-  goModule: string | null,
+  goModules: GoModule[],
 ): FileEntry[] {
   const { byNoExt, byDir } = index;
 
@@ -210,11 +240,15 @@ function resolveImport(
     return [];
   }
 
-  // package 导入
-  if (goModule && (imp.source === goModule || imp.source.startsWith(goModule + '/'))) {
-    const rest = imp.source.slice(goModule.length).replace(/^\//, '');
-    const dirFiles = byDir.get(rest);
-    return dirFiles ? [...dirFiles] : [];
+  // package 导入：遍历全部 go.mod（已按 module 长度降序，最长前缀优先）
+  for (const gm of goModules) {
+    if (imp.source === gm.module || imp.source.startsWith(gm.module + '/')) {
+      const rest = imp.source.slice(gm.module.length).replace(/^\//, '');
+      // 目标目录 = go.mod 所在目录 + 剥离 module 前缀后的子路径
+      const dir = gm.dir ? (rest ? `${gm.dir}/${rest}` : gm.dir) : rest;
+      const dirFiles = byDir.get(dir);
+      if (dirFiles && dirFiles.length > 0) return [...dirFiles];
+    }
   }
 
   // Python 点分模块 / 其他点分形式
@@ -334,7 +368,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     return { rel, abs, ext: path.extname(abs), dir: path.posix.dirname(rel) };
   });
   const index = buildIndex(files);
-  const goModule = readGoModule(root);
+  const goModules = readGoModules(root);
 
   // 2. 解析符号 + import（顺带统计行数，零成本复用已读内容做单文件监控）
   const parsed = new Map<string, { symbols: ExpectedApi[]; imports: ParsedImport[] }>();
@@ -370,7 +404,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     const p = parsed.get(f.rel);
     if (!p) continue;
     for (const imp of p.imports) {
-      const targets = resolveImport(imp, f, index, goModule);
+      const targets = resolveImport(imp, f, index, goModules);
       for (const t of targets) {
         if (t.rel === f.rel) continue;
         const key = `${f.rel}|${t.rel}`;
@@ -561,7 +595,49 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       edges.push({ id: `contains_${sanitize(parentRel)}_${sanitize(d.rel)}`, from: parentId, to: dirNodeId(d.rel), label: 'contains' });
     }
   }
+  // 依赖边渲染：与布局排序同构的分层聚合——
+  // 同目录文件间保留文件级短边（信息精确）；
+  // 跨目录依赖聚合到"最近公共祖先层的两个直接子项"之间（文件或目录容器），
+  // 同一对节点合并为一条 label ×N。边只存在于同层兄弟之间，结构性消除跨容器穿越。
+  const normDir = (d: string): string => (d === '.' ? '' : d);
+  const ancestorsOf = (dir: string): string[] => {
+    const out: string[] = [];
+    let d = normDir(dir);
+    for (;;) {
+      out.push(d);
+      if (d === '') break;
+      d = normDir(path.posix.dirname(d));
+    }
+    return out;
+  };
+  /** rel 在 lcaDir 层的直接子项节点 id（直接文件 → 文件节点；深入子目录 → 目录容器） */
+  const ownerAtLca = (rel: string, lca: string): string => {
+    const rest = lca === '' ? rel : rel.slice(lca.length + 1);
+    const slash = rest.indexOf('/');
+    if (slash === -1) return fileNodeId(rel);
+    return dirNodeId(lca === '' ? rest.slice(0, slash) : `${lca}/${rest.slice(0, slash)}`);
+  };
+
+  const aggEdges = new Map<string, { from: string; to: string; n: number }>();
+  const directEdges: Array<[string, string]> = [];
   for (const [fromRel, toRel] of fileDeps) {
+    const fromAnc = ancestorsOf(path.posix.dirname(fromRel));
+    const toAncSet = new Set(ancestorsOf(path.posix.dirname(toRel)));
+    const lca = fromAnc.find((d) => toAncSet.has(d));
+    if (lca === undefined) continue;
+    const a = ownerAtLca(fromRel, lca);
+    const b = ownerAtLca(toRel, lca);
+    if (a === b) continue;
+    if (a.startsWith('file_') && b.startsWith('file_')) {
+      directEdges.push([fromRel, toRel]);
+    } else {
+      const key = `${a}|${b}`;
+      const cur = aggEdges.get(key);
+      if (cur) cur.n++;
+      else aggEdges.set(key, { from: a, to: b, n: 1 });
+    }
+  }
+  for (const [fromRel, toRel] of directEdges) {
     edges.push({
       id: `dep_${sanitize(fromRel)}_${sanitize(toRel)}`,
       from: fileNodeId(fromRel),
@@ -570,6 +646,18 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       type: 'dashed',
     });
   }
+  const aggSorted = [...aggEdges.values()].sort((x, y) => x.from.localeCompare(y.from) || x.to.localeCompare(y.to));
+  for (const { from, to, n } of aggSorted) {
+    edges.push({
+      id: `dep_${sanitize(from)}_${sanitize(to)}`,
+      from,
+      to,
+      label: n > 1 ? `imports ×${n}` : 'imports',
+      type: 'dashed',
+      style: n > 3 ? { strokeWidth: 2 } : undefined,
+    });
+  }
+  const renderedDepEdges = directEdges.length + aggSorted.length;
 
   // 9. 组装 DSL
   const canvasW = Math.round(rootSize.w + MARGIN * 2);
@@ -603,8 +691,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const message = [
     `已导入项目 → feature "${feature}"`,
     `项目根: ${root}`,
-    `文件: ${files.length} 个（符号 ${symbolsFound} 个，依赖边 ${fileDeps.length} 条，目录容器 ${dirCount} 个）`,
-    goModule ? `Go module: ${goModule}` : null,
+    `文件: ${files.length} 个（符号 ${symbolsFound} 个，依赖 ${fileDeps.length} 条→渲染 ${renderedDepEdges} 条（跨目录已聚合），目录容器 ${dirCount} 个）`,
+    goModules.length > 0 ? `Go modules: ${goModules.map((g) => g.module).join(', ')}` : null,
     oversized.length > 0
       ? `⚠ 单文件化预警 ${oversized.length} 个:\n  - ${oversized
           .map((x) => `${x.rel}（${x.lines} 行${x.lines >= 600 ? '，严重' : ''}）`)

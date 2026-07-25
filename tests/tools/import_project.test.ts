@@ -44,6 +44,11 @@ beforeAll(() => {
   put('pylib/config.py', 'TIMEOUT = 30\n\ndef get_timeout():\n    return TIMEOUT\n');
   put('pylib/worker.py', 'from pylib.config import get_timeout\nimport config\n\ndef run():\n    return get_timeout()\n');
 
+  // Go 多模块（monorepo）：submod 有自己的 go.mod，模块路径独立
+  put('submod/go.mod', 'module example.com/submod\n\ngo 1.21\n');
+  put('submod/lib/lib.go', 'package lib\n\nfunc Hello() string {\n\treturn "hi"\n}\n');
+  put('submod/cmd/main.go', 'package main\n\nimport "example.com/submod/lib"\n\nfunc main() {\n\tprintln(lib.Hello())\n}\n');
+
   // 应被跳过的内容
   put('node_modules/dep/index.js', 'module.exports = {};\n');
   put('src/a.test.ts', `import { mainA } from './a';\ntest('a', () => { mainA(1); });\n`);
@@ -67,8 +72,8 @@ describe('import_project', () => {
     });
 
     expect(result.feature).toBe('imported_demo');
-    // 8 个源文件（node_modules / .test.ts / .git 应被跳过）
-    expect(result.files_parsed).toBe(8);
+    // 10 个源文件（node_modules / .test.ts / .git 应被跳过）
+    expect(result.files_parsed).toBe(10);
     expect(result.symbols_found).toBeGreaterThanOrEqual(8);
     expect(result.dirs_created).toBeGreaterThanOrEqual(3); // src, src/util, pkg, pkg/model, pkg/svc, pylib
   });
@@ -104,14 +109,18 @@ describe('import_project', () => {
     const depEdges = edges.filter((e) => e.label === 'imports');
     const depPairs = depEdges.map((e) => `${e.from}→${e.to}`);
 
-    // TS: a.ts → b.ts
+    // TS: a.ts → b.ts（同目录，文件级边保留）
     expect(depPairs).toContain('file_src_a_ts→file_src_b_ts');
-    // TS: util/index.ts → util/c.ts
+    // TS: util/index.ts → util/c.ts（同目录，文件级边保留）
     expect(depPairs).toContain('file_src_util_index_ts→file_src_util_c_ts');
-    // Go: svc.go → model.go（module 前缀剥离）
-    expect(depPairs).toContain('file_pkg_svc_svc_go→file_pkg_model_model_go');
-    // Python: worker.py → config.py（点分模块或同包导入至少解析一条）
+    // Go: svc.go → model.go（跨目录，聚合为 LCA 层目录容器间边）
+    expect(depPairs).toContain('dir_pkg_svc→dir_pkg_model');
+    // Go 多模块: cmd/main.go → lib/lib.go（子模块 go.mod 独立识别，跨目录聚合）
+    expect(depPairs).toContain('dir_submod_cmd→dir_submod_lib');
+    // Python: worker.py → config.py（同目录，文件级边保留）
     expect(depPairs).toContain('file_pylib_worker_py→file_pylib_config_py');
+    // 跨目录边不应以文件级形式出现（已聚合）
+    expect(depPairs).not.toContain('file_pkg_svc_svc_go→file_pkg_model_model_go');
 
     // contains 边：目录→文件、父目录→子目录
     const containsPairs = edges.filter((e) => e.label === 'contains').map((e) => `${e.from}→${e.to}`);

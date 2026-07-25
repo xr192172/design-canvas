@@ -350,22 +350,13 @@ class MinHeap {
  * → 拐角圆角化（二次贝塞尔削角）→ 全路径采样校验。
  * 任一环节失败返回 null，由调用方降级到更小网格或尽力而为贝塞尔。
  */
-function waypointRoute(ep: Endpoints, obstacles: GRect[], cellSize: number): EdgePathResult | null {
-  const PAD = 100;
-  let minX = Math.min(ep.sx, ep.ex);
-  let minY = Math.min(ep.sy, ep.ey);
-  let maxX = Math.max(ep.sx, ep.ex);
-  let maxY = Math.max(ep.sy, ep.ey);
-  for (const o of obstacles) {
-    minX = Math.min(minX, o.x);
-    minY = Math.min(minY, o.y);
-    maxX = Math.max(maxX, o.x + o.w);
-    maxY = Math.max(maxY, o.y + o.h);
-  }
-  minX -= PAD;
-  minY -= PAD;
-  maxX += PAD;
-  maxY += PAD;
+function waypointRoute(ep: Endpoints, obstacles: GRect[], cellSize: number, pad: number): EdgePathResult | null {
+  // 边界框只由两端点决定 + pad 环绕（障碍仅用于 blocked 标记，网格外自动裁剪）。
+  // 历史上曾把全部障碍纳入包围盒——大图（如 600 节点画布）会把网格撑爆触发上限直接放弃路由。
+  let minX = Math.min(ep.sx, ep.ex) - pad;
+  let minY = Math.min(ep.sy, ep.ey) - pad;
+  let maxX = Math.max(ep.sx, ep.ex) + pad;
+  let maxY = Math.max(ep.sy, ep.ey) + pad;
   const cols = Math.ceil((maxX - minX) / cellSize);
   const rows = Math.ceil((maxY - minY) / cellSize);
   if (cols * rows > 400000) return null;
@@ -658,10 +649,13 @@ export function computeEdgePath(opts: EdgePathOpts): EdgePathResult {
   }
 
   // 最终兜底：A* waypoint 路由（窄通道穿行，贝塞尔族表达不了的折线/S 路径）
-  // 先粗网格后细网格；成功即返回（offset 退避在此种罕见情形下忽略）
-  for (const cell of [20, 10]) {
-    const routed = waypointRoute(base, obstacles, cell);
-    if (routed) return routed;
+  // pad 分档扩大（绕行空间不足时放大边界框重试），每档先粗网格后细网格；
+  // 成功即返回（offset 退避在此种罕见情形下忽略）
+  for (const pad of [150, 400, 1000]) {
+    for (const cell of [20, 10]) {
+      const routed = waypointRoute(base, obstacles, cell, pad);
+      if (routed) return routed;
+    }
   }
 
   // 尽力而为：返回碰撞最少的组合
