@@ -1589,6 +1589,101 @@ footer button:active {
 .lg-flash.lg-green { background: #4CAF50; }
 .lg-flash.lg-gray { background: #666; }
 .lg-flash.lg-red { background: #ff1744; }
+/* 视图切换（节点/动画） */
+.view-switcher {
+  display: flex;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.view-switcher button {
+  background: var(--theme-input-bg);
+  border: none;
+  color: var(--theme-text-dim);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+.view-switcher button.active {
+  background: var(--theme-primary);
+  color: #fff;
+}
+.view-switcher button:not(.active):hover {
+  background: var(--theme-hover);
+  color: var(--theme-text);
+}
+/* 步进控制条（动画视图浮层） */
+.stepper-bar {
+  position: absolute;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  z-index: 60;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  font-size: 12px;
+}
+.stepper-bar button {
+  background: var(--theme-border);
+  border: none;
+  color: var(--theme-text);
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.stepper-bar button:hover { background: var(--theme-hover); color: var(--theme-primary); }
+.stepper-bar button.primary { background: var(--theme-primary); color: #fff; }
+.stepper-status {
+  color: var(--theme-text-sub);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 动画视图：节点面板内输入框 */
+.stepper-input-wrap {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+}
+.stepper-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--theme-input-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 4px;
+  color: var(--theme-text);
+  font-size: 10px;
+  padding: 2px 6px;
+  font-family: inherit;
+}
+.stepper-input:focus { outline: none; border-color: var(--theme-primary); }
+.stepper-inject-btn {
+  background: var(--theme-primary);
+  border: none;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.stepper-inject-btn:hover { background: var(--theme-primary-dark); }
+/* 动画视图下隐藏粒子层（数据表达由步进器接管） */
+body[data-view="anim"] .anim-layer-v2 .anim-particle-v2 { display: none; }
 .sim-btn {
   background: var(--theme-border);
   border: none;

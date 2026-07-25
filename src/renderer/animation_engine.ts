@@ -811,7 +811,8 @@ ${ANIM_CORE_SOURCE}
   // 返回 { value, result, classification } 供后续分支/异常处理使用；无 handler 时返回 null
   // mock 模式：result 优先取 mock_results 轮换，其次 mock_result，否则 { $mock: api }
   // live 模式（L5b）留待阶段 H，当前回退 mock 并 warn
-  function executeHandler(flow, payloadData) {
+  // quiet=true（步进器复用）时跳过浮层/闪烁——调用方自行在 PROC 区渲染调用详情
+  function executeHandler(flow, payloadData, quiet) {
     var h = flow.handler;
     if (!h || !h.file_id || !h.api) return null;
     var meta = HANDLER_META[h.file_id] || null;
@@ -823,9 +824,11 @@ ${ANIM_CORE_SOURCE}
       : (flow.rawFlow ? flow.rawFlow.value : undefined));
 
     var args = applyInputMapping(h.input_mapping, evalValue, undefined);
-    showHandlerCall(h.file_id, h.api, args, signature);
-    // 闪烁时长收敛（与浮层 3.2s 错峰，降低视觉噪音）
-    flashNode(h.file_id, '#ffeb3b', 450);
+    if (!quiet) {
+      showHandlerCall(h.file_id, h.api, args, signature);
+      // 闪烁时长收敛（与浮层 3.2s 错峰，降低视觉噪音）
+      flashNode(h.file_id, '#ffeb3b', 450);
+    }
 
     if (h.live) {
       console.warn('[animV2] handler.live 未实现（阶段H），回退 mock:', h.api);
@@ -838,7 +841,7 @@ ${ANIM_CORE_SOURCE}
     // ---- L4.5 异常分类：declared → 异常路径；undeclared → 警报；none → 正常流 ----
     var classification = classifyError(h.errors, result);
     console.log('[animV2][dbg] handler', h.api, 'result=', JSON.stringify(result), 'class=', classification.kind);
-    return { value: newValue, result: result, classification: classification };
+    return { value: newValue, result: result, args: args, classification: classification };
   }
 
   // ---- L4.5 异常日志（写入 sim-panel 的 #anim-log；面板不存在时回退 console） ----
@@ -1681,11 +1684,449 @@ ${ANIM_CORE_SOURCE}
     });
   }
 
+  // ========== 动画视图：交互式数据步进器（Stepper） ==========
+  // 视图切换：body[data-view="anim"]；flow 相关节点挂组件面板（IN/PROC/OUT 三区扩展坞，
+  // 不动布局不动边）；入口节点输入框注入真实数据，chip 沿 flow 链步进/自动推进，
+  // handler 复用 executeHandler（quiet 模式）真实执行 mock 逻辑并展示 ƒ调用⇒结果。
+
+  var stepper = {
+    view: 'nodes',
+    runs: [],
+    seq: 0,
+    autoTimer: null,
+    panels: {},
+    bar: null
+  };
+
+  function stepperEntryNodes() {
+    var froms = {}, tos = {};
+    EXPLICIT_FLOWS.forEach(function(f) {
+      if (f.from) froms[f.from] = true;
+      if (f.to) tos[f.to] = true;
+      (f.branches || []).forEach(function(b) { if (b.to) tos[b.to] = true; });
+    });
+    var out = [];
+    for (var id in froms) { if (!tos[id]) out.push(id); }
+    if (out.length === 0) { for (var id2 in froms) out.push(id2); } // 成环时全部 from 可注入
+    return out;
+  }
+
+  function stepperFlowNodes() {
+    var set = {};
+    EXPLICIT_FLOWS.forEach(function(f) {
+      if (f.from) set[f.from] = true;
+      if (f.to) set[f.to] = true;
+      if (f.handler && f.handler.file_id) set[f.handler.file_id] = true;
+      (f.branches || []).forEach(function(b) { if (b.to) set[b.to] = true; });
+    });
+    return set;
+  }
+
+  function setStepperStatus(msg) {
+    var el = document.getElementById('stepper-status');
+    if (el) el.textContent = msg;
+  }
+
+  function flowConfigOf(f) {
+    return (state.flowConfigs && state.flowConfigs[f.id]) || f;
+  }
+
+  // ---- 节点组件面板：节点本体下方挂 IN/PROC/OUT 三区（不动布局/不动边） ----
+  function ensureStepperPanel(nodeId, isEntry) {
+    if (stepper.panels[nodeId]) return stepper.panels[nodeId];
+    var nodeEl = document.querySelector('.node[data-id="' + nodeId + '"]');
+    var rect = getNodeRect(nodeId);
+    if (!nodeEl || !rect) return null;
+    var ns = 'http://www.w3.org/2000/svg';
+    var w = Math.max(rect.w, 240);
+    var h = 90;
+    var x = rect.x + rect.w / 2 - w / 2;
+    var y = rect.y + rect.h + 8;
+
+    var g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'node-panel');
+
+    var bg = document.createElementNS(ns, 'rect');
+    bg.setAttribute('x', x); bg.setAttribute('y', y);
+    bg.setAttribute('width', w); bg.setAttribute('height', h);
+    bg.setAttribute('rx', '6');
+    bg.setAttribute('fill', cssVar('--theme-card-bg', '#152141'));
+    bg.setAttribute('stroke', cssVar('--theme-border', '#243459'));
+    bg.setAttribute('stroke-dasharray', '3,3');
+    g.appendChild(bg);
+
+    var zoneNames = ['in', 'proc', 'out'];
+    var zoneLabels = { 'in': 'IN', 'proc': 'PROC', 'out': 'OUT' };
+    for (var i = 0; i < zoneNames.length; i++) {
+      var zy = y + 6 + i * 28;
+      var lab = document.createElementNS(ns, 'text');
+      lab.setAttribute('x', x + 8);
+      lab.setAttribute('y', zy + 15);
+      lab.setAttribute('fill', cssVar('--theme-text-dim', '#5a6f94'));
+      lab.setAttribute('style', 'font-size:9px;font-weight:600;');
+      lab.textContent = zoneLabels[zoneNames[i]];
+      g.appendChild(lab);
+      var zone = document.createElementNS(ns, 'g');
+      zone.setAttribute('data-zone', zoneNames[i]);
+      zone.setAttribute('transform', 'translate(' + (x + 46) + ',' + zy + ')');
+      g.appendChild(zone);
+    }
+
+    // PROC 行：覆盖式单行文本（ƒ api(args) ⇒ result）
+    var procText = document.createElementNS(ns, 'text');
+    procText.setAttribute('class', 'proc-text');
+    procText.setAttribute('x', '0');
+    procText.setAttribute('y', '15');
+    procText.setAttribute('fill', '#ffeb3b');
+    procText.setAttribute('style', 'font-size:10px;font-family:monospace;');
+    g.querySelector('[data-zone="proc"]').appendChild(procText);
+
+    // 入口节点 IN 行：输入框 + 注入按钮（交互事件阻止冒泡到画布拖动）
+    if (isEntry) {
+      var fo = document.createElementNS(ns, 'foreignObject');
+      fo.setAttribute('x', x + 42);
+      fo.setAttribute('y', y + 4);
+      fo.setAttribute('width', w - 50);
+      fo.setAttribute('height', '26');
+      var div = document.createElement('div');
+      div.setAttribute('class', 'stepper-input-wrap');
+      div.addEventListener('mousedown', function(ev) { ev.stopPropagation(); });
+      var input = document.createElement('input');
+      input.setAttribute('class', 'stepper-input');
+      input.setAttribute('placeholder', '输入 JSON，如 {"token":"abc"}');
+      var btn = document.createElement('button');
+      btn.setAttribute('class', 'stepper-inject-btn');
+      btn.textContent = '注入';
+      (function(nid, inp) {
+        btn.addEventListener('click', function() { stepperInject(nid, inp.value); });
+        inp.addEventListener('keydown', function(ev) {
+          ev.stopPropagation();
+          if (ev.key === 'Enter') stepperInject(nid, inp.value);
+        });
+      })(nodeId, input);
+      div.appendChild(input);
+      div.appendChild(btn);
+      fo.appendChild(div);
+      g.appendChild(fo);
+    }
+
+    nodeEl.appendChild(g);
+    var panel = { g: g, nodeId: nodeId, x: x, y: y, w: w, h: h };
+    stepper.panels[nodeId] = panel;
+    return panel;
+  }
+
+  // ---- chip：深色底 + 彩色描边 + 10px 字；zone 内 FIFO 最多 2 枚 ----
+  function makeChip(text, color) {
+    var ns = 'http://www.w3.org/2000/svg';
+    var g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'stepper-chip');
+    var w = Math.max(text.length * 7 + 16, 42);
+    var r = document.createElementNS(ns, 'rect');
+    r.setAttribute('x', '0'); r.setAttribute('y', '3');
+    r.setAttribute('width', w); r.setAttribute('height', '20');
+    r.setAttribute('rx', '10');
+    r.setAttribute('fill', '#1a1a2e');
+    r.setAttribute('stroke', color);
+    g.appendChild(r);
+    var t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', w / 2); t.setAttribute('y', '17');
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('fill', '#e8eefc');
+    t.setAttribute('style', 'font-size:10px;pointer-events:none;');
+    t.textContent = text;
+    g.appendChild(t);
+    return { g: g, w: w };
+  }
+
+  function addZoneChip(panel, zoneName, text, color) {
+    var zone = panel.g.querySelector('[data-zone="' + zoneName + '"]');
+    if (!zone) return null;
+    while (zone.childNodes.length >= 2) zone.removeChild(zone.firstChild);
+    var offset = 0;
+    for (var i = 0; i < zone.childNodes.length; i++) {
+      var c = zone.childNodes[i];
+      c.setAttribute('transform', 'translate(' + offset + ',0)');
+      offset += (parseFloat(c.getAttribute('data-w')) || 42) + 6;
+    }
+    var chip = makeChip(text, color);
+    chip.g.setAttribute('data-w', chip.w);
+    chip.g.setAttribute('transform', 'translate(' + offset + ',0)');
+    zone.appendChild(chip.g);
+    return chip.g;
+  }
+
+  function zoneCenter(panel, zoneName) {
+    var idx = { 'in': 0, 'proc': 1, 'out': 2 }[zoneName];
+    if (idx === undefined) idx = 0;
+    return { x: panel.x + 86, y: panel.y + 6 + idx * 28 + 13 };
+  }
+
+  // ---- chip 转场：rAF 插值飞行，速度跟随全局倍率 ----
+  // rAF 在后台/不可见标签页会被节流（永不触发），用 setTimeout 兜底保证 done 必达
+  function flyChip(text, color, fromXY, toXY, done) {
+    var layer = ensureAnimLayer();
+    if (!layer) { done(); return; }
+    var chip = makeChip(text, color);
+    chip.g.setAttribute('transform', 'translate(' + fromXY.x + ',' + fromXY.y + ')');
+    layer.appendChild(chip.g);
+    var dur = 500 / (state.speedMul || 1);
+    var finished = false;
+    var finish = function() {
+      if (finished) return;
+      finished = true;
+      if (chip.g.parentNode) chip.g.parentNode.removeChild(chip.g);
+      done();
+    };
+    var t0 = null;
+    var frame = function(ts) {
+      if (finished) return;
+      if (!t0) t0 = ts;
+      var k = Math.min((ts - t0) / dur, 1);
+      var x = fromXY.x + (toXY.x - fromXY.x) * k;
+      var y = fromXY.y + (toXY.y - fromXY.y) * k;
+      chip.g.setAttribute('transform', 'translate(' + x + ',' + y + ')');
+      if (k < 1 && stepper.view === 'anim') {
+        requestAnimationFrame(frame);
+      } else {
+        finish();
+      }
+    };
+    requestAnimationFrame(frame);
+    setTimeout(finish, dur + 200);
+  }
+
+  // ---- 注入：解析输入 → 每条出向 flow 创建一个 run，立即推进第一步 ----
+  function stepperInject(nodeId, raw) {
+    var v = raw;
+    try { v = JSON.parse(raw); } catch (e) { /* 裸字符串按原样注入 */ }
+    var flows = [];
+    EXPLICIT_FLOWS.forEach(function(f) { if (f.from === nodeId) flows.push(f); });
+    if (!flows.length) { setStepperStatus('该节点无出向数据流'); return; }
+    flows.forEach(function(f) {
+      stepper.runs.push({ id: ++stepper.seq, flow: f, value: v, result: undefined, stage: 'inject', flying: false });
+    });
+    setStepperStatus('已注入 ' + flows.length + ' 条流，点「步进」推进');
+    stepperStep();
+  }
+
+  // ---- 步进：推进所有活跃 run 一个阶段（飞行中的跳过本轮） ----
+  function stepperStep() {
+    var alive = [];
+    var acted = false;
+    for (var i = 0; i < stepper.runs.length; i++) {
+      var run = stepper.runs[i];
+      if (run.flying) { alive.push(run); continue; }
+      if (run.stage === 'done') continue;
+      acted = true;
+      if (advanceRun(run)) alive.push(run);
+    }
+    stepper.runs = alive;
+    if (!stepper.runs.length && acted) {
+      setStepperStatus('全部数据已到达终点');
+      stepperStopAuto();
+    }
+  }
+
+  function advanceRun(run) {
+    var f = flowConfigOf(run.flow);
+    var panel;
+    // 阶段1：数据落入 from 节点 OUT 区
+    if (run.stage === 'inject') {
+      panel = ensureStepperPanel(f.from, false);
+      if (panel) addZoneChip(panel, 'out', formatValueShort(run.value, 20), cssVar('--theme-accent', '#4fc3f7'));
+      run.stage = f.handler ? 'to-handler' : 'to-target';
+      setStepperStatus('#' + run.id + ' ' + f.from + ' 输出数据');
+      return true;
+    }
+    // 阶段2：chip 飞到 handler 节点，PROC 执行函数
+    if (run.stage === 'to-handler') {
+      var h = f.handler;
+      var fromPanel = stepper.panels[f.from];
+      var hPanel = ensureStepperPanel(h.file_id, false);
+      if (!hPanel) { run.stage = 'to-target'; return true; }
+      run.flying = true;
+      flyChip(formatValueShort(run.value, 20), cssVar('--theme-accent', '#4fc3f7'),
+        fromPanel ? zoneCenter(fromPanel, 'out') : zoneCenter(hPanel, 'proc'),
+        zoneCenter(hPanel, 'proc'),
+        function() {
+          var ctx = executeHandler(f, run.value, true);
+          if (ctx) {
+            run.result = ctx.result;
+            run.value = ctx.value;
+            var pt = hPanel.g.querySelector('.proc-text');
+            if (pt) {
+              var callStr = 'ƒ ' + h.api + '(' + formatHandlerArgs(ctx.args || {}, 12) + ') ⇒ ' + formatValueShort(ctx.result, 18);
+              if (callStr.length > 30) callStr = callStr.substring(0, 29) + '…';
+              pt.textContent = callStr;
+            }
+            if (ctx.classification && ctx.classification.kind !== 'none') {
+              setStepperStatus('#' + run.id + ' 异常(' + ctx.classification.kind + ')，数据终止于 ' + h.file_id);
+              run.stage = 'done';
+            } else {
+              run.stage = 'handler-out';
+              setStepperStatus('#' + run.id + ' ƒ ' + h.api + ' 已处理');
+            }
+          } else {
+            run.stage = 'to-target';
+          }
+          run.flying = false;
+        });
+      return true;
+    }
+    // 阶段3：handler 结果落入其 OUT 区
+    if (run.stage === 'handler-out') {
+      panel = stepper.panels[f.handler.file_id];
+      if (panel) addZoneChip(panel, 'out', formatValueShort(run.result, 20), '#ffeb3b');
+      run.stage = 'to-target';
+      return true;
+    }
+    // 阶段4：分支求值 → chip 飞到目标节点 IN 区 → 链式接力
+    if (run.stage === 'to-target') {
+      var target = f.to;
+      if (f.branches && f.branches.length) {
+        var picked = pickBranch(f.branches, run.value, run.result);
+        if (!picked) {
+          setStepperStatus('#' + run.id + ' 分支全未命中，数据终止');
+          return false;
+        }
+        target = picked.branch.to;
+      }
+      var fromP = stepper.panels[f.handler ? f.handler.file_id : f.from];
+      var toP = ensureStepperPanel(target, false);
+      if (!toP) return false;
+      run.flying = true;
+      var carry = run.result !== undefined ? run.result : run.value;
+      (function(targetId, toPanel, fromPanel) {
+        flyChip(formatValueShort(carry, 20), cssVar('--theme-accent', '#4fc3f7'),
+          fromPanel ? zoneCenter(fromPanel, 'out') : zoneCenter(toPanel, 'in'),
+          zoneCenter(toPanel, 'in'),
+          function() {
+            addZoneChip(toPanel, 'in', formatValueShort(carry, 20), cssVar('--theme-accent', '#4fc3f7'));
+            var next = null;
+            for (var j = 0; j < EXPLICIT_FLOWS.length; j++) {
+              if (EXPLICIT_FLOWS[j].from === targetId) { next = EXPLICIT_FLOWS[j]; break; }
+            }
+            if (next) {
+              run.flow = next;
+              run.result = undefined;
+              run.stage = 'inject';
+              setStepperStatus('#' + run.id + ' 到达 ' + targetId + '，接力下一流');
+            } else {
+              run.stage = 'done';
+              setStepperStatus('#' + run.id + ' 到达终点 ' + targetId);
+            }
+            run.flying = false;
+          });
+      })(target, toP, fromP);
+      return true;
+    }
+    return run.stage !== 'done';
+  }
+
+  function stepperStartAuto() {
+    if (stepper.autoTimer) return;
+    var btn = document.getElementById('stepper-auto');
+    if (btn) { btn.textContent = '⏸ 暂停'; btn.classList.add('primary'); }
+    stepper.autoTimer = setInterval(function() {
+      var busy = false;
+      for (var i = 0; i < stepper.runs.length; i++) if (stepper.runs[i].flying) busy = true;
+      if (!busy) stepperStep();
+    }, 1100);
+  }
+
+  function stepperStopAuto() {
+    if (stepper.autoTimer) { clearInterval(stepper.autoTimer); stepper.autoTimer = null; }
+    var btn = document.getElementById('stepper-auto');
+    if (btn) { btn.textContent = '▶ 自动'; btn.classList.remove('primary'); }
+  }
+
+  // ---- 步进控制条（动画视图浮层） ----
+  function ensureStepperBar() {
+    if (stepper.bar) return;
+    var wrap = document.querySelector('.canvas-wrap');
+    if (!wrap) return;
+    var bar = document.createElement('div');
+    bar.className = 'stepper-bar';
+    bar.innerHTML = '<button id="stepper-step" type="button">⏭ 步进</button>' +
+      '<button id="stepper-auto" type="button">▶ 自动</button>' +
+      '<button id="stepper-clear" type="button">↺ 清空</button>' +
+      '<span id="stepper-status" class="stepper-status"></span>';
+    wrap.appendChild(bar);
+    stepper.bar = bar;
+    document.getElementById('stepper-step').addEventListener('click', stepperStep);
+    document.getElementById('stepper-auto').addEventListener('click', function() {
+      if (stepper.autoTimer) stepperStopAuto(); else stepperStartAuto();
+    });
+    document.getElementById('stepper-clear').addEventListener('click', function() {
+      stepperStopAuto();
+      stepper.runs = [];
+      for (var id in stepper.panels) {
+        var zones = stepper.panels[id].g.querySelectorAll('[data-zone]');
+        for (var i = 0; i < zones.length; i++) {
+          if (zones[i].getAttribute('data-zone') === 'proc') {
+            var pt = zones[i].querySelector('.proc-text');
+            if (pt) pt.textContent = '';
+          } else {
+            while (zones[i].childNodes.length) zones[i].removeChild(zones[i].firstChild);
+          }
+        }
+      }
+      setStepperStatus('已清空');
+    });
+  }
+
+  // ---- 视图切换 ----
+  function enterAnimView() {
+    if (stepper.view === 'anim') return;
+    stepper.view = 'anim';
+    document.body.setAttribute('data-view', 'anim');
+    pause(); // 停周期粒子流：数据表达由步进器接管（CSS 同步隐藏残留粒子）
+    state.activeParticles.forEach(function(p) { if (p.el.parentNode) p.el.parentNode.removeChild(p.el); });
+    state.activeParticles = [];
+    var entries = stepperEntryNodes();
+    var nodes = stepperFlowNodes();
+    for (var id in nodes) ensureStepperPanel(id, entries.indexOf(id) >= 0);
+    ensureStepperBar();
+    var bn = document.getElementById('view-nodes'), ba = document.getElementById('view-anim');
+    if (bn) bn.classList.remove('active');
+    if (ba) ba.classList.add('active');
+    setStepperStatus(entries.length ? '在入口节点（虚线面板）输入数据并注入' : '无入口节点');
+  }
+
+  function exitAnimView() {
+    if (stepper.view !== 'anim') return;
+    stepper.view = 'nodes';
+    document.body.setAttribute('data-view', 'nodes');
+    stepperStopAuto();
+    stepper.runs = [];
+    for (var id in stepper.panels) {
+      var p = stepper.panels[id];
+      if (p.g.parentNode) p.g.parentNode.removeChild(p.g);
+    }
+    stepper.panels = {};
+    if (stepper.bar && stepper.bar.parentNode) stepper.bar.parentNode.removeChild(stepper.bar);
+    stepper.bar = null;
+    resume();
+    var bn = document.getElementById('view-nodes'), ba = document.getElementById('view-anim');
+    if (bn) bn.classList.add('active');
+    if (ba) ba.classList.remove('active');
+  }
+
+  function setupViewToggle() {
+    var bn = document.getElementById('view-nodes');
+    var ba = document.getElementById('view-anim');
+    if (!bn || !ba) return; // 无 flows 页面不渲染按钮
+    bn.addEventListener('click', exitAnimView);
+    ba.addEventListener('click', enterAnimView);
+  }
+
   // ---- 启动 ----
   function start() {
     if (state.started) return;
     state.started = true;
     setupControlButtons();
+    setupViewToggle();
 
     // 等待 DOM 渲染完成（scripts.ts 可能在动画脚本之后才渲染节点）
     setTimeout(function() {

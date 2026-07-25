@@ -526,6 +526,10 @@ export function renderHTML(dsl: DesignDSL): string {
     <div class="canvas-wrap">
       <div class="canvas-toolbar">
         <input type="text" id="node-search" class="search-input" placeholder="🔍 搜索节点 (label / id)..." autocomplete="off">
+        ${(dsl.animations_v2?.flows?.length ?? 0) > 0 ? `<div class="view-switcher" title="切换视图：节点=静态结构 / 动画=交互式数据步进">
+          <button id="view-nodes" class="active" type="button">🗂 节点</button>
+          <button id="view-anim" type="button">🎬 动画</button>
+        </div>` : ''}
         <div class="history-controls">
           <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶</button>
           <button id="btn-redo" type="button" title="重做 (Ctrl+Y)" disabled>↷</button>
