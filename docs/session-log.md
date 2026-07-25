@@ -25,5 +25,5 @@
 - F3 动画激活：`flowDomVisible` 门控插在 `spawnDefaultParticle` 统一入口——端点隐藏时 flow 整体不执行（无语义/无粒子/无日志），展开后下周期自动恢复；粒子/高亮已有 display 检查兜底
 - DSL/schema：`Node.layer` `Node.host` `Edge.layer` 三字段 + edit_dsl 三工具支持（add/update node/edge，host 存在性校验，null 清除回 main）
 - 验证：218/218 测试通过（新增层属性/推导/豁免/F3 门控用例），tsc 零错误，17 个示例 HTML 全部重渲染
-- 提交：（见 git log 最新一条 feat: 分层披露）
-- 下一步候选：detail 层数据变形链（输入→函数→输出形状标注 + 注入异常值回放）；非开发者可读性（每个文件"做什么/数据进什么样/出什么样"）
+- 提交：`471ebc6` feat: 分层披露三层体系
+- 下一步：detail 层数据变形链——完整设计已固化在 [animation-design.md](./animation-design.md) 第 10 节（文件=数据加工车间：进料口/加工链/出料口 + 形状卡 + 输入注入质检；实施顺序 D1 静态形状卡 → D2 变形链推导 → D3 注入回放）
