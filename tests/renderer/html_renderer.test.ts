@@ -196,18 +196,18 @@ describe('renderHTML - conveyor 示例', () => {
     expect(html).toContain('DynamicInjection');
   });
 
-  it('conveyor 的 29 个节点都有 rect', () => {
+  it('conveyor 的 33 个节点都有 rect', () => {
     const html = renderHTML(conveyor as DesignDSL);
     const nodeMatches = html.match(/class="node[^"]*"/g);
     expect(nodeMatches).not.toBeNull();
-    expect(nodeMatches!.length).toBe(29);
+    expect(nodeMatches!.length).toBe(33);
   });
 
-  it('conveyor 的 30 条边（5 条流向 + 21 条 contains + 4 条扩展）', () => {
+  it('conveyor 的 33 条边（5 条流向 + 21 条 contains + 4 条扩展 + 3 条 detail 变形链）', () => {
     const html = renderHTML(conveyor as DesignDSL);
     const edgeMatches = html.match(/class="edge"/g);
     expect(edgeMatches).not.toBeNull();
-    expect(edgeMatches!.length).toBe(30);
+    expect(edgeMatches!.length).toBe(33);
   });
 
   it('conveyor 的 3 条标注通过 window.__DSL__ 暴露（供 tooltip 使用）', () => {
@@ -369,5 +369,80 @@ describe('renderHTML - 职责分层', () => {
     expect(html).toMatch(/data-id="err_b"[^>]*data-layer="error"/);
     const bMatch = html.match(/<g class="node[^"]*" data-id="err_b"[^>]*>/);
     expect(bMatch![0]).not.toContain('data-host');
+  });
+});
+
+describe('renderHTML - D1 数据形状卡', () => {
+  function makeShapedDSL(): DesignDSL {
+    const dsl = makeMinimalDSL();
+    dsl.geometry.nodes.push({
+      id: 'shape_node',
+      x: 10,
+      y: 200,
+      label: '进料口',
+      layer: 'detail',
+      host: 'n1',
+      shapes: {
+        in: {
+          type: 'object',
+          properties: { token: { type: 'string' } },
+          required: ['token'],
+        },
+        out: {
+          type: 'object',
+          properties: {
+            user_id: { type: 'integer' },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      },
+    });
+    return dsl;
+  }
+
+  it('形状卡渲染进/出人话形状（schemaToHuman 转换）', () => {
+    const html = renderHTML(makeShapedDSL());
+    expect(html).toContain('class="shape-card"');
+    expect(html).toContain('<span class="shape-dir">进</span>');
+    expect(html).toContain('<span class="shape-dir">出</span>');
+    expect(html).toContain('{token: 字符串}');
+    expect(html).toContain('{user_id: 整数, tags: 字符串[]}');
+  });
+
+  it('形状卡节点标签置顶 + 卡片在标签下方', () => {
+    const html = renderHTML(makeShapedDSL());
+    // 标签 y = 节点 y + 18（置顶），卡片 foreignObject y = 节点 y + 28
+    expect(html).toMatch(/<text x="130" y="218"[^>]*>进料口<\/text>/);
+    expect(html).toMatch(/<foreignObject x="16" y="228"[^>]*><div[^>]*class="shape-card"/);
+  });
+
+  it('形状卡节点默认尺寸放大（240 × 34+行*24+10）', () => {
+    const html = renderHTML(makeShapedDSL());
+    // 2 行 → 高 34+48+10=92
+    expect(html).toMatch(/<rect data-shape="true" x="10" y="200" width="240" height="92"/);
+  });
+
+  it('无 shapes 节点不渲染形状卡，显式尺寸优先', () => {
+    const dsl = makeShapedDSL();
+    dsl.geometry.nodes[2].width = 300;
+    dsl.geometry.nodes[2].height = 100;
+    const html = renderHTML(dsl);
+    expect(html).toMatch(/<rect data-shape="true" x="10" y="200" width="300" height="100"/);
+    // n1/n2 无 shapes → 无卡片
+    const n1Match = html.match(/<g class="node[^"]*" data-id="n1"[\s\S]*?<\/g>/);
+    expect(n1Match![0]).not.toContain('shape-card');
+  });
+
+  it('形状卡 XSS 转义（label 中的 HTML 不注入）', () => {
+    const dsl = makeMinimalDSL();
+    dsl.geometry.nodes.push({
+      id: 'evil',
+      x: 0,
+      y: 0,
+      shapes: { in: { type: 'string', label: '<script>alert(1)</script>' } },
+    });
+    const html = renderHTML(dsl);
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;script&gt;');
   });
 });

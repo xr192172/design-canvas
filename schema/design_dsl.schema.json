@@ -103,6 +103,15 @@
           "type": "string",
           "description": "深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关"
         },
+        "shapes": {
+          "type": "object",
+          "description": "数据形状卡（D1）：进/出该节点的数据形状（AnimationValueSchema，人话渲染，纯展示）",
+          "properties": {
+            "in": { "type": "object", "description": "进料口数据形状（JSON Schema 格式）" },
+            "out": { "type": "object", "description": "出料口数据形状（JSON Schema 格式）" }
+          },
+          "additionalProperties": false
+        },
         "style": {
           "type": "object",
           "properties": {

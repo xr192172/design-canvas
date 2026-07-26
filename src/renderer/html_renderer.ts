@@ -15,17 +15,20 @@ import { buildScript } from './scripts.js';
 import { buildAnimationScript } from './animation_engine.js';
 import { computeEdgePath } from './edge_geom.js';
 import type { GRect } from './edge_geom.js';
+import { schemaToHuman } from './shape_card.js';
 
 /** 障碍矩形（edge_geom.GRect 的本地别名，保持调用处可读性） */
 type RectBox = GRect;
 
-/** 计算节点矩形边界（带默认尺寸） */
+/** 计算节点矩形边界（带默认尺寸；形状卡节点默认更宽更高） */
 function nodeBox(n: Node): GRect {
+  const rows = (n.shapes?.in ? 1 : 0) + (n.shapes?.out ? 1 : 0);
+  const hasShapes = rows > 0;
   return {
     x: n.x ?? 0,
     y: n.y ?? 0,
-    w: n.width ?? 120,
-    h: n.height ?? 60,
+    w: n.width ?? (hasShapes ? 240 : 120),
+    h: n.height ?? (hasShapes ? 34 + rows * 24 + 10 : 60),
   };
 }
 
@@ -207,6 +210,10 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
   }
 
   // 内容渲染
+  const shapeRows: Array<{ dir: 'in' | 'out'; text: string }> = [];
+  if (n.shapes?.in) shapeRows.push({ dir: 'in', text: schemaToHuman(n.shapes.in) });
+  if (n.shapes?.out) shapeRows.push({ dir: 'out', text: schemaToHuman(n.shapes.out) });
+  const hasShapes = shapeRows.length > 0;
   let contentSvg = '';
   if (n.content && n.content.type === 'rich' && n.content.blocks && n.content.blocks.length > 0) {
     // 富文本节点：用 foreignObject 内嵌 HTML
@@ -215,15 +222,25 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
   } else {
     // 纯文字节点：SVG text，根据节点宽度自适应字体大小
     const textX = b.x + b.w / 2;
-    // 平铺布局：父节点文字上移到顶部（y+18），子节点保持居中
-    const textY = isParent ? b.y + 18 : b.y + b.h / 2;
+    // 平铺布局：父节点文字上移到顶部（y+18），子节点保持居中；形状卡节点标签同样置顶
+    const textY = isParent || hasShapes ? b.y + 18 : b.y + b.h / 2;
     // 根据节点宽度和标签长度估算合适的字体大小
     const labelLen = label.length;
     const maxByWidth = Math.floor((b.w - 16) / Math.max(labelLen * 0.6, 1));
     const maxByHeight = Math.floor((b.h - 8) / 1.4);
     const fontSize = Math.max(11, Math.min(18, maxByWidth, maxByHeight));
-    const dy = isParent ? '0' : '0.35em';
+    const dy = isParent || hasShapes ? '0' : '0.35em';
     contentSvg = `<text x="${textX}" y="${textY}" text-anchor="middle" dy="${dy}" fill="${esc(textColor)}" style="font-size:${fontSize}px" ${isParent ? 'class="label-top"' : ''}>${esc(label)}</text>`;
+    // D1 数据形状卡：进/出料口人话形状（纯展示，pointer-events=none 不抢拖拽）
+    if (hasShapes) {
+      const rowsHtml = shapeRows
+        .map(
+          (r) =>
+            `<div class="shape-row ${r.dir}"><span class="shape-dir">${r.dir === 'in' ? '进' : '出'}</span><span class="shape-body">${esc(r.text)}</span></div>`,
+        )
+        .join('');
+      contentSvg += `<foreignObject x="${b.x + 6}" y="${b.y + 28}" width="${b.w - 12}" height="${b.h - 34}" pointer-events="none"><div xmlns="http://www.w3.org/1999/xhtml" class="shape-card">${rowsHtml}</div></foreignObject>`;
+    }
   }
 
   return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${layerAttr}${hostAttr}${hiddenAttr}>

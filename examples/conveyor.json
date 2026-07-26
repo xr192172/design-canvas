@@ -343,6 +343,94 @@
         "style": { "bg": "#6a1b9a", "color": "#e1bee7", "borderRadius": 60, "shape": "circle" },
         "type": "llm",
         "description": "模拟 Agent-Aided Memory 生成结构化消息"
+      },
+
+      {
+        "id": "node_compose_port_in",
+        "x": 100, "y": 940, "width": 220,
+        "label": "进料口",
+        "layer": "detail", "host": "node_context_compose",
+        "shapes": {
+          "out": {
+            "type": "object",
+            "properties": {
+              "sections": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "section_id": { "type": "string" },
+                    "messages": { "type": "number" }
+                  }
+                }
+              },
+              "tokenBudget": { "type": "integer" }
+            },
+            "required": ["sections", "tokenBudget"]
+          }
+        }
+      },
+      {
+        "id": "node_compose_step_budget",
+        "x": 340, "y": 940, "width": 220,
+        "label": "① 预算核算",
+        "layer": "detail", "host": "node_context_compose",
+        "shapes": {
+          "in": {
+            "type": "object",
+            "properties": {
+              "sections": { "type": "array", "items": { "type": "object" } },
+              "tokenBudget": { "type": "integer" }
+            }
+          },
+          "out": {
+            "type": "object",
+            "properties": {
+              "usedTokens": { "type": "integer" },
+              "overBudget": { "type": "boolean" }
+            },
+            "required": ["usedTokens", "overBudget"]
+          }
+        }
+      },
+      {
+        "id": "node_compose_step_assemble",
+        "x": 580, "y": 940, "width": 220,
+        "label": "② 按序组装",
+        "layer": "detail", "host": "node_context_compose",
+        "shapes": {
+          "in": {
+            "type": "object",
+            "properties": {
+              "sections": { "type": "array", "items": { "type": "object" } },
+              "order": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "out": {
+            "type": "object",
+            "properties": {
+              "prompt": { "type": "string" },
+              "totalTokens": { "type": "integer" }
+            },
+            "required": ["prompt", "totalTokens"]
+          }
+        }
+      },
+      {
+        "id": "node_compose_port_out",
+        "x": 820, "y": 940, "width": 220,
+        "label": "出料口",
+        "layer": "detail", "host": "node_context_compose",
+        "shapes": {
+          "in": {
+            "type": "object",
+            "properties": {
+              "prompt": { "type": "string" },
+              "totalTokens": { "type": "integer" }
+            },
+            "required": ["prompt", "totalTokens"]
+          }
+        }
       }
     ],
     "edges": [
@@ -382,7 +470,11 @@
       { "id": "edge_contains_rollback", "from": "node_section_queue", "to": "node_rollback", "label": "contains" },
       { "id": "edge_rollback_flow", "from": "node_rollback", "to": "node_current_round", "label": "可 Rollback 恢复", "style": { "stroke": "#ce93d8", "strokeDasharray": "5 3" } },
       { "id": "edge_token_feedback", "from": "node_context_compose", "to": "node_section_queue", "label": "超预算反馈触发折叠", "style": { "stroke": "#ff5722", "strokeDasharray": "8 4" } },
-      { "id": "edge_retrieval_cache_loop", "from": "node_retrieval_cache", "to": "node_dynamic_injection", "label": "缓存命中跳过检索", "style": { "stroke": "#fff59d", "strokeDasharray": "3 3" } }
+      { "id": "edge_retrieval_cache_loop", "from": "node_retrieval_cache", "to": "node_dynamic_injection", "label": "缓存命中跳过检索", "style": { "stroke": "#fff59d", "strokeDasharray": "3 3" } },
+
+      { "id": "edge_chain_1", "from": "node_compose_port_in", "to": "node_compose_step_budget", "label": "原料" },
+      { "id": "edge_chain_2", "from": "node_compose_step_budget", "to": "node_compose_step_assemble", "label": "预算内继续" },
+      { "id": "edge_chain_3", "from": "node_compose_step_assemble", "to": "node_compose_port_out", "label": "成品" }
     ]
   },
 

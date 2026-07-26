@@ -36,6 +36,47 @@ describe('edit_dsl - 节点增强属性', () => {
   beforeEach(() => clearAllFeatures());
   afterEach(() => clearAllFeatures());
 
+  it('add_node 支持 shapes 形状卡 + 非法 type 拒绝', () => {
+    createFeature({ feature: 'test_shapes' });
+    addNode({
+      feature: 'test_shapes',
+      node_id: 'port_in',
+      label: '进料口',
+      layer: 'detail',
+      shapes: {
+        in: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'] },
+        out: { type: 'string' },
+      },
+    });
+    const node = getDSL('test_shapes')!.geometry.nodes[0];
+    expect(node.shapes?.in?.type).toBe('object');
+    expect(node.shapes?.out?.type).toBe('string');
+
+    // 非法 type 递归拒绝（嵌套 properties 内也校验）
+    expect(() =>
+      addNode({
+        feature: 'test_shapes',
+        node_id: 'bad',
+        shapes: { in: { type: 'object', properties: { x: { type: 'str' as never } } } },
+      }),
+    ).toThrow(/shapes\.in\.properties\.x\.type/);
+  });
+
+  it('update_node 修改 shapes；null 清除', () => {
+    createFeature({ feature: 'test_shapes_upd' });
+    addNode({ feature: 'test_shapes_upd', node_id: 'n1', label: '节点' });
+
+    updateNode({
+      feature: 'test_shapes_upd',
+      node_id: 'n1',
+      shapes: { out: { type: 'array', items: { type: 'integer' } } },
+    });
+    expect(getDSL('test_shapes_upd')!.geometry.nodes[0].shapes?.out?.items?.type).toBe('integer');
+
+    updateNode({ feature: 'test_shapes_upd', node_id: 'n1', shapes: null });
+    expect(getDSL('test_shapes_upd')!.geometry.nodes[0].shapes).toBeUndefined();
+  });
+
   it('add_node 支持 type/description/status/shape/swimlane', () => {
     createFeature({ feature: 'test_node_props' });
     addNode({

@@ -16,6 +16,7 @@ import { renderDsl } from './tools/render_dsl.js';
 import { getDsl } from './tools/get_dsl.js';
 import { listFeatures } from './tools/list_features.js';
 import { createFeature, addNode, updateNode, deleteNode, addEdge, deleteEdge, addFile, updateFile, deleteFile, addExpectedApi, updateExpectedApi, deleteExpectedApi, setNodeSemantic, batchMoveNodes, batchUpdateStyle, batchDeleteNodes, cloneFeature, diffFeatures } from './tools/edit_dsl.js';
+import type { AddNodeInput, UpdateNodeInput } from './tools/edit_dsl.js';
 import { scaffold } from './tools/scaffold.js';
 import { updateStatus, checkStatus } from './tools/status_tools.js';
 import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools.js';
@@ -203,6 +204,10 @@ server.registerTool(
       swimlane: z.string().optional().describe('所属泳道 ID'),
       layer: z.enum(['main', 'error', 'detail']).optional().describe('职责分层：main=主干(默认显示) / error=异常处理(折叠) / detail=实现细节(折叠)'),
       host: z.string().optional().describe('深层节点的宿主主干节点 ID（角标挂载点）'),
+      shapes: z.object({
+        in: z.record(z.string(), z.unknown()).optional().describe('进料口数据形状（JSON Schema：{type,properties,items,required,enum,label}）'),
+        out: z.record(z.string(), z.unknown()).optional().describe('出料口数据形状'),
+      }).optional().describe('数据形状卡（D1）：渲染在节点上的人话版进/出数据形状'),
     },
   },
   async (args) => {
@@ -226,6 +231,7 @@ server.registerTool(
         swimlane: args.swimlane,
         layer: args.layer,
         host: args.host,
+        shapes: args.shapes as AddNodeInput['shapes'],
       });
       return {
         content: [{ type: 'text', text: result.message }],
@@ -266,6 +272,10 @@ server.registerTool(
       swimlane: z.string().optional().describe('所属泳道 ID'),
       layer: z.enum(['main', 'error', 'detail']).nullable().optional().describe('职责分层：main=主干(默认) / error=异常(折叠) / detail=细节(折叠)；null=清除回到 main'),
       host: z.string().nullable().optional().describe('深层节点的宿主节点 ID；null=清除'),
+      shapes: z.object({
+        in: z.record(z.string(), z.unknown()).optional().describe('进料口数据形状（JSON Schema）'),
+        out: z.record(z.string(), z.unknown()).optional().describe('出料口数据形状'),
+      }).nullable().optional().describe('数据形状卡（D1）；null=清除'),
     },
   },
   async (args) => {
@@ -289,6 +299,7 @@ server.registerTool(
         swimlane: args.swimlane,
         layer: args.layer,
         host: args.host,
+        shapes: args.shapes as UpdateNodeInput['shapes'],
       });
       return {
         content: [{ type: 'text', text: result.message }],

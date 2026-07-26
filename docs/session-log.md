@@ -45,3 +45,14 @@
 - 视图适配：`fitVisibleContent` 按可见节点包围盒反推 scale，跳过折叠隐藏节点防幽灵占位撑大画布
 - 杂项：.gitignore 扩展（output/ 全目录、.backup/、scripts/*.tmp.mjs）；删除临时脚本
 - 验证：218/218 测试，tsc 零错误
+
+## 2026-07-26 会话（D1 静态形状卡）
+
+**本批完成：D1 静态形状卡——detail 层数据变形链第一步**
+- DSL/schema：`Node.shapes` 字段（`{in?, out?}` 各一份 AnimationValueSchema）+ design_dsl.schema.json 同步
+- 渲染核心 [shape_card.ts](../src/renderer/shape_card.ts)：`schemaToHuman` 人话转换——作者手写 label 优先（D2 LLM 语义标注落点）；对象 2 层嵌套预算（超限折叠为 …）；数组不消耗深度（`字符串[][][]` 仍可读）；enum 渲染为 `(a|b)` 取值集
+- 渲染集成 [html_renderer.ts](../src/renderer/html_renderer.ts)：形状卡节点默认 240 宽、动态高度（34+rows×24+10）；标签置顶；foreignObject 内嵌 HTML 行（进/出前缀 + 人话形状），pointer-events=none 不抢拖拽；样式见 styles.ts `.shape-card/.shape-row`
+- 编辑支持：add_node/update_node 增加 shapes 参数 + `assertValidSchema` 递归轻校验（type 枚举 + properties/items 递归，防渲染垃圾）；update 传 null 清除
+- conveyor 示例：ContextComposition 下挂 4 节点变形链演示——进料口 → ① 预算核算 → ② 顺序组装 → 出料口，3 条 detail 层链边，全程 shapes 标注进/出数据形状
+- 验证：239/239 测试通过（新增 shape_card 14 用例 + 渲染/编辑/e2e 用例），tsc 零错误，conveyor.html 重渲染确认 24 处形状卡标记
+- 下一步：D2 变形链推导（TreeSitter 提取函数骨架 + LLM 语义标注，自动生成 detail 层节点/边）→ D3 注入回放（进料口编辑 JSON/预设异常场景）

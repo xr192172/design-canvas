@@ -120,6 +120,8 @@ export interface Node {
   layer?: NodeLayer;
   /** 深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关 */
   host?: string;
+  /** 数据形状卡（D1）：进/出该节点的数据形状（人话版 JSON Schema 渲染，纯展示） */
+  shapes?: NodeShapes;
 }
 
 /** 边 SVG 样式 */
@@ -398,6 +400,14 @@ export interface AnimationValueSchema {
   enum?: (string | number)[];
   /** 描述 */
   description?: string;
+}
+
+/** 节点数据形状卡（D1）：进料口/出料口各一份 AnimationValueSchema */
+export interface NodeShapes {
+  /** 进：进入该节点/步骤的数据形状 */
+  in?: AnimationValueSchema;
+  /** 出：离开该节点/步骤的数据形状 */
+  out?: AnimationValueSchema;
 }
 
 /** 流转的数据值定义 */

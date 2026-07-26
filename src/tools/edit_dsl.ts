@@ -10,8 +10,27 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DesignDSL, Node, Edge, NodeStyle, NodeContent, DiagramStatus, SemanticFile, ExpectedApi, NodeLayer } from '../dsl/types.js';
+import type { DesignDSL, Node, Edge, NodeStyle, NodeContent, DiagramStatus, SemanticFile, ExpectedApi, NodeLayer, NodeShapes, AnimationValueSchema } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
+
+/** 形状卡轻校验：type 枚举 + properties/items 递归（防止渲染垃圾） */
+function assertValidSchema(s: AnimationValueSchema, path: string): void {
+  const validTypes = ['object', 'array', 'string', 'number', 'boolean', 'integer', 'null'];
+  if (!s || typeof s !== 'object' || !validTypes.includes(s.type)) {
+    throw new Error(`${path}.type 必须是 ${validTypes.join('/')} 之一`);
+  }
+  if (s.properties) {
+    for (const [k, v] of Object.entries(s.properties)) {
+      assertValidSchema(v, `${path}.properties.${k}`);
+    }
+  }
+  if (s.items) assertValidSchema(s.items, `${path}.items`);
+}
+
+function assertValidShapes(shapes: NodeShapes): void {
+  if (shapes.in) assertValidSchema(shapes.in, 'shapes.in');
+  if (shapes.out) assertValidSchema(shapes.out, 'shapes.out');
+}
 
 // ─────────────────────────────────────────────────────────────
 // create_feature：创建新 feature
@@ -101,10 +120,11 @@ export interface AddNodeInput {
   sub_dsl?: DesignDSL;
   layer?: NodeLayer;
   host?: string;
+  shapes?: NodeShapes;
 }
 
 export function addNode(input: AddNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -117,6 +137,7 @@ export function addNode(input: AddNodeInput): EditResult {
   if (host && !dsl.geometry.nodes.find(n => n.id === host)) {
     throw new Error(`host 节点 "${host}" 不存在`);
   }
+  if (shapes) assertValidShapes(shapes);
 
   const style: NodeStyle = {};
   if (bg) style.bg = bg;
@@ -143,6 +164,7 @@ export function addNode(input: AddNodeInput): EditResult {
     sub_dsl,
     layer,
     host,
+    shapes,
   };
 
   dsl.geometry.nodes.push(node);
@@ -191,10 +213,11 @@ export interface UpdateNodeInput {
   sub_dsl?: DesignDSL;
   layer?: NodeLayer | null;
   host?: string | null;
+  shapes?: NodeShapes | null;
 }
 
 export function updateNode(input: UpdateNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -229,6 +252,14 @@ export function updateNode(input: UpdateNodeInput): EditResult {
         throw new Error(`host 节点 "${host}" 不存在`);
       }
       node.host = host;
+    }
+  }
+  // shapes：null 表示清除形状卡
+  if (shapes !== undefined) {
+    if (shapes === null) delete node.shapes;
+    else {
+      assertValidShapes(shapes);
+      node.shapes = shapes;
     }
   }
 

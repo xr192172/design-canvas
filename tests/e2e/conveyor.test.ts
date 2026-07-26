@@ -75,10 +75,10 @@ describe('e2e: conveyor 端到端', () => {
     renderDsl({ dsl_json: dslJson });
     const html = fs.readFileSync(CONVEYOR_HTML, 'utf-8');
     expect(html).toContain('<svg');
-    // 29 个节点
-    expect((html.match(/class="node[^"]*"/g) ?? []).length).toBe(29);
-    // 30 条边
-    expect((html.match(/class="edge"/g) ?? []).length).toBe(30);
+    // 33 个节点（含 4 个 detail 层形状卡节点）
+    expect((html.match(/class="node[^"]*"/g) ?? []).length).toBe(33);
+    // 33 条边（含 3 条 detail 变形链边）
+    expect((html.match(/class="edge"/g) ?? []).length).toBe(33);
   });
 
   it('HTML 包含 semantic 卡片（6 个文件路径）', () => {
@@ -134,7 +134,7 @@ describe('e2e: conveyor 端到端', () => {
     const result = getDsl({ feature_name: 'conveyor' });
     const parsed = JSON.parse(result.json);
     expect(parsed.feature).toBe('conveyor');
-    expect(parsed.geometry.nodes).toHaveLength(29);
+    expect(parsed.geometry.nodes).toHaveLength(33);
   });
 
   it('list_features 能列出 conveyor', () => {

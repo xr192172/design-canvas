@@ -303,6 +303,40 @@ main {
   color: #fff;
   align-self: flex-start;
 }
+/* D1 数据形状卡：节点上进/出料口的人话形状展示（纯展示，pointer-events:none） */
+.shape-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  box-sizing: border-box;
+}
+.shape-card .shape-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  background: var(--theme-input-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  overflow: hidden;
+}
+.shape-card .shape-dir {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--theme-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.shape-card .shape-row.out .shape-dir {
+  color: var(--theme-accent);
+}
+.shape-card .shape-body {
+  color: var(--theme-text);
+  word-break: break-all;
+  opacity: 0.92;
+}
 .node .collapse-btn {
   cursor: pointer;
   transition: transform 0.2s ease;
