@@ -44,6 +44,23 @@ export interface ForceLayoutInput {
   height?: number;
 }
 
+/**
+ * 平铺布局守卫：含 contains 包含关系的 DSL（import_project 产物）是嵌套结构，
+ * dag/force 等平铺布局会把文件节点与容器同级重排，导致子节点逃逸出容器、
+ * 布局不可逆腐坏（浏览器 auto-save 会持久化）。一律拒绝并提示。
+ */
+function assertFlatLayoutSafe(dsl: DesignDSL, algo: string): void {
+  const hasContains = (dsl.geometry.edges || []).some(
+    (e) => (e.label || '').toLowerCase() === 'contains' || e.label === '包含',
+  );
+  if (hasContains) {
+    throw new Error(
+      `当前 DSL 含目录容器嵌套结构（contains 边），${algo} 平铺布局会破坏层级（子节点将逃逸出容器）。` +
+        `嵌套工程图请勿使用平铺布局；如需重排请重新运行 import_project。`,
+    );
+  }
+}
+
 export function dagLayout(input: DagLayoutInput): { message: string; rank_count: number; edge_crossings: number } {
   const {
     feature,
@@ -58,6 +75,8 @@ export function dagLayout(input: DagLayoutInput): { message: string; rank_count:
   if (!dsl) {
     throw new Error(`feature "${feature}" 不存在`);
   }
+
+  assertFlatLayoutSafe(dsl, 'dag');
 
   if (!dsl.geometry.nodes || dsl.geometry.nodes.length === 0) {
     return { message: '画布为空，无需布局', rank_count: 0, edge_crossings: 0 };
@@ -348,6 +367,8 @@ export function forceLayout(input: ForceLayoutInput): { message: string; iterati
   if (!dsl) {
     throw new Error(`feature "${feature}" 不存在`);
   }
+
+  assertFlatLayoutSafe(dsl, 'force');
 
   if (!dsl.geometry.nodes || dsl.geometry.nodes.length === 0) {
     return { message: '画布为空，无需布局', iterations: 0, edge_crossings: 0 };

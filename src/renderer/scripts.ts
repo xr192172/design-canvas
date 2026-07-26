@@ -2761,20 +2761,15 @@ ${EDGE_GEOM_SOURCE}
 
     if (zoomIn) zoomIn.addEventListener('click', () => setScale(canvasState.scale * 1.2));
     if (zoomOut) zoomOut.addEventListener('click', () => setScale(canvasState.scale / 1.2));
-    // 初始视图（也是 zoom-reset 的目标）：巨图（fit 后实际显示 <50%）直接以实际 100%
-    // 显示并居中内容包围盒，避免开局一团乱麻；普通图保持 scale=1 全览
-    function applyInitialView() {
-      if (fitScale >= 0.5) {
-        canvasState.scale = 1;
-        canvasState.panX = 0;
-        canvasState.panY = 0;
-        updateViewBox();
-        return;
-      }
-      canvasState.scale = 1 / fitScale; // 实际 100%（1 单位 = 1 屏幕 px）
+    // 适配可见内容到屏幕：按屏幕尺寸直接反推 scale（s_d = scale × fitScale）。
+    // 旧公式 min(ow/fw, oh/fh) 对超长画布（8480×24746）会被完整高度拖累，
+    // meet 适配后实际显示仍只有 ~4%，等于没 fit —— 必须绕开 origViewBox 维度。
+    // maxActual：实际显示比例上限（防小包围盒被过度放大）
+    function fitVisibleContent(maxActual) {
       const nodes = dsl.geometry?.nodes || [];
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cnt = 0;
       nodes.forEach(n => {
+        // 跳过不可见节点（深层折叠 / collapse 折叠），避免幽灵占位撑大画布
         const el = document.querySelector('.node[data-id="' + n.id + '"]');
         if (el && el.style.display === 'none') return;
         cnt++;
@@ -2785,43 +2780,36 @@ ${EDGE_GEOM_SOURCE}
         maxX = Math.max(maxX, x + w);
         maxY = Math.max(maxY, y + h);
       });
-      if (cnt > 0) {
-        // 使视图中心对准内容包围盒中心：panX = ox + ow/2 - cx（由 updateViewBox 公式反推）
-        const [ox, oy, ow, oh] = origViewBox;
-        canvasState.panX = ox + ow / 2 - (minX + maxX) / 2;
-        canvasState.panY = oy + oh / 2 - (minY + maxY) / 2;
-      }
-      updateViewBox();
-    }
-    if (zoomReset) zoomReset.addEventListener('click', applyInitialView);
-    if (zoomFit) zoomFit.addEventListener('click', () => {
-      const nodes = dsl.geometry?.nodes || [];
-      if (nodes.length === 0) return;
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      let visibleCount = 0;
-      nodes.forEach(n => {
-        // 跳过不可见节点（深层折叠 / collapse 折叠），避免幽灵占位撑大画布
-        const el = document.querySelector('.node[data-id="' + n.id + '"]');
-        if (el && el.style.display === 'none') return;
-        visibleCount++;
-        const x = n.x || 0, y = n.y || 0;
-        const w = n.width || 120, h = n.height || 60;
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x + w);
-        maxY = Math.max(maxY, y + h);
-      });
-      if (visibleCount === 0) return;
+      if (cnt === 0) return;
       const padding = 50;
       const fw = maxX - minX + padding * 2;
       const fh = maxY - minY + padding * 2;
+      const rect = svg.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || fitScale <= 0) return;
+      const sd = Math.min(rect.width / fw, rect.height / fh, maxActual || 1.5);
+      canvasState.scale = Math.max(0.2, Math.min(canvasState.maxScale, sd / fitScale));
+      // 使视图中心对准可见包围盒中心（由 updateViewBox 公式反推）
       const [ox, oy, ow, oh] = origViewBox;
-      canvasState.scale = Math.min(ow / fw, oh / fh, 2, canvasState.maxScale);
-      // 令 viewBox 左上角对准包围盒（由 updateViewBox 公式反推：pan = o + (oDim - nDim)/2 - target）
-      canvasState.panX = ox + (ow - ow / canvasState.scale) / 2 - (minX - padding);
-      canvasState.panY = oy + (oh - oh / canvasState.scale) / 2 - (minY - padding);
+      canvasState.panX = ox + ow / 2 - (minX + maxX) / 2;
+      canvasState.panY = oy + oh / 2 - (minY + maxY) / 2;
       updateViewBox();
-    });
+    }
+
+    // 初始视图（也是 zoom-reset 的目标）：巨图（fit 后实际显示 <50%）适配可见内容到屏幕
+    // （折叠后只剩顶层容器时，开局即可读）；普通图保持 scale=1 全览
+    function applyInitialView() {
+      if (fitScale >= 0.5) {
+        canvasState.scale = 1;
+        canvasState.panX = 0;
+        canvasState.panY = 0;
+        updateViewBox();
+        return;
+      }
+      // 巨图：适配可见内容，实际显示封顶 100%（1 单位 = 1 屏幕 px）
+      fitVisibleContent(1.0);
+    }
+    if (zoomReset) zoomReset.addEventListener('click', applyInitialView);
+    if (zoomFit) zoomFit.addEventListener('click', () => fitVisibleContent(1.5));
 
     applyInitialView();
   }

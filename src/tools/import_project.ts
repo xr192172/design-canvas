@@ -74,6 +74,9 @@ const PAD = 20;
 const TITLE_H = 30;
 const MARGIN = 60;
 
+/** 布局常量导出（relayout_nested 恢复脚本复用，保证容器尺寸约定一致） */
+export const IMPORT_LAYOUT = { FILE_W, FILE_H, COL_GAP, ROW_GAP, PAD, TITLE_H, MARGIN };
+
 /** 各语言文件节点配色（深色主题协调） */
 const LANG_COLORS: Record<string, { bg: string; color: string }> = {
   go: { bg: '#1a4a7a', color: '#ffffff' },
@@ -272,7 +275,7 @@ function resolveImport(
 // 布局：递归分组（目录紧凑包裹，组内按依赖拓扑分列）
 // ─────────────────────────────────────────────────────────────
 
-interface LayoutItem {
+export interface LayoutItem {
   id: string;
   w: number;
   h: number;
@@ -281,7 +284,7 @@ interface LayoutItem {
 }
 
 /** Kahn 拓扑分列；环上的节点追加到最后一列（按 id 排序保证确定性） */
-function rankItems(ids: string[], deps: Array<[string, string]>): Map<string, number> {
+export function rankItems(ids: string[], deps: Array<[string, string]>): Map<string, number> {
   const inDeg = new Map<string, number>();
   const out = new Map<string, string[]>();
   ids.forEach((id) => { inDeg.set(id, 0); out.set(id, []); });
@@ -310,7 +313,7 @@ function rankItems(ids: string[], deps: Array<[string, string]>): Map<string, nu
 }
 
 /** 组内布局：按 rank 分列，列内按 id 排序纵排，返回内容 bbox 尺寸 */
-function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>): { w: number; h: number } {
+export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>): { w: number; h: number } {
   const ids = items.map((i) => i.id);
   const rank = rankItems(ids, deps);
   const byRank = new Map<number, LayoutItem[]>();
@@ -320,9 +323,38 @@ function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>): { w: n
     list.push(item);
     byRank.set(r, list);
   }
+  const ranks = [...byRank.keys()].sort((a, b) => a - b);
+
+  // 紧凑货架排布：依赖结构退化（≤2 列）且条目较多时，单列纵排会堆出数千 px 高塔
+  // （如 cross-border-scout 100+ 文件单列 12834px），折叠视图无法适配屏幕。
+  // 货架算法：按高度降序（同高按 id）逐行填充，行宽目标 = √（总面积×1.5)，
+  // 天然支持异构尺寸（大容器与小文件混排），bbox 近 3:2，牺牲微弱拓扑序换可读性。
+  if (ranks.length <= 2 && items.length >= 3) {
+    const area = items.reduce((s, i) => s + (i.w + COL_GAP) * (i.h + ROW_GAP), 0);
+    const maxItemW = Math.max(...items.map((i) => i.w));
+    const targetW = Math.max(Math.sqrt(area * 1.5), maxItemW);
+    const sorted = [...items].sort((a, b) => b.h - a.h || a.id.localeCompare(b.id));
+    let x = 0;
+    let y = 0;
+    let shelfH = 0;
+    let maxW = 0;
+    for (const it of sorted) {
+      if (x > 0 && x + it.w > targetW) {
+        y += shelfH + ROW_GAP;
+        x = 0;
+        shelfH = 0;
+      }
+      it.x = x;
+      it.y = y;
+      x += it.w + COL_GAP;
+      shelfH = Math.max(shelfH, it.h);
+      maxW = Math.max(maxW, x - COL_GAP);
+    }
+    return { w: Math.max(maxW, FILE_W), h: Math.max(y + shelfH, FILE_H) };
+  }
+
   let maxX = 0;
   let maxY = 0;
-  const ranks = [...byRank.keys()].sort((a, b) => a - b);
   let xCursor = 0;
   for (const r of ranks) {
     const col = byRank.get(r)!.sort((a, b) => a.id.localeCompare(b.id));

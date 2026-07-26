@@ -5,8 +5,14 @@ node_modules/
 dist/
 build/
 
-# 渲染产物（HTML 文件）
-output/*.html
+# 渲染产物（HTML 文件，含嵌套目录）
+output/
+
+# 布局腐坏备份 / 诊断脚本等临时产物
+.backup/
+
+# 一次性临时脚本
+scripts/*.tmp.mjs
 
 # 运行时持久化的 DSL（用户实际使用时生成；examples/ 目录的示例需要提交）
 .design-canvas/
