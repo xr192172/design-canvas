@@ -56,3 +56,12 @@
 - conveyor 示例：ContextComposition 下挂 4 节点变形链演示——进料口 → ① 预算核算 → ② 顺序组装 → 出料口，3 条 detail 层链边，全程 shapes 标注进/出数据形状
 - 验证：239/239 测试通过（新增 shape_card 14 用例 + 渲染/编辑/e2e 用例），tsc 零错误，conveyor.html 重渲染确认 24 处形状卡标记
 - 下一步：D2 变形链推导（TreeSitter 提取函数骨架 + LLM 语义标注，自动生成 detail 层节点/边）→ D3 注入回放（进料口编辑 JSON/预设异常场景）
+
+**追加批：D2 变形链推导（工具侧）** `derive_detail_chain`
+- 混合来源分工落地（animation-design 10.5）：工具干机械活（骨架/调用序/类型→shapes），LLM 干语义活（update_node 填人话 label + shapes.label + 聚合细步骤）——MCP 工具内无 LLM，标注留给客户端
+- 骨架提取：ts_kernel parseFile 拿函数/方法符号；调用边用文本法（`name(` 出现即连边，按 body 内首次出现位置排序邻居），复用 monolith 文本引用图经验（<3 字符名跳过）；入口自动推导 = 入度 0 + 导出优先；DFS pre-order 得调用链
+- 类型 → shapes：Go（滤 ctx/error、共享类型 `a, b int`、命名多返回包 object、`[]T`/`*T`/map）、TS（`name: type`、Promise 解包、`T[]`、union 取首）、Python（`list[T]`、无注解降级"任意"、self 滤除）
+- 生成：detail 节点（layer+host+description=签名原文）宿主下方一行排布（220 宽 +20 间隔，同 conveyor D1 手工布局）+ 链边；`{host}__sN_` / `__chain_` 前缀幂等重跑；max_steps 默认 12 截断，其余进 skipped 名单
+- 坑：① TS kernel return_type 字段自带冒号（type_annotation 节点含 `:`）需剥净 ② clearAllFeatures 只清 features/ 目录，测试隔离还要删活态 design-canvas.json
+- 验证：252/252 测试通过（新增 derive_chain 13 用例：Go/TS/Py 三语言 + 幂等 + 截断 + entry 覆盖 + 错误处理），tsc 零错误，dist 冒烟（对自身 derive_chain.ts 推导）链序/shapes 正确
+- 下一步：D3 注入回放（进料口 JSON 编辑 + 预设异常场景一键注入 → 回放暴露问题）；或对真实工程（如 ai-base）跑 D2 + LLM 语义标注全流程验证

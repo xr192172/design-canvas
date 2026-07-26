@@ -22,6 +22,7 @@ import { updateStatus, checkStatus } from './tools/status_tools.js';
 import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools.js';
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
+import { deriveDetailChain } from './tools/derive_chain.js';
 import { checkConsistency } from './tools/consistency.js';
 import { runSimulation, getSimulationState, resetSimulation } from './tools/simulation.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -1168,6 +1169,47 @@ server.registerTool(
       const result = await backfillScaffold({
         feature: args.feature,
         scaffold_dir: args.scaffold_dir,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// derive_detail_chain：D2 变形链推导，TreeSitter 骨架 + 类型 → shapes
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'derive_detail_chain',
+  {
+    title: 'Derive detail-layer data transformation chain',
+    description:
+      'D2 变形链推导：从源文件提取函数骨架（TreeSitter）+ 文本法调用图，生成挂在主干节点下的 detail 层节点/链边。' +
+      '参数/返回类型自动推导为 shapes 数据形状（Go 滤 ctx/error、TS 解包 Promise、Python 注解降级）。' +
+      '幂等可重跑。之后请用 update_node 做语义标注（人话 label + shapes.label），并可聚合相邻细步骤。' +
+      '注意调用边为文本匹配推导，同名方法可能误连，语义标注阶段需修正。支持 .go/.ts/.js/.py。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      node_id: z.string().describe('主干文件节点 id（detail 链挂在它下面）'),
+      source_path: z
+        .string()
+        .optional()
+        .describe('源文件路径（缺省取 semantic.files[node_id].path，相对 project_root）'),
+      project_root: z.string().optional().describe('源文件根目录，默认当前工作目录'),
+      entry: z.string().optional().describe('入口函数名（缺省自动推导：入度 0 且优先导出）'),
+      max_steps: z.number().optional().describe('入链函数上限，默认 12'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await deriveDetailChain({
+        feature: args.feature,
+        node_id: args.node_id,
+        source_path: args.source_path,
+        project_root: args.project_root,
+        entry: args.entry,
+        max_steps: args.max_steps,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

@@ -1,0 +1,315 @@
+/**
+ * derive_detail_chain 工具测试（D2 变形链推导）
+ *
+ * 覆盖场景：
+ * - Go 文件：入口自动推导 + DFS 调用链排序 + 参数/返回类型 → shapes
+ * - Go 参数共享类型（a, b int）+ context.Context 滤除 + error 返回滤除
+ * - Go 命名多返回值 → object properties
+ * - TS 文件：name: type 参数 + Promise<T> 解包 + T[] 数组
+ * - Python 文件：list[T] 数组 + 无注解参数降级
+ * - 幂等重跑：旧 derived 节点/边清理重建
+ * - max_steps 截断 + skipped 名单
+ * - 显式 entry 覆盖自动推导
+ * - 错误：node 不存在 / 源文件缺失 / 无可用函数
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { deriveDetailChain } from '../../src/tools/derive_chain';
+import { createFeature, addNode, addFile } from '../../src/tools/edit_dsl';
+import { clearAllFeatures, getDSL, getLiveDslFile } from '../../src/storage';
+
+// ─────────────────────────────────────────────────────────────
+// fixtures
+// ─────────────────────────────────────────────────────────────
+
+let tmpDir: string;
+
+function writeFixture(name: string, content: string): string {
+  const p = path.join(tmpDir, name);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, content, 'utf-8');
+  return p;
+}
+
+const GO_FIXTURE = `package compose
+
+import "context"
+
+type Section struct { ID string }
+type Composition struct { Text string }
+
+func Compose(ctx context.Context, sections []Section, tokenBudget int) (Composition, error) {
+	used, over := checkBudget(sections, tokenBudget)
+	if over {
+		return Composition{}, ErrOverBudget
+	}
+	text := assemble(sections, used)
+	helperUnused(1, 2)
+	return text, nil
+}
+
+func checkBudget(sections []Section, budget int) (used int, over bool) {
+	return 0, false
+}
+
+func assemble(sections []Section, budget int) Composition {
+	return Composition{}
+}
+
+func helperUnused(a, b int) int {
+	return a + b
+}
+`;
+
+const TS_FIXTURE = `interface User { id: string; name: string }
+
+async function loadUser(token: string, tags: string[]): Promise<User> {
+  const raw = await verifyToken(token);
+  return enrich(raw, tags);
+}
+
+function verifyToken(token: string): User {
+  return { id: '1', name: 'x' };
+}
+
+function enrich(u: User, tags: string[]): User {
+  return u;
+}
+`;
+
+const PY_FIXTURE = `def compose(sections: list[str], budget: int) -> dict:
+    checked = check(sections)
+    return build(checked, budget)
+
+def check(sections):
+    return sections
+
+def build(checked: list[str], budget: int) -> dict:
+    return {}
+`;
+
+/** 建一个带宿主节点的 feature，返回宿主节点 id */
+function setupHost(feature: string, withSemanticPath?: string): string {
+  createFeature({ feature });
+  addNode({ feature, node_id: 'host_node', label: '宿主文件节点', x: 100, y: 100, width: 200, height: 60 });
+  if (withSemanticPath) {
+    addFile({ feature, file_id: 'host_node', path: withSemanticPath, responsibility: '测试文件' });
+  }
+  return 'host_node';
+}
+
+beforeEach(() => {
+  clearAllFeatures();
+  // clearAllFeatures 只清 features/ 目录，活态文件也要清（getDSL 优先读它）
+  const live = getLiveDslFile();
+  if (fs.existsSync(live)) fs.unlinkSync(live);
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'derive_chain_'));
+});
+afterEach(() => {
+  clearAllFeatures();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Go：主干链路
+// ─────────────────────────────────────────────────────────────
+
+describe('derive_detail_chain - Go', () => {
+  it('入口自动推导 + DFS 调用链生成 detail 节点/边', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+
+    const result = await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+
+    // 链序 = DFS 调用序：Compose → checkBudget → assemble → helperUnused
+    expect(result.chain.map((c) => c.name)).toEqual(['Compose', 'checkBudget', 'assemble', 'helperUnused']);
+    expect(result.nodes_created).toBe(4);
+    expect(result.edges_created).toBe(3);
+
+    const dsl = getDSL('f_go')!;
+    const derived = dsl.geometry.nodes.filter((n) => n.host === 'host_node');
+    expect(derived).toHaveLength(4);
+    for (const n of derived) {
+      expect(n.layer).toBe('detail');
+      expect(n.id).toMatch(/^host_node__s\d+_/);
+    }
+    // 链边
+    const chainEdges = dsl.geometry.edges.filter((e) => e.id.startsWith('host_node__chain_'));
+    expect(chainEdges).toHaveLength(3);
+    expect(chainEdges[0].layer).toBe('detail');
+    expect(chainEdges[0].from).toContain('Compose');
+    expect(chainEdges[0].to).toContain('checkBudget');
+  });
+
+  it('shapes 从签名推导：ctx 滤除、error 滤除、命名多返回包 object', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+    const result = await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+    const dsl = getDSL('f_go')!;
+    const byName = new Map(result.chain.map((c) => [c.name, c.node_id]));
+
+    const compose = dsl.geometry.nodes.find((n) => n.id === byName.get('Compose'))!;
+    // context.Context 参数滤除；[]Section → array(object label Section)
+    expect(compose.shapes?.in?.properties?.sections).toEqual({
+      type: 'array',
+      items: { type: 'object', label: 'Section' },
+    });
+    expect(compose.shapes?.in?.properties?.tokenBudget).toEqual({ type: 'integer' });
+    expect(compose.shapes?.in?.properties?.ctx).toBeUndefined();
+    // (Composition, error) → 滤 error → object label Composition
+    expect(compose.shapes?.out).toEqual({ type: 'object', label: 'Composition' });
+
+    // 命名多返回 (used int, over bool) → object properties
+    const checkBudget = dsl.geometry.nodes.find((n) => n.id === byName.get('checkBudget'))!;
+    expect(checkBudget.shapes?.out).toEqual({
+      type: 'object',
+      properties: { used: { type: 'integer' }, over: { type: 'boolean' } },
+    });
+
+    // 共享类型参数 a, b int → 两个 integer
+    const helper = dsl.geometry.nodes.find((n) => n.id === byName.get('helperUnused'))!;
+    expect(helper.shapes?.in?.properties?.a).toEqual({ type: 'integer' });
+    expect(helper.shapes?.in?.properties?.b).toEqual({ type: 'integer' });
+    expect(helper.shapes?.out).toEqual({ type: 'integer' });
+  });
+
+  it('不在主调用路径的函数进 skipped', async () => {
+    const orphan = GO_FIXTURE + `\nfunc lonelyHelper(x string) string {\n\treturn x\n}\n`;
+    writeFixture('compose.go', orphan);
+    setupHost('f_go', 'compose.go');
+    const result = await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+    expect(result.skipped).toContain('lonelyHelper');
+    // 4 个入链（lonelyHelper 不进）
+    expect(result.nodes_created).toBe(4);
+  });
+
+  it('显式 entry 覆盖自动推导', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+    const result = await deriveDetailChain({
+      feature: 'f_go',
+      node_id: 'host_node',
+      project_root: tmpDir,
+      entry: 'checkBudget',
+    });
+    expect(result.chain[0].name).toBe('checkBudget');
+  });
+
+  it('max_steps 截断，其余进 skipped', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+    const result = await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir, max_steps: 2 });
+    expect(result.nodes_created).toBe(2);
+    expect(result.edges_created).toBe(1);
+    expect(result.skipped).toContain('assemble');
+    expect(result.skipped).toContain('helperUnused');
+  });
+
+  it('幂等重跑：旧 derived 节点/边被清理重建', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+    await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+    const before = getDSL('f_go')!;
+    const nodeCount = before.geometry.nodes.length;
+    const edgeCount = before.geometry.edges.length;
+
+    await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+    const after = getDSL('f_go')!;
+    expect(after.geometry.nodes.length).toBe(nodeCount);
+    expect(after.geometry.edges.length).toBe(edgeCount);
+  });
+
+  it('detail 节点布局在宿主下方一行（x 递增）', async () => {
+    writeFixture('compose.go', GO_FIXTURE);
+    setupHost('f_go', 'compose.go');
+    await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir });
+    const dsl = getDSL('f_go')!;
+    const derived = dsl.geometry.nodes
+      .filter((n) => n.host === 'host_node')
+      .sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
+    const host = dsl.geometry.nodes.find((n) => n.id === 'host_node')!;
+    expect(derived[0].y!).toBeGreaterThan((host.y ?? 0) + (host.height ?? 60));
+    for (let i = 1; i < derived.length; i++) {
+      expect(derived[i].x!).toBeGreaterThan(derived[i - 1].x!);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// TypeScript
+// ─────────────────────────────────────────────────────────────
+
+describe('derive_detail_chain - TypeScript', () => {
+  it('name: type 参数 + Promise<T> 解包 + T[] 数组', async () => {
+    writeFixture('user.ts', TS_FIXTURE);
+    setupHost('f_ts', 'user.ts');
+    const result = await deriveDetailChain({ feature: 'f_ts', node_id: 'host_node', project_root: tmpDir });
+
+    expect(result.chain.map((c) => c.name)).toEqual(['loadUser', 'verifyToken', 'enrich']);
+    const dsl = getDSL('f_ts')!;
+    const loadUser = dsl.geometry.nodes.find((n) => n.id.includes('loadUser'))!;
+    expect(loadUser.shapes?.in?.properties?.token).toEqual({ type: 'string' });
+    expect(loadUser.shapes?.in?.properties?.tags).toEqual({ type: 'array', items: { type: 'string' } });
+    // Promise<User> 解包 → object label User
+    expect(loadUser.shapes?.out).toEqual({ type: 'object', label: 'User' });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Python
+// ─────────────────────────────────────────────────────────────
+
+describe('derive_detail_chain - Python', () => {
+  it('list[T] → array + 无注解参数降级为任意', async () => {
+    writeFixture('comp.py', PY_FIXTURE);
+    setupHost('f_py', 'comp.py');
+    const result = await deriveDetailChain({ feature: 'f_py', node_id: 'host_node', project_root: tmpDir });
+
+    expect(result.chain.map((c) => c.name)).toEqual(['compose', 'check', 'build']);
+    const dsl = getDSL('f_py')!;
+    const compose = dsl.geometry.nodes.find((n) => n.id.includes('compose'))!;
+    expect(compose.shapes?.in?.properties?.sections).toEqual({ type: 'array', items: { type: 'string' } });
+    expect(compose.shapes?.in?.properties?.budget).toEqual({ type: 'integer' });
+    const check = dsl.geometry.nodes.find((n) => n.id.includes('__s2_check'))!;
+    // 无注解 → 类型未知但占位可渲染
+    expect(check.shapes?.in?.properties?.sections).toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 错误处理
+// ─────────────────────────────────────────────────────────────
+
+describe('derive_detail_chain - 错误', () => {
+  it('node 不存在 → 报错', async () => {
+    createFeature({ feature: 'f_err' });
+    await expect(
+      deriveDetailChain({ feature: 'f_err', node_id: 'ghost', project_root: tmpDir }),
+    ).rejects.toThrow(/不存在/);
+  });
+
+  it('源文件缺失 → 报错', async () => {
+    setupHost('f_err2', 'not_exist.go');
+    await expect(
+      deriveDetailChain({ feature: 'f_err2', node_id: 'host_node', project_root: tmpDir }),
+    ).rejects.toThrow(/不存在|无法读取/);
+  });
+
+  it('源文件无可解析函数 → 报错', async () => {
+    writeFixture('empty.go', 'package x\n\nvar A = 1\n');
+    setupHost('f_err3', 'empty.go');
+    await expect(
+      deriveDetailChain({ feature: 'f_err3', node_id: 'host_node', project_root: tmpDir }),
+    ).rejects.toThrow(/函数|解析/);
+  });
+
+  it('source_path 显式指定优先于 semantic.files', async () => {
+    const abs = writeFixture('direct.go', GO_FIXTURE);
+    setupHost('f_direct'); // 无 semantic file
+    const result = await deriveDetailChain({ feature: 'f_direct', node_id: 'host_node', source_path: abs });
+    expect(result.nodes_created).toBe(4);
+  });
+});
