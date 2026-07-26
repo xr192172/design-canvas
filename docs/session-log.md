@@ -36,3 +36,12 @@
 - 顺手修：布局按钮成功后调不存在的 loadDSL() → 改 location.reload()（与 undo/redo 同策略）
 - 验证：218/218 测试；浏览器实测 ai_base 初始 5 容器/100% 可读、缩小至 6% 全览、fit/reset 正常、折叠往返 5↔22；conveyor 小图回归无损（28/29 可见，1 个为 F2 推导的 error 层节点正常折叠）
 - design-canvas.json 移出版本控制（MCP 运行时 DSL）`9cd644d`
+
+**追加批 2：嵌套布局腐坏恢复与防护** `fcb739b`
+- 事故：ai_base 曾被平铺布局（dag/force）作用，子节点逃逸出容器、画布残留 2380×68000 腐坏尺寸，viewBox 与实际内容脱节
+- 恢复：新增 [relayout_nested.mjs](../scripts/relayout_nested.mjs)——按 contains 边递归重排容器（复用 import_project 布局常量），回写 geometry.width/height
+- 防护：[dag_layout.ts](../src/tools/dag_layout.ts) 增加 `assertFlatLayoutSafe` 守卫，含 contains 边的嵌套工程图一律拒绝 dag/force 平铺布局（浏览器 auto-save 会持久化腐坏，不可逆）
+- 排布优化：import_project 货架排布（shelf layout）——依赖退化（≤2 列）且条目 ≥3 时按高度降序逐行填充，行宽目标 √(总面积×1.5)，bbox 近 3:2，避免单列堆出万 px 高塔（cross-border-scout 曾 12834px）
+- 视图适配：`fitVisibleContent` 按可见节点包围盒反推 scale，跳过折叠隐藏节点防幽灵占位撑大画布
+- 杂项：.gitignore 扩展（output/ 全目录、.backup/、scripts/*.tmp.mjs）；删除临时脚本
+- 验证：218/218 测试，tsc 零错误
