@@ -198,6 +198,72 @@ describe('derive_detail_chain - Go', () => {
     expect(result.chain[0].name).toBe('checkBudget');
   });
 
+  it('入口推导偏好最长调用链（跳过无调用的构造函数）', async () => {
+    // 真实工程教训（ai-base summary_zone.go）：先入度 0 + 导出的构造函数无调用，
+    // 真正的流水线入口在后面的方法上 → 应选链最长的候选
+    const fixture = `package store
+
+type Store struct{}
+
+func NewStore(cap int) *Store {
+	return &Store{}
+}
+
+func (s *Store) Process(items []string) string {
+	valid := s.validate(items)
+	return s.save(valid)
+}
+
+func (s *Store) validate(items []string) []string {
+	return items
+}
+
+func (s *Store) save(items []string) string {
+	return ""
+}
+`;
+    writeFixture('store.go', fixture);
+    setupHost('f_flat', 'store.go');
+    const result = await deriveDetailChain({ feature: 'f_flat', node_id: 'host_node', project_root: tmpDir });
+    expect(result.chain.map((c) => c.name)).toEqual(['Process', 'validate', 'save']);
+    expect(result.skipped).toContain('NewStore');
+  });
+
+  it('扁平文件（函数互不调用）退化为单节点并给出提示', async () => {
+    const fixture = `package flat
+
+func Alpha(x int) int { return x }
+
+func Beta(y string) string { return y }
+`;
+    writeFixture('flat.go', fixture);
+    setupHost('f_flat2', 'flat.go');
+    const result = await deriveDetailChain({ feature: 'f_flat2', node_id: 'host_node', project_root: tmpDir });
+    expect(result.nodes_created).toBe(1);
+    expect(result.message).toContain('扁平');
+  });
+
+  it('Go []byte 特判为可读字节串（非 integer 数组）', async () => {
+    // 真实工程教训（ai-base media_replacer.go）：[]byte 推成 array<integer> 非开发者看不懂
+    const fixture = `package media
+
+func Process(data []byte) []byte {
+	return decode(data)
+}
+
+func decode(data []byte) []byte {
+	return data
+}
+`;
+    writeFixture('media.go', fixture);
+    setupHost('f_byte', 'media.go');
+    const result = await deriveDetailChain({ feature: 'f_byte', node_id: 'host_node', project_root: tmpDir });
+    const dsl = getDSL('f_byte')!;
+    const proc = dsl.geometry.nodes.find((n) => n.id === result.chain[0].node_id)!;
+    expect(proc.shapes?.in?.properties?.data).toEqual({ type: 'string', label: '字节串' });
+    expect(proc.shapes?.out).toEqual({ type: 'string', label: '字节串' });
+  });
+
   it('max_steps 截断，其余进 skipped', async () => {
     writeFixture('compose.go', GO_FIXTURE);
     setupHost('f_go', 'compose.go');

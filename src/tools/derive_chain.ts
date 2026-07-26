@@ -103,6 +103,8 @@ function mapGoType(raw: string): AnimationValueSchema {
   if (!t) return ANY;
   if (t.startsWith('...')) return { type: 'array', items: mapGoType(t.slice(3)) };
   while (t.startsWith('*')) t = t.slice(1).trim();
+  // []byte/[]uint8 是 Go 字节串惯用法，推成 array<integer> 非开发者看不懂（真实工程教训）
+  if (t === '[]byte' || t === '[]uint8') return { type: 'string', label: '字节串' };
   if (t.startsWith('[]')) return { type: 'array', items: mapGoType(t.slice(2)) };
   if (t.startsWith('map[')) return { type: 'object', label: t };
   if (t === 'string') return { type: 'string' };
@@ -318,14 +320,18 @@ function buildCallGraph(symbols: ParsedSymbol[], content: string): Map<string, C
   return graph;
 }
 
-/** 入口推导：入度 0；优先导出（Go 大写 / Python 无下划线前缀）；再按行号 */
+/** 入口推导：入度 0 → 链最长优先 → 导出（Go 大写 / Python 无下划线前缀）→ 行号最早 */
 function pickEntry(symbols: ParsedSymbol[], graph: Map<string, CallEdge[]>): ParsedSymbol {
   const called = new Set<string>();
   for (const edges of graph.values()) for (const e of edges) called.add(e.callee);
   const candidates = symbols.filter((s) => !called.has(s.qualified_name));
   const pool = candidates.length > 0 ? candidates : symbols;
-  const exported = pool.filter((s) => /^[A-Z]/.test(s.name) || !s.name.startsWith('_'));
-  const finalPool = exported.length > 0 ? exported : pool;
+  // 偏好链最长的候选（真实工程教训：先入度 0 的构造函数常无调用，流水线入口在后面）
+  const scored = pool.map((s) => ({ s, len: walkChain(s, symbols, graph).length }));
+  const maxLen = Math.max(...scored.map((x) => x.len));
+  const best = scored.filter((x) => x.len === maxLen).map((x) => x.s);
+  const exported = best.filter((s) => /^[A-Z]/.test(s.name) || !s.name.startsWith('_'));
+  const finalPool = exported.length > 0 ? exported : best;
   return finalPool.reduce((a, b) => (a.start_line <= b.start_line ? a : b));
 }
 
@@ -472,6 +478,13 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     ...chainInfo.map((c) => `  ${CIRCLED[c.step - 1] ?? c.step} ${c.signature}`),
     '',
     `未入链函数（不在主调用路径或被截断）: ${skipped.length > 0 ? skipped.join(', ') : '无'}`,
+    ...(chain.length === 1 && symbols.length > 1
+      ? [
+          '',
+          '提示：该文件函数互不调用（扁平 API 面），变形链退化为单节点。' +
+            '若需展示数据流，建议换用含调用流水线的文件，或显式 entry 指定关注点函数。',
+        ]
+      : []),
     '',
     '下一步（LLM 语义标注）：',
     '  1. update_node 把 label 改为人话步骤名（如 "① 预算核算"）',

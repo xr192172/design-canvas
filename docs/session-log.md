@@ -65,3 +65,15 @@
 - 坑：① TS kernel return_type 字段自带冒号（type_annotation 节点含 `:`）需剥净 ② clearAllFeatures 只清 features/ 目录，测试隔离还要删活态 design-canvas.json
 - 验证：252/252 测试通过（新增 derive_chain 13 用例：Go/TS/Py 三语言 + 幂等 + 截断 + entry 覆盖 + 错误处理），tsc 零错误，dist 冒烟（对自身 derive_chain.ts 推导）链序/shapes 正确
 - 下一步：D3 注入回放（进料口 JSON 编辑 + 预设异常场景一键注入 → 回放暴露问题）；或对真实工程（如 ai-base）跑 D2 + LLM 语义标注全流程验证
+
+**追加批：D2 真实工程验证（ai-base media_replacer.go）+ 推导质量修复**
+- 验证流程两脚本化：[derive_real_aibase.mjs](../scripts/derive_real_aibase.mjs)（建宿主 → derive → dump shapes）+ [annotate_aibase.mjs](../scripts/annotate_aibase.mjs)（LLM 语义标注 + 渲染 HTML）——分工边界清晰：工具产物进来，人话写回去
+- 目标选择教训：首选 summary_zone.go 是**扁平 API 面**（13 个方法互不调用，调用图全空），变形链退化为单节点——D2 适用对象是"含调用流水线的文件"，换 media_replacer.go（ReplaceImages→replaceImage→decodeDataURL/describeImage）后链条完整
+- 修复① pickEntry 偏好最长链：旧策略"入度 0 → 导出 → 行号最早"会选中无调用的构造函数（NewSummaryZone/NewStore），真流水线入口在后面的方法上；改为入度 0 候选里 DFS 链最长者优先
+- 修复② 扁平文件提示：chain=1 且文件多函数时输出"该文件函数互不调用（扁平 API 面）…建议换文件或显式 entry"
+- 修复③ Go `[]byte`/`[]uint8` 特判为 `{type:string, label:字节串}`——推成 array<integer> 非开发者看不懂（真实文件里 []byte 满地都是）
+- LLM 语义标注实做：4 步粒度判断为合适（无需聚合）；人话 label（① 扫描消息找图片 / ② 单图换位 / ③ 解码 base64 拿字节 / ④ 生成图片描述）+ shapes.label 全覆盖；未命名多返回 r0/r1 重命名为可读键名（图片字节/扩展名）
+- 视觉验证（浏览器截图）：主节点角标 ⊖4 → 点击展开 4 detail 节点一行排开，链边箭头完整，形状卡 入/出 人话文本无溢出无重叠，PASS
+- 坑：冒烟脚本重跑会把"已覆盖的活态文件"再次备份，毁掉真备份——备份需幂等（活态 feature==自身或备份已存在则跳过）；ai_base 活态文件从 .design-canvas/features/ai_base.json 存档恢复（599 节点无损）
+- 验证：255/255 测试通过（新增 3 用例：最长链入口/扁平提示/[]byte），tsc 零错误
+- 下一步：D3 注入回放（进料口 JSON 编辑 + 预设异常场景一键注入 → 回放暴露问题）
