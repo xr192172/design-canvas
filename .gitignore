@@ -10,6 +10,8 @@ output/*.html
 
 # 运行时持久化的 DSL（用户实际使用时生成；examples/ 目录的示例需要提交）
 .design-canvas/
+# MCP server 运行时 DSL（项目根，随使用场景变化，不入库）
+design-canvas.json
 
 # 测试覆盖率
 coverage/
