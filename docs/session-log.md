@@ -27,3 +27,12 @@
 - 验证：218/218 测试通过（新增层属性/推导/豁免/F3 门控用例），tsc 零错误，17 个示例 HTML 全部重渲染
 - 提交：`471ebc6` feat: 分层披露三层体系
 - 下一步：detail 层数据变形链——完整设计已固化在 [animation-design.md](./animation-design.md) 第 10 节（文件=数据加工车间：进料口/加工链/出料口 + 形状卡 + 输入注入质检；实施顺序 D1 静态形状卡 → D2 变形链推导 → D3 注入回放）
+
+**追加批：巨型图可用性修复（用户反馈 ai_base 产物看不懂 + 不能缩放）**
+- 根因：缩放语义没考虑巨型画布——ai_base 8480×24746 fit 后实际显示仅 3.8%，固定 5 倍上限永远放不到可读尺寸；500+ 节点全平铺（v2 决策默认展开）开局即乱麻
+- 缩放屏幕感知化：`fitScale`（scale=1 的实际显示比例）驱动一切——动态上限 max(5, 3/fitScale)（可达实际 300%）、巨图滚轮大步长 1.2、标签改显示真实百分比（scale×fitScale）、巨图（fitScale<0.5）初始直接实际 100% 居中内容包围盒（zoom-reset 同目标）；顺带修 zoom-fit 的 pan 公式（原公式符号错误，fit 时偏移不可见仅因整图都在视野内）
+- 巨图默认折叠（v3）：节点 >100 且无持久化折叠状态时默认折叠全部目录容器，ai_base 开局 599 节点→5 个顶层容器；展开尊重嵌套折叠（逐级披露：展开 agent-shell→22 个直接子节点，子容器仍折叠）
+- 边可见性统一：toggleCollapse 的 ad-hoc 边循环全部收敛到 applyLayerVisibility 全局规则（层可见 ∧ 两端点 DOM 可见），修掉跨容器边悬空；applyLayerVisibility 跳过 contains 边（始终保持隐藏）
+- 顺手修：布局按钮成功后调不存在的 loadDSL() → 改 location.reload()（与 undo/redo 同策略）
+- 验证：218/218 测试；浏览器实测 ai_base 初始 5 容器/100% 可读、缩小至 6% 全览、fit/reset 正常、折叠往返 5↔22；conveyor 小图回归无损（28/29 可见，1 个为 F2 推导的 error 层节点正常折叠）
+- design-canvas.json 移出版本控制（MCP 运行时 DSL）`9cd644d`

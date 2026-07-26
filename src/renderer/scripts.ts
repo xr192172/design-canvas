@@ -550,45 +550,45 @@ ${EDGE_GEOM_SOURCE}
     });
   }
 
-  // 平铺式布局：默认展开所有子节点（不折叠）。
-  // 仅当 localStorage 中存有用户手动折叠状态时，才恢复折叠。
+  // 折叠初始化：
+  // 1. 有持久化状态 → 恢复用户上次的折叠
+  // 2. 无持久化且巨型图（节点 > 100，如 import_project 产物）→ 默认折叠全部目录容器，
+  //    初始只留顶层架构逐级披露，避免开局一团乱麻（v3）
+  // 3. 其余 → 默认全部展开（v2 决策保留）
   function initCollapsedState() {
     var restored = null;
     try {
       var collapsedKey = 'design-canvas-collapsed:' + (dsl.feature || 'unknown');
       var versionKey = 'design-canvas-collapsed-ver:' + (dsl.feature || 'unknown');
-      // v2 = 平铺布局默认展开；清除 v1（旧的全折叠默认）的持久化状态
-      if (localStorage.getItem(versionKey) !== '2') {
+      // v3 = 巨图默认折叠目录容器；清除旧版本持久化状态
+      if (localStorage.getItem(versionKey) !== '3') {
         localStorage.removeItem(collapsedKey);
-        localStorage.setItem(versionKey, '2');
+        localStorage.setItem(versionKey, '3');
       } else {
         var raw = localStorage.getItem(collapsedKey);
         if (raw) restored = JSON.parse(raw);
       }
     } catch (e) { /* ignore */ }
 
+    var parentsToCollapse = [];
     if (restored && Array.isArray(restored)) {
-      // 恢复用户上次的折叠状态
-      restored.forEach(function(pid) {
-        if (!childrenOf[pid]) return;
-        state.collapsed.add(pid);
-        var nodeEl = document.querySelector('.node[data-id="' + pid + '"]');
-        if (nodeEl) nodeEl.classList.add('collapsed');
-        var descendants = getAllDescendants(pid);
-        descendants.forEach(function(did) {
-          var descEl = document.querySelector('.node[data-id="' + did + '"]');
-          if (descEl) descEl.style.display = 'none';
-        });
-        document.querySelectorAll('.edge').forEach(function(edgeEl) {
-          var from = edgeEl.getAttribute('data-from');
-          var to = edgeEl.getAttribute('data-to');
-          if (descendants.includes(from) && descendants.includes(to)) {
-            edgeEl.style.display = 'none';
-          }
-        });
-      });
+      parentsToCollapse = restored;
+    } else if ((dsl.geometry?.nodes || []).length > 100) {
+      parentsToCollapse = Object.keys(childrenOf);
     }
-    // 无持久化状态时默认全部展开（平铺布局）
+
+    parentsToCollapse.forEach(function(pid) {
+      if (!childrenOf[pid]) return;
+      state.collapsed.add(pid);
+      var nodeEl = document.querySelector('.node[data-id="' + pid + '"]');
+      if (nodeEl) nodeEl.classList.add('collapsed');
+      getAllDescendants(pid).forEach(function(did) {
+        var descEl = document.querySelector('.node[data-id="' + did + '"]');
+        if (descEl) descEl.style.display = 'none';
+      });
+    });
+    // 边可见性交由全局规则统一计算（隐藏端点的边一并隐藏）
+    if (parentsToCollapse.length > 0) applyLayerVisibility();
   }
 
   // ==== Tooltip ====
@@ -889,11 +889,13 @@ ${EDGE_GEOM_SOURCE}
     const isCollapsed = state.collapsed.has(nodeId);
 
     if (isCollapsed) {
-      // 展开（跳过职责分层判定为不可见的深层节点）
+      // 展开（跳过职责分层判定为不可见的深层节点；尊重嵌套折叠——
+      // 后代路径上另有已折叠容器时不展开，实现逐级披露）
       state.collapsed.delete(nodeId);
       nodeEl.classList.remove('collapsed');
       descendants.forEach(did => {
         if (!isNodeVisible(did)) return;
+        if (hasCollapsedAncestor(did, nodeId)) return;
         const descEl = document.querySelector('.node[data-id="' + did + '"]');
         if (descEl) {
           descEl.style.display = '';
@@ -901,18 +903,8 @@ ${EDGE_GEOM_SOURCE}
           setTimeout(() => descEl.classList.remove('node-enter'), 300);
         }
       });
-      // 显示相关边（但 contains 边始终隐藏；深层边跟随层可见性）
-      document.querySelectorAll('.edge').forEach(edgeEl => {
-        const edgeId = edgeEl.getAttribute('data-id');
-        const from = edgeEl.getAttribute('data-from');
-        const to = edgeEl.getAttribute('data-to');
-        if ((descendants.includes(from) || descendants.includes(to)) && !isContainsEdge(edgeId)) {
-          if (!isNodeVisible(from) || !isNodeVisible(to)) return;
-          const el = edgeEl.getAttribute('data-layer') || 'main';
-          if (el !== 'main' && !isLayerExpanded(el, edgeHostOf(from, to))) return;
-          edgeEl.style.display = '';
-        }
-      });
+      // 边可见性交由全局规则统一计算（层可见 ∧ 两端点 DOM 可见），避免跨容器边悬空
+      applyLayerVisibility();
     } else {
       // 折叠
       state.collapsed.add(nodeId);
@@ -921,16 +913,19 @@ ${EDGE_GEOM_SOURCE}
         const descEl = document.querySelector('.node[data-id="' + did + '"]');
         if (descEl) descEl.style.display = 'none';
       });
-      // 隐藏相关边（两端都在后代中的边）
-      document.querySelectorAll('.edge').forEach(edgeEl => {
-        const from = edgeEl.getAttribute('data-from');
-        const to = edgeEl.getAttribute('data-to');
-        if (descendants.includes(from) && descendants.includes(to)) {
-          edgeEl.style.display = 'none';
-        }
-      });
+      applyLayerVisibility();
     }
     updateCanvasViewBox();
+  }
+
+  // 后代 id 到 stopId（不含）的父链上是否存在已折叠容器
+  function hasCollapsedAncestor(id, stopId) {
+    let cur = parentOf[id];
+    while (cur && cur !== stopId) {
+      if (state.collapsed.has(cur)) return true;
+      cur = parentOf[cur];
+    }
+    return false;
   }
 
   // 更新 SVG viewBox（折叠后可能高度变化）
@@ -1007,6 +1002,9 @@ ${EDGE_GEOM_SOURCE}
       }
     });
     document.querySelectorAll('.edge').forEach(edgeEl => {
+      const edgeId = edgeEl.getAttribute('data-id');
+      // contains 边始终隐藏（父子嵌套已可视表达），不参与可见性计算
+      if (edgeId && isContainsEdge(edgeId)) return;
       const from = edgeEl.getAttribute('data-from');
       const to = edgeEl.getAttribute('data-to');
       const edgeLayer = edgeEl.getAttribute('data-layer') || 'main';
@@ -2658,6 +2656,19 @@ ${EDGE_GEOM_SOURCE}
     const origViewBox = svg.getAttribute('viewBox').split(' ').map(Number);
     canvasState.origViewBox = origViewBox;
 
+    // 屏幕感知缩放：fitScale = scale=1 时内容的实际显示比例（uniform，含 meet 约束）
+    // 巨型画布（如 import_project 产物 8480×24746）fit 后实际显示可能只有 ~4%，
+    // 固定 5 倍上限永远放不到可读尺寸 → 上限/步长/初始视图全部按 fitScale 自适应
+    const rect0 = svg.getBoundingClientRect();
+    const fitScale = (rect0.width > 0 && rect0.height > 0 && origViewBox[2] > 0 && origViewBox[3] > 0)
+      ? Math.min(rect0.width / origViewBox[2], rect0.height / origViewBox[3])
+      : 1;
+    canvasState.fitScale = fitScale;
+    // 上限：至少允许放大到实际 300%（巨图 maxScale 可远超 5）
+    canvasState.maxScale = Math.max(5, 3 / fitScale);
+    // 巨图滚轮大步长，普通图细调
+    const wheelStep = fitScale < 0.25 ? 1.2 : 1.1;
+
     function updateViewBox() {
       const [ox, oy, ow, oh] = origViewBox;
       const nw = ow / canvasState.scale;
@@ -2670,11 +2681,12 @@ ${EDGE_GEOM_SOURCE}
 
     function updateZoomLabel() {
       const label = document.getElementById('zoom-level');
-      if (label) label.textContent = Math.round(canvasState.scale * 100) + '%';
+      // 诚实标签：显示实际显示比例（scale × fitScale），而非相对 viewBox 的虚值
+      if (label) label.textContent = Math.round(canvasState.scale * fitScale * 100) + '%';
     }
 
     function setScale(newScale, centerX, centerY) {
-      newScale = Math.max(0.2, Math.min(5, newScale));
+      newScale = Math.max(0.2, Math.min(canvasState.maxScale, newScale));
       if (centerX !== undefined && centerY !== undefined) {
         const rect = svg.getBoundingClientRect();
         const [ox, oy, ow, oh] = origViewBox;
@@ -2691,7 +2703,7 @@ ${EDGE_GEOM_SOURCE}
     // 滚轮缩放
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const delta = e.deltaY > 0 ? 1 / wheelStep : wheelStep;
       setScale(canvasState.scale * delta, e.offsetX, e.offsetY);
     }, { passive: false });
 
@@ -2749,12 +2761,39 @@ ${EDGE_GEOM_SOURCE}
 
     if (zoomIn) zoomIn.addEventListener('click', () => setScale(canvasState.scale * 1.2));
     if (zoomOut) zoomOut.addEventListener('click', () => setScale(canvasState.scale / 1.2));
-    if (zoomReset) zoomReset.addEventListener('click', () => {
-      canvasState.scale = 1;
-      canvasState.panX = 0;
-      canvasState.panY = 0;
+    // 初始视图（也是 zoom-reset 的目标）：巨图（fit 后实际显示 <50%）直接以实际 100%
+    // 显示并居中内容包围盒，避免开局一团乱麻；普通图保持 scale=1 全览
+    function applyInitialView() {
+      if (fitScale >= 0.5) {
+        canvasState.scale = 1;
+        canvasState.panX = 0;
+        canvasState.panY = 0;
+        updateViewBox();
+        return;
+      }
+      canvasState.scale = 1 / fitScale; // 实际 100%（1 单位 = 1 屏幕 px）
+      const nodes = dsl.geometry?.nodes || [];
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cnt = 0;
+      nodes.forEach(n => {
+        const el = document.querySelector('.node[data-id="' + n.id + '"]');
+        if (el && el.style.display === 'none') return;
+        cnt++;
+        const x = n.x || 0, y = n.y || 0;
+        const w = n.width || 120, h = n.height || 60;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + w);
+        maxY = Math.max(maxY, y + h);
+      });
+      if (cnt > 0) {
+        // 使视图中心对准内容包围盒中心：panX = ox + ow/2 - cx（由 updateViewBox 公式反推）
+        const [ox, oy, ow, oh] = origViewBox;
+        canvasState.panX = ox + ow / 2 - (minX + maxX) / 2;
+        canvasState.panY = oy + oh / 2 - (minY + maxY) / 2;
+      }
       updateViewBox();
-    });
+    }
+    if (zoomReset) zoomReset.addEventListener('click', applyInitialView);
     if (zoomFit) zoomFit.addEventListener('click', () => {
       const nodes = dsl.geometry?.nodes || [];
       if (nodes.length === 0) return;
@@ -2777,13 +2816,14 @@ ${EDGE_GEOM_SOURCE}
       const fw = maxX - minX + padding * 2;
       const fh = maxY - minY + padding * 2;
       const [ox, oy, ow, oh] = origViewBox;
-      canvasState.scale = Math.min(ow / fw, oh / fh, 2);
-      canvasState.panX = (minX - padding - ox) * canvasState.scale;
-      canvasState.panY = (minY - padding - oy) * canvasState.scale;
+      canvasState.scale = Math.min(ow / fw, oh / fh, 2, canvasState.maxScale);
+      // 令 viewBox 左上角对准包围盒（由 updateViewBox 公式反推：pan = o + (oDim - nDim)/2 - target）
+      canvasState.panX = ox + (ow - ow / canvasState.scale) / 2 - (minX - padding);
+      canvasState.panY = oy + (oh - oh / canvasState.scale) / 2 - (minY - padding);
       updateViewBox();
     });
 
-    updateZoomLabel();
+    applyInitialView();
   }
 
   // ==== 多选工具栏 ====
@@ -2830,7 +2870,8 @@ ${EDGE_GEOM_SOURCE}
         .then(res => res.json())
         .then(data => {
           if (data.success) {
-            loadDSL();
+            // 与 undo/redo 同策略：全量刷新保证所有特性可靠重渲染
+            location.reload();
           }
         })
         .catch(err => {
