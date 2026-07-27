@@ -1270,6 +1270,15 @@ ${EDGE_GEOM_SOURCE}
       document.getElementById('editor-content-type').value = content.type || 'text';
       document.getElementById('editor-content-blocks').value = content.blocks ? JSON.stringify(content.blocks, null, 2) : '';
 
+      // 进料口入口（D3）：仅当节点有 flow 经过时显示（nodeFlows 函数声明提升，可前向调用）
+      const replayRow = document.getElementById('editor-replay-row');
+      if (replayRow) {
+        const nFlows = nodeFlows(nodeId);
+        replayRow.classList.toggle('hidden', nFlows.length === 0);
+        const replayCnt = document.getElementById('editor-replay-count');
+        if (replayCnt) replayCnt.textContent = String(nFlows.length);
+      }
+
       // Sync color picker and text input
       const bgColorEl = document.getElementById('editor-bg-color');
       const bgTextEl = document.getElementById('editor-bg-text');
@@ -1349,6 +1358,203 @@ ${EDGE_GEOM_SOURCE}
       if (e.key === 'Escape' && !editor.classList.contains('hidden')) {
         closeEditor();
       }
+    });
+
+    // ==== 进料口 · 注入回放面板（D3：静态报告 + 视觉回放，纯浏览器端） ====
+    // 注意：本段是注入浏览器的纯 JS 文本（buildScript 模板字符串内），禁用 TS 语法与模板字面量
+    const replayPanel = document.getElementById('replay-panel');
+    const replayMask = document.getElementById('replay-mask');
+    const flowSel = document.getElementById('replay-flow');
+    const presetSel = document.getElementById('replay-preset');
+    const injectTa = document.getElementById('replay-inject');
+    const valueTa = document.getElementById('replay-value');
+    const reportEl = document.getElementById('replay-report');
+    let replayFlows = [];
+
+    function nodeFlows(nodeId) {
+      const flows = (dsl.animations_v2 && dsl.animations_v2.flows) || [];
+      return flows.filter(f => (f.handler && f.handler.file_id === nodeId) || f.from === nodeId);
+    }
+
+    function currentFlow() {
+      return replayFlows.find(f => flowSel && f.id === flowSel.value) || replayFlows[0] || null;
+    }
+
+    function closeReplay() {
+      if (replayPanel) replayPanel.classList.add('hidden');
+      if (replayMask) replayMask.classList.add('hidden');
+    }
+
+    function fillPresetAndInject() {
+      const f = currentFlow();
+      if (!f || !presetSel || !injectTa || !valueTa) return;
+      const errors = (f.handler && f.handler.errors) || [];
+      presetSel.innerHTML = '<option value="">（不预设，手动编辑下方 JSON）</option>';
+      for (const e of errors) {
+        const opt = document.createElement('option');
+        opt.value = e.type;
+        opt.textContent = e.type + '（' + e.severity + ' → ' + e.to + '）';
+        presetSel.appendChild(opt);
+      }
+      const presetRow = document.getElementById('replay-preset-row');
+      if (presetRow) presetRow.classList.toggle('hidden', errors.length === 0);
+      // 缺省注入值：handler.mock_results[0] ?? handler.mock_result ?? {}
+      const h = f.handler;
+      let def = {};
+      if (h) {
+        if (Array.isArray(h.mock_results) && h.mock_results.length > 0) def = h.mock_results[0];
+        else if (h.mock_result !== undefined) def = h.mock_result;
+      }
+      injectTa.value = JSON.stringify(def, null, 2);
+      valueTa.value = (f.mock_values && f.mock_values.length > 0) ? JSON.stringify(f.mock_values[0], null, 2) : '';
+      if (reportEl) reportEl.classList.add('hidden');
+    }
+
+    function openReplay(nodeId) {
+      if (!replayPanel || !replayMask || !flowSel) return;
+      replayFlows = nodeFlows(nodeId);
+      if (replayFlows.length === 0) return;
+      flowSel.innerHTML = '';
+      for (const f of replayFlows) {
+        const opt = document.createElement('option');
+        opt.value = f.id;
+        const dest = f.to || (f.branches ? f.branches.map(b => b.to).join('|') : '?');
+        opt.textContent = f.id + '（' + f.from + ' → ' + dest + '）';
+        flowSel.appendChild(opt);
+      }
+      fillPresetAndInject();
+      closeEditor(); // 属性编辑器让位（回放只读 DSL，不产生编辑）
+      replayPanel.classList.remove('hidden');
+      replayMask.classList.remove('hidden');
+    }
+
+    const replayOpenBtn = document.getElementById('editor-replay-open');
+    if (replayOpenBtn) replayOpenBtn.addEventListener('click', () => {
+      const idInput = document.getElementById('editor-id');
+      const nodeId = idInput && idInput.value;
+      if (nodeId) openReplay(nodeId);
+    });
+    if (flowSel) flowSel.addEventListener('change', fillPresetAndInject);
+    if (presetSel) presetSel.addEventListener('change', () => {
+      const f = currentFlow();
+      const errs = (f && f.handler && f.handler.errors) || [];
+      const decl = errs.find(e => e.type === presetSel.value);
+      const core = window.__animV2__ && window.__animV2__.core;
+      if (!decl || !core || !injectTa) return;
+      const built = core.buildPresetValue(decl);
+      injectTa.value = JSON.stringify(built.value, null, 2);
+      if (!built.hit) showToast('⚠ 声明条件非标准形态，自动构造值未命中 condition，建议手动调整', 'error');
+    });
+    const replayCloseBtn = document.getElementById('replay-close');
+    if (replayCloseBtn) replayCloseBtn.addEventListener('click', closeReplay);
+    const replayCancelBtn = document.getElementById('replay-cancel');
+    if (replayCancelBtn) replayCancelBtn.addEventListener('click', closeReplay);
+    if (replayMask) replayMask.addEventListener('click', closeReplay);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && replayPanel && !replayPanel.classList.contains('hidden')) {
+        closeReplay();
+      }
+    });
+
+    const replayRunBtn = document.getElementById('replay-run');
+    if (replayRunBtn) replayRunBtn.addEventListener('click', () => {
+      const f = currentFlow();
+      const core = window.__animV2__ && window.__animV2__.core;
+      if (!f || !core || !injectTa || !valueTa || !reportEl) return;
+
+      let inject;
+      try {
+        inject = JSON.parse(injectTa.value || 'null');
+      } catch (err) {
+        showToast('注入值 JSON 解析失败：' + err.message, 'error');
+        return;
+      }
+      let valueCtx;
+      const rawVal = valueTa.value.trim();
+      if (rawVal) {
+        try {
+          valueCtx = JSON.parse(rawVal);
+        } catch (err) {
+          showToast('value 上下文 JSON 解析失败：' + err.message, 'error');
+          return;
+        }
+      } else {
+        valueCtx = (f.mock_values && f.mock_values.length > 0) ? f.mock_values[0] : {};
+      }
+
+      // ── 静态报告（与 MCP inject_replay 同源纯函数） ──
+      const lines = [];
+      const problems = [];
+      const errors = (f.handler && f.handler.errors) || [];
+      lines.push({ text: '注入值：' + core.formatValueShort(inject, 120), cls: 'info' });
+
+      // 形状质检：handler.file_id 节点 shapes.out vs 注入值
+      const fileId = f.handler && f.handler.file_id;
+      const allNodes = (dsl.geometry && dsl.geometry.nodes) || [];
+      const hostNode = fileId ? allNodes.find(n => n.id === fileId) : undefined;
+      if (hostNode && hostNode.shapes && hostNode.shapes.out) {
+        const violations = core.validateValueSchema(hostNode.shapes.out, inject);
+        if (violations.length === 0) {
+          lines.push({ text: '形状校验通过：' + fileId + '.shapes.out', cls: 'ok' });
+        } else {
+          lines.push({ text: '⚠ 形状校验违例（' + fileId + '.shapes.out）：', cls: 'warn' });
+          for (const v of violations) lines.push({ text: '  ' + v, cls: 'warn' });
+          problems.push('注入值与声明形状不匹配（DSL 漂移或数据非法）');
+        }
+      }
+
+      // 异常分类 → 路由
+      const cls = core.classifyError(errors, inject);
+      if (cls.kind === 'declared' && cls.decl) {
+        const d = cls.decl;
+        lines.push({
+          text: '已声明异常命中：' + d.type + '（' + d.severity + '）→ ' + d.to,
+          cls: d.severity === 'unexpected' ? 'err' : 'warn',
+        });
+        if (d.log) lines.push({ text: '  日志：' + d.log, cls: 'info' });
+      } else if (cls.kind === 'undeclared') {
+        lines.push({ text: '⚠ 未声明异常：' + core.formatValueShort(inject, 80), cls: 'err' });
+        lines.push({ text: '  结果像异常但未命中任何 errors 声明 → 疑似 bug，请补 errors 声明', cls: 'err' });
+        problems.push('未声明异常（疑似 bug）');
+      } else if (f.branches && f.branches.length > 0) {
+        const picked = core.pickBranch(f.branches, valueCtx, inject);
+        if (picked) {
+          const cond = f.branches[picked.index].condition || 'else';
+          lines.push({ text: '正常结果 → 命中分支 #' + (picked.index + 1) + '（' + cond + '）→ ' + picked.branch.to, cls: 'ok' });
+        } else {
+          lines.push({ text: '正常结果，但所有分支条件均未命中（无 else 兜底）→ 数据无处可去', cls: 'err' });
+          problems.push('分支全部未命中（无 else 兜底）');
+        }
+      } else if (f.to) {
+        lines.push({ text: '正常结果 → 直连流向：' + f.to, cls: 'ok' });
+      } else {
+        lines.push({ text: '正常结果，flow 无 branches 也无 to → 数据无处可去', cls: 'err' });
+        problems.push('flow 无出口');
+      }
+
+      // ── 视觉回放：动画引擎实际跑一遍（粒子 / 闪烁 / anim-log） ──
+      if (window.__animV2__ && window.__animV2__.replayFlow) {
+        const r = window.__animV2__.replayFlow(f.id, inject, valueCtx);
+        lines.push(r.ok
+          ? { text: '视觉回放已执行（观察画布粒子与 anim-log）', cls: 'info' }
+          : { text: '⚠ 视觉回放未执行：' + r.error, cls: 'warn' });
+      } else {
+        lines.push({ text: '⚠ 动画引擎未就绪，仅静态报告', cls: 'warn' });
+      }
+
+      lines.push({
+        text: problems.length > 0 ? '结论：暴露 ' + problems.length + ' 个问题 —— ' + problems.join('；') : '结论：回放正常，未暴露问题',
+        cls: problems.length > 0 ? 'err' : 'ok',
+      });
+
+      reportEl.innerHTML = '';
+      for (const ln of lines) {
+        const div = document.createElement('div');
+        div.className = 'replay-line replay-' + ln.cls;
+        div.textContent = ln.text;
+        reportEl.appendChild(div);
+      }
+      reportEl.classList.remove('hidden');
     });
 
     document.querySelectorAll('.node').forEach(nodeEl => {

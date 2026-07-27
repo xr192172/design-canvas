@@ -1230,6 +1230,35 @@ footer button:active {
   background: var(--theme-secondary);
 }
 
+/* 进料口 · 注入回放面板（D3） */
+.replay-panel {
+  width: 520px;
+}
+.replay-open-btn {
+  width: 100%;
+}
+.replay-panel textarea {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
+.replay-report {
+  background: var(--theme-secondary);
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.replay-line.replay-info { color: var(--theme-text-sub); }
+.replay-line.replay-ok { color: #4caf50; }
+.replay-line.replay-warn { color: #ff9800; }
+.replay-line.replay-err { color: #e94560; }
+
 .btn-primary,
 .btn-secondary {
   padding: 8px 18px;

@@ -331,6 +331,145 @@ export function classifyError(
 }
 
 // ─────────────────────────────────────────────────────────────
+// D3 注入回放：预设场景构造 + 形状质检（纯逻辑单源，MCP 工具与浏览器面板共用）
+// ─────────────────────────────────────────────────────────────
+
+/** 数据形状 schema（与 AnimationValueSchema 结构对齐，此处独立声明避免 import） */
+export interface ValueSchemaLike {
+  type?: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'integer' | 'null';
+  label?: string;
+  properties?: Record<string, ValueSchemaLike>;
+  items?: ValueSchemaLike;
+  required?: string[];
+  enum?: (string | number)[];
+  description?: string;
+}
+
+/**
+ * 从 condition 提取字符串字面量（如 'BUDGET_EXCEEDED'）作为错误码候选
+ */
+export function extractStringLiterals(condition: string | undefined | null): string[] {
+  var out: string[] = [];
+  if (!condition) return out;
+  var re = /'([^'\\]*)'|"([^"\\]*)"/g;
+  var m: RegExpExecArray | null;
+  while ((m = re.exec(condition)) !== null) {
+    out.push(m[1] !== undefined ? m[1] : m[2]);
+  }
+  return out;
+}
+
+/**
+ * 预设场景候选注入值：condition 字面量 × 字段形态（code / message / 裸字符串），其次常见形态
+ * 真实工程教训：condition 可能是 message 子串匹配（indexOf）或裸字符串比较（result.error === 'EOF'），
+ * 只会构造 code 字段的值永远命中不了这类声明
+ */
+export function presetCandidates(decl: ErrorDeclLike): unknown[] {
+  var literals = extractStringLiterals(decl.condition);
+  var out: unknown[] = [];
+  for (var i = 0; i < literals.length; i++) {
+    var lit = literals[i];
+    out.push({ error: { code: lit, message: decl.type } });
+    out.push({ error: { code: decl.type, message: lit } });
+    out.push({ error: { message: lit } });
+    out.push({ error: lit });
+  }
+  out.push(
+    { error: { code: decl.type, message: decl.type } },
+    { error: { code: decl.type } },
+    { panic: true, message: decl.type },
+    { error: { type: decl.type } },
+    { error: decl.type },
+  );
+  return out;
+}
+
+/**
+ * 为 errors 声明自动构造注入值；都不命中 condition 时返回首选形态 + hit=false
+ */
+export function buildPresetValue(decl: ErrorDeclLike): { value: unknown; hit: boolean } {
+  var candidates = presetCandidates(decl);
+  for (var i = 0; i < candidates.length; i++) {
+    if (evalCondition(decl.condition, undefined, candidates[i])) {
+      return { value: candidates[i], hit: true };
+    }
+  }
+  return { value: candidates[0], hit: false };
+}
+
+/**
+ * 轻量形状校验（AnimationValueSchema 子集：type / properties / required / items / enum）
+ * 与 ajv(strict:false) 语义对齐：label 等非标关键字忽略；返回违例列表（空 = 通过）
+ * 违例格式："/tokens: 期望 integer，实际 string"（路径与 ajv instancePath 同风格）
+ */
+export function validateValueSchema(schema: ValueSchemaLike | undefined | null, value: unknown): string[] {
+  var violations: string[] = [];
+
+  function typeName(v: unknown): string {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return 'array';
+    return typeof v;
+  }
+
+  function typeOk(t: string, v: unknown): boolean {
+    switch (t) {
+      case 'object': return v !== null && typeof v === 'object' && !Array.isArray(v);
+      case 'array': return Array.isArray(v);
+      case 'string': return typeof v === 'string';
+      case 'number': return typeof v === 'number';
+      case 'integer': return typeof v === 'number' && isFinite(v as number) && Math.floor(v as number) === v;
+      case 'boolean': return typeof v === 'boolean';
+      case 'null': return v === null;
+      default: return true;
+    }
+  }
+
+  function walk(s: ValueSchemaLike, v: unknown, path: string): void {
+    if (!s || typeof s !== 'object') return;
+    if (s.type && !typeOk(s.type, v)) {
+      violations.push(path + ': 期望 ' + s.type + '，实际 ' + typeName(v));
+      return; // 类型不匹配不再深入（避免级联垃圾违例）
+    }
+    if (s.enum && s.enum.length > 0) {
+      var hit = false;
+      for (var i = 0; i < s.enum.length; i++) {
+        if (s.enum[i] === v) { hit = true; break; }
+      }
+      if (!hit) {
+        violations.push(path + ': 取值 ' + formatValueShort(v, 24) + ' 不在枚举 (' + s.enum.join('|') + ')');
+      }
+    }
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      var obj = v as Record<string, unknown>;
+      if (s.required) {
+        for (var r = 0; r < s.required.length; r++) {
+          var key = s.required[r];
+          if (!Object.prototype.hasOwnProperty.call(obj, key)) {
+            violations.push(path + '/' + key + ': 缺少必填字段');
+          }
+        }
+      }
+      if (s.properties) {
+        for (var k in s.properties) {
+          if (Object.prototype.hasOwnProperty.call(s.properties, k) &&
+              Object.prototype.hasOwnProperty.call(obj, k)) {
+            walk(s.properties[k], obj[k], path + '/' + k);
+          }
+        }
+      }
+    }
+    if (Array.isArray(v) && s.items) {
+      for (var i = 0; i < v.length; i++) {
+        walk(s.items, v[i], path + '/' + i);
+      }
+    }
+  }
+
+  walk(schema as ValueSchemaLike, value, '/');
+  return violations;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 通用：状态快照
 // ─────────────────────────────────────────────────────────────
 

@@ -858,6 +858,10 @@ ${
         <label>内容块 JSON (content.blocks)</label>
         <textarea id="editor-content-blocks" rows="6" placeholder='[{"type":"text","value":"标题","style":{"fontSize":18,"bold":true}},{"type":"color_block","bg":"#0f3460","children":[{"type":"text","value":"内容"}]}]'></textarea>
       </div>
+      <div class="form-group hidden" id="editor-replay-row">
+        <label>注入回放（D3）</label>
+        <button type="button" id="editor-replay-open" class="btn-secondary replay-open-btn">🧪 打开进料口面板（<span id="editor-replay-count">0</span> 条 flow）</button>
+      </div>
     </div>
     <div class="editor-footer">
       <button id="editor-cancel" class="btn-secondary">取消</button>
@@ -865,6 +869,38 @@ ${
     </div>
   </div>
   <div id="editor-mask" class="editor-mask hidden"></div>
+  <div id="replay-panel" class="prop-editor replay-panel hidden">
+    <div class="editor-header">
+      <h3>🧪 进料口 · 注入回放</h3>
+      <button id="replay-close" class="editor-close">×</button>
+    </div>
+    <div class="editor-body">
+      <div class="form-group">
+        <label>Flow</label>
+        <select id="replay-flow"></select>
+      </div>
+      <div class="form-group" id="replay-preset-row">
+        <label>预设异常场景（从 errors 声明自动构造注入值）</label>
+        <select id="replay-preset">
+          <option value="">（不预设，手动编辑下方 JSON）</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>注入值 JSON（作为 handler 返回值 result）</label>
+        <textarea id="replay-inject" rows="6" spellcheck="false"></textarea>
+      </div>
+      <div class="form-group">
+        <label>分支求值上下文 value（可选，JSON；缺省取 flow.mock_values[0]）</label>
+        <textarea id="replay-value" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div id="replay-report" class="replay-report hidden"></div>
+    </div>
+    <div class="editor-footer">
+      <button id="replay-cancel" class="btn-secondary">关闭</button>
+      <button id="replay-run" class="btn-primary">▶ 回放</button>
+    </div>
+  </div>
+  <div id="replay-mask" class="editor-mask hidden"></div>
   <script>${buildScript(dsl)}</script>
   <script>${buildAnimationScript(dsl)}</script>
 </body>

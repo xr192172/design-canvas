@@ -1353,6 +1353,51 @@ ${ANIM_CORE_SOURCE}
   }
 
   // ---- L0/L2 默认行为与显式流 ----
+  // 显式 flow DSL → 运行时配置（startDefaultFlows 与 replayFlow 共用）
+  function buildFlowConfig(f) {
+    return {
+      id: f.id,
+      from: f.from,
+      to: f.to,
+      interval: (f.trigger && f.trigger.interval) || 4000,
+      color: '',
+      label: f.value ? (f.value.label || f.value.type) : '',
+      valueType: f.value ? f.value.type : '',
+      valueLabel: f.value ? (f.value.label || f.value.type) : '',
+      branches: f.branches || null,
+      mockRotator: (f.mock_values && f.mock_values.length > 0) ? createMockRotator(f.mock_values) : null,
+      handler: f.handler || null,
+      // L4.5：handler.mock_results 轮换（可混入 { error } / { panic: true } 演示异常路径）
+      handlerRotator: (f.handler && f.handler.mock_results && f.handler.mock_results.length > 0)
+        ? createMockRotator(f.handler.mock_results) : null,
+      effect: f.effect || 'particle_flow',
+      onArrive: f.on_arrive || 'fade',
+      explicit: true,
+      rawFlow: f
+    };
+  }
+
+  // ---- D3 注入回放：注入值替代 mock_results 强制一次 handler 返回值，走完整视觉路径 ----
+  // 纯静态推演（不跑真实代码、不改 DSL）；返回 { ok, error? } 供面板提示
+  function replayFlow(flowId, injectResult, valueCtx) {
+    if (!HAS_EXPLICIT_FLOWS) return { ok: false, error: '该图纸无 animations_v2 flows' };
+    var raw = null;
+    for (var i = 0; i < EXPLICIT_FLOWS.length; i++) {
+      if (EXPLICIT_FLOWS[i].id === flowId) { raw = EXPLICIT_FLOWS[i]; break; }
+    }
+    if (!raw) return { ok: false, error: 'flow 不存在: ' + flowId };
+    var cfg = buildFlowConfig(raw);
+    // 一次性 rotator：executeHandler 优先取 handlerRotator → 注入值成为本次 result
+    if (raw.handler) {
+      cfg.handlerRotator = function() { return injectResult; };
+    }
+    if (!flowDomVisible(cfg)) {
+      return { ok: false, error: 'flow 端点当前不可见（深层折叠中），请先展开宿主层' };
+    }
+    spawnDefaultParticle(cfg, valueCtx);
+    return { ok: true };
+  }
+
   function startDefaultFlows() {
     var periodicFlows = [];
     var eventFlows = [];
@@ -1364,26 +1409,7 @@ ${ANIM_CORE_SOURCE}
         var f = EXPLICIT_FLOWS[i];
         if (!f.trigger) continue;
 
-        var flowConfig = {
-          id: f.id,
-          from: f.from,
-          to: f.to,
-          interval: f.trigger.interval || 4000,
-          color: '',
-          label: f.value ? (f.value.label || f.value.type) : '',
-          valueType: f.value ? f.value.type : '',
-          valueLabel: f.value ? (f.value.label || f.value.type) : '',
-          branches: f.branches || null,
-          mockRotator: (f.mock_values && f.mock_values.length > 0) ? createMockRotator(f.mock_values) : null,
-          handler: f.handler || null,
-          // L4.5：handler.mock_results 轮换（可混入 { error } / { panic: true } 演示异常路径）
-          handlerRotator: (f.handler && f.handler.mock_results && f.handler.mock_results.length > 0)
-            ? createMockRotator(f.handler.mock_results) : null,
-          effect: f.effect || 'particle_flow',
-          onArrive: f.on_arrive || 'fade',
-          explicit: true,
-          rawFlow: f
-        };
+        var flowConfig = buildFlowConfig(f);
 
         if (f.trigger.type === 'periodic') {
           periodicFlows.push(flowConfig);
@@ -2181,6 +2207,18 @@ ${ANIM_CORE_SOURCE}
     step: step,
     reset: reset,
     spawnParticle: spawnDefaultParticle,
+    // D3 注入回放：__animV2__.replayFlow('flow_id', {error:{code:'X'}}, valueCtx?)
+    replayFlow: replayFlow,
+    // 纯逻辑核心（进料口面板静态报告用，与 MCP inject_replay 工具同源）
+    core: {
+      evalCondition: evalCondition,
+      pickBranch: pickBranch,
+      classifyError: classifyError,
+      isErrorResult: isErrorResult,
+      buildPresetValue: buildPresetValue,
+      validateValueSchema: validateValueSchema,
+      formatValueShort: formatValueShort
+    },
     debug: state.debug,
     // 手动触发 effect（调试 / L5 运行时调用）
     // 用法：__animV2__.triggerEffect('card_create', { to: 'node_section_queue', value: { id, summary, ... } })

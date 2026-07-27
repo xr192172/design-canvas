@@ -11,16 +11,16 @@
  *      结果像异常但未命中声明 → undeclared（疑似 bug）
  *   3. 正常结果 → pickBranch 按 branches condition 求值（value 上下文可传，
  *      缺省取 flow.mock_values[0]，再没有则 {}）
- *   4. 形状质检：handler.file_id 节点的 shapes.out 存在时，ajv 校验注入值，
+ *   4. 形状质检：handler.file_id 节点的 shapes.out 存在时，validateValueSchema
+ *      校验注入值（与 ajv strict:false 语义对齐），
  *      违例 = DSL 与代码漂移 / 数据非法
  *
  * 预设异常场景：preset = errors[].type，自动构造候选注入值
  *   （{error:{code:type}} / {panic:true} 等形态，取第一个命中 decl.condition 的）。
  */
 
-import { Ajv } from 'ajv';
 import { getDSL } from '../storage.js';
-import { classifyError, pickBranch, evalCondition, formatValueShort } from '../renderer/anim_core.js';
+import { classifyError, pickBranch, formatValueShort, buildPresetValue, validateValueSchema } from '../renderer/anim_core.js';
 import type { AnimationError, AnimationFlow, AnimationValueSchema } from '../dsl/types.js';
 
 export interface InjectReplayInput {
@@ -67,63 +67,14 @@ export interface InjectReplayResult {
   presets?: string[];
 }
 
-const ajv = new Ajv({ allErrors: true, strict: false });
-
-/** 从 condition 提取字符串字面量（如 'BUDGET_EXCEEDED'）作为错误码候选 */
-function extractStringLiterals(condition: string): string[] {
-  const out: string[] = [];
-  const re = /'([^'\\]*)'|"([^"\\]*)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(condition)) !== null) {
-    out.push(m[1] ?? m[2]);
-  }
-  return out;
-}
-
-/** 预设场景候选注入值：condition 字面量 × 字段形态（code / message / 裸字符串），其次常见形态
- *  真实工程教训：condition 可能是 message 子串匹配（indexOf）或裸字符串比较（result.error === 'EOF'），
- *  只会构造 code 字段的值永远命中不了这类声明 */
-function presetCandidates(decl: AnimationError): unknown[] {
-  const literals = extractStringLiterals(decl.condition);
-  const out: unknown[] = [];
-  for (const lit of literals) {
-    out.push({ error: { code: lit, message: decl.type } });
-    out.push({ error: { code: decl.type, message: lit } });
-    out.push({ error: { message: lit } });
-    out.push({ error: lit });
-  }
-  out.push(
-    { error: { code: decl.type, message: decl.type } },
-    { error: { code: decl.type } },
-    { panic: true, message: decl.type },
-    { error: { type: decl.type } },
-    { error: decl.type },
-  );
-  return out;
-}
-
-/** 为 errors 声明自动构造注入值；都不命中 condition 时返回首选形态 + hit=false */
-function buildPresetValue(decl: AnimationError): { value: unknown; hit: boolean } {
-  for (const candidate of presetCandidates(decl)) {
-    if (evalCondition(decl.condition, undefined, candidate)) {
-      return { value: candidate, hit: true };
-    }
-  }
-  return { value: presetCandidates(decl)[0], hit: false };
-}
-
-/** ajv 校验注入值 vs AnimationValueSchema（label 等非标关键字在 strict:false 下忽略） */
+/** 形状校验：shapes.out vs 注入值（validateValueSchema 与 ajv strict:false 语义对齐，label 等非标关键字忽略） */
 function checkShape(
   schema: AnimationValueSchema,
   inject: unknown,
   target: string,
 ): ShapeCheck {
-  const validate = ajv.compile(schema);
-  const valid = validate(inject) as boolean;
-  const violations = (validate.errors ?? []).map(
-    (e) => `${e.instancePath || '/'}: ${e.message ?? '未知违例'}`,
-  );
-  return { target, valid, violations };
+  const violations = validateValueSchema(schema, inject);
+  return { target, valid: violations.length === 0, violations };
 }
 
 function findFlow(flows: AnimationFlow[], flowId: string): AnimationFlow {

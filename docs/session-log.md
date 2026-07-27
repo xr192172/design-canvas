@@ -97,3 +97,13 @@
 - 渲染验证 [verify_fullchain_render.mjs](../scripts/verify_fullchain_render.mjs)：Playwright channel:'chrome'（chromium 下载受限的降级路径）；巨图视口外 SVG 元素 Playwright 无法滚动点击 → DOM 级 MouseEvent 分发；容器祖先链逐级展开 → 角标展开 error/detail 层 → 16 项 DOM 断言全过 + 3 张截图证据
 - 验证：273/273 测试通过（新增 2 用例：message 子串匹配 / 裸字符串比较），tsc 零错误
 - 遗留：用户浏览器 localStorage 里的旧布局覆盖与新物化坐标可能不一致，清一次 localStorage 即归一到文件布局；进料口 UI 面板仍是下一步候选
+
+**追加批：D3 进料口 UI 面板（浏览器端注入回放，纯客户端）**
+- 架构定调：面板逻辑全部在浏览器端，与 MCP inject_replay 工具**同源**——anim_core 是纯函数单源（vitest 直接 import / 构建期内联进动画脚本），面板经 `window.__animV2__.core` 调用同一套实现，两侧报告语义天然一致
+- anim_core 新增 `validateValueSchema`：轻量形状校验（type/properties/required/items/enum 子集，与 ajv strict:false 语义对齐、label 等非标关键字忽略，违例路径格式同 ajv instancePath）；`buildPresetValue`/`presetCandidates` 从 inject_replay 上移至此——inject_replay 重构复用并**移除 ajv 运行时依赖**（ajv 仍留在 dependencies 供他处，inject 路径不再引用）
+- 引擎新增 `replayFlow(flowId, inject, valueCtx)`：一次性 handlerRotator 让注入值成为本次 handler result，走完整视觉路径（粒子/闪烁/异常日志），flow 端点折叠不可见时返回错误提示先展开宿主层；`window.__animV2__.core` 暴露 7 个纯函数
+- 面板交互：属性编辑器末尾加入口行（仅节点有 flow 经过时显示 + flow 计数）→ 面板含 flow 下拉 / 预设异常场景下拉（从 errors 声明自动构造注入值，未命中 condition 时 toast 提醒）/ 注入值 JSON / value 上下文（缺省 mock_values[0]）/ 报告区；静态报告（注入值回显 → 形状质检 → 异常分类路由 → 结论）+ 视觉回放双通道一次完成
+- **大坑**：buildScript 返回 4200 行巨型模板字符串，注入其中的浏览器代码禁用①模板字面量（反引号/`${}` 会终结外层模板）②TS 语法（as 断言/类型注解会原样进浏览器炸运行时）——tsc 把它当字符串不检查，靠 esbuild/vitest transform 才暴露；整段重写为纯 JS + 字符串拼接并留注释警示后人
+- 验证 [verify_feed_port.mjs](../scripts/verify_feed_port.mjs) 21 项断言全过：入口显隐/计数、面板开关让位、flow/预设下拉、预设构造命中 condition、四场景报告（已声明异常/else 分支/超 80% 红分支/未声明异常 bug 警报）、视觉回放执行、Escape 关闭、全程无 JS 异常；截图证据 output/feedport_panel.png
+- 验证：273/273 测试通过，tsc 零错误
+- 至此 D1（形状卡）/D2（变形链推导）/D3（注入回放工具 + UI）全部落地，分层披露 L0-L4.5 闭环完成
