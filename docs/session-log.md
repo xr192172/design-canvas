@@ -87,3 +87,13 @@
 - 验证：271/271 测试通过（新增 inject_replay 16 用例：异常路径/分支求值/预设场景/形状质检/错误处理），tsc 零错误
 - 留作后续：进料口 UI 编辑面板（双击 → JSON 编辑 → 调用 inject_replay 回放）是交互糖，引擎已就绪
 - 下一步候选：进料口 UI 面板；或对 ai-base 大图跑 import→derive→annotate→inject 全链路
+
+**追加批：ai-base 全链路验证（derive→annotate→errors/branches→inject→render）+ 坐标物化修复**
+- 全链路脚本 [fullchain_aibase.mjs](../scripts/fullchain_aibase.mjs)：以 decision_splitter.go 为宿主跑通 D2+D3 全流程——derive 派生 Split 变形链 → LLM 语义标注（① 拆分决策 + 进出形状人话）→ 按真实代码错误路径声明 3 errors（not configured=接线 bug=unexpected；LLM 失败/JSON 损坏=业务可预期=expected）+ 2 branches（空决策跳过建图 / 多决策建 N 节点）
+- inject_replay 七场景全对：3 preset 命中声明、未声明异常（context canceled）正确触发 bug 警报、两条分支求值正确
+- preset 候选修复（inject_replay.ts）：真实 condition 多是 message 子串匹配（indexOf）或裸字符串比较（result.error==='EOF'），只构造 code 字段的值永远命中不了——presetCandidates 增加 `{error:{message:lit}}` 与 `{error:lit}` 形态
+- **坐标物化大坑**：ai_base 文件里 599/605 节点 x/y 全 null，漂亮布局只存在于用户浏览器 localStorage（applyLocalOverrides 覆盖），全新环境全部堆在 (0,0)；relayout_nested 物化坐标进文件（9130×10192，货架排布），此后工具脚本读到的 host.x 才是真实值——此前 fullchain 按 `x??0` 把新节点放到了原点附近
+- 密排货架无空隙（4 列 ×104 行距）：6 个新节点（3 error + 1 detail + 2 main）改为 v2 容器下方横条带排布，无 contains 边（relayout 重跑会当根节点重排，已在脚本注释声明）
+- 渲染验证 [verify_fullchain_render.mjs](../scripts/verify_fullchain_render.mjs)：Playwright channel:'chrome'（chromium 下载受限的降级路径）；巨图视口外 SVG 元素 Playwright 无法滚动点击 → DOM 级 MouseEvent 分发；容器祖先链逐级展开 → 角标展开 error/detail 层 → 16 项 DOM 断言全过 + 3 张截图证据
+- 验证：273/273 测试通过（新增 2 用例：message 子串匹配 / 裸字符串比较），tsc 零错误
+- 遗留：用户浏览器 localStorage 里的旧布局覆盖与新物化坐标可能不一致，清一次 localStorage 即归一到文件布局；进料口 UI 面板仍是下一步候选

@@ -80,17 +80,26 @@ function extractStringLiterals(condition: string): string[] {
   return out;
 }
 
-/** 预设场景候选注入值：优先 condition 字面量（声明类型名≠错误码时自适应），其次常见形态 */
+/** 预设场景候选注入值：condition 字面量 × 字段形态（code / message / 裸字符串），其次常见形态
+ *  真实工程教训：condition 可能是 message 子串匹配（indexOf）或裸字符串比较（result.error === 'EOF'），
+ *  只会构造 code 字段的值永远命中不了这类声明 */
 function presetCandidates(decl: AnimationError): unknown[] {
   const literals = extractStringLiterals(decl.condition);
-  return [
-    ...literals.map((lit) => ({ error: { code: lit, message: decl.type } })),
+  const out: unknown[] = [];
+  for (const lit of literals) {
+    out.push({ error: { code: lit, message: decl.type } });
+    out.push({ error: { code: decl.type, message: lit } });
+    out.push({ error: { message: lit } });
+    out.push({ error: lit });
+  }
+  out.push(
     { error: { code: decl.type, message: decl.type } },
     { error: { code: decl.type } },
     { panic: true, message: decl.type },
     { error: { type: decl.type } },
     { error: decl.type },
-  ];
+  );
+  return out;
 }
 
 /** 为 errors 声明自动构造注入值；都不命中 condition 时返回首选形态 + hit=false */

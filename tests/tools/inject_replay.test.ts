@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
-import { clearAllFeatures, saveDSL, getLiveDslFile } from '../../src/storage.js';
+import { clearAllFeatures, saveDSL, getDSL, getLiveDslFile } from '../../src/storage.js';
 import { injectReplay } from '../../src/tools/inject_replay.js';
 import { updateNode } from '../../src/tools/edit_dsl.js';
 import type { DesignDSL } from '../../src/dsl/types.js';
@@ -200,6 +200,42 @@ describe('inject_replay - 预设异常场景', () => {
     expect(() =>
       injectReplay({ feature: 'f_replay', flow_id: 'flow_budget', preset: 'NoSuchError' }),
     ).toThrow(/NoSuchError.*ErrBudgetExceeded/s);
+  });
+
+  it('condition 为 message 子串匹配（indexOf）时，preset 构造 message 含字面量的值', () => {
+    // 真实工程教训（ai-base decision_splitter）：condition 检查 message 包含子串，
+    // 字面量进 code 字段的值永远命中不了
+    setupFixture();
+    const dsl = getDSL('f_replay')!;
+    dsl.animations_v2!.flows![0].handler!.errors = [
+      {
+        type: 'ErrLLMCallFailed',
+        condition: "result.error && String(result.error.message).indexOf('LLM call failed') >= 0",
+        severity: 'expected',
+        to: 'draft_zone',
+      },
+    ];
+    saveDSL(dsl);
+    const r = injectReplay({ feature: 'f_replay', flow_id: 'flow_budget', preset: 'ErrLLMCallFailed' });
+    expect(r.classification).toBe('declared');
+    expect(r.route.error_type).toBe('ErrLLMCallFailed');
+  });
+
+  it('condition 为裸字符串比较（result.error === "EOF"）时，preset 构造 error 为字面量字符串', () => {
+    setupFixture();
+    const dsl = getDSL('f_replay')!;
+    dsl.animations_v2!.flows![0].handler!.errors = [
+      {
+        type: 'ErrEOF',
+        condition: "result.error === 'EOF'",
+        severity: 'expected',
+        to: 'draft_zone',
+      },
+    ];
+    saveDSL(dsl);
+    const r = injectReplay({ feature: 'f_replay', flow_id: 'flow_budget', preset: 'ErrEOF' });
+    expect(r.classification).toBe('declared');
+    expect(r.route.error_type).toBe('ErrEOF');
   });
 });
 
