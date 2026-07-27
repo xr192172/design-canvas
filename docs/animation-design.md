@@ -745,7 +745,7 @@ src/renderer/
 
 1. **D1 静态形状卡**：detail 节点渲染进出数据形状（人话版 JSON Schema），纯展示无交互——非开发者先能看懂 ✅ `9d9baeb`
 2. **D2 变形链推导**：TreeSitter 提取函数骨架 + LLM 语义标注，生成 detail 层节点/边 ✅（工具侧：`derive_detail_chain`——骨架提取/调用图/类型→shapes 全自动，幂等可重跑；语义标注由 LLM 拿到结果后用 update_node 完成；真实工程验证 ✅ ai-base media_replacer.go 全流程跑通——注意 D2 适用对象是含调用流水线的文件，扁平 API 面文件会退化为单节点并给出提示）
-3. **D3 注入回放**：进料口编辑 JSON / 预设异常场景 → 回放暴露问题
+3. **D3 注入回放**：进料口编辑 JSON / 预设异常场景 → 回放暴露问题 ✅（工具侧：`inject_replay`——注入值替代 mock_results 静态推演：classifyError 异常分类 + pickBranch 分支求值 + shapes.out ajv 质检；preset 从 errors 声明自适应构造注入值；纯只读零风险。进料口 UI 编辑面板留作后续交互糖）
 
 ---
 

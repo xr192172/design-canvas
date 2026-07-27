@@ -23,6 +23,7 @@ import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { deriveDetailChain } from './tools/derive_chain.js';
+import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
 import { runSimulation, getSimulationState, resetSimulation } from './tools/simulation.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -1210,6 +1211,45 @@ server.registerTool(
         project_root: args.project_root,
         entry: args.entry,
         max_steps: args.max_steps,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// inject_replay：D3 注入回放，静态推演一次 flow 回放暴露问题
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'inject_replay',
+  {
+    title: 'Inject a value and statically replay a flow',
+    description:
+      'D3 注入回放（质检环节）：注入一个 JSON 值替代 mock_results 作为 flow 的 handler result，静态推演回放路径。' +
+      '回放语义与动画引擎 mock 模式对齐：命中 errors 声明 → 报告异常流向；结果像异常但未声明 → 未声明异常警报（疑似 bug）；' +
+      '正常结果 → branches 条件求值报告命中分支。handler.file_id 节点声明了 shapes.out 时，ajv 校验注入值并报告违例字段。' +
+      'preset 参数从 errors 声明自动生成注入值（自适应 condition 字面量）；list_presets=true 只列出可用预设场景。' +
+      '纯静态推演，不跑真实代码、不修改 DSL，零风险。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      flow_id: z.string().describe('要回放的 flow id（animations_v2.flows[].id）'),
+      inject: z.unknown().optional().describe('注入值（作为 handler result），与 preset 二选一'),
+      preset: z.string().optional().describe('预设异常场景：handler.errors[].type，自动构造注入值'),
+      value: z.unknown().optional().describe('分支求值的 value 上下文（缺省取 flow.mock_values[0] ?? {}）'),
+      list_presets: z.boolean().optional().describe('true 时只列出可用预设场景，不执行回放'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = injectReplay({
+        feature: args.feature,
+        flow_id: args.flow_id,
+        inject: args.inject,
+        preset: args.preset,
+        value: args.value,
+        list_presets: args.list_presets,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

@@ -77,3 +77,13 @@
 - 坑：冒烟脚本重跑会把"已覆盖的活态文件"再次备份，毁掉真备份——备份需幂等（活态 feature==自身或备份已存在则跳过）；ai_base 活态文件从 .design-canvas/features/ai_base.json 存档恢复（599 节点无损）
 - 验证：255/255 测试通过（新增 3 用例：最长链入口/扁平提示/[]byte），tsc 零错误
 - 下一步：D3 注入回放（进料口 JSON 编辑 + 预设异常场景一键注入 → 回放暴露问题）
+
+**追加批：D3 注入回放（工具侧）** `inject_replay`
+- 设计锚点 §10.4 落地为纯静态推演：注入值替代 mock_results 作为 handler result → classifyError 异常分类（declared/undeclared/none）→ 正常值走 pickBranch 分支求值；全复用 anim_core 纯函数，零风险不改 DSL
+- 形状质检闭环：handler.file_id 节点声明 shapes.out 时，ajv（allErrors, strict:false——label 等非标关键字被忽略）校验注入值，违例字段逐条列出 = "DSL 漂移或数据非法" 暴露
+- 预设异常场景自适应构造：声明类型名≠condition 错误码（ErrBudgetExceeded vs BUDGET_EXCEEDED）——从 condition 提取字符串字面量作错误码候选，首个命中 decl.condition 的候选胜出；全不中则降级首选形态并在报告标注
+- 坑：DesignDSL 新版动画字段是 animations_v2（flows），animations 是旧版 Animation[]——vitest 不做类型检查测试照过，tsc 才拦下；TS 项目别拿 vitest 绿当类型安全证据
+- 实测 [inject_replay_conveyor.mjs](../scripts/inject_replay_conveyor.mjs) 六场景全对：list_presets / preset×2 / 预算内绿分支 / 超 80% 红分支 / NETWORK_TIMEOUT 未声明异常警报；脚本 finally 自动恢复活态文件（上次备份事故的教训固化）
+- 验证：271/271 测试通过（新增 inject_replay 16 用例：异常路径/分支求值/预设场景/形状质检/错误处理），tsc 零错误
+- 留作后续：进料口 UI 编辑面板（双击 → JSON 编辑 → 调用 inject_replay 回放）是交互糖，引擎已就绪
+- 下一步候选：进料口 UI 面板；或对 ai-base 大图跑 import→derive→annotate→inject 全链路
