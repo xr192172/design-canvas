@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import { getDSL, saveDSL } from '../dist/src/storage.js';
 import { deriveDetailChain } from '../dist/src/tools/derive_chain.js';
-import { updateNode } from '../dist/src/tools/edit_dsl.js';
+import { updateNode } from '../dist/src/tools/node_ops.js';
 import { injectReplay } from '../dist/src/tools/inject_replay.js';
 
 const FEATURE = 'ai_base';

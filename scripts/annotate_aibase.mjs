@@ -3,7 +3,7 @@
 // 用法：npm run build && node scripts/derive_real_aibase.mjs && node scripts/annotate_aibase.mjs
 import fs from 'node:fs';
 import path from 'node:path';
-import { updateNode } from '../dist/src/tools/edit_dsl.js';
+import { updateNode } from '../dist/src/tools/node_ops.js';
 import { getDSL } from '../dist/src/storage.js';
 import { renderHTML } from '../dist/src/renderer/html_renderer.js';
 

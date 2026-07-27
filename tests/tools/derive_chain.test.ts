@@ -18,7 +18,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { deriveDetailChain } from '../../src/tools/derive_chain';
-import { createFeature, addNode, addFile } from '../../src/tools/edit_dsl';
+import { createFeature } from '../../src/tools/feature_ops';
+import { addNode } from '../../src/tools/node_ops';
+import { addFile } from '../../src/tools/file_ops';
 import { clearAllFeatures, getDSL, getLiveDslFile } from '../../src/storage';
 
 // ─────────────────────────────────────────────────────────────
