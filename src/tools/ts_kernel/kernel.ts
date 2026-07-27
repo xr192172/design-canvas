@@ -330,6 +330,9 @@ function parseContent(parser: ParserLike, content: string): TreeLike {
 export interface ParsedFile {
   symbols: ParsedSymbol[];
   imports: ParsedImport[];
+  /** 解析失败原因（语言包加载失败 / parse 抛错）；成功时缺省。
+   *  调用方借此区分"文件本为空"与"解析静默失败"（后者会丢依赖边）。 */
+  error?: string;
 }
 
 /**
@@ -343,7 +346,7 @@ export async function parseFileFull(filePath: string, content: string): Promise<
   if (!lang) return empty;
 
   const parser = await getParser(ext, lang);
-  if (!parser) return empty;
+  if (!parser) return { ...empty, error: `语言包加载失败: ${lang}` };
 
   try {
     const tree = parseContent(parser as ParserLike, content);
@@ -354,7 +357,7 @@ export async function parseFileFull(filePath: string, content: string): Promise<
     return { symbols, imports };
   } catch (e) {
     console.warn(`[ts_kernel] parse ${filePath} failed: ${(e as Error).message}`);
-    return empty;
+    return { ...empty, error: (e as Error).message };
   }
 }
 

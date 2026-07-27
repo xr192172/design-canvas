@@ -63,7 +63,7 @@ const SKIP_DIRS = new Set([
 ]);
 
 /** 跳过的文件模式（测试/生成物，非架构） */
-const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|test_.*\.py$|.*_test\.py$)/;
+const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|\.gen\.[tj]sx?$|test_.*\.py$|.*_test\.py$)/;
 
 /** 布局常量（与渲染器父节点约定一致：padding 20 + title 30） */
 const FILE_W = 240;
@@ -177,29 +177,52 @@ function readGoModules(root: string): GoModule[] {
   return mods.sort((a, b) => b.module.length - a.module.length);
 }
 
+/** 扩展名解析优先级（同名无扩展名路径碰撞时，排名靠前者胜出——.ts 优先于编译产物 .js） */
+const RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go'];
+
 /** 构建查找索引：无扩展名路径 / 目录路径 → 文件 rel 列表 */
 function buildIndex(files: FileEntry[]): {
   byNoExt: Map<string, FileEntry>;
   byDir: Map<string, FileEntry[]>;
+  /** 同名不同扩展名的碰撞记录（被丢弃的一方），用于结果可见性 */
+  collisions: string[];
 } {
   const byNoExt = new Map<string, FileEntry>();
   const byDir = new Map<string, FileEntry[]>();
+  const collisions: string[] = [];
+  const extRank = (f: FileEntry): number => {
+    const i = RESOLVE_EXTS.indexOf(f.ext);
+    return i === -1 ? RESOLVE_EXTS.length : i;
+  };
+  const setNoExt = (key: string, f: FileEntry): void => {
+    const prev = byNoExt.get(key);
+    if (!prev) {
+      byNoExt.set(key, f);
+      return;
+    }
+    if (prev.rel === f.rel) return;
+    // 碰撞：保留扩展名优先级高者，另一方记录（静默覆盖会错连依赖边）
+    if (extRank(f) < extRank(prev)) {
+      byNoExt.set(key, f);
+      collisions.push(`${prev.rel}（与 ${f.rel} 同名，依赖解析采用后者）`);
+    } else {
+      collisions.push(`${f.rel}（与 ${prev.rel} 同名，依赖解析采用后者）`);
+    }
+  };
   for (const f of files) {
     const noExt = f.rel.slice(0, f.rel.length - f.ext.length);
-    byNoExt.set(noExt, f);
+    setNoExt(noExt, f);
     const list = byDir.get(f.dir) || [];
     list.push(f);
     byDir.set(f.dir, list);
     // index 文件额外注册目录本身（import './dir' → ./dir/index.ts）
     const base = path.posix.basename(noExt);
     if (base === 'index' || base === '__init__' || base === 'mod') {
-      byNoExt.set(f.dir, f);
+      setNoExt(f.dir, f);
     }
   }
-  return { byNoExt, byDir };
+  return { byNoExt, byDir, collisions };
 }
-
-const RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go'];
 
 /**
  * 把一条 import 解析为项目内部文件列表（0..n）
@@ -400,6 +423,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     return { rel, abs, ext: path.extname(abs), dir: path.posix.dirname(rel) };
   });
   const index = buildIndex(files);
+  for (const c of index.collisions) skipped.push(`同名碰撞: ${c}`);
   const goModules = readGoModules(root);
 
   // 2. 解析符号 + import（顺带统计行数，零成本复用已读内容做单文件监控）
@@ -416,6 +440,10 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     }
     lineCounts.set(f.rel, countLines(content));
     const full = await parseFileFull(f.abs, content);
+    // 解析失败 = 静默丢依赖边 + 空 API 面，必须在结果中可见（区别于"文件本为空"）
+    if (full.error) {
+      skipped.push(`解析失败: ${f.rel}（${full.error}），该文件的依赖边与 API 缺失`);
+    }
     // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
     const apis: ExpectedApi[] = full.symbols.slice(0, 50).map((s) => ({
       signature: s.signature,
