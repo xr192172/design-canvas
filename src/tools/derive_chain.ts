@@ -386,7 +386,8 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     filePath = path.isAbsolute(source_path) ? source_path : path.join(projectRoot, source_path);
   } else {
     const rel = dsl.semantic?.files?.find((f) => f.id === node_id)?.path;
-    if (rel) filePath = path.join(projectRoot, rel);
+    // semantic path 可能是绝对路径（外部项目回填），直接 join 会在 Windows 拼出怪胎
+    if (rel) filePath = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
   }
   if (!filePath) {
     throw new Error(`节点 "${node_id}" 没有对应源文件（semantic.files 无此 id，且未传 source_path）`);

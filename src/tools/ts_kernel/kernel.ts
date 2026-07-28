@@ -20,6 +20,7 @@
  *   - 用户只需装一次 tree-sitter-* 包
  */
 
+import path from 'node:path';
 import type Parser from 'tree-sitter';
 import { findLanguageByExt, LanguageEntry } from './languages.js';
 import { isLanguageInstalled, isExtSupported, listSupportedExts, probeInstalledLanguages } from './probe.js';
@@ -74,6 +75,8 @@ interface SyntaxNodeLike {
   startPosition: { row: number };
   endPosition: { row: number };
   text: string;
+  /** 命名节点标记（匿名关键字/标点为 false——'else'/'if' 等关键字 type 也是纯字母，\w 正则无法区分） */
+  isNamed?: boolean;
   childForFieldName(name: string): SyntaxNodeLike | null;
   child(index: number): SyntaxNodeLike | null;
   childCount: number;
@@ -325,6 +328,29 @@ function parseContent(parser: ParserLike, content: string): TreeLike {
   }
   return parseViaCallback(parser, content);
 }
+
+/**
+ * AST 级解析入口：供控制流（CFG）等结构化分析使用。
+ * 与 parseFileFull 同一 parse 管线（含 32KB callback 规避），失败返回 null。
+ */
+export async function parseAstRoot(
+  filePath: string,
+  content: string,
+): Promise<{ root: SyntaxNodeLike; langName: string } | null> {
+  const ext = path.extname(filePath);
+  const lang = findLanguageByExt(ext);
+  if (!lang) return null;
+  const parser = await getParser(ext, lang);
+  if (!parser) return null;
+  try {
+    const tree = parseContent(parser as ParserLike, content);
+    return { root: tree.rootNode, langName: lang.name };
+  } catch {
+    return null;
+  }
+}
+
+export type { SyntaxNodeLike };
 
 /** 单文件完整解析结果（一次 parse，符号 + import 双产出） */
 export interface ParsedFile {

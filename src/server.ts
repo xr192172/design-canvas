@@ -29,6 +29,7 @@ import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { deriveDetailChain } from './tools/derive_chain.js';
+import { deriveAlgorithm } from './tools/derive_algorithm.js';
 import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
 import { runSimulation, getSimulationState, resetSimulation } from './tools/simulation.js';
@@ -1217,6 +1218,47 @@ server.registerTool(
         project_root: args.project_root,
         entry: args.entry,
         max_steps: args.max_steps,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// derive_algorithm：函数内算法控制流（D2 的互补：D2 看函数间，本工具看函数内）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'derive_algorithm',
+  {
+    title: 'Derive intra-function algorithm control-flow graph',
+    description:
+      '算法控制流推导：TreeSitter 解析指定函数体，if→diamond 分支（是/否边）、for/while→hexagon 循环（进入/重复/结束边）、' +
+      'return→终止节点、连续语句合并为 step，挂载为宿主节点的 detail 层。' +
+      '与 derive_detail_chain 互补：D2 看函数间调用链，本工具看单个函数内部怎么运转，适合交流学习/团队对齐/项目研究。' +
+      '嵌套超 max_depth 折叠为"嵌套逻辑"块；return 后的 dead code 会点名提醒。幂等可重跑。支持 .go/.ts/.js/.py。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      node_id: z.string().describe('宿主文件节点 id（算法图挂在它下面）'),
+      function: z.string().describe('目标函数名（Go/TS 方法用裸名）'),
+      source_path: z
+        .string()
+        .optional()
+        .describe('源文件路径（缺省取 semantic.files[node_id].path，相对 project_root）'),
+      project_root: z.string().optional().describe('源文件根目录，默认当前工作目录'),
+      max_depth: z.number().optional().describe('控制流嵌套最大深度，默认 3，超出折叠'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await deriveAlgorithm({
+        feature: args.feature,
+        node_id: args.node_id,
+        function: args.function,
+        source_path: args.source_path,
+        project_root: args.project_root,
+        max_depth: args.max_depth,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {
