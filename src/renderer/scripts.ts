@@ -3212,7 +3212,7 @@ ${EDGE_GEOM_SOURCE}
 
   // ==== 主题切换 ====
   function setupThemeSwitcher() {
-    const themes = ['blue', 'sakura', 'forest', 'ocean'];
+    const themes = ['blue', 'sakura', 'forest', 'ocean', 'star'];
     themes.forEach(theme => {
       const btn = document.getElementById('theme-' + theme);
       if (btn) {

@@ -126,6 +126,37 @@ export function buildStyles(): string {
   --anim-card-body: #64b5f6;
 }
 
+/* 星图主题：深空底 + 星光青主色 + 星云紫点缀。配套星野/发光规则见下方 star 专区 */
+[data-theme="star"] {
+  --theme-primary: #7dd3fc;
+  --theme-primary-rgb: 125, 211, 252;
+  --theme-primary-dark: #38bdf8;
+  --theme-primary-light: #e0f2fe;
+  --theme-secondary: #060b1f;
+  --theme-background: #02040d;
+  --theme-card-bg: #0d1633;
+  --theme-panel-bg: rgba(6, 11, 31, 0.96);
+  --theme-border: #1e2a52;
+  --theme-input-bg: #0a1129;
+  --theme-hover: #1c2c5c;
+  --theme-text: #e6f1ff;
+  --theme-text-sub: #93b4e0;
+  --theme-text-dim: #54689c;
+  --theme-accent: #c4b5fd;
+  --theme-accent-rgb: 196, 181, 253;
+  --theme-edge: #7dd3fc;
+  --theme-success: #4caf50;
+  --theme-warning: #ff9800;
+  --theme-error: #f44336;
+  --anim-card-active-bg: #1c2c5c;
+  --anim-card-active-border: #2e4480;
+  --anim-card-folded-bg: #101a3a;
+  --anim-card-folded-border: #1e2a52;
+  --anim-card-title: #ffffff;
+  --anim-card-folded-title: #93b4e0;
+  --anim-card-body: #93b4e0;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -1467,6 +1498,63 @@ footer button:active {
 .theme-sakura { background: linear-gradient(135deg, #ff7eb3, #2d1b36); }
 .theme-forest { background: linear-gradient(135deg, #4caf50, #1a2f1a); }
 .theme-ocean { background: linear-gradient(135deg, #2196f3, #0d2847); }
+.theme-star { background: linear-gradient(135deg, #7dd3fc, #02040d); }
+
+/* ==== 星图主题专区 ====
+ * 星野：多层 radial-gradient 光点，不同平铺周期（240~420px）错开伪随机分布；
+ * 星云：大面积低透明度紫/青光晕。全部挂在 svg 元素背景上——随画布内容一起平移缩放，
+ * 星野即星图本身。规则置于文件尾部：与基础规则同特异性时靠源码顺序获胜。
+ */
+body[data-theme="star"] .canvas-wrap svg {
+  background-color: var(--theme-secondary);
+  background-image:
+    radial-gradient(ellipse 42% 30% at 72% 18%, rgba(196, 181, 253, 0.055), transparent 70%),
+    radial-gradient(ellipse 38% 26% at 18% 78%, rgba(125, 211, 252, 0.045), transparent 70%),
+    radial-gradient(1.5px 1.5px at 25% 35%, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+    radial-gradient(1px 1px at 75% 15%, rgba(190, 220, 255, 0.7) 50%, transparent 51%),
+    radial-gradient(1px 1px at 45% 80%, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+    radial-gradient(2px 2px at 85% 60%, rgba(196, 181, 253, 0.55) 50%, transparent 51%),
+    radial-gradient(1px 1px at 10% 90%, rgba(125, 211, 252, 0.6) 50%, transparent 51%),
+    radial-gradient(1.2px 1.2px at 60% 45%, rgba(255, 255, 255, 0.4) 50%, transparent 51%);
+  background-size:
+    100% 100%,
+    100% 100%,
+    340px 340px,
+    260px 260px,
+    420px 420px,
+    300px 300px,
+    380px 380px,
+    240px 240px;
+}
+/* 节点常态微光（恒星感）；hover/selected 加强，规则在同特异性基础规则之后 */
+body[data-theme="star"] .node rect,
+body[data-theme="star"] .node circle,
+body[data-theme="star"] .node polygon {
+  filter: drop-shadow(0 0 6px rgba(var(--theme-primary-rgb), 0.30));
+}
+body[data-theme="star"] .node:hover rect,
+body[data-theme="star"] .node:hover circle,
+body[data-theme="star"] .node:hover polygon {
+  filter: brightness(1.25) drop-shadow(0 0 14px rgba(var(--theme-primary-rgb), 0.65));
+}
+body[data-theme="star"] .node.selected rect,
+body[data-theme="star"] .node.selected circle,
+body[data-theme="star"] .node.selected polygon {
+  filter: drop-shadow(0 0 18px rgba(var(--theme-primary-rgb), 0.8));
+}
+/* 星光轨迹边：常态柔光，高亮时拖尾增强 */
+body[data-theme="star"] .edge path {
+  filter: drop-shadow(0 0 3px rgba(var(--theme-primary-rgb), 0.35));
+}
+body[data-theme="star"] .edge:hover path,
+body[data-theme="star"] .edge.highlighted path,
+body[data-theme="star"] .edge.selected path {
+  filter: drop-shadow(0 0 10px rgba(var(--theme-primary-rgb), 0.75));
+}
+/* 边标签压在星野上需要暗色描边保底可读 */
+body[data-theme="star"] .edge text {
+  text-shadow: 0 0 4px var(--theme-secondary), 0 0 8px var(--theme-secondary);
+}
 
 /** ==== 右键菜单 ==== */
 .context-menu {

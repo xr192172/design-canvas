@@ -26,6 +26,7 @@ try {
   saveDSL({
     feature: FEATURE,
     title: '算法控制流演示：ReplaceImages',
+    theme: 'star',
     geometry: {
       nodes: [
         { id: 'media_replacer', x: 120, y: 60, width: 240, height: 80, label: 'media_replacer.go', type: 'file' },

@@ -639,6 +639,7 @@ export function renderHTML(dsl: DesignDSL): string {
           <button id="theme-sakura" class="theme-sakura ${theme === 'sakura' ? 'active' : ''}" title="樱花"></button>
           <button id="theme-forest" class="theme-forest ${theme === 'forest' ? 'active' : ''}" title="森林"></button>
           <button id="theme-ocean" class="theme-ocean ${theme === 'ocean' ? 'active' : ''}" title="海洋"></button>
+          <button id="theme-star" class="theme-star ${theme === 'star' ? 'active' : ''}" title="星图"></button>
         </div>
         <div class="zoom-controls">
           <button id="zoom-out" type="button" title="缩小">−</button>

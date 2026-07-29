@@ -326,6 +326,27 @@ describe('renderHTML - 职责分层', () => {
     expect(html).toContain('canvasState.fitVisibleContent = fitVisibleContent');
   });
 
+  it('星图主题：star 调色板 + 星野背景 + 发光规则 + 切换按钮', () => {
+    const dsl = makeMinimalDSL();
+    dsl.theme = 'star';
+    const html = renderHTML(dsl);
+    // body 主题属性
+    expect(html).toContain('<body data-theme="star">');
+    // 调色板变量块
+    expect(html).toContain('[data-theme="star"]');
+    expect(html).toContain('--theme-primary: #7dd3fc');
+    expect(html).toContain('--theme-background: #02040d');
+    // 星野（radial-gradient 光点 + 多周期平铺）
+    expect(html).toContain('body[data-theme="star"] .canvas-wrap svg');
+    expect(html).toContain('340px 340px');
+    // 节点/边发光
+    expect(html).toContain('body[data-theme="star"] .node rect');
+    expect(html).toContain('body[data-theme="star"] .edge path');
+    // 主题切换器按钮 + JS 主题数组
+    expect(html).toContain('id="theme-star"');
+    expect(html).toContain("'blue', 'sakura', 'forest', 'ocean', 'star'");
+  });
+
   it('F2 推导：handler.errors.to 节点自动 error 层 + host=flow.from', () => {
     const dsl = makeMinimalDSL();
     dsl.geometry.nodes.push({ id: 'err_sink', x: 10, y: 200, width: 100, height: 50, label: '错误池' });

@@ -44,7 +44,7 @@
     },
     "theme": {
       "type": "string",
-      "enum": ["blue", "sakura", "forest", "ocean"],
+      "enum": ["blue", "sakura", "forest", "ocean", "star"],
       "description": "主题 ID"
     },
     "animations_v2": {

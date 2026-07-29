@@ -95,7 +95,7 @@ export interface ThemeConfig {
 }
 
 /** 主题 ID */
-export type ThemeId = 'blue' | 'sakura' | 'forest' | 'ocean';
+export type ThemeId = 'blue' | 'sakura' | 'forest' | 'ocean' | 'star';
 
 /** 顶层 DSL 文档 */
 export interface DesignDSL {
