@@ -309,6 +309,23 @@ describe('renderHTML - 职责分层', () => {
     expect(html).toContain('if (!flowDomVisible(flow)) return;');
   });
 
+  it('缩放钻入动效：相机补间 + 检查点 + 钻入/退回函数注入', () => {
+    const html = renderHTML(makeMinimalDSL());
+    // 相机动效核心
+    expect(html).toContain('function animateCamera(');
+    expect(html).toContain('function easeInOutCubic(');
+    // 钻入/退回
+    expect(html).toContain('function drillIntoHost(');
+    expect(html).toContain('function drillOutOfHost(');
+    expect(html).toContain('function cameraFitNodes(');
+    // 检查点（退路机制）：展开前记录、收起时恢复
+    expect(html).toContain('cameraAnim.checkpoints[key] = { scale: canvasState.scale');
+    expect(html).toContain('delete cameraAnim.checkpoints[key]');
+    // 闭包相机句柄暴露
+    expect(html).toContain('canvasState.updateViewBox = updateViewBox');
+    expect(html).toContain('canvasState.fitVisibleContent = fitVisibleContent');
+  });
+
   it('F2 推导：handler.errors.to 节点自动 error 层 + host=flow.from', () => {
     const dsl = makeMinimalDSL();
     dsl.geometry.nodes.push({ id: 'err_sink', x: 10, y: 200, width: 100, height: 50, label: '错误池' });

@@ -1033,10 +1033,19 @@ ${EDGE_GEOM_SOURCE}
 
   function toggleHostLayer(hostId, layer) {
     const key = hostId + ':' + layer;
-    if (state.expandedLayers.has(key)) state.expandedLayers.delete(key);
-    else state.expandedLayers.add(key);
-    updateBadgeStates();
-    applyLayerVisibility();
+    if (state.expandedLayers.has(key)) {
+      state.expandedLayers.delete(key);
+      updateBadgeStates();
+      applyLayerVisibility();
+      drillOutOfHost(hostId, layer); // 退回展开前相机检查点
+    } else {
+      // 记录相机检查点（退路机制），展开后钻入宿主深层
+      cameraAnim.checkpoints[key] = { scale: canvasState.scale, panX: canvasState.panX, panY: canvasState.panY };
+      state.expandedLayers.add(key);
+      updateBadgeStates();
+      applyLayerVisibility();
+      drillIntoHost(hostId, layer);
+    }
   }
 
   function updateBadgeStates() {
@@ -1076,11 +1085,13 @@ ${EDGE_GEOM_SOURCE}
       state.globalLayers.error = !state.globalLayers.error;
       errBtn.classList.toggle('active', state.globalLayers.error);
       applyLayerVisibility();
+      if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.2, true);
     });
     if (detBtn) detBtn.addEventListener('click', () => {
       state.globalLayers.detail = !state.globalLayers.detail;
       detBtn.classList.toggle('active', state.globalLayers.detail);
       applyLayerVisibility();
+      if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.2, true);
     });
   }
 
@@ -2971,7 +2982,7 @@ ${EDGE_GEOM_SOURCE}
     // 旧公式 min(ow/fw, oh/fh) 对超长画布（8480×24746）会被完整高度拖累，
     // meet 适配后实际显示仍只有 ~4%，等于没 fit —— 必须绕开 origViewBox 维度。
     // maxActual：实际显示比例上限（防小包围盒被过度放大）
-    function fitVisibleContent(maxActual) {
+    function fitVisibleContent(maxActual, animate) {
       const nodes = dsl.geometry?.nodes || [];
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cnt = 0;
       nodes.forEach(n => {
@@ -2993,11 +3004,18 @@ ${EDGE_GEOM_SOURCE}
       const rect = svg.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0 || fitScale <= 0) return;
       const sd = Math.min(rect.width / fw, rect.height / fh, maxActual || 1.5);
-      canvasState.scale = Math.max(0.2, Math.min(canvasState.maxScale, sd / fitScale));
-      // 使视图中心对准可见包围盒中心（由 updateViewBox 公式反推）
       const [ox, oy, ow, oh] = origViewBox;
-      canvasState.panX = ox + ow / 2 - (minX + maxX) / 2;
-      canvasState.panY = oy + oh / 2 - (minY + maxY) / 2;
+      const target = {
+        scale: Math.max(0.2, Math.min(canvasState.maxScale, sd / fitScale)),
+        // 使视图中心对准可见包围盒中心（由 updateViewBox 公式反推）
+        panX: ox + ow / 2 - (minX + maxX) / 2,
+        panY: oy + oh / 2 - (minY + maxY) / 2,
+      };
+      // animate=true 走相机动效（层开关/钻入场景），默认瞬时（初始视图/重置）
+      if (animate) { animateCamera(target, 420); return; }
+      canvasState.scale = target.scale;
+      canvasState.panX = target.panX;
+      canvasState.panY = target.panY;
       updateViewBox();
     }
 
@@ -3015,10 +3033,124 @@ ${EDGE_GEOM_SOURCE}
       fitVisibleContent(1.0);
     }
     if (zoomReset) zoomReset.addEventListener('click', applyInitialView);
-    if (zoomFit) zoomFit.addEventListener('click', () => fitVisibleContent(1.5));
+    if (zoomFit) zoomFit.addEventListener('click', () => fitVisibleContent(1.5, true));
 
     applyInitialView();
+
+    // 钻入动效句柄：闭包内相机函数挂到 canvasState，供层展开/收起调用
+    canvasState.updateViewBox = updateViewBox;
+    canvasState.fitVisibleContent = fitVisibleContent;
   }
+
+  // ==== 缩放钻入动效 ====
+  // 展开层级 = 钻入（相机平滑框住宿主+深层孩子，实际显示封顶 120% 防过曝）；
+  // 收起 = 退回（恢复该层展开前的相机检查点）。检查点即退路机制。
+  const cameraAnim = { raf: 0, checkpoints: {} };
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  // 相机补间：scale/panX/panY 从当前值平滑到 target，新动画取消进行中的旧动画
+  function animateCamera(target, duration) {
+    if (!canvasState.updateViewBox) return;
+    if (cameraAnim.raf) cancelAnimationFrame(cameraAnim.raf);
+    const from = { scale: canvasState.scale, panX: canvasState.panX, panY: canvasState.panY };
+    const dur = duration || 420;
+    const start = performance.now();
+    function step(now) {
+      const t = Math.min(1, (now - start) / dur);
+      const k = easeInOutCubic(t);
+      canvasState.scale = from.scale + (target.scale - from.scale) * k;
+      canvasState.panX = from.panX + (target.panX - from.panX) * k;
+      canvasState.panY = from.panY + (target.panY - from.panY) * k;
+      canvasState.updateViewBox();
+      if (t < 1) cameraAnim.raf = requestAnimationFrame(step);
+      else cameraAnim.raf = 0;
+    }
+    cameraAnim.raf = requestAnimationFrame(step);
+  }
+
+  // 框住一组节点的目标相机（与 fitVisibleContent 同公式，maxActual 封顶实际显示）
+  // 返回 { scale, panX, panY, __sd }；__sd = 实际显示比例（钻入可读性判定用）
+  function cameraFitNodes(ids, maxActual) {
+    const svg = document.getElementById('canvas');
+    if (!svg || !canvasState.origViewBox || !canvasState.fitScale) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cnt = 0;
+    ids.forEach(id => {
+      const n = nodeById[id];
+      if (!n) return;
+      cnt++;
+      const x = n.x || 0, y = n.y || 0, w = n.width || 120, h = n.height || 60;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + w);
+      maxY = Math.max(maxY, y + h);
+    });
+    if (cnt === 0) return null;
+    const padding = 60;
+    const fw = maxX - minX + padding * 2;
+    const fh = maxY - minY + padding * 2;
+    const sd = Math.min(rect.width / fw, rect.height / fh, maxActual || 1.2);
+    const vb = canvasState.origViewBox;
+    return {
+      scale: Math.max(0.2, Math.min(canvasState.maxScale || 5, sd / canvasState.fitScale)),
+      panX: vb[0] + vb[2] / 2 - (minX + maxX) / 2,
+      panY: vb[1] + vb[3] / 2 - (minY + maxY) / 2,
+      __sd: sd,
+    };
+  }
+
+  // 钻入宿主深层。两种取景：
+  //   小层（全入镜实际显示 ≥70%）→ 宿主+全部该层孩子一起入镜
+  //   长条/大片（全入镜不可读）→ 入口取景：宿主+按距离就近纳入孩子，直到跌破 70% 下限
+  function drillIntoHost(hostId, layer) {
+    const groups = hostChildren[hostId];
+    if (!groups) return;
+    const host = nodeById[hostId];
+    if (!host) return;
+    const kids = (groups[layer] || []).map(id => nodeById[id]).filter(Boolean);
+    const full = cameraFitNodes([hostId].concat(kids.map(k => k.id)), 1.2);
+    if (!full) return;
+    if (kids.length === 0 || full.__sd >= 0.7) { animateCamera(full, 420); return; }
+    const hx = (host.x || 0) + (host.width || 120) / 2;
+    const hy = (host.y || 0) + (host.height || 60) / 2;
+    kids.sort((a, b) => {
+      const ax = (a.x || 0) + (a.width || 120) / 2, ay = (a.y || 0) + (a.height || 60) / 2;
+      const bx = (b.x || 0) + (b.width || 120) / 2, by = (b.y || 0) + (b.height || 60) / 2;
+      return ((ax - hx) * (ax - hx) + (ay - hy) * (ay - hy)) - ((bx - hx) * (bx - hx) + (by - hy) * (by - hy));
+    });
+    const ids = [hostId, kids[0].id];
+    let best = cameraFitNodes(ids, 1.2);
+    for (let i = 1; i < kids.length; i++) {
+      const cand = cameraFitNodes(ids.concat([kids[i].id]), 1.2);
+      if (!cand || cand.__sd < 0.7) break;
+      ids.push(kids[i].id);
+      best = cand;
+    }
+    if (best) animateCamera(best, 420);
+  }
+
+  // 退回：恢复该层展开前的相机检查点
+  function drillOutOfHost(hostId, layer) {
+    const key = hostId + ':' + layer;
+    const cp = cameraAnim.checkpoints[key];
+    if (!cp) return;
+    delete cameraAnim.checkpoints[key];
+    animateCamera(cp, 380);
+  }
+
+  // 调试/e2e 句柄（与 __DSL__ / __animV2__ 同级）：相机状态与钻入函数可编程访问
+  window.__canvas__ = {
+    canvasState: canvasState,
+    cameraAnim: cameraAnim,
+    state: state,
+    animateCamera: animateCamera,
+    drillIntoHost: drillIntoHost,
+    drillOutOfHost: drillOutOfHost,
+  };
 
   // ==== 多选工具栏 ====
   function setupMultiSelectBar() {
