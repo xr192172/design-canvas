@@ -137,7 +137,9 @@ function renderContentBlocks(blocks: import('../dsl/types.js').ContentBlock[]): 
 function renderNode(n: Node, parentIds?: Set<string>): string {
   const b = nodeBox(n);
   const style = n.style ?? {};
-  const fill = style.bg ?? '';
+  // tone 语义色优先于显式 bg；均无时走主题变量
+  const toneFill = style.tone ? `var(--theme-${style.tone})` : '';
+  const fill = style.bg ?? toneFill;
   const stroke = (style.border ?? '').split(' ').pop() ?? '';
   // 未显式指定配色的节点跟随主题：走 inline style（支持 var()），
   // 选中/状态/动画等 CSS 规则带 !important 或更高优先级，可正常覆盖

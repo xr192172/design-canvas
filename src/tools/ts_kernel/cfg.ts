@@ -23,7 +23,7 @@ import type { SyntaxNodeLike } from './kernel.js';
 // 公开类型
 // ─────────────────────────────────────────────────────────────
 
-export type CfgNodeKind = 'entry' | 'exit' | 'step' | 'branch' | 'loop' | 'return';
+export type CfgNodeKind = 'entry' | 'exit' | 'step' | 'branch' | 'loop' | 'return' | 'throw' | 'handler' | 'finally';
 
 export interface CfgNode {
   id: string;
@@ -58,7 +58,7 @@ export interface FunctionCfg {
 // 语言节点类型表
 // ─────────────────────────────────────────────────────────────
 
-type CtrlKind = 'branch' | 'loop' | 'return' | 'continue' | 'break';
+type CtrlKind = 'branch' | 'loop' | 'return' | 'continue' | 'break' | 'throw' | 'try';
 
 const TS_CTRL: Record<string, CtrlKind> = {
   if_statement: 'branch',
@@ -70,6 +70,8 @@ const TS_CTRL: Record<string, CtrlKind> = {
   return_statement: 'return',
   continue_statement: 'continue',
   break_statement: 'break',
+  throw_statement: 'throw',
+  try_statement: 'try',
 };
 
 const CTRL: Record<string, Record<string, CtrlKind>> = {
@@ -96,6 +98,8 @@ const CTRL: Record<string, Record<string, CtrlKind>> = {
     return_statement: 'return',
     continue_statement: 'continue',
     break_statement: 'break',
+    raise_statement: 'throw',
+    try_statement: 'try',
   },
 };
 
@@ -130,6 +134,10 @@ interface Ctx {
   returns: string[];
   /** 循环栈：continue 回连栈顶循环头，break 记入栈顶待接到循环出口 */
   loopStack: Array<{ headerId: string; breaks: string[] }>;
+  /** 异常 handler 栈：throw 查栈顶找最近 catch */
+  handlerStack: Array<{ id: string }>;
+  /** 未捕获的 throw（函数内无 try/catch），由 extractFunctionCfg 末尾连到 exit */
+  uncaughtThrows: string[];
 }
 
 function addNode(ctx: Ctx, kind: CfgNodeKind, label: string, col: number, src?: SyntaxNodeLike, condition?: string): string {
@@ -294,6 +302,20 @@ function buildSeq(ctx: Ctx, stmts: SyntaxNodeLike[], col: number, depth: number)
     const stmt = stmts[i];
     const kind = ctrl[stmt.type];
     if (!kind) {
+      // Go 无 throw 语句：expression_statement 直接调用 panic( 视为抛出
+      // （首 token 判定，避免字符串/注释里出现 "panic(" 误判）
+      if (ctx.lang === 'go' && stmt.type === 'expression_statement' && /^\s*panic\s*\(/.test(stmt.text)) {
+        flush();
+        const id = addNode(ctx, 'throw', oneLine(stmt.text, 44), col, stmt);
+        link(ctx, exits, id);
+        if (!entry) entry = id;
+        const top = ctx.handlerStack[ctx.handlerStack.length - 1];
+        if (top) ctx.edges.push({ from: id, to: top.id, label: '抛出' });
+        else ctx.uncaughtThrows.push(id);
+        exits = [];
+        if (i < stmts.length - 1) ctx.deadCode = true;
+        break;
+      }
       stmtBuf.push(stmt);
       continue;
     }
@@ -307,6 +329,86 @@ function buildSeq(ctx: Ctx, stmts: SyntaxNodeLike[], col: number, depth: number)
       exits = [];
       if (i < stmts.length - 1) ctx.deadCode = true;
       break;
+    }
+
+    if (kind === 'throw') {
+      // throw_statement / raise_statement：标注抛出的异常表达式
+      const argNode = stmt.childForFieldName('argument') ?? stmt.childForFieldName('value');
+      const label = argNode ? oneLine(argNode.text, 44) : oneLine(stmt.text, 44);
+      const id = addNode(ctx, 'throw', label, col, stmt);
+      link(ctx, exits, id);
+      if (!entry) entry = id;
+      // 异常边：连最近 catch handler（栈顶）；无 handler 记为未捕获，末尾统一连 exit
+      const top = ctx.handlerStack[ctx.handlerStack.length - 1];
+      if (top) ctx.edges.push({ from: id, to: top.id, label: '抛出' });
+      else ctx.uncaughtThrows.push(id);
+      // throw 后续语句不可达（同 return）
+      exits = [];
+      if (i < stmts.length - 1) ctx.deadCode = true;
+      break;
+    }
+
+    if (kind === 'try') {
+      // try_statement 结构（TS/Python）：
+      //   body(block) + catch_clause*/except_clause* + finally_clause?
+      // 构建顺序：先建 handler 节点（throw 寻址需要）→ push 栈 → try body → pop 栈 → handler body
+      const tryId = addNode(ctx, 'step', 'try', col, stmt);
+      link(ctx, exits, tryId);
+      if (!entry) entry = tryId;
+
+      // 1. catch handler 节点（body 稍后构建）
+      const handlerIds: string[] = [];
+      for (let j = 0; j < stmt.childCount; j++) {
+        const c = stmt.child(j);
+        if (c && (c.type === 'catch_clause' || c.type === 'except_clause')) {
+          const paramNode = c.childForFieldName('parameter') ?? c.childForFieldName('type');
+          const catchType = paramNode ? oneLine(paramNode.text, 24) : '所有异常';
+          handlerIds.push(addNode(ctx, 'handler', `catch ${catchType}`, col + 1, c, catchType));
+        }
+      }
+
+      // 2. try body（其中 throw 会查到栈顶 handler）
+      ctx.handlerStack.push(...handlerIds.map((hid) => ({ id: hid })));
+      const tryBodyRes = buildSeq(ctx, stmtsOf(stmt.childForFieldName('body')), col + 1, depth + 1);
+      ctx.handlerStack.splice(ctx.handlerStack.length - handlerIds.length, handlerIds.length);
+      if (tryBodyRes.entry) ctx.edges.push({ from: tryId, to: tryBodyRes.entry, label: '进入' });
+
+      // 3. handler body
+      const handlerExits: Exit[] = [];
+      let hIdx = 0;
+      for (let j = 0; j < stmt.childCount; j++) {
+        const c = stmt.child(j);
+        if (!c || (c.type !== 'catch_clause' && c.type !== 'except_clause')) continue;
+        const hid = handlerIds[hIdx++];
+        // 无显式 throw 的 try：异常可能来自任意调用，画虚线语义边 try → handler
+        ctx.edges.push({ from: tryId, to: hid, label: '异常' });
+        const catchRes = buildSeq(ctx, stmtsOf(c.childForFieldName('body')), col + 2, depth + 1);
+        if (catchRes.entry) ctx.edges.push({ from: hid, to: catchRes.entry, label: '处理' });
+        handlerExits.push(...catchRes.exits);
+      }
+
+      // 4. finally（所有路径必经）
+      let finallyId: string | null = null;
+      let finallyExits: Exit[] = [];
+      for (let j = 0; j < stmt.childCount; j++) {
+        const c = stmt.child(j);
+        if (c && c.type === 'finally_clause') {
+          finallyId = addNode(ctx, 'finally', 'finally', col, c);
+          const finRes = buildSeq(ctx, stmtsOf(c.childForFieldName('body')), col + 1, depth + 1);
+          if (finRes.entry) ctx.edges.push({ from: finallyId, to: finRes.entry, label: '进入' });
+          finallyExits = finRes.exits;
+          break;
+        }
+      }
+
+      const normalExits = [...tryBodyRes.exits, ...handlerExits];
+      if (finallyId) {
+        link(ctx, normalExits, finallyId);
+        exits = finallyExits;
+      } else {
+        exits = normalExits;
+      }
+      continue;
     }
 
     if (kind === 'continue' || kind === 'break') {
@@ -431,6 +533,8 @@ export async function extractFunctionCfg(
     deadCode: false,
     returns: [],
     loopStack: [],
+    handlerStack: [],
+    uncaughtThrows: [],
   };
 
   const entryId = addNode(ctx, 'entry', `▶ ${funcName}`, 0, funcNode);
@@ -451,6 +555,10 @@ export async function extractFunctionCfg(
   }
   for (const rid of ctx.returns) {
     ctx.edges.push({ from: rid, to: exitId });
+  }
+  // 未捕获的 throw：异常向上抛出函数边界
+  for (const tid of ctx.uncaughtThrows) {
+    ctx.edges.push({ from: tid, to: exitId, label: '未捕获' });
   }
 
   return {

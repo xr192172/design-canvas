@@ -41,17 +41,23 @@ export interface DeriveAlgorithmResult {
   truncated: boolean;
   dead_code: boolean;
   /** 控制流节点分类计数 */
-  stats: { steps: number; branches: number; loops: number; returns: number };
+  stats: { steps: number; branches: number; loops: number; returns: number; throws: number; handlers: number };
 }
 
-/** CFG 节点类型 → 渲染形状 */
-const KIND_SHAPE: Record<CfgNodeKind, { shape: 'circle' | 'diamond' | 'hexagon' | 'rounded'; w: number; h: number }> = {
+/** CFG 节点类型 → 渲染形状（tone 为语义色，渲染器映射到主题变量：error=红 success=绿 warning=橙） */
+const KIND_SHAPE: Record<
+  CfgNodeKind,
+  { shape: 'circle' | 'diamond' | 'hexagon' | 'rounded'; w: number; h: number; tone?: 'error' | 'success' | 'warning' }
+> = {
   entry: { shape: 'circle', w: 140, h: 44 },
   exit: { shape: 'circle', w: 140, h: 44 },
   return: { shape: 'circle', w: 180, h: 48 },
   branch: { shape: 'diamond', w: 220, h: 64 },
   loop: { shape: 'hexagon', w: 220, h: 56 },
   step: { shape: 'rounded', w: 240, h: 52 },
+  throw: { shape: 'diamond', w: 220, h: 64, tone: 'error' },
+  handler: { shape: 'rounded', w: 220, h: 52, tone: 'success' },
+  finally: { shape: 'hexagon', w: 180, h: 48, tone: 'warning' },
 };
 
 const COL_GAP = 280;
@@ -132,7 +138,7 @@ export async function deriveAlgorithm(input: DeriveAlgorithmInput): Promise<Deri
       label: cn.label,
       layer: 'detail',
       host: node_id,
-      style: { shape: meta.shape },
+      style: { shape: meta.shape, ...(meta.tone ? { tone: meta.tone } : {}) },
     };
     const descParts: string[] = [`${cn.kind}${cn.line > 0 ? ` · 源码第 ${cn.line} 行` : ''}`];
     if (cn.condition && cn.condition !== cn.label) descParts.push(`条件：${cn.condition}`);
@@ -157,7 +163,7 @@ export async function deriveAlgorithm(input: DeriveAlgorithmInput): Promise<Deri
   const lines = [
     `已推导算法控制流：feature "${feature}" 节点 ${node_id} 函数 ${funcName}()`,
     `源文件：${relPath}`,
-    `结构：${kindCount('step')} 步骤 · ${kindCount('branch')} 分支 · ${kindCount('loop')} 循环 · ${kindCount('return')} return`,
+    `结构：${kindCount('step')} 步骤 · ${kindCount('branch')} 分支 · ${kindCount('loop')} 循环 · ${kindCount('return')} return · ${kindCount('throw')} throw · ${kindCount('handler')} handler`,
     ...(cfg.truncated ? [`注意：存在超过 max_depth=${max_depth} 的嵌套块，已折叠为"嵌套逻辑"节点（可调大 max_depth 展开）`] : []),
     ...(cfg.deadCode ? ['注意：return 之后存在不可达语句（dead code），未入图——建议检查源码'] : []),
     '',
@@ -175,6 +181,8 @@ export async function deriveAlgorithm(input: DeriveAlgorithmInput): Promise<Deri
       branches: kindCount('branch'),
       loops: kindCount('loop'),
       returns: kindCount('return'),
+      throws: kindCount('throw'),
+      handlers: kindCount('handler'),
     },
   };
 }

@@ -25,6 +25,8 @@ export interface NodeStyle {
   bg?: string;
   /** 前景色（文字） */
   color?: string;
+  /** 语义色调：error/success/warning，渲染器映射到主题变量（显式 bg 优先） */
+  tone?: 'error' | 'success' | 'warning';
   /** 边框，如 "1px solid #4f8df7" */
   border?: string;
   /** 圆角半径（px） */
