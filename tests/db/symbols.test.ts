@@ -10,11 +10,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { Database } from '../../src/db/db';
-import { openDb } from '../../src/db/db';
+import { openDb, getProjectCacheDb, closeAllProjectCacheDbs } from '../../src/db/db';
 import {
   syncFile,
   syncProject,
   removeFile,
+  pruneDeletedFiles,
   searchSymbols,
   getIndexStats,
   getFileParse,
@@ -238,6 +239,57 @@ export function buildPath(x: string): string {
     const rows = db.prepare('SELECT COUNT(*) c FROM imports WHERE file_path = ?').get('c.ts') as { c: number };
     expect(rows.c).toBe(0);
     expect(getFileParse(db, 'c.ts')).toBeNull();
+  });
+});
+
+describe('pruneDeletedFiles - 删除侦测', () => {
+  it('磁盘上已删除的文件被清出缓存（files/nodes/imports + 边级联）', async () => {
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
+    fs.rmSync(path.join(dir, 'b.ts'));
+    // 比对基准 = 本次全量扫描列表（只剩 a.ts）
+    const pruned = pruneDeletedFiles(db, dir, [path.join(dir, 'a.ts')]);
+    expect(pruned).toEqual(['b.ts']);
+    const stats = getIndexStats(db);
+    expect(stats.files).toBe(1);
+    expect(stats.edges).toBe(0); // a→b 边随 b 节点级联删除
+    expect(searchSymbols(db, 'helperB')).toEqual([]);
+    expect(getFileParse(db, 'b.ts')).toBeNull();
+  });
+
+  it('存活的文件不受影响；不受支持扩展名的 files 行不被误删', async () => {
+    writeProjectFile('README.md', '# hi\n');
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts'), path.join(dir, 'README.md')]);
+    const pruned = pruneDeletedFiles(db, dir, [path.join(dir, 'a.ts')]);
+    // b.ts 不在扫描列表 → 删；README.md 不在扫描列表但扩展名不受支持 → 保留（多工具共享缓存不互踩）
+    expect(pruned).toEqual(['b.ts']);
+    const row = db.prepare('SELECT path FROM files WHERE path = ?').get('README.md');
+    expect(row).toBeDefined();
+  });
+
+  it('全部存活时返回空数组', async () => {
+    const files = [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')];
+    await syncProject(db, dir, files);
+    expect(pruneDeletedFiles(db, dir, files)).toEqual([]);
+  });
+});
+
+describe('getProjectCacheDb - 项目缓存连接池', () => {
+  afterEach(() => {
+    closeAllProjectCacheDbs();
+  });
+
+  it('同一项目根复用同一连接，不同根各自独立，db 文件落在项目 .design-canvas/', () => {
+    const projA = path.join(dir, 'projA');
+    const projB = path.join(dir, 'projB');
+    fs.mkdirSync(projA, { recursive: true });
+    fs.mkdirSync(projB, { recursive: true });
+    const a1 = getProjectCacheDb(projA);
+    const a2 = getProjectCacheDb(projA);
+    const b1 = getProjectCacheDb(projB);
+    expect(a1).toBe(a2);
+    expect(a1).not.toBe(b1);
+    expect(fs.existsSync(path.join(projA, '.design-canvas', 'cache.db'))).toBe(true);
+    expect(fs.existsSync(path.join(projB, '.design-canvas', 'cache.db'))).toBe(true);
   });
 });
 

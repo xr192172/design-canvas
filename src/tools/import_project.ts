@@ -27,7 +27,7 @@ import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
 import { countLines, assessLines } from './monolith.js';
 import type { Database } from '../db/db.js';
-import { syncProject, getFileParse } from '../db/symbols.js';
+import { syncProject, getFileParse, pruneDeletedFiles } from '../db/symbols.js';
 
 export interface ImportProjectInput {
   /** 目标项目根目录（绝对路径或相对 cwd） */
@@ -420,6 +420,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   // 1. 扫描文件
   let absFiles = walkFiles(root, include_tests);
   const skipped: string[] = [];
+  // 截断前的完整列表——pruneDeletedFiles 的比对基准（拿截断后列表会误删）
+  const walkedAll = absFiles;
   if (absFiles.length > max_files) {
     skipped.push(`超出 max_files=${max_files}，跳过 ${absFiles.length - max_files} 个文件`);
     absFiles = absFiles.slice(0, max_files);
@@ -462,6 +464,13 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     const db = input.cache_db;
     const sync = await syncProject(db, root, absFiles);
     cacheStats = { hits: 0, reparsed: 0, failed: 0 };
+    // 删除侦测：清掉磁盘上已不存在的文件的缓存行（比对基准是截断前完整列表）
+    const pruned = pruneDeletedFiles(db, root, walkedAll);
+    if (pruned.length > 0) {
+      skipped.push(
+        `缓存清理: ${pruned.length} 个文件已从磁盘删除（${pruned.slice(0, 3).join(', ')}${pruned.length > 3 ? ' 等' : ''}）`,
+      );
+    }
     const byPath = new Map(sync.results.map((r) => [r.path, r]));
     for (const f of files) {
       const r = byPath.get(f.rel);

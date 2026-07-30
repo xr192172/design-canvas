@@ -107,4 +107,26 @@ describe('import_project 缓存路径', () => {
     // 依赖边不因增量而丢失
     expect(edgeSet('cache_mod2')).toContain('file_src_a_ts→file_src_b_ts:imports');
   });
+
+  // 注意：本测试会增删共享 fixture 文件，必须放在最后
+  it('文件删除后缓存自动清理（删除侦测），DSL 同步剔除', async () => {
+    put('src/c.ts', `export function loneC(): number {\n  return 3;\n}\n`);
+    const db = openDb(path.join(dbDir, 'del.db'));
+    const r1 = await importProject({ project_dir: fixtureRoot, feature: 'cache_del1', cache_db: db });
+    expect(r1.files_parsed).toBe(5);
+
+    fs.rmSync(path.join(fixtureRoot, 'src/c.ts'));
+    const r2 = await importProject({ project_dir: fixtureRoot, feature: 'cache_del2', cache_db: db });
+
+    expect(r2.cache).toEqual({ hits: 4, reparsed: 0, failed: 0 });
+    expect(r2.files_parsed).toBe(4);
+    expect(r2.skipped.some((s) => s.includes('缓存清理') && s.includes('src/c.ts'))).toBe(true);
+    // 缓存内也不留尸体
+    const row = db.prepare('SELECT COUNT(*) c FROM files').get() as { c: number };
+    expect(row.c).toBe(4);
+    // DSL 节点同步剔除
+    const nodeIds = getDSL('cache_del2')!.geometry.nodes.map((n) => n.id);
+    expect(nodeIds).not.toContain('file_src_c_ts');
+    db.close();
+  });
 });

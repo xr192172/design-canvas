@@ -60,3 +60,38 @@ export function openDb(dbFile: string = getDbFile()): Database {
   ).run(SCHEMA_VERSION, Date.now(), 'v2: +imports 表（原始 import 记录，import_project 缓存读取源）');
   return db;
 }
+
+// ─────────────────────────────────────────────────────────────
+// 项目级缓存连接池（MCP 长进程内跨工具调用复用）
+// ─────────────────────────────────────────────────────────────
+
+const projectCachePool = new Map<string, Database>();
+
+/**
+ * 打开（并复用）目标项目的符号缓存：<projectRoot>/.design-canvas/cache.db
+ * 缓存跟着被分析的项目走（内容是该项目源文件的派生物，相对路径键才不撞车），
+ * 与 getDbFile() 的数据主目录缓存是两个独立用途。
+ * 失败（只读目录 / 无写权限）会抛错——调用方应 catch 后按无缓存退化。
+ * 进程退出无需显式 close：WAL 模式崩溃安全。
+ */
+export function getProjectCacheDb(projectRoot: string): Database {
+  const key = path.resolve(projectRoot);
+  let db = projectCachePool.get(key);
+  if (!db) {
+    db = openDb(path.join(key, '.design-canvas', 'cache.db'));
+    projectCachePool.set(key, db);
+  }
+  return db;
+}
+
+/** 关闭全部项目缓存连接（测试隔离用；生产进程退出时 OS 回收即可） */
+export function closeAllProjectCacheDbs(): void {
+  for (const db of projectCachePool.values()) {
+    try {
+      db.close();
+    } catch {
+      /* 已关闭 */
+    }
+  }
+  projectCachePool.clear();
+}

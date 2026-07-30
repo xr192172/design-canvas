@@ -235,7 +235,7 @@
 - 落地：`.design-canvas/cache.db` 常驻缓存，backfill 按 hash 增量；解决 tmp 污染——不再用临时目录
 - 成本：中（最终选 node:sqlite 零依赖，见 7.3；backfill 核心解析逻辑不动）
 - **进度（2026-07-29）**：v1 已落地 `src/db/`（schema + openDb + syncFile/syncProject/searchSymbols + 15 测试全绿）
-- **进度（2026-07-30）**：self_analyze 已接入缓存层（schema v2 + import_project cache_db，见 7.4），二次运行 55 文件全命中。待做：MCP 工具接入缓存层、文件删除侦测（removeFile 已就绪，缺监听触发）、并发池
+- **进度（2026-07-30）**：self_analyze + MCP server 均已接入缓存层（schema v2 + import_project cache_db，见 7.4），二次运行 55 文件全命中；删除侦测落地（sync 顺带 prune）。待做：并发池；实时文件监听归序号 11
 
 **2. MCP 工具收敛到 ~8 个（JSON Patch 模式）**
 - 现状痛点：40+ MCP 工具（evolution.md 4.3 记录），方案 B 已规划未落地
@@ -386,3 +386,8 @@ design-canvas 路线图第 1 项（SQLite 缓存 + 文件 hash 增量）与 ai-b
 2. **import_project 双路径**：新增可选参数 `cache_db`。提供时 syncProject 按 content_hash 增量（未变更文件不重解析），再从 cache.db 读回符号 + imports 走原有边推导；不提供时行为与之前完全一致。50 符号截断、解析失败可见性两条路径共用同一 ingest。结果新增 `cache: { hits, reparsed, failed }` 统计并写进 message
 3. **self_analyze.mjs 接入**：缓存放**项目根 `.design-canvas/cache.db`** 而非 `.tmp_self_analyze`（那个目录跑完即删，放进去增量价值归零）。缓存是 src/ 的派生物，跨运行复用才有意义；隔离要求针对的是 DSL feature 数据，不是符号缓存
 4. **import_project.ts 只 import symbols.ts 不 import db.ts**（type-only 引用 Database）：symbols.ts 对 db.ts 也是 type-only 依赖，因此 MCP server 主链路运行时仍不加载 node:sqlite——Node <22.5 用户不受影响，cache_db 纯注入
+
+**第二批（2026-07-30 下午，MCP 接入 + 删除侦测，27 测试全绿）**：
+
+5. **MCP server 接入**：`import_project` 工具经 `getProjectCacheDb(project_dir)` 拿缓存——连接池按项目根复用（MCP 是长进程），缓存放**被分析项目的** `<project_dir>/.design-canvas/cache.db`（缓存跟着项目走，相对路径键才不撞车；与数据主目录的 cache.db 是两个独立用途）。node:sqlite 走**动态 import**：加载失败（Node <22.5）或打开失败（目标目录只读）都退化为全量解析，缓存失败绝不阻塞工具调用
+6. **删除侦测（prune 模式）**：每次 sync 顺带比对 files 表与本次全量扫描列表（`pruneDeletedFiles`），清掉磁盘上已不存在文件的缓存行（nodes 级联清边与 FTS）。两个防误删约束：比对基准必须是 **max_files 截断前**的完整列表；只 prune 受支持扩展名的文件（与 sync 同域），.md 等其他工具写入的行不受影响——多工具共享项目缓存时不互踩。实时 fs 监听仍归序号 11，届时换 removeFile 实时触发

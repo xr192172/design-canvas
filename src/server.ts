@@ -1017,6 +1017,15 @@ server.registerTool(
 // ─────────────────────────────────────────────────────────────
 // import_project：扫描现有项目 → 自动生成设计图 DSL
 // ─────────────────────────────────────────────────────────────
+// 符号缓存（Node 22.5+ node:sqlite）：静态 import 会让旧 Node 上 server 启动即崩，
+// 动态 import 把失败约束在单次工具调用内——加载失败/打开失败都退化为全量解析。
+type ProjectCacheMod = typeof import('./db/db.js');
+let projectCacheMod: Promise<ProjectCacheMod | null> | null = null;
+function loadProjectCache(): Promise<ProjectCacheMod | null> {
+  if (!projectCacheMod) projectCacheMod = import('./db/db.js').catch(() => null);
+  return projectCacheMod;
+}
+
 server.registerTool(
   'import_project',
   {
@@ -1035,12 +1044,23 @@ server.registerTool(
   },
   async (args) => {
     try {
+      // 符号缓存：<project_dir>/.design-canvas/cache.db（跟着项目走，增量解析）
+      let cacheDb: import('./db/db.js').Database | undefined;
+      const cache = await loadProjectCache();
+      if (cache) {
+        try {
+          cacheDb = cache.getProjectCacheDb(args.project_dir);
+        } catch {
+          cacheDb = undefined; // 目标目录只读等情况 → 无缓存退化
+        }
+      }
       const result = await importProject({
         project_dir: args.project_dir,
         feature: args.feature,
         title: args.title,
         max_files: args.max_files,
         include_tests: args.include_tests,
+        cache_db: cacheDb,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

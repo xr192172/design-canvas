@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Database } from './db.js';
-import { parseFileFull } from '../tools/ts_kernel/index.js';
+import { parseFileFull, isSupported } from '../tools/ts_kernel/index.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -228,12 +228,44 @@ export async function syncProject(
   };
 }
 
-/** 文件从项目删除时调用：清节点（级联清边与 FTS）+ files 行 + 原始 import 记录 */
-export function removeFile(db: Database, projectRoot: string, absPath: string): void {
-  const rel = toRelPath(projectRoot, absPath);
+/** 按相对路径删除一个文件的全部缓存行（nodes 级联清边与 FTS） */
+function removeFileRel(db: Database, rel: string): void {
   db.prepare('DELETE FROM nodes WHERE file_path = ?').run(rel);
   db.prepare('DELETE FROM files WHERE path = ?').run(rel);
   db.prepare('DELETE FROM imports WHERE file_path = ?').run(rel);
+}
+
+/** 文件从项目删除时调用：清节点（级联清边与 FTS）+ files 行 + 原始 import 记录 */
+export function removeFile(db: Database, projectRoot: string, absPath: string): void {
+  removeFileRel(db, toRelPath(projectRoot, absPath));
+}
+
+/**
+ * 删除侦测（轻量形态）：比对 files 表与本次全量扫描列表，
+ * 清掉磁盘上已不存在的文件的缓存行。在每次 sync 时顺带做，
+ * 不做 fs 监听（监听属序号 11，届时换 removeFile 实时触发）。
+ *
+ * absPaths 必须是【完整】扫描列表（max_files 截断之前），否则误删。
+ * 只 prune 受支持扩展名的文件（与 sync 同域）——.md 等其他工具写入的
+ * files 行不受 import_project 扫描列表影响，避免多工具共享缓存时互踩。
+ * 返回被清理的相对路径列表。
+ */
+export function pruneDeletedFiles(db: Database, projectRoot: string, absPaths: string[]): string[] {
+  const alive = new Set(absPaths.map((p) => toRelPath(projectRoot, p)));
+  const rows = db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+  const dead = rows
+    .map((r) => r.path)
+    .filter((rel) => isSupported(path.posix.extname(rel)) && !alive.has(rel));
+  if (dead.length === 0) return [];
+  db.exec('BEGIN');
+  try {
+    for (const rel of dead) removeFileRel(db, rel);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return dead;
 }
 
 // ─────────────────────────────────────────────────────────────
