@@ -40,6 +40,8 @@ export interface DeriveAlgorithmResult {
   edges_created: number;
   truncated: boolean;
   dead_code: boolean;
+  /** 控制流节点分类计数 */
+  stats: { steps: number; branches: number; loops: number; returns: number };
 }
 
 /** CFG 节点类型 → 渲染形状 */
@@ -102,12 +104,29 @@ export async function deriveAlgorithm(input: DeriveAlgorithmInput): Promise<Deri
   const hasD2 = dsl.geometry.nodes.some((n) => n.id.startsWith(`${node_id}__s`));
   const baseY = hy + hh + 40 + (hasD2 ? 140 : 0);
 
-  const newNodes: Node[] = cfg.nodes.map((cn, i) => {
+  // 折行布局：同 col 超过 MAX_ALG_ROWS 个节点时折到右侧视觉列，
+  // 避免长函数（60+ 节点）单列成数千 px 高塔无法浏览
+  const MAX_ALG_ROWS = 10;
+  const colCount = new Map<number, number>();
+  for (const cn of cfg.nodes) colCount.set(cn.col, (colCount.get(cn.col) ?? 0) + 1);
+  const colStart = new Map<number, number>();
+  let accCols = 0;
+  for (const c of [...colCount.keys()].sort((a, b) => a - b)) {
+    colStart.set(c, accCols);
+    accCols += Math.ceil((colCount.get(c) ?? 0) / MAX_ALG_ROWS);
+  }
+  const colSeq = new Map<number, number>();
+
+  const newNodes: Node[] = cfg.nodes.map((cn) => {
     const meta = KIND_SHAPE[cn.kind];
+    const seq = colSeq.get(cn.col) ?? 0;
+    colSeq.set(cn.col, seq + 1);
+    const vcol = (colStart.get(cn.col) ?? 0) + Math.floor(seq / MAX_ALG_ROWS);
+    const row = seq % MAX_ALG_ROWS;
     const node: Node = {
       id: `${nodePrefix}${cn.id}`,
-      x: hx + cn.col * COL_GAP,
-      y: baseY + i * ROW_GAP,
+      x: hx + vcol * COL_GAP,
+      y: baseY + row * ROW_GAP,
       width: meta.w,
       height: meta.h,
       label: cn.label,
@@ -151,5 +170,11 @@ export async function deriveAlgorithm(input: DeriveAlgorithmInput): Promise<Deri
     edges_created: newEdges.length,
     truncated: cfg.truncated,
     dead_code: cfg.deadCode,
+    stats: {
+      steps: kindCount('step'),
+      branches: kindCount('branch'),
+      loops: kindCount('loop'),
+      returns: kindCount('return'),
+    },
   };
 }

@@ -573,8 +573,13 @@ ${EDGE_GEOM_SOURCE}
     var parentsToCollapse = [];
     if (restored && Array.isArray(restored)) {
       parentsToCollapse = restored;
-    } else if ((dsl.geometry?.nodes || []).length > 100) {
-      parentsToCollapse = Object.keys(childrenOf);
+    } else {
+      // 巨图默认折叠目录容器：只数 main 层节点（深层默认隐藏，不该触发折叠），
+      // 否则 116 个隐藏深层节点会把 56 节点的报告误判为巨图，首屏只剩几个折叠空壳
+      var mainCount = (dsl.geometry?.nodes || []).filter(function(n) {
+        return (n.layer || 'main') === 'main';
+      }).length;
+      if (mainCount > 100) parentsToCollapse = Object.keys(childrenOf);
     }
 
     parentsToCollapse.forEach(function(pid) {
@@ -929,22 +934,29 @@ ${EDGE_GEOM_SOURCE}
   }
 
   // 更新 SVG viewBox（折叠后可能高度变化）
+  // 展开深层后按需扩展画布（只增不减）：可见节点超出当前 viewBox 时同步扩展
+  // svg viewBox 与缩放基准 origViewBox——二者同源，只改 svg 会在下次缩放时丢失扩展区
   function updateCanvasViewBox() {
     const svg = document.getElementById('canvas');
     if (!svg) return;
-    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
+    let maxX = 0;
     let maxY = 0;
-    document.querySelectorAll('.node').forEach(n => {
-      if (n.style.display === 'none') return;
-      const rect = n.querySelector('rect');
-      if (rect) {
-        const y = parseFloat(rect.getAttribute('y')) + parseFloat(rect.getAttribute('height'));
-        maxY = Math.max(maxY, y);
-      }
+    (dsl.geometry?.nodes || []).forEach(n => {
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      if (el && el.style.display === 'none') return;
+      maxX = Math.max(maxX, (n.x || 0) + (n.width || 0));
+      maxY = Math.max(maxY, (n.y || 0) + (n.height || 0));
     });
-    if (maxY > 0 && maxY + 50 > vb[3]) {
-      vb[3] = maxY + 50;
-      svg.setAttribute('viewBox', vb.join(' '));
+    function grow(vb) {
+      let changed = false;
+      if (maxX > 0 && maxX + 50 > vb[2]) { vb[2] = maxX + 50; changed = true; }
+      if (maxY > 0 && maxY + 50 > vb[3]) { vb[3] = maxY + 50; changed = true; }
+      return changed;
+    }
+    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
+    if (grow(vb)) svg.setAttribute('viewBox', vb.join(' '));
+    if (canvasState.origViewBox && grow(canvasState.origViewBox) && canvasState.updateViewBox) {
+      canvasState.updateViewBox();
     }
   }
 
@@ -3142,6 +3154,14 @@ ${EDGE_GEOM_SOURCE}
     animateCamera(cp, 380);
   }
 
+  // 报告面板/外部脚本用：相机飞到指定节点并选中（复用钻入的取景与补间曲线）
+  function flyToNode(id) {
+    if (!nodeById[id]) return;
+    const fit = cameraFitNodes([id], 1.2);
+    if (fit) animateCamera(fit, 520);
+    selectNode(id);
+  }
+
   // 调试/e2e 句柄（与 __DSL__ / __animV2__ 同级）：相机状态与钻入函数可编程访问
   window.__canvas__ = {
     canvasState: canvasState,
@@ -3150,6 +3170,7 @@ ${EDGE_GEOM_SOURCE}
     animateCamera: animateCamera,
     drillIntoHost: drillIntoHost,
     drillOutOfHost: drillOutOfHost,
+    flyToNode: flyToNode,
   };
 
   // ==== 多选工具栏 ====
@@ -3178,6 +3199,40 @@ ${EDGE_GEOM_SOURCE}
         clearMultiSelect();
       });
     }
+  }
+
+  // ==== 报告导读面板（renderHTML options.report 注入时存在；无面板时静默跳过） ====
+  function setupReportPanel() {
+    const overlay = document.getElementById('report-overlay');
+    if (!overlay) return;
+    function closePanel() { overlay.classList.add('hidden'); }
+    const closeBtn = document.getElementById('report-close');
+    const startBtn = document.getElementById('report-start');
+    const openBtn = document.getElementById('report-open');
+    if (closeBtn) closeBtn.addEventListener('click', closePanel);
+    if (startBtn) startBtn.addEventListener('click', closePanel);
+    if (openBtn) openBtn.addEventListener('click', function() { overlay.classList.remove('hidden'); });
+    // 点遮罩空白处关闭
+    overlay.addEventListener('click', function(ev) { if (ev.target === overlay) closePanel(); });
+    // 热点榜单 / 推荐路径：点击 → 关面板 + 相机飞到节点
+    overlay.querySelectorAll('[data-fly]').forEach(function(el) {
+      el.addEventListener('click', function() {
+        const id = el.getAttribute('data-fly');
+        closePanel();
+        if (id) flyToNode(id);
+      });
+    });
+  }
+
+  // ==== 紧凑工具栏：⋯ 展开/收起编辑类按钮（撤销/布局等） ====
+  function setupToolbarAdvanced() {
+    const toggle = document.getElementById('advanced-toggle');
+    const adv = document.getElementById('toolbar-advanced');
+    if (!toggle || !adv) return;
+    toggle.addEventListener('click', function() {
+      adv.classList.toggle('hidden');
+      toggle.classList.toggle('active');
+    });
   }
 
   // ==== 布局按钮 ====
@@ -4311,6 +4366,8 @@ ${EDGE_GEOM_SOURCE}
   setupCanvasZoomPan();
   setupLayoutButtons();
   setupMultiSelectBar();
+  setupReportPanel();
+  setupToolbarAdvanced();
   setupThemeSwitcher();
   setupNodeSearch();
   setupKeyboardShortcuts();
@@ -4320,6 +4377,18 @@ ${EDGE_GEOM_SOURCE}
   setupAnnotationTriggers();
   setupNodeEditor();
   setupSimulation();
+
+  // URL hash 直达：#fly=<node_id>（Hub 子页"在星图中定位"跳转；命中时跳过导读面板直接飞）
+  (function() {
+    const m = /[#&]fly=([^&]+)/.exec(location.hash || '');
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    if (!nodeById[id]) return;
+    const overlay = document.getElementById('report-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    // 延迟到首帧布局后：初始化时 svg 像素尺寸未就绪，相机取景会算错 scale
+    setTimeout(function() { flyToNode(id); }, 120);
+  })();
 
   // 撤销/重做按钮
   const undoBtn = document.getElementById('btn-undo');

@@ -67,6 +67,9 @@ function computeCanvasSize(dsl: DesignDSL): { width: number; height: number } {
   let maxX = 0;
   let maxY = 0;
   for (const n of dsl.geometry.nodes) {
+    // 深层节点默认隐藏（层角标展开才可见），不参与初始画布尺寸，
+    // 否则隐藏节点把画布撑出大片空白（展开后由前端 updateCanvasViewBox 按需扩展）
+    if ((n.layer ?? 'main') !== 'main') continue;
     const b = nodeBox(n);
     maxX = Math.max(maxX, b.x + b.w);
     maxY = Math.max(maxY, b.y + b.h);
@@ -493,8 +496,74 @@ function deriveLayers(dsl: DesignDSL): DesignDSL {
   return { ...dsl, geometry: { ...dsl.geometry, nodes } };
 }
 
+/** 报告导读摘要：renderHTML 第二参数传入，生成打开即见的导读面板 */
+export interface ReportSummary {
+  /** 面板大标题（默认 dsl.title ?? dsl.feature） */
+  heading?: string;
+  /** 副标题一行（生成时间、数据源等） */
+  subline?: string;
+  /** 概况指标条 */
+  metrics?: Array<{ label: string; value: string }>;
+  /** 热点榜单：点击条目飞到对应节点并选中 */
+  hotspots?: Array<{ node_id?: string; label: string; detail?: string; severity?: 'crit' | 'warn' }>;
+  /** 推荐探索路径（有序），带 node_id 的项可点击飞行 */
+  tour?: Array<{ node_id?: string; text: string }>;
+}
+
+export interface RenderOptions {
+  report?: ReportSummary;
+  /** 页面导航：注入"返回主页"链接（Hub 模式下子页面用） */
+  nav?: { home_href?: string; home_label?: string };
+  /** 紧凑工具栏：编辑类按钮（撤销/布局/导入导出/标注）收纳进 ⋯ 菜单（报告/浏览场景） */
+  compact_toolbar?: boolean;
+}
+
+/** 报告导读面板：打开即见的摘要卡（指标/热点/推荐路径/图例），仅 options.report 存在时注入 */
+function buildReportPanel(dsl: DesignDSL, report: ReportSummary): string {
+  const heading = report.heading ?? dsl.title ?? dsl.feature;
+  const metrics = report.metrics ?? [];
+  const hotspots = report.hotspots ?? [];
+  const tour = report.tour ?? [];
+  const metricsHtml = metrics.length > 0
+    ? `<div class="report-metrics">${metrics.map((m) => `<div class="report-metric"><div class="report-metric-val">${esc(m.value)}</div><div class="report-metric-label">${esc(m.label)}</div></div>`).join('')}</div>`
+    : '';
+  const hotspotsHtml = hotspots.length > 0
+    ? `<ul class="report-hotspots">${hotspots.map((h) => `<li class="report-hotspot sev-${h.severity === 'crit' ? 'crit' : 'warn'}"${h.node_id ? ` data-fly="${esc(h.node_id)}"` : ''}><span class="report-hotspot-dot"></span><span class="report-hotspot-label">${esc(h.label)}</span><span class="report-hotspot-detail">${esc(h.detail ?? '')}</span></li>`).join('')}</ul>`
+    : '<div class="report-empty">✅ 全部文件在阈值内，无巨石</div>';
+  const tourHtml = tour.length > 0
+    ? `<div class="report-section-title">🧭 推荐探索路径<span class="report-hint">带 ✈ 的步骤可点击定位</span></div><ol class="report-tour">${tour.map((t) => `<li class="report-tour-item"${t.node_id ? ` data-fly="${esc(t.node_id)}"` : ''}>${esc(t.text)}</li>`).join('')}</ol>`
+    : '';
+  return `      <div id="report-overlay" class="report-overlay">
+        <div class="report-card">
+          <button id="report-close" class="report-close" type="button" title="关闭，开始探索">✕</button>
+          <div class="report-kicker">SELF-ANALYSIS REPORT</div>
+          <h2 class="report-heading">${esc(heading)}</h2>
+          ${report.subline ? `<div class="report-subline">${esc(report.subline)}</div>` : ''}
+          ${metricsHtml}
+          <div class="report-section-title">⚠ 巨石文件 TOP<span class="report-hint">点击条目直达节点</span></div>
+          ${hotspotsHtml}
+          ${tourHtml}
+          <div class="report-section-title">📖 图例与操作</div>
+          <div class="report-legend">
+            <div class="report-legend-row">
+              <span class="lg-item"><span class="lg-swatch lg-file"></span>文件（颜色=语言）</span>
+              <span class="lg-item"><span class="lg-swatch lg-dir"></span>目录容器</span>
+              <span class="lg-item"><span class="lg-shape">◆</span>分支</span>
+              <span class="lg-item"><span class="lg-shape">⬡</span>循环</span>
+              <span class="lg-item"><span class="lg-shape">●</span>入口/返回</span>
+            </div>
+            <div class="report-legend-row lg-ops">
+              <span>单击节点=选中看详情</span><span>左上 ▸ 角标=展开内部</span><span>滚轮=缩放</span><span>拖拽空白=平移</span>
+            </div>
+          </div>
+          <button id="report-start" class="report-start" type="button"${tour.length > 0 && tour[0].node_id ? ` data-fly="${esc(tour[0].node_id)}"` : ''}>${tour.length > 0 && tour[0].node_id ? '开始探索：直达第一站 →' : '开始探索 →'}</button>
+        </div>
+      </div>
+`;
+}
+
 /** 主渲染入口：DSL → 完整 HTML 字符串 */
-export function renderHTML(dsl: DesignDSL): string {
+export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
   // 职责分层自动推导（F2）：L4.5 handler.errors 声明的流向节点 → error 层（host=flow.from）
   // 烘焙进注入副本，存储文件不动；显式 layer 优先不覆盖
   dsl = deriveLayers(dsl);
@@ -594,6 +663,7 @@ export function renderHTML(dsl: DesignDSL): string {
 </head>
 <body data-theme="${esc(theme)}">
   <header>
+    ${options?.nav?.home_href ? `<a href="${esc(options.nav.home_href)}" class="home-link" title="返回主页">🏠 ${esc(options.nav.home_label ?? '主页')}</a>` : ''}
     <h1>${esc(dsl.feature)}</h1>
     ${title ? `<span class="title">${esc(title)}</span>` : ''}
     <div class="meta">
@@ -607,34 +677,39 @@ export function renderHTML(dsl: DesignDSL): string {
     <div class="canvas-wrap">
       <div class="canvas-toolbar">
         <input type="text" id="node-search" class="search-input" placeholder="🔍 搜索节点 (label / id)..." autocomplete="off">
+        ${options?.report ? `<button id="report-open" class="report-open-btn" type="button" title="查看分析摘要">📋 摘要</button>` : ''}
         ${(dsl.animations_v2?.flows?.length ?? 0) > 0 ? `<div class="view-switcher" title="切换视图：节点=静态结构 / 动画=交互式数据步进">
           <button id="view-nodes" class="active" type="button">🗂 节点</button>
           <button id="view-anim" type="button">🎬 动画</button>
         </div>` : ''}
-        <div class="history-controls">
-          <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶</button>
-          <button id="btn-redo" type="button" title="重做 (Ctrl+Y)" disabled>↷</button>
-        </div>
+        ${options?.compact_toolbar ? `<button id="advanced-toggle" class="advanced-toggle" type="button" title="更多工具（撤销/重做、重新布局）">⋯ 工具</button>` : ''}
         ${(() => {
           // 职责分层：统计深层节点，有才显示层开关
           const errCount = dsl.geometry.nodes.filter((n) => n.layer === 'error').length;
           const detCount = dsl.geometry.nodes.filter((n) => n.layer === 'detail').length;
           if (errCount === 0 && detCount === 0) return '';
           const errBtn = errCount > 0
-            ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})">🛡 ${errCount}</button>`
+            ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})">🛡 异常 ${errCount}</button>`
             : '';
           const detBtn = detCount > 0
-            ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})">🧩 ${detCount}</button>`
+            ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})">🧩 细节 ${detCount}</button>`
             : '';
           return `<div class="layer-controls">${errBtn}${detBtn}</div>`;
         })()}
+        <div id="toolbar-advanced" class="${options?.compact_toolbar ? 'toolbar-advanced toolbar-advanced--row hidden' : 'toolbar-advanced'}">
+        <div class="history-controls">
+          <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
+          <button id="btn-redo" type="button" title="重做 (Ctrl+Y)" disabled>↷ 重做</button>
+        </div>
         <span id="history-indicator" class="history-indicator" title="历史记录"></span>
         <div class="layout-controls">
-          <button id="layout-dag" type="button" title="拓扑排序布局">🗺️</button>
-          <button id="layout-force" type="button" title="力导向布局">⚡</button>
-          <button id="layout-grid" type="button" title="网格对齐">📐</button>
+          <button id="layout-dag" type="button" title="拓扑排序布局">🗺️ 拓扑</button>
+          <button id="layout-force" type="button" title="力导向布局">⚡ 力导</button>
+          <button id="layout-grid" type="button" title="网格对齐">📐 网格</button>
         </div>
+        </div><!-- /toolbar-advanced -->
         <div class="theme-switcher" title="切换主题">
+          <span class="toolbar-label">主题</span>
           <button id="theme-blue" class="theme-blue ${theme === 'blue' ? 'active' : ''}" title="蓝色"></button>
           <button id="theme-sakura" class="theme-sakura ${theme === 'sakura' ? 'active' : ''}" title="樱花"></button>
           <button id="theme-forest" class="theme-forest ${theme === 'forest' ? 'active' : ''}" title="森林"></button>
@@ -645,10 +720,11 @@ export function renderHTML(dsl: DesignDSL): string {
           <button id="zoom-out" type="button" title="缩小">−</button>
           <span id="zoom-level" class="zoom-level">100%</span>
           <button id="zoom-in" type="button" title="放大">+</button>
-          <button id="zoom-fit" type="button" title="适应画布">⤢</button>
-          <button id="zoom-reset" type="button" title="重置">⟲</button>
+          <button id="zoom-fit" type="button" title="适应画布">⤢ 适应</button>
+          <button id="zoom-reset" type="button" title="重置">⟲ 重置</button>
         </div>
       </div>
+      ${options?.report ? buildReportPanel(dsl, options.report) : ''}
       <div id="context-menu" class="context-menu hidden">
         <div class="context-menu-item" data-action="edit-label">✏️ 编辑标签</div>
         <div class="context-menu-item" data-action="add-annotation">💬 添加标注</div>

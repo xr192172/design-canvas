@@ -293,8 +293,8 @@ describe('renderHTML - 职责分层', () => {
     const html = renderHTML(makeLayeredDSL());
     expect(html).toContain('id="layer-error-toggle"');
     expect(html).toContain('id="layer-detail-toggle"');
-    expect(html).toContain('🛡 1');
-    expect(html).toContain('🧩 1');
+    expect(html).toContain('🛡 异常 1');
+    expect(html).toContain('🧩 细节 1');
 
     // 注意：scripts 内联代码里也有同名字符串，必须匹配 HTML 按钮形式
     const plain = renderHTML(makeMinimalDSL());
