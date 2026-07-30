@@ -439,27 +439,31 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
   const newEdges: Edge[] = [];
   const chainInfo: DeriveChainResult['chain'] = [];
 
-  chain.forEach((s, i) => {
-    const id = `${nodePrefix}${i + 1}_${sanitize(s.qualified_name)}`;
+  let stepNum = 0;
+  chain.forEach((s) => {
+    // 防御：跳过 name 为空或非法的符号（extractName 兜底失败返回代码片段的情况）
+    if (!s.name || s.name.length > 64 || !/^[A-Za-z_$]/.test(s.name)) return;
+    stepNum++;
+    const id = `${nodePrefix}${stepNum}_${sanitize(s.qualified_name)}`;
     const shapes = signatureToShapes(s.signature, lang);
     const node: Node = {
       id,
-      x: hx + i * 240,
+      x: hx + (stepNum - 1) * 240,
       y: baseY,
       width: 220,
-      label: `${CIRCLED[i] ?? `${i + 1}.`} ${s.name}`,
+      label: `${CIRCLED[stepNum - 1] ?? `${stepNum}.`} ${s.name}`,
       layer: 'detail',
       host: node_id,
       description: s.signature,
     };
     if (shapes.in || shapes.out) node.shapes = shapes;
     newNodes.push(node);
-    chainInfo.push({ step: i + 1, name: s.name, signature: s.signature, node_id: id });
+    chainInfo.push({ step: stepNum, name: s.name, signature: s.signature, node_id: id });
 
-    if (i > 0) {
+    if (stepNum > 1) {
       newEdges.push({
-        id: `${edgePrefix}${i}`,
-        from: newNodes[i - 1].id,
+        id: `${edgePrefix}${stepNum - 1}`,
+        from: newNodes[newNodes.length - 2].id,
         to: id,
         layer: 'detail',
       });

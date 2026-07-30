@@ -88,15 +88,23 @@ function fieldText(node: SyntaxNodeLike | null, fieldName: string): string {
   return child ? child.text : '';
 }
 
+/** 标识符合法性：非空、长度 ≤ 64、只含字母数字下划线 $、不以数字开头 */
+function isValidIdentifier(s: string): boolean {
+  if (!s || s.length === 0 || s.length > 64) return false;
+  if (/^\d/.test(s)) return false;
+  return /^[A-Za-z_$][\w$]*$/.test(s);
+}
+
 function extractName(node: SyntaxNodeLike, fieldMap: LanguageEntry['field_map']): string {
   const direct = fieldText(node, fieldMap.name);
-  if (direct) return direct;
+  if (direct && isValidIdentifier(direct)) return direct;
 
   // 兜底：从第一个 identifier 子节点取
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
     if (child && (child.type === 'identifier' || child.type === 'property_identifier' || child.type === 'type_identifier' || child.type === 'name')) {
-      return child.text;
+      const text = child.text;
+      if (isValidIdentifier(text)) return text;
     }
   }
   return '';

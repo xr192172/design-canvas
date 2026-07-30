@@ -700,6 +700,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       status: 'done',
       expected_apis: apis,
       actual_apis: apis,
+      lines: lineCounts.get(f.rel) ?? 0,
     });
   }
   for (const d of [...dirByRel.values()].sort((a, b) => a.rel.localeCompare(b.rel))) {

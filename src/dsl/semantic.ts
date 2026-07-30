@@ -28,6 +28,8 @@ export interface SemanticFile {
   status?: DiagramStatus;
   /** 从实际代码中解析出的已实现 API（代码回填时自动填充） */
   actual_apis?: ExpectedApi[];
+  /** 文件行数（import_project 扫描时填充，供单文件化预警/星图 tooltip 从 DSL 读取） */
+  lines?: number;
 }
 
 /** 代码模板配置 */
