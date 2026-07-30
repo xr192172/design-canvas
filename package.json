@@ -12,7 +12,9 @@
     "start": "node dist/src/server.js",
     "serve": "node dist/src/tools/serve.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "self-analyze": "npm run build && node scripts/self_analyze.mjs",
+    "hub": "node scripts/hub.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -26,7 +28,7 @@
     "zod": "^3.25.0 || ^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.20.1",
     "playwright": "^1.62.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"

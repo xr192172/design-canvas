@@ -45,3 +45,6 @@ npm-debug.log*
 *.tmp
 *.bak
 
+# 参考库（借鉴用，不属于本项目代码）
+vendor/
+

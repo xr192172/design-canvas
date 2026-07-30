@@ -26,6 +26,8 @@ import { saveDSL } from '../storage.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
 import { countLines, assessLines } from './monolith.js';
+import type { Database } from '../db/db.js';
+import { syncProject, getFileParse } from '../db/symbols.js';
 
 export interface ImportProjectInput {
   /** 目标项目根目录（绝对路径或相对 cwd） */
@@ -38,6 +40,12 @@ export interface ImportProjectInput {
   max_files?: number;
   /** 是否包含测试文件（默认 false，测试文件通常是架构噪声） */
   include_tests?: boolean;
+  /**
+   * 可选：符号缓存（openDb 的返回值）。提供时走增量路径——
+   * content_hash 未变的文件直接读 cache.db，跳过重解析；
+   * 变更文件由 syncFile 解析并写回缓存，下次运行受益。
+   */
+  cache_db?: Database;
 }
 
 export interface ImportProjectResult {
@@ -48,6 +56,8 @@ export interface ImportProjectResult {
   dep_edges: number;
   dirs_created: number;
   skipped: string[];
+  /** 缓存增量统计（仅 cache_db 提供时存在）：hits=未变命中 reparsed=重解析 failed=失败 */
+  cache?: { hits: number; reparsed: number; failed: number };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -430,30 +440,66 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const parsed = new Map<string, { symbols: ExpectedApi[]; imports: ParsedImport[] }>();
   const lineCounts = new Map<string, number>();
   let symbolsFound = 0;
-  for (const f of files) {
-    let content: string;
-    try {
-      content = fs.readFileSync(f.abs, 'utf-8');
-    } catch {
-      skipped.push(`读取失败: ${f.rel}`);
-      continue;
-    }
-    lineCounts.set(f.rel, countLines(content));
-    const full = await parseFileFull(f.abs, content);
-    // 解析失败 = 静默丢依赖边 + 空 API 面，必须在结果中可见（区别于"文件本为空"）
-    if (full.error) {
-      skipped.push(`解析失败: ${f.rel}（${full.error}），该文件的依赖边与 API 缺失`);
-    }
+  let cacheStats: { hits: number; reparsed: number; failed: number } | undefined;
+
+  /** 两条路径共用的收录逻辑：50 上限截断 + 计数 + 登记 */
+  const ingest = (rel: string, syms: Array<{ signature: string; start_line: number }>, imps: ParsedImport[]): void => {
     // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
-    const apis: ExpectedApi[] = full.symbols.slice(0, 50).map((s) => ({
+    const apis: ExpectedApi[] = syms.slice(0, 50).map((s) => ({
       signature: s.signature,
       notes: `line ${s.start_line}`,
     }));
-    if (full.symbols.length > 50) {
-      skipped.push(`${f.rel}: 符号数 ${full.symbols.length} 超上限，仅收录前 50`);
+    if (syms.length > 50) {
+      skipped.push(`${rel}: 符号数 ${syms.length} 超上限，仅收录前 50`);
     }
     symbolsFound += apis.length;
-    parsed.set(f.rel, { symbols: apis, imports: full.imports });
+    parsed.set(rel, { symbols: apis, imports: imps });
+  };
+
+  if (input.cache_db) {
+    // 缓存路径：syncProject 内部按 content_hash 增量——未变更文件不重解析，
+    // 随后从 cache.db 读回符号与原始 import（含 Go 包路径 / Python 点分模块）
+    const db = input.cache_db;
+    const sync = await syncProject(db, root, absFiles);
+    cacheStats = { hits: 0, reparsed: 0, failed: 0 };
+    const byPath = new Map(sync.results.map((r) => [r.path, r]));
+    for (const f of files) {
+      const r = byPath.get(f.rel);
+      const cached = r && r.status !== 'failed' ? getFileParse(db, f.rel) : null;
+      if (!r || r.status === 'failed' || !cached) {
+        // 解析失败 = 静默丢依赖边 + 空 API 面，必须在结果中可见（区别于"文件本为空"）
+        // 缓存侧不写 files 行，下次运行自动重试
+        cacheStats.failed++;
+        skipped.push(`解析失败: ${f.rel}（${r?.error || '缓存读取异常'}），该文件的依赖边与 API 缺失`);
+        parsed.set(f.rel, { symbols: [], imports: [] });
+        continue;
+      }
+      if (r.status === 'skipped') cacheStats.hits++;
+      else cacheStats.reparsed++;
+      lineCounts.set(f.rel, cached.line_count);
+      ingest(
+        f.rel,
+        cached.symbols.map((s) => ({ signature: s.signature ?? s.name, start_line: s.start_line })),
+        cached.imports,
+      );
+    }
+  } else {
+    for (const f of files) {
+      let content: string;
+      try {
+        content = fs.readFileSync(f.abs, 'utf-8');
+      } catch {
+        skipped.push(`读取失败: ${f.rel}`);
+        continue;
+      }
+      lineCounts.set(f.rel, countLines(content));
+      const full = await parseFileFull(f.abs, content);
+      // 解析失败 = 静默丢依赖边 + 空 API 面，必须在结果中可见（区别于"文件本为空"）
+      if (full.error) {
+        skipped.push(`解析失败: ${f.rel}（${full.error}），该文件的依赖边与 API 缺失`);
+      }
+      ingest(f.rel, full.symbols, full.imports);
+    }
   }
 
   // 3. 依赖边（文件级，去重，去自环）
@@ -752,6 +798,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     `已导入项目 → feature "${feature}"`,
     `项目根: ${root}`,
     `文件: ${files.length} 个（符号 ${symbolsFound} 个，依赖 ${fileDeps.length} 条→渲染 ${renderedDepEdges} 条（跨目录已聚合），目录容器 ${dirCount} 个）`,
+    cacheStats ? `缓存: 命中 ${cacheStats.hits} / 重解析 ${cacheStats.reparsed} / 失败 ${cacheStats.failed}` : null,
     goModules.length > 0 ? `Go modules: ${goModules.map((g) => g.module).join(', ')}` : null,
     oversized.length > 0
       ? `⚠ 单文件化预警 ${oversized.length} 个:\n  - ${oversized
@@ -770,5 +817,6 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     dep_edges: fileDeps.length,
     dirs_created: dirCount,
     skipped,
+    cache: cacheStats,
   };
 }
