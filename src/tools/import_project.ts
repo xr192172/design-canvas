@@ -362,7 +362,8 @@ export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>):
   // （如 cross-border-scout 100+ 文件单列 12834px），折叠视图无法适配屏幕。
   // 货架算法：按高度降序（同高按 id）逐行填充，行宽目标 = √（总面积×1.5)，
   // 天然支持异构尺寸（大容器与小文件混排），bbox 近 3:2，牺牲微弱拓扑序换可读性。
-  if (ranks.length <= 2 && items.length >= 3) {
+  // 阈值从 3 提到 12：3~11 文件走 barycenter 列布局，边更短直。
+  if (ranks.length <= 2 && items.length >= 12) {
     const area = items.reduce((s, i) => s + (i.w + COL_GAP) * (i.h + ROW_GAP), 0);
     const maxItemW = Math.max(...items.map((i) => i.w));
     const targetW = Math.max(Math.sqrt(area * 1.5), maxItemW);
@@ -386,11 +387,50 @@ export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>):
     return { w: Math.max(maxW, FILE_W), h: Math.max(y + shelfH, FILE_H) };
   }
 
+  // barycenter 列内排序：邻居在上层/下层的平均 y 作为排序键，迭代 3 轮收敛
+  const inNeighbors = new Map<string, string[]>();
+  const outNeighbors = new Map<string, string[]>();
+  for (const id of ids) { inNeighbors.set(id, []); outNeighbors.set(id, []); }
+  for (const [f, t] of deps) {
+    if (inNeighbors.has(t)) inNeighbors.get(t)!.push(f);
+    if (outNeighbors.has(f)) outNeighbors.get(f)!.push(t);
+  }
+  // 初始 y：按列内 rank 索引占位（供 barycenter 计算）
+  for (const r of ranks) {
+    const col = byRank.get(r)!;
+    col.forEach((it, idx) => { it.y = idx * (it.h + ROW_GAP); });
+  }
+  for (let iter = 0; iter < 3; iter++) {
+    const topDown = iter < 2;
+    const order = topDown ? ranks : [...ranks].reverse();
+    for (const r of order) {
+      const col = byRank.get(r)!;
+      const neighborCol = topDown ? byRank.get(r - 1) : byRank.get(r + 1);
+      if (neighborCol && neighborCol.length > 0) {
+        const ny = new Map(neighborCol.map((it) => [it.id, it.y]));
+        col.sort((a, b) => {
+          const ay = (inNeighbors.get(a.id) || [])
+            .map((n) => ny.get(n))
+            .filter((v) => v !== undefined) as number[];
+          const by = (inNeighbors.get(b.id) || [])
+            .map((n) => ny.get(n))
+            .filter((v) => v !== undefined) as number[];
+          const av = ay.length ? ay.reduce((s, v) => s + v, 0) / ay.length : Number.MAX_VALUE;
+          const bv = by.length ? by.reduce((s, v) => s + v, 0) / by.length : Number.MAX_VALUE;
+          return av - bv;
+        });
+      }
+      // 重新赋 y
+      let yCursor = 0;
+      for (const it of col) { it.y = yCursor; yCursor += it.h + ROW_GAP; }
+    }
+  }
+
   let maxX = 0;
   let maxY = 0;
   let xCursor = 0;
   for (const r of ranks) {
-    const col = byRank.get(r)!.sort((a, b) => a.id.localeCompare(b.id));
+    const col = byRank.get(r)!;
     let colW = 0;
     let yCursor = 0;
     for (const item of col) {
@@ -536,15 +576,17 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     name: string;
     subdirs: Map<string, DirNode>;
     files: FileEntry[];
+    /** 子树文件数（含自身文件 + 所有后代目录文件） */
+    subtreeSize: number;
   }
-  const rootDir: DirNode = { rel: '', name: path.basename(root), subdirs: new Map(), files: [] };
+  const rootDir: DirNode = { rel: '', name: path.basename(root), subdirs: new Map(), files: [], subtreeSize: 0 };
   const dirByRel = new Map<string, DirNode>([['', rootDir]]);
   const ensureDir = (rel: string): DirNode => {
     const existing = dirByRel.get(rel);
     if (existing) return existing;
     const parentRel = path.posix.dirname(rel);
     const parent = ensureDir(parentRel === '.' ? '' : parentRel);
-    const d: DirNode = { rel, name: path.posix.basename(rel), subdirs: new Map(), files: [] };
+    const d: DirNode = { rel, name: path.posix.basename(rel), subdirs: new Map(), files: [], subtreeSize: 0 };
     parent.subdirs.set(rel, d);
     dirByRel.set(rel, d);
     return d;
@@ -552,6 +594,14 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   for (const f of files) {
     ensureDir(f.dir === '.' ? '' : f.dir).files.push(f);
   }
+  // 子树文件数自底向上统计（目录排序用）
+  const computeSubtree = (d: DirNode): number => {
+    let n = d.files.length;
+    for (const sub of d.subdirs.values()) n += computeSubtree(sub);
+    d.subtreeSize = n;
+    return n;
+  };
+  computeSubtree(rootDir);
 
   // 5. 生成节点 ID
   const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -574,15 +624,28 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     const localDeps: Array<[string, string]> = [];
 
     // 子目录先布局（递归），获得尺寸后作为 item
+    // 排序：入口目录（含 main/index/server/app 文件）优先，其余按子树大小降序
+    const subdirOrder = (a: DirNode, b: DirNode): number => {
+      const aIsEntry = a.files.some((f) => /main|index|server|app\./i.test(f.rel));
+      const bIsEntry = b.files.some((f) => /main|index|server|app\./i.test(f.rel));
+      if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
+      return b.subtreeSize - a.subtreeSize;
+    };
     const subdirItems = new Map<string, LayoutItem>();
-    for (const sub of [...dir.subdirs.values()].sort((a, b) => a.rel.localeCompare(b.rel))) {
+    for (const sub of [...dir.subdirs.values()].sort(subdirOrder)) {
       const size = layoutDir(sub);
       const item: LayoutItem = { id: dirNodeId(sub.rel), w: size.w, h: size.h, x: 0, y: 0 };
       subdirItems.set(sub.rel, item);
       items.push(item);
     }
-    // 文件节点
-    for (const f of [...dir.files].sort((a, b) => a.rel.localeCompare(b.rel))) {
+    // 文件节点（排序：含 main/index/server/app 的入口文件优先，其余按行数降序——大文件先占位）
+    const fileOrder = (a: FileEntry, b: FileEntry): number => {
+      const aIsEntry = /main|index|server|app\./i.test(a.rel);
+      const bIsEntry = /main|index|server|app\./i.test(b.rel);
+      if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
+      return (lineCounts.get(b.rel) ?? 0) - (lineCounts.get(a.rel) ?? 0);
+    };
+    for (const f of [...dir.files].sort(fileOrder)) {
       items.push(fileLayout.get(f.rel)!);
     }
     // 局部依赖：两端都在本目录直接子级（文件→文件；涉及子目录内部的聚合到子目录容器）
