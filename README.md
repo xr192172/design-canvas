@@ -48,9 +48,10 @@ npm start
 # }
 ```
 
-## MCP 工具一览（46 个，分 11 组）
+## MCP 工具一览（37 个，分 11 组）
 
 > 工具分 **高频**（LLM 常用，推荐优先暴露）和 **按需**（浏览器/人审/版本管理场景）两组。
+> 所有写操作已收敛为单个 `update_feature` 工具（批量 + 原子回滚）。
 > 完整工具演化与偏离记录见 [docs/evolution.md](./docs/evolution.md)。
 
 ### 核心 ★
@@ -66,19 +67,12 @@ npm start
 | 工具 | 用途 |
 |------|------|
 | `create_feature(feature, title?)` | 创建空 feature |
-| `add_node(feature, node_id, ...)` | 添加节点（含位置/样式/形状/状态/泳道） |
-| `update_node(feature, node_id, ...)` | 更新节点属性（仅传需改字段） |
-| `delete_node(feature, node_id)` | 删除节点及关联边 |
-| `add_edge(feature, edge_id, from, to, ...)` | 添加边（直线/曲线/虚线 + 箭头方向） |
-| `delete_edge(feature, edge_id)` | 删除边 |
+| `update_feature(feature, operations[])` | **统一写入口**：节点/边/文件/API 增删改、节点平移(move)、语义绑定(binding)、状态更新(status)。批量按序执行，任一失败全部回滚 |
 
-### 语义层编辑（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `add_file` / `update_file` / `delete_file` | 语义文件增删改 |
-| `add_expected_api` / `update_expected_api` / `delete_expected_api` | 预期 API 签名增删改 |
-| `set_node_semantic(feature, node_id, file_id)` | 绑定节点与语义文件，状态联动 |
+`update_feature` 操作格式：`{op, type, id, data?}`
+- `op`: `add` / `update` / `delete` / `move`（move 仅节点，`data:{dx,dy}` 相对平移）
+- `type`: `node` / `edge` / `file` / `api`（id=所属 file_id）/ `binding`（节点绑文件）/ `status`（状态联动）
+- 示例：`{op:"add",type:"node",id:"n1",data:{label:"服务",x:100,y:100,shape:"rounded"}}`
 
 ### 代码生成 ★
 
@@ -87,16 +81,12 @@ npm start
 | `scaffold(feature, output_dir?, overwrite?, ui_framework?)` | 从 semantic 层生成代码骨架（go/ts/py/js/vue/tsx + INVARIANTS.md） |
 | `backfill_scaffold(feature, scaffold_dir?)` | 解析实现代码的 API 签名回填 DSL actual_apis，输出差异报告 |
 | `check_status(feature, scaffold_dir?)` | 扫描 TODO 残留量自动推断状态 |
-| `update_status(feature, node_id, status)` | 手动更新节点状态 |
 | `consistency_check(feature, code_dir?)` | 对比 expected_apis vs 实际代码，输出一致性报告（只读） |
 
-### 批量操作（按需）
+### 批量与对比（按需）
 
 | 工具 | 用途 |
 |------|------|
-| `batch_move_nodes(feature, node_ids[], dx, dy)` | 批量平移节点 |
-| `batch_update_style(feature, node_ids[], ...)` | 批量更新样式/状态 |
-| `batch_delete_nodes(feature, node_ids[])` | 批量删除节点 |
 | `clone_feature(source, target, title?)` | 克隆 feature |
 | `diff_features(feature_a, feature_b)` | 对比两个 feature 差异 |
 

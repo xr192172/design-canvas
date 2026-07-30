@@ -16,15 +16,10 @@ import { renderDsl } from './tools/render_dsl.js';
 import { getDsl } from './tools/get_dsl.js';
 import { listFeatures } from './tools/list_features.js';
 import { createFeature, cloneFeature } from './tools/feature_ops.js';
-import { addNode, updateNode, deleteNode } from './tools/node_ops.js';
-import { addEdge, deleteEdge } from './tools/edge_ops.js';
-import { addFile, updateFile, deleteFile } from './tools/file_ops.js';
-import { addExpectedApi, updateExpectedApi, deleteExpectedApi, setNodeSemantic } from './tools/api_ops.js';
-import { batchMoveNodes, batchUpdateStyle, batchDeleteNodes } from './tools/batch_ops.js';
+import { updateFeature } from './tools/update_feature.js';
 import { diffFeatures } from './tools/diff.js';
-import type { AddNodeInput, UpdateNodeInput } from './tools/node_ops.js';
 import { scaffold } from './tools/scaffold.js';
-import { updateStatus, checkStatus } from './tools/status_tools.js';
+import { checkStatus } from './tools/status_tools.js';
 import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools.js';
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
@@ -50,13 +45,18 @@ const server = new McpServer(
     instructions:
       'design-canvas：人机共享的可视化协议层。支持两种工作流：' +
       '\n\n1. 完整 DSL 模式：render_dsl 渲染并保存 → get_dsl 读取 → list_features 列出' +
-      '\n\n2. 增量编辑模式（推荐）：create_feature 创建 → add_node 添加节点 → add_edge 添加边 → update_node 修改 → render_dsl 渲染预览' +
-      '\n   - 节点属性：type(类型/description/status(描述)/shape(形状)/swimlane(泳道)/content(富文本内容)' +
-      '\n   - 语义层：add_file 添加文件 → add_expected_api 添加API → set_node_semantic 绑定节点与文件' +
-      '\n   - 批量操作：batch_move_nodes / batch_update_style / batch_delete_nodes' +
+      '\n\n2. 增量编辑模式（推荐）：create_feature 创建 → update_feature 统一提交所有写操作 → render_dsl 渲染预览' +
+      '\n   update_feature 通过 operations 列表批量执行（任一失败全部回滚）：' +
+      '\n   - {op:"add",type:"node",id:"n1",data:{label,x,y,bg,shape,type,status,swimlane,layer,host,shapes,...}}' +
+      '\n   - {op:"update"|"delete"|"move",type:"node",id:"n1",data:{...}}（move 用 data:{dx,dy} 相对平移）' +
+      '\n   - {op:"add"|"update"|"delete",type:"edge",id:"e1",data:{from,to,label,edge_type,arrow,layer}}' +
+      '\n   - {op:"add"|"update"|"delete",type:"file",id:"f1",data:{path,responsibility,status,...}}' +
+      '\n   - {op:"add"|"update"|"delete",type:"api",id:"<file_id>",data:{signature,new_signature?,notes?}}' +
+      '\n   - {op:"update",type:"binding",id:"<node_id>",data:{file_id,sync_status?}} 绑定节点与语义文件' +
+      '\n   - {op:"update",type:"status",id:"<node_id>",data:{status}} 更新状态（同步 file 并重算 feature 状态）' +
       '\n\n3. 代码生成：scaffold 从设计图 semantic 层生成代码骨架（签名 + TODO + import），LLM 在骨架上填充实现。' +
       '\n\n4. 状态回填：LLM 写完代码后，调用 backfill_scaffold 自动解析实际 API 签名回填到 DSL。' +
-      '\n   然后 check_status 扫描 TODO 残留量自动推断状态，或 update_status 手动标记。' +
+      '\n   然后 check_status 扫描 TODO 残留量自动推断状态，或 update_feature 的 status 操作手动标记。' +
       '\n   render_dsl 重新渲染后节点颜色随状态变化：灰=待实现, 橙=实现中, 绿=已完成。' +
       '\n\n5. 人审流程：人类在浏览器双击节点添加标注 → list_annotations 读取 → LLM 迭代修改 → resolve_annotation 关闭。' +
       '\n\n6. 自动布局：dag_layout（拓扑排序）/ force_layout（力导向）/ grid_align（网格对齐）一键整理画布，避免连线混乱。' +
@@ -187,535 +187,38 @@ server.registerTool(
 );
 
 // ─────────────────────────────────────────────────────────────
-// add_node：添加节点
+// update_feature：统一写操作入口（替代原 16 个写工具）
 // ─────────────────────────────────────────────────────────────
 server.registerTool(
-  'add_node',
+  'update_feature',
   {
-    title: 'Add node to feature',
-    description: '向指定 feature 添加一个新节点。节点 ID 必须唯一。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_id: z.string().describe('节点唯一 ID'),
-      label: z.string().optional().describe('节点显示标签，默认等于 node_id'),
-      x: z.number().optional().describe('节点 X 坐标'),
-      y: z.number().optional().describe('节点 Y 坐标'),
-      width: z.number().optional().describe('节点宽度'),
-      height: z.number().optional().describe('节点高度'),
-      bg: z.string().optional().describe('背景色（十六进制，如 #2196F3）'),
-      color: z.string().optional().describe('文字颜色'),
-      border: z.string().optional().describe('边框样式'),
-      borderRadius: z.number().optional().describe('圆角半径'),
-      shape: z.enum(['rect', 'rounded', 'circle', 'diamond', 'freeform']).optional().describe('节点形状'),
-      type: z.string().optional().describe('节点类型，如 service/module/database/api/queue/ui'),
-      description: z.string().optional().describe('节点描述/备注'),
-      status: z.enum(['draft', 'in_progress', 'done']).optional().describe('实现状态'),
-      swimlane: z.string().optional().describe('所属泳道 ID'),
-      layer: z.enum(['main', 'error', 'detail']).optional().describe('职责分层：main=主干(默认显示) / error=异常处理(折叠) / detail=实现细节(折叠)'),
-      host: z.string().optional().describe('深层节点的宿主主干节点 ID（角标挂载点）'),
-      shapes: z.object({
-        in: z.record(z.string(), z.unknown()).optional().describe('进料口数据形状（JSON Schema：{type,properties,items,required,enum,label}）'),
-        out: z.record(z.string(), z.unknown()).optional().describe('出料口数据形状'),
-      }).optional().describe('数据形状卡（D1）：渲染在节点上的人话版进/出数据形状'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = addNode({
-        feature: args.feature,
-        node_id: args.node_id,
-        label: args.label,
-        x: args.x,
-        y: args.y,
-        width: args.width,
-        height: args.height,
-        bg: args.bg,
-        color: args.color,
-        border: args.border,
-        borderRadius: args.borderRadius,
-        shape: args.shape,
-        type: args.type,
-        description: args.description,
-        status: args.status,
-        swimlane: args.swimlane,
-        layer: args.layer,
-        host: args.host,
-        shapes: args.shapes as AddNodeInput['shapes'],
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// update_node：更新节点
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'update_node',
-  {
-    title: 'Update node',
-    description: '更新已存在的节点属性。只传入需要修改的字段即可。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_id: z.string().describe('节点 ID'),
-      label: z.string().optional().describe('节点显示标签'),
-      x: z.number().optional().describe('节点 X 坐标'),
-      y: z.number().optional().describe('节点 Y 坐标'),
-      width: z.number().optional().describe('节点宽度'),
-      height: z.number().optional().describe('节点高度'),
-      bg: z.string().optional().describe('背景色'),
-      color: z.string().optional().describe('文字颜色'),
-      border: z.string().optional().describe('边框样式'),
-      borderRadius: z.number().optional().describe('圆角半径'),
-      shape: z.enum(['rect', 'rounded', 'circle', 'diamond', 'freeform']).optional().describe('节点形状'),
-      type: z.string().optional().describe('节点类型'),
-      description: z.string().optional().describe('节点描述/备注'),
-      status: z.enum(['draft', 'in_progress', 'done']).optional().describe('实现状态'),
-      swimlane: z.string().optional().describe('所属泳道 ID'),
-      layer: z.enum(['main', 'error', 'detail']).nullable().optional().describe('职责分层：main=主干(默认) / error=异常(折叠) / detail=细节(折叠)；null=清除回到 main'),
-      host: z.string().nullable().optional().describe('深层节点的宿主节点 ID；null=清除'),
-      shapes: z.object({
-        in: z.record(z.string(), z.unknown()).optional().describe('进料口数据形状（JSON Schema）'),
-        out: z.record(z.string(), z.unknown()).optional().describe('出料口数据形状'),
-      }).nullable().optional().describe('数据形状卡（D1）；null=清除'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = updateNode({
-        feature: args.feature,
-        node_id: args.node_id,
-        label: args.label,
-        x: args.x,
-        y: args.y,
-        width: args.width,
-        height: args.height,
-        bg: args.bg,
-        color: args.color,
-        border: args.border,
-        borderRadius: args.borderRadius,
-        shape: args.shape,
-        type: args.type,
-        description: args.description,
-        status: args.status,
-        swimlane: args.swimlane,
-        layer: args.layer,
-        host: args.host,
-        shapes: args.shapes as UpdateNodeInput['shapes'],
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// delete_node：删除节点
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'delete_node',
-  {
-    title: 'Delete node',
-    description: '删除指定节点，同时删除所有与之相关的边。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_id: z.string().describe('节点 ID'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = deleteNode({
-        feature: args.feature,
-        node_id: args.node_id,
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// add_edge：添加边
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'add_edge',
-  {
-    title: 'Add edge between nodes',
-    description: '在两个已存在的节点之间添加一条边。from 和 to 必须是已存在的节点 ID。支持直线/曲线/虚线三种类型和正向/反向/双向/无箭头四种方向。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      edge_id: z.string().describe('边唯一 ID'),
-      from: z.string().describe('源节点 ID'),
-      to: z.string().describe('目标节点 ID'),
-      label: z.string().optional().describe('边上的标签文字'),
-      edge_type: z.enum(['straight', 'curve', 'dashed']).optional().describe('边类型：直线(默认)/曲线/虚线'),
-      arrow: z.enum(['forward', 'reverse', 'both', 'none']).optional().describe('箭头方向：正向(默认)/反向/双向/无'),
-      layer: z.enum(['main', 'error', 'detail']).optional().describe('职责分层：缺省时自动推导——任一端点为深层节点则跟随较深层'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = addEdge({
-        feature: args.feature,
-        edge_id: args.edge_id,
-        from: args.from,
-        to: args.to,
-        label: args.label,
-        edge_type: args.edge_type,
-        arrow: args.arrow,
-        layer: args.layer,
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// delete_edge：删除边
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'delete_edge',
-  {
-    title: 'Delete edge',
-    description: '删除指定的边。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      edge_id: z.string().describe('边 ID'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = deleteEdge({
-        feature: args.feature,
-        edge_id: args.edge_id,
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// add_file：添加语义文件
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'add_file',
-  {
-    title: 'Add semantic file',
-    description: '向 feature 的 semantic 层添加一个新文件，定义职责和预期 API。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件唯一 ID（建议与对应节点 ID 一致）'),
-      path: z.string().describe('目标文件相对路径，如 service/user.go'),
-      responsibility: z.string().describe('文件职责描述'),
-      status: z.enum(['draft', 'in_progress', 'done']).optional().describe('文件状态'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = addFile({
-        feature: args.feature,
-        file_id: args.file_id,
-        path: args.path,
-        responsibility: args.responsibility,
-        status: args.status,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// update_file：更新语义文件
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'update_file',
-  {
-    title: 'Update semantic file',
-    description: '更新语义文件的属性，只传需要修改的字段。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件 ID'),
-      path: z.string().optional().describe('目标文件路径'),
-      responsibility: z.string().optional().describe('职责描述'),
-      status: z.enum(['draft', 'in_progress', 'done']).optional().describe('文件状态'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = updateFile({
-        feature: args.feature,
-        file_id: args.file_id,
-        path: args.path,
-        responsibility: args.responsibility,
-        status: args.status,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// delete_file：删除语义文件
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'delete_file',
-  {
-    title: 'Delete semantic file',
-    description: '删除指定的语义文件。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件 ID'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = deleteFile({ feature: args.feature, file_id: args.file_id });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// add_expected_api：添加预期 API
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'add_expected_api',
-  {
-    title: 'Add expected API to file',
-    description: '向语义文件添加一个预期 API 签名。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件 ID'),
-      signature: z.string().describe('API 签名，如 UserService.Login(username string) (string, error)'),
-      notes: z.string().optional().describe('API 说明备注'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = addExpectedApi({
-        feature: args.feature,
-        file_id: args.file_id,
-        signature: args.signature,
-        notes: args.notes,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// update_expected_api：更新预期 API
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'update_expected_api',
-  {
-    title: 'Update expected API',
-    description: '更新预期 API 的签名或备注。按原签名匹配。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件 ID'),
-      signature: z.string().describe('要修改的原 API 签名'),
-      new_signature: z.string().optional().describe('新的 API 签名'),
-      notes: z.string().optional().describe('新的备注'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = updateExpectedApi({
-        feature: args.feature,
-        file_id: args.file_id,
-        signature: args.signature,
-        new_signature: args.new_signature,
-        notes: args.notes,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// delete_expected_api：删除预期 API
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'delete_expected_api',
-  {
-    title: 'Delete expected API',
-    description: '从语义文件中删除指定的预期 API。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      file_id: z.string().describe('文件 ID'),
-      signature: z.string().describe('要删除的 API 签名'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = deleteExpectedApi({
-        feature: args.feature,
-        file_id: args.file_id,
-        signature: args.signature,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// set_node_semantic：绑定节点与语义文件
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'set_node_semantic',
-  {
-    title: 'Bind node to semantic file',
+    title: 'Update feature with batch operations',
     description:
-      '将几何层节点与语义层文件绑定，自动同步状态。' +
-      '绑定后节点和文件共享同一 ID，状态变化自动联动。',
+      '统一写操作入口：通过 operations 列表批量执行节点/边/文件/API 的增删改、节点平移、语义绑定、状态更新。' +
+      '按顺序执行，任一失败自动回滚全部变更（原子性）。' +
+      'op: add/update/delete/move（move 仅 node，data:{dx,dy} 相对平移）；' +
+      'type: node/edge/file/api/binding/status；' +
+      'id: node_id/edge_id/file_id（api 类型 id 为所属 file_id）；' +
+      'data: 各操作字段（同原 add_*/update_* 工具参数）。',
     inputSchema: {
       feature: z.string().describe('feature 名'),
-      node_id: z.string().describe('节点 ID'),
-      file_id: z.string().describe('文件 ID'),
-      sync_status: z.boolean().optional().describe('是否同步状态，默认 true'),
+      operations: z
+        .array(
+          z.object({
+            op: z.enum(['add', 'update', 'delete', 'move']).describe('操作类型：add 新增 / update 更新 / delete 删除 / move 相对平移（仅 node）'),
+            type: z.enum(['node', 'edge', 'file', 'api', 'binding', 'status']).describe('目标类型：node 节点 / edge 边 / file 语义文件 / api 预期API(id=file_id) / binding 节点绑定文件(仅update, data.file_id) / status 状态更新(仅update, data.status)'),
+            id: z.string().describe('目标 ID：node_id / edge_id / file_id'),
+            data: z.record(z.string(), z.unknown()).optional().describe('操作数据，字段同原 add_*/update_* 工具（node: {label,x,y,bg,shape,type,status,swimlane,layer,host,shapes}；edge: {from,to,label,edge_type,arrow,layer}；file: {path,responsibility,status}；api: {signature,new_signature?,notes?}；move: {dx,dy}）'),
+          }),
+        )
+        .describe('操作列表，按顺序执行，任一失败全部回滚'),
     },
   },
   async (args) => {
     try {
-      const result = setNodeSemantic({
+      const result = updateFeature({
         feature: args.feature,
-        node_id: args.node_id,
-        file_id: args.file_id,
-        sync_status: args.sync_status,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// batch_move_nodes：批量移动节点
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'batch_move_nodes',
-  {
-    title: 'Batch move nodes',
-    description: '批量移动多个节点，按偏移量 dx/dy 平移。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_ids: z.array(z.string()).describe('节点 ID 列表'),
-      dx: z.number().describe('X 轴偏移量（px）'),
-      dy: z.number().describe('Y 轴偏移量（px）'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = batchMoveNodes({
-        feature: args.feature,
-        node_ids: args.node_ids,
-        dx: args.dx,
-        dy: args.dy,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// batch_update_style：批量更新节点样式
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'batch_update_style',
-  {
-    title: 'Batch update node styles',
-    description: '批量更新多个节点的样式和状态。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_ids: z.array(z.string()).describe('节点 ID 列表'),
-      bg: z.string().optional().describe('背景色'),
-      color: z.string().optional().describe('文字颜色'),
-      status: z.enum(['draft', 'in_progress', 'done']).optional().describe('节点状态'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = batchUpdateStyle({
-        feature: args.feature,
-        node_ids: args.node_ids,
-        bg: args.bg,
-        color: args.color,
-        status: args.status,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// batch_delete_nodes：批量删除节点
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'batch_delete_nodes',
-  {
-    title: 'Batch delete nodes',
-    description: '批量删除多个节点及关联的边。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_ids: z.array(z.string()).describe('节点 ID 列表'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = batchDeleteNodes({
-        feature: args.feature,
-        node_ids: args.node_ids,
+        operations: args.operations,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {
@@ -805,43 +308,6 @@ server.registerTool(
         output_dir: args.output_dir,
         overwrite: args.overwrite,
         ui_framework: args.ui_framework,
-      });
-      return {
-        content: [{ type: 'text', text: result.message }],
-      };
-    } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// update_status：手动更新节点状态
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'update_status',
-  {
-    title: 'Update node implementation status',
-    description:
-      '手动更新节点/文件的实现状态。同时更新 geometry.nodes 和 semantic.files 中的状态，' +
-      '并自动重新计算 feature 整体状态。render_dsl 后节点颜色会随之变化。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_id: z.string().describe('节点 ID'),
-      status: z
-        .enum(['draft', 'in_progress', 'done'])
-        .describe('新状态：draft=待实现, in_progress=实现中, done=已完成'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = updateStatus({
-        feature: args.feature,
-        node_id: args.node_id,
-        status: args.status,
       });
       return {
         content: [{ type: 'text', text: result.message }],

@@ -27,14 +27,14 @@
 | `design_check` | 对比 codebase-memory-mcp 现状 |
 | `export_skeleton` | 生成文件骨架 |
 
-#### 实际实现（40+ 工具，分 7 组）
+#### 实际实现（37 工具，写操作已收敛为 update_feature）
 
 | 分组 | 工具 | 变更性质 |
 |---|---|---|
 | **核心渲染** | `render_dsl` / `get_dsl` / `list_features` | 对齐设计 |
-| **增量编辑** | `create_feature` / `add_node` / `update_node` / `delete_node` / `add_edge` / `delete_edge` / `add_file` / `update_file` / `delete_file` / `add_expected_api` / `update_expected_api` / `delete_expected_api` / `set_node_semantic` | **新增**——替代"每次重写整个 JSON" |
-| **批量操作** | `batch_move_nodes` / `batch_update_style` / `batch_delete_nodes` / `clone_feature` / `diff_features` | **新增** |
-| **代码生成** | `scaffold`（替代 `export_skeleton`）/ `backfill_scaffold` / `check_status` / `update_status` / `consistency_check`（替代 `design_check`） | **改名+拆分** |
+| **增量编辑** | `create_feature` / `update_feature` | **收敛**——原 16 个写工具（add/update/delete node/edge/file/api、set_node_semantic、batch_*、update_status）合并为单个 `update_feature`，operations 批量提交 + 原子回滚 |
+| **批量与对比** | `clone_feature` / `diff_features` | **新增**（batch_move/update_style/delete 已并入 `update_feature`） |
+| **代码生成** | `scaffold`（替代 `export_skeleton`）/ `backfill_scaffold` / `check_status` / `consistency_check`（替代 `design_check`） | **改名+拆分**（update_status 已并入 `update_feature` 的 status 操作） |
 | **人审流程** | `list_annotations` / `resolve_annotation` / `add_annotation` / `submit_approval` / `review_annotation` / `list_approvals` / `get_approval_history` | **新增**——设计文档只提标注，实际做了完整审批链 |
 | **自动布局** | `dag_layout` / `force_layout` / `grid_align` | **新增** |
 | **仿真器** | `run_simulation` / `get_simulation_state` / `reset_simulation` | **新增**——对应设计文档阶段 8 |
@@ -47,6 +47,7 @@
 - **`design_check` → `consistency_check` + `backfill_scaffold`**：原设计依赖外部 codebase-memory-mcp 作为 MCP client 调用 AST 服务。实际改为内置 TreeSitterKernel（见 2.2），因此一致性检查和代码回填拆为两个独立工具，职责更清晰
 - **`export_skeleton` → `scaffold`**：增强版，支持多语言（go/ts/py/js/vue/tsx）、UI 骨架生成、自定义模板、INVARIANTS.md 生成
 - **增量编辑模式**：原设计要求 LLM 每次输出完整 DSL JSON，迭代成本高。增量工具让 LLM 逐步完善设计
+- **写操作收敛为 `update_feature`**：16 个写工具参数模式高度重复（feature + id + 字段），LLM 选择成本高、工具列表冗长。合并后统一为 `{op, type, id, data}` 操作格式，支持批量提交与原子回滚（任一失败恢复操作前快照），原子操作实现仍复用 `node_ops` / `edge_ops` / `file_ops` / `api_ops` / `status_tools` 模块
 
 ### 2.2 架构决策变更
 
