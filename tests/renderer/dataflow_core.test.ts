@@ -152,6 +152,29 @@ describe('collectJudgements - CFG 判定精确化', () => {
     expect(collectJudgements(nodes, edges, '', 'Compose')).toEqual([]);
     expect(collectJudgements(nodes, edges, 'host', '')).toEqual([]);
   });
+
+  it('跨文件追加前缀（{host}__sx1_{fn}__alg_）也能收集判定', () => {
+    // derive_chain 跨文件追加：外部函数 detail 节点 id {host}__sx1_OtherFn，
+    // 其 CFG 节点 id {host}__sx1_OtherFn__alg_*（含 __alg_ → 放宽后统一识别）
+    const nodes = [
+      { id: 'host__sx1_OtherFn__alg_e1', label: '▶ OtherFn', style: { shape: 'circle' } },
+      { id: 'host__sx1_OtherFn__alg_b1', label: '数量判断', style: { shape: 'diamond' }, description: 'branch\n条件：config.count > 3' },
+      { id: 'host__sx1_OtherFn__alg_r1', label: '返回真', style: { shape: 'rounded' } },
+      { id: 'host__sx1_OtherFn__alg_r2', label: '返回假', style: { shape: 'rounded' } },
+    ];
+    const edges = [
+      { id: 'host__sx1_OtherFn__alge_0', from: 'host__sx1_OtherFn__alg_e1', to: 'host__sx1_OtherFn__alg_b1' },
+      { id: 'host__sx1_OtherFn__alge_1', from: 'host__sx1_OtherFn__alg_b1', to: 'host__sx1_OtherFn__alg_r1', label: '是' },
+      { id: 'host__sx1_OtherFn__alge_2', from: 'host__sx1_OtherFn__alg_b1', to: 'host__sx1_OtherFn__alg_r2', label: '否' },
+    ];
+    const js = collectJudgements(nodes, edges, 'host', 'OtherFn');
+    expect(js).toHaveLength(1);
+    expect(js[0].cond).toBe('config.count > 3');
+    expect(js[0].branches).toEqual([
+      { via: '是', to: '返回真' },
+      { via: '否', to: '返回假' },
+    ]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────

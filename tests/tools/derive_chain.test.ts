@@ -519,3 +519,97 @@ func f3() int { return 3 }
     expect(result.edges_created).toBe(5); // 3 链边 + 2 跳边
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// 跨文件追加：数据流到链尾 → 追进被调外部函数（节点 + 链边 + 外部 CFG）
+// ─────────────────────────────────────────────────────────────
+
+describe('derive_detail_chain - 跨文件追加（数据流追进外部函数）', () => {
+  it('链尾函数有 cross 目标且目标文件可解析 → 追加外部节点 + 链边 + 外部 CFG', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    // 目标文件存在（含分支 → extractFunctionCfg 生成判定）
+    writeFixture('other.ts', `export interface Cfg { mode: string; count: number }
+export function OtherFn(config: Cfg): boolean {
+  if (config.count > 3) {
+    return true;
+  }
+  return false;
+}
+`);
+    setupHost('f_cross2', 'branch.go');
+    const { openDb } = await import('../../src/db/db');
+    const db = openDb(path.join(tmpDir, '.design-canvas', 'cache.db'));
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare(
+      "INSERT INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', 6, NULL, ?)",
+    ).run('branch.go#stepB', 'other.ts#OtherFn', JSON.stringify({ cross: true }));
+    db.close();
+
+    const result = await deriveDetailChain({ feature: 'f_cross2', node_id: 'host_node', project_root: tmpDir });
+
+    // 链尾 stepB → 追进 OtherFn
+    expect(result.cross_trace).toHaveLength(1);
+    expect(result.cross_trace[0].caller).toBe('stepB');
+    expect(result.cross_trace[0].target).toBe('other.ts#OtherFn');
+    expect(result.cross_trace[0].has_cfg).toBe(true);
+
+    const dsl = getDSL('f_cross2')!;
+    const xnode = dsl.geometry.nodes.find((n) => n.id.includes('__sx1_OtherFn'))!;
+    expect(xnode).toBeDefined();
+    expect(xnode.label).toContain('OtherFn·→other.ts');
+    expect(xnode.shapes?.out).toEqual({ type: 'boolean' });
+    // 链边：链尾 stepB → 外部节点（buildDataTrace 沿 __chain_ 边继续推进）
+    const stepBId = result.chain.find((c) => c.name === 'stepB')!.node_id;
+    const xedge = dsl.geometry.edges.find((e) => e.from === stepBId && e.id.startsWith('host_node__chain_x'))!;
+    expect(xedge.to).toBe(xnode.id);
+    // 外部 CFG：跨文件判定可追踪（diamond 分支节点存在）
+    const algNodes = dsl.geometry.nodes.filter((n) => n.id.startsWith(xnode.id + '__alg_'));
+    expect(algNodes.length).toBeGreaterThan(0);
+    expect(algNodes.some((n) => n.style?.shape === 'diamond')).toBe(true);
+  });
+
+  it('目标文件不存在 → 跨文件追加跳过（标注仍在，主链不受影响）', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    setupHost('f_cross3', 'branch.go');
+    const { openDb } = await import('../../src/db/db');
+    const db = openDb(path.join(tmpDir, '.design-canvas', 'cache.db'));
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare(
+      "INSERT INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', 6, NULL, ?)",
+    ).run('branch.go#stepB', 'ghost.ts#GhostFn', JSON.stringify({ cross: true }));
+    db.close();
+
+    const result = await deriveDetailChain({ feature: 'f_cross3', node_id: 'host_node', project_root: tmpDir });
+    expect(result.cross_trace).toEqual([]);
+    expect(result.cross_calls.length).toBe(1); // 标注仍在
+    expect(result.nodes_created).toBe(3); // 只有主链节点
+  });
+
+  it('跨文件追加幂等：重跑清理重建（节点数不变）', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    writeFixture('other.ts', `export function OtherFn(config: { count: number }): boolean {
+  if (config.count > 3) return true;
+  return false;
+}
+`);
+    setupHost('f_cross4', 'branch.go');
+    const { openDb } = await import('../../src/db/db');
+    const db = openDb(path.join(tmpDir, '.design-canvas', 'cache.db'));
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare(
+      "INSERT INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', 6, NULL, ?)",
+    ).run('branch.go#stepB', 'other.ts#OtherFn', JSON.stringify({ cross: true }));
+    db.close();
+
+    await deriveDetailChain({ feature: 'f_cross4', node_id: 'host_node', project_root: tmpDir });
+    const before = getDSL('f_cross4')!;
+    const nodeCount = before.geometry.nodes.length;
+    const edgeCount = before.geometry.edges.length;
+    expect(nodeCount).toBeGreaterThan(3); // 含外部节点 + CFG
+
+    await deriveDetailChain({ feature: 'f_cross4', node_id: 'host_node', project_root: tmpDir });
+    const after = getDSL('f_cross4')!;
+    expect(after.geometry.nodes.length).toBe(nodeCount);
+    expect(after.geometry.edges.length).toBe(edgeCount);
+  });
+});

@@ -44,8 +44,9 @@ export interface DeriveAlgorithmResult {
   stats: { steps: number; branches: number; loops: number; returns: number; throws: number; handlers: number };
 }
 
-/** CFG 节点类型 → 渲染形状（tone 为语义色，渲染器映射到主题变量：error=红 success=绿 warning=橙） */
-const KIND_SHAPE: Record<
+/** CFG 节点类型 → 渲染形状（tone 为语义色，渲染器映射到主题变量：error=红 success=绿 warning=橙）
+ *  导出供 derive_chain 跨文件追加复用（外部函数 CFG 同构挂载） */
+export const KIND_SHAPE: Record<
   CfgNodeKind,
   { shape: 'circle' | 'diamond' | 'hexagon' | 'rounded'; w: number; h: number; tone?: 'error' | 'success' | 'warning' }
 > = {

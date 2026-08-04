@@ -78,10 +78,11 @@ export interface DfJudgement {
 }
 
 /**
- * 收集宿主下某函数的 CFG 判定（derive_algorithm 产物，id 前缀 {host}__alg_）。
- * 关联方式：CFG entry 节点 label 为 "▶ {funcName}"（derive_algorithm 生成规则）。
+ * 收集某函数的 CFG 判定（derive_algorithm / derive_chain 跨文件追加的产物）。
+ * 关联方式：CFG entry 节点 label 为 "▶ {funcName}"（生成规则，同文件与跨文件一致）。
+ * 节点集合：id 含 __alg_ 即视为 CFG 子图（同文件 {host}__alg_*、跨文件追加 {host}__x_<fn>__alg_* 均命中），
+ * 不再依赖 host 前缀——跨文件函数（数据流追进外部文件）也能找到判定。
  * 沿出边 BFS 收集 branch（diamond）/ loop（hexagon）节点的条件与走向。
- * v1 只展示真实条件与走向结构，不做 mock 求值（mock 值是假值，求值无意义）。
  */
 export function collectJudgements(
   nodes: DfNodeLike[],
@@ -90,20 +91,20 @@ export function collectJudgements(
   funcName: string,
 ): DfJudgement[] {
   if (!host || !funcName) return [];
-  const algPrefix = host + '__alg_';
-  const algEdgePrefix = host + '__alge_';
-  const algNodes = nodes.filter((n) => n.id.startsWith(algPrefix));
+  // CFG 子图集合：id 含 __alg_（同文件与跨文件追加统一识别）
+  const algNodes = nodes.filter((n) => n.id.includes('__alg_'));
   if (algNodes.length === 0) return [];
   const nodeById = new Map(algNodes.map((n) => [n.id, n]));
+  const algIds = new Set(algNodes.map((n) => n.id));
 
-  // entry：label === "▶ {funcName}"
+  // entry：label === "▶ {funcName}"（兜底：▶ 开头且含函数名）
   const entry = algNodes.find((n) => n.label === `▶ ${funcName}`) ?? algNodes.find((n) => (n.label || '').includes(funcName) && (n.label || '').startsWith('▶'));
   if (!entry) return [];
 
-  // 出边索引
+  // 出边索引：仅 CFG 子图内部边（from/to 都在集合内，跨文件追加边同样命中）
   const outEdges = new Map<string, DfEdgeLike[]>();
   for (const e of edges) {
-    if (!e.id.startsWith(algEdgePrefix)) continue;
+    if (!algIds.has(e.from) || !algIds.has(e.to)) continue;
     let arr = outEdges.get(e.from);
     if (!arr) {
       arr = [];

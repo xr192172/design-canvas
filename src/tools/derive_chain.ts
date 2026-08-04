@@ -16,7 +16,9 @@ import path from 'node:path';
 import type { AnimationValueSchema, Edge, Node } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 import type { Database } from '../db/db.js';
-import { parseFileFull, type ParsedCall, type ParsedSymbol } from './ts_kernel/index.js';
+import { parseFileFull, isSupported, type ParsedCall, type ParsedSymbol } from './ts_kernel/index.js';
+import { extractFunctionCfg } from './ts_kernel/cfg.js';
+import { KIND_SHAPE } from './derive_algorithm.js';
 
 export interface DeriveChainInput {
   /** feature 名 */
@@ -33,6 +35,8 @@ export interface DeriveChainInput {
   max_steps?: number;
   /** 主链外分支函数上限（调用图除主链外的被调函数节点），默认 20 */
   max_branches?: number;
+  /** 跨文件追加上限（数据流追进被调外部函数的数量），默认 2 */
+  max_cross?: number;
 }
 
 export interface DeriveChainResult {
@@ -44,6 +48,8 @@ export interface DeriveChainResult {
   branch: Array<{ name: string; signature: string; node_id: string; caller: string; kind: 'jump' | 'extra' }>;
   /** 跨文件调用标注（cache.db 有数据时；本文件函数 → 其他文件符号） */
   cross_calls: Array<{ caller: string; targets: string[] }>;
+  /** 跨文件追加（v1）：链尾函数追进被调外部函数（detail 节点 + 链边 + 外部 CFG） */
+  cross_trace: Array<{ caller: string; target: string; node_id: string; has_cfg: boolean }>;
   skipped: string[];
   nodes_created: number;
   edges_created: number;
@@ -478,19 +484,24 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     try {
       const { openDb: open } = await import('../db/db.js');
       db = open(cacheDbPath);
-      const rows = db
+      // source 格式对齐：cache.db 的 relPath 可能相对 src/ 根（如 renderer/xx.ts），
+      // 与 project_root 计算的 relPath 不一致 → relPath 查不到时退化为 basename 匹配
+      let rows = db
         .prepare("SELECT source, target FROM edges WHERE kind='call' AND metadata IS NOT NULL AND source LIKE ?")
         .all(`${relPath}#%`) as Array<{ source: string; target: string }>;
+      if (rows.length === 0) {
+        rows = db
+          .prepare("SELECT source, target FROM edges WHERE kind='call' AND metadata IS NOT NULL AND source LIKE ?")
+          .all(`%${path.basename(filePath)}#%`) as Array<{ source: string; target: string }>;
+      }
       for (const r of rows) {
-        const callerQn = r.source.slice(relPath.length + 1);
-        const tp = r.target.split('#');
-        const label = tp.length === 2 ? `${tp[0]}#${tp[1]}` : r.target;
-        let arr = crossByCaller.get(callerQn);
+        const callerName = r.source.slice(r.source.lastIndexOf('#') + 1);
+        let arr = crossByCaller.get(callerName);
         if (!arr) {
           arr = [];
-          crossByCaller.set(callerQn, arr);
+          crossByCaller.set(callerName, arr);
         }
-        if (arr.length < 8) arr.push(label);
+        if (!arr.includes(r.target) && arr.length < 8) arr.push(r.target);
       }
     } catch {
       // cache.db 损坏/被锁 → 跳过跨文件标注，不影响主流程
@@ -513,13 +524,16 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     .sort((a, b) => a.start_line - b.start_line)
     .map((s) => s.name);
 
-  // 幂等：清理旧的 derived 节点/边（含分支）
+  // 幂等：清理旧的 derived 节点/边（含分支与跨文件追加的 CFG 边——后者 id 形如 {node_id}__sx{n}_...__alge_*）
   const nodePrefix = `${node_id}__s`;
   const edgePrefix = `${node_id}__chain_`;
   const branchEdgePrefix = `${node_id}__branch_`;
   dsl.geometry.nodes = dsl.geometry.nodes.filter((n) => !n.id.startsWith(nodePrefix));
   dsl.geometry.edges = (dsl.geometry.edges ?? []).filter(
-    (e) => !e.id.startsWith(edgePrefix) && !e.id.startsWith(branchEdgePrefix),
+    (e) =>
+      !e.id.startsWith(edgePrefix) &&
+      !e.id.startsWith(branchEdgePrefix) &&
+      !e.id.startsWith(nodePrefix),
   );
 
   // 布局：宿主正下方一行（与 conveyor D1 手工布局同风格：220 宽 + 20 间隔）
@@ -636,6 +650,112 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     }
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // 跨文件追加（v1）：数据流到跨文件调用点 → 追进被调的外部函数（深度 1 层）
+  // 链上每个有跨文件调用的函数都是锚点（数据流进入外部文件，返回后继续主链）
+  // 复用：cache.db cross 边定位目标；signatureToShapes 生成 shapes；
+  //       extractFunctionCfg 生成外部函数 CFG → 跨文件判定可追踪
+  // 节点 id：{node_id}__sx{n}_{fn}（含 __s 前缀 → 幂等清理一并覆盖）；
+  // 外部 CFG：{xid}__alg_* / {xid}__alge_*（含 __alg_ → collectJudgements 按 label 关联可命中）
+  // ─────────────────────────────────────────────────────────────
+  const crossTrace: DeriveChainResult['cross_trace'] = [];
+  const maxCross = input.max_cross ?? 3; // 外部函数追加总数上限
+  const xStart = stepNum + extraLimited.length;
+  let xNo = 0;
+  let xTotal = 0;
+  for (let ci = 0; ci < chain.length && xTotal < maxCross; ci++) {
+    const s = chain[ci];
+    if (isBadName(s)) continue;
+    const sId = chainNodeByQn.get(s.qualified_name);
+    if (!sId) continue;
+    // 每锚点最多 1 个目标（防爆炸），总数受 maxCross 限制
+    const targets = (crossByCaller.get(s.qualified_name) ?? []).slice(0, maxCross - xTotal);
+    if (targets.length === 0) continue;
+    // 锚点原紧邻后继：外部函数处理完数据流返回继续主链
+    const nextSym = ci + 1 < chain.length ? chain[ci + 1] : undefined;
+    const nextId = nextSym && !isBadName(nextSym) ? chainNodeByQn.get(nextSym.qualified_name) : undefined;
+    for (const t of targets) {
+      const [tfile, tfn] = t.split('#');
+      if (!tfile || !tfn) continue;
+      // cache.db 的 target 相对 src/ 根（如 renderer/styles.ts）→ 尝试 project_root 与 project_root/src 两个候选
+      const candPaths = [
+        path.isAbsolute(tfile) ? tfile : path.join(projectRoot, tfile),
+        path.join(projectRoot, 'src', tfile),
+      ];
+      const tpath = candPaths.find((p) => fs.existsSync(p));
+      if (!tpath || !isSupported(path.extname(tpath))) continue;
+      try {
+        const tcontent = fs.readFileSync(tpath, 'utf-8');
+        const tlang = detectLang(tpath);
+        const tparsed = await parseFileFull(tpath, tcontent);
+        if (tparsed.error) continue;
+        const tsym = tparsed.symbols.find((sy) => sy.name === tfn || sy.qualified_name === tfn);
+        if (!tsym) continue;
+        xNo++;
+        xTotal++;
+        const num = xStart + xNo;
+        const xid = `${nodePrefix}x${xNo}_${sanitize(tfn)}`;
+        const tshapes = signatureToShapes(tsym.signature, tlang);
+        const tfileName = tfile.split('/').pop() ?? tfile;
+        const xnode: Node = {
+          id: xid,
+          x: hx + (num - 1) * 240,
+          y: baseY + 96, // 与主链错开一行：外部文件层
+          width: 220,
+          label: `${CIRCLED[num - 1] ?? `${num}.`} ${tfn}·→${tfileName}`,
+          layer: 'detail',
+          host: node_id,
+          description: `${tsym.signature}\n跨文件调用：${tfile}`,
+        };
+        if (tshapes.in || tshapes.out) xnode.shapes = tshapes;
+        newNodes.push(xnode);
+        // 进入边：锚点 → 外部函数；返回边：外部函数 → 锚点原紧邻后继（数据流返回继续主链）
+        newEdges.push({ id: `${edgePrefix}x${xNo}`, from: sId, to: xid, layer: 'detail' });
+        if (nextId) newEdges.push({ id: `${edgePrefix}x${xNo}r`, from: xid, to: nextId, layer: 'detail' });
+
+        // 外部函数 CFG：数据流进入后继续展示其内部判定
+        const tcfg = await extractFunctionCfg(tpath, tcontent, tfn, 3);
+        if (tcfg) {
+          const algP = `${xid}__alg_`;
+          const algeP = `${xid}__alge_`;
+          const cfgX = (xnode.x ?? hx) + 260;
+          const cfgNodes: Node[] = tcfg.nodes.map((cn, i) => {
+            const meta = KIND_SHAPE[cn.kind] ?? KIND_SHAPE.step;
+            const node: Node = {
+              id: `${algP}${cn.id}`,
+              x: cfgX,
+              y: baseY + i * 104,
+              width: meta.w,
+              height: meta.h,
+              label: cn.label,
+              layer: 'detail',
+              host: node_id,
+              style: { shape: meta.shape, ...(meta.tone ? { tone: meta.tone } : {}) },
+            };
+            const descParts: string[] = [`${cn.kind}${cn.line > 0 ? ` · 源码第 ${cn.line} 行` : ''}`];
+            if (cn.condition && cn.condition !== cn.label) descParts.push(`条件：${cn.condition}`);
+            node.description = descParts.join('\n');
+            return node;
+          });
+          const cfgEdges: Edge[] = tcfg.edges.map((ce, i) => ({
+            id: `${algeP}${i}`,
+            from: `${algP}${ce.from}`,
+            to: `${algP}${ce.to}`,
+            label: ce.label,
+            layer: 'detail',
+          }));
+          newNodes.push(...cfgNodes);
+          newEdges.push(...cfgEdges);
+          crossTrace.push({ caller: s.qualified_name, target: t, node_id: xid, has_cfg: true });
+        } else {
+          crossTrace.push({ caller: s.qualified_name, target: t, node_id: xid, has_cfg: false });
+        }
+      } catch {
+        // 外部文件解析失败 → 跳过追加（不影响主链）
+      }
+    }
+  }
+
   dsl.geometry.nodes.push(...newNodes);
   dsl.geometry.edges.push(...newEdges);
   saveDSL(dsl);
@@ -653,6 +773,10 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     ...(crossCallsInfo.length > 0
       ? ['', '跨文件调用（→ 目标文件#函数，节点 label 后缀标记）：',
         ...crossCallsInfo.map((c) => `  ${c.caller} → ${c.targets.join(', ')}`)]
+      : []),
+    ...(crossTrace.length > 0
+      ? ['', '跨文件追加（数据流追进外部函数：detail 节点 + 链边 + 外部 CFG）：',
+        ...crossTrace.map((c) => `  ${c.caller} → ${c.target}（${c.has_cfg ? '含判定' : '无 CFG'}）`)]
       : []),
     '',
     `未入链函数（不在主调用路径、非分支或被截断）: ${skipped.length > 0 ? skipped.join(', ') : '无'}`,
@@ -678,6 +802,7 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     chain: chainInfo,
     branch: branchInfo,
     cross_calls: crossCallsInfo,
+    cross_trace: crossTrace,
     skipped,
     nodes_created: newNodes.length,
     edges_created: newEdges.length,
