@@ -90,7 +90,7 @@ npm start
 |------|------|
 | `import_project(project_dir, ...)` | 导入真实工程生成 feature 图（多模块 go.mod 解析 + 依赖边 LCA 分层聚合，SQLite 增量缓存可选） |
 | `check_monolith(file_path, ...)` | 单文件监控：超阈值自动 Louvain 社区发现，给拆分建议（仅建议不改代码） |
-| `derive_detail_chain(feature, file, ...)` | 变形链推导：提取函数调用链生成 detail 层节点/边 + 数据形状卡 |
+| `derive_detail_chain(feature, file, ...)` | 变形链推导：AST 级调用图生成 detail 层节点/边（主链 + 虚线跳边 + 截断分支节点）+ 数据形状卡 + 跨文件调用标注 |
 | `derive_algorithm(feature, file, ...)` | 算法控制流推导：函数内部结构解析挂载 detail 层 |
 | `inject_replay(feature, ...)` | 注入回放：进料口 JSON/预设异常场景注入，静态推演暴露问题 |
 

@@ -15,7 +15,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AnimationValueSchema, Edge, Node } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
-import { parseFile, type ParsedSymbol } from './ts_kernel/index.js';
+import type { Database } from '../db/db.js';
+import { parseFileFull, type ParsedCall, type ParsedSymbol } from './ts_kernel/index.js';
 
 export interface DeriveChainInput {
   /** feature 名 */
@@ -30,6 +31,8 @@ export interface DeriveChainInput {
   entry?: string;
   /** 入链函数上限，默认 12 */
   max_steps?: number;
+  /** 主链外分支函数上限（调用图除主链外的被调函数节点），默认 20 */
+  max_branches?: number;
 }
 
 export interface DeriveChainResult {
@@ -37,6 +40,10 @@ export interface DeriveChainResult {
   feature: string;
   node_id: string;
   chain: Array<{ step: number; name: string; signature: string; node_id: string }>;
+  /** 主链外的分支调用：jump=链上跳边（谁调谁），extra=截断未入链的辅助函数（建了节点） */
+  branch: Array<{ name: string; signature: string; node_id: string; caller: string; kind: 'jump' | 'extra' }>;
+  /** 跨文件调用标注（cache.db 有数据时；本文件函数 → 其他文件符号） */
+  cross_calls: Array<{ caller: string; targets: string[] }>;
   skipped: string[];
   nodes_created: number;
   edges_created: number;
@@ -290,33 +297,39 @@ function signatureToShapes(
 }
 
 // ─────────────────────────────────────────────────────────────
-// 调用图（文本法，language-agnostic）
+// 调用图（AST 级，路线图序号 3 的调用边接入渲染）
 // ─────────────────────────────────────────────────────────────
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 interface CallEdge {
   callee: string;
-  /** 被调函数在 caller body 中首次出现位置（邻居排序用） */
-  pos: number;
+  /** 被调函数在 caller body 中首次调用行号（邻居排序用） */
+  line: number;
 }
 
-function buildCallGraph(symbols: ParsedSymbol[], content: string): Map<string, CallEdge[]> {
-  const lines = content.split('\n');
+/**
+ * AST 级调用图：parseFileFull.calls（同文件 resolved 的精确调用边）。
+ * 替代原文本正则（name( 出现即连边）——同名不同 receiver 的方法不再误连。
+ * graph key/value 均为 qualified_name（class 方法如 Svc.Start）。
+ */
+function buildCallGraph(
+  symbols: ParsedSymbol[],
+  calls: ParsedCall[],
+): Map<string, CallEdge[]> {
   const graph = new Map<string, CallEdge[]>();
-  for (const s of symbols) {
-    const body = lines.slice(s.start_line - 1, s.end_line).join('\n');
-    const edges: CallEdge[] = [];
-    for (const t of symbols) {
-      if (t === s || t.name.length < 3) continue;
-      const m = body.match(new RegExp(`(?<![\\w])${escapeRegex(t.name)}\\s*\\(`));
-      if (m && m.index !== undefined) edges.push({ callee: t.qualified_name, pos: m.index });
+  const byQName = new Map(symbols.map((s) => [s.qualified_name, s]));
+  for (const c of calls) {
+    // 只取同文件解析成功的边：caller/callee 都必须在符号表
+    if (!c.resolved || !c.callee_qn) continue;
+    if (!byQName.has(c.caller) || !byQName.has(c.callee_qn)) continue;
+    let arr = graph.get(c.caller);
+    if (!arr) {
+      arr = [];
+      graph.set(c.caller, arr);
     }
-    edges.sort((a, b) => a.pos - b.pos);
-    graph.set(s.qualified_name, edges);
+    // 同一定向调用去重（一行内多次调用 / 循环内重复）
+    if (!arr.some((e) => e.callee === c.callee_qn)) arr.push({ callee: c.callee_qn, line: c.line });
   }
+  for (const arr of graph.values()) arr.sort((a, b) => a.line - b.line);
   return graph;
 }
 
@@ -398,15 +411,18 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
 
   const content = fs.readFileSync(filePath, 'utf-8');
   const lang = detectLang(filePath);
-  const symbols = (await parseFile(filePath, content)).filter(
-    (s) => s.kind === 'function' || s.kind === 'method',
-  );
+  const parsed = await parseFileFull(filePath, content);
+  if (parsed.error) {
+    throw new Error(`解析失败: ${parsed.error}`);
+  }
+  const symbols = parsed.symbols.filter((s) => s.kind === 'function' || s.kind === 'method');
   if (symbols.length === 0) {
     throw new Error(`未从 ${path.basename(filePath)} 解析到函数/方法（语言不支持或文件无函数定义）`);
   }
+  const byQName = new Map(symbols.map((s) => [s.qualified_name, s]));
 
-  // 调用图 → 入口 → DFS 主链 → max_steps 截断
-  const graph = buildCallGraph(symbols, content);
+  // AST 级调用图（路线图序号 3：调用边接入渲染——精确边替代文本正则）
+  const graph = buildCallGraph(symbols, parsed.calls);
   let entrySym: ParsedSymbol;
   if (entry) {
     const found = symbols.find((s) => s.name === entry || s.qualified_name === entry);
@@ -418,16 +434,93 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
   const fullChain = walkChain(entrySym, symbols, graph);
   const chain = fullChain.slice(0, max_steps);
   const chainSet = new Set(chain.map((s) => s.qualified_name));
+
+  // 分支 = 谁调谁的完整图结构（walkChain 全遍历只给出线性加工序）：
+  //   - 跳边（jump）：链上 A 调 B 且 B 非 A 的紧邻后继（如 Entry 同时调 stepA/stepB）→ 虚线边
+  //   - 链外节点（extra）：链上 A 调 B 但 B 未入链（max_steps 截断）→ 建节点 + 虚线边
+  const maxBranches = input.max_branches ?? 20;
+  const extraOrder: Array<{ fn: ParsedSymbol; caller: string }> = [];
+  const extraSet = new Set<string>();
+  const jumpOrder: Array<{ fromQn: string; toQn: string }> = [];
+  for (let i = 0; i < chain.length; i++) {
+    const s = chain[i];
+    const nextQn = i + 1 < chain.length ? chain[i + 1].qualified_name : null;
+    for (const e of graph.get(s.qualified_name) ?? []) {
+      if (e.callee === nextQn) continue; // 链顺序边已画，跳过
+      const t = byQName.get(e.callee);
+      if (!t) continue;
+      if (chainSet.has(t.qualified_name)) {
+        jumpOrder.push({ fromQn: s.qualified_name, toQn: t.qualified_name });
+      } else if (!extraSet.has(t.qualified_name)) {
+        extraSet.add(t.qualified_name);
+        extraOrder.push({ fn: t, caller: s.qualified_name });
+      }
+    }
+  }
+  const extraLimited = extraOrder.slice(0, maxBranches);
+  const jumpLimited = jumpOrder.slice(0, Math.max(0, maxBranches - extraLimited.length));
+
+  // 跨文件调用标注（可选增强）：cache.db 有数据时读 edges(kind='call', cross) 中
+  // source 属于本文件的行 → 标注调用方节点 label/description（v1 不建外部节点防图爆炸）
+  // cache.db 定位：projectRoot 下没有则向上逐级找（源文件根常是项目根的子目录，如 src/）
+  const crossByCaller = new Map<string, string[]>();
+  const relPath = path.relative(projectRoot, filePath).split(path.sep).join('/') || path.basename(filePath);
+  let cacheDbPath: string | null = null;
+  for (let dir = path.resolve(projectRoot); dir && dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    const cand = path.join(dir, '.design-canvas', 'cache.db');
+    if (fs.existsSync(cand)) {
+      cacheDbPath = cand;
+      break;
+    }
+  }
+  if (cacheDbPath) {
+    let db: Database | null = null;
+    try {
+      const { openDb: open } = await import('../db/db.js');
+      db = open(cacheDbPath);
+      const rows = db
+        .prepare("SELECT source, target FROM edges WHERE kind='call' AND metadata IS NOT NULL AND source LIKE ?")
+        .all(`${relPath}#%`) as Array<{ source: string; target: string }>;
+      for (const r of rows) {
+        const callerQn = r.source.slice(relPath.length + 1);
+        const tp = r.target.split('#');
+        const label = tp.length === 2 ? `${tp[0]}#${tp[1]}` : r.target;
+        let arr = crossByCaller.get(callerQn);
+        if (!arr) {
+          arr = [];
+          crossByCaller.set(callerQn, arr);
+        }
+        if (arr.length < 8) arr.push(label);
+      }
+    } catch {
+      // cache.db 损坏/被锁 → 跳过跨文件标注，不影响主流程
+    } finally {
+      if (db) {
+        try {
+          db.close();
+        } catch {
+          /* 已关闭 */
+        }
+      }
+    }
+  }
+  const crossCallsInfo: DeriveChainResult['cross_calls'] = [...crossByCaller.entries()]
+    .map(([caller, targets]) => ({ caller, targets }))
+    .sort((a, b) => a.caller.localeCompare(b.caller));
+
   const skipped = symbols
-    .filter((s) => !chainSet.has(s.qualified_name))
+    .filter((s) => !chainSet.has(s.qualified_name) && !extraSet.has(s.qualified_name))
     .sort((a, b) => a.start_line - b.start_line)
     .map((s) => s.name);
 
-  // 幂等：清理旧的 derived 节点/边
+  // 幂等：清理旧的 derived 节点/边（含分支）
   const nodePrefix = `${node_id}__s`;
   const edgePrefix = `${node_id}__chain_`;
+  const branchEdgePrefix = `${node_id}__branch_`;
   dsl.geometry.nodes = dsl.geometry.nodes.filter((n) => !n.id.startsWith(nodePrefix));
-  dsl.geometry.edges = (dsl.geometry.edges ?? []).filter((e) => !e.id.startsWith(edgePrefix));
+  dsl.geometry.edges = (dsl.geometry.edges ?? []).filter(
+    (e) => !e.id.startsWith(edgePrefix) && !e.id.startsWith(branchEdgePrefix),
+  );
 
   // 布局：宿主正下方一行（与 conveyor D1 手工布局同风格：220 宽 + 20 间隔）
   const hx = host.x ?? 0;
@@ -438,11 +531,27 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
   const newNodes: Node[] = [];
   const newEdges: Edge[] = [];
   const chainInfo: DeriveChainResult['chain'] = [];
+  const branchInfo: DeriveChainResult['branch'] = [];
+
+  /** 防御：跳过 name 为空或非法的符号（extractName 兜底失败返回代码片段的情况） */
+  const isBadName = (s: ParsedSymbol): boolean =>
+    !s.name || s.name.length > 64 || !/^[A-Za-z_$]/.test(s.name);
+  /** 跨文件调用 → label 后缀（可见标记；完整签名进 description） */
+  const crossSuffix = (qn: string): string => {
+    const targets = crossByCaller.get(qn);
+    if (!targets || targets.length === 0) return '';
+    const fileNames = [...new Set(targets.map((t) => t.split('#')[0].split('/').pop() ?? t))];
+    return ` ·→${fileNames.slice(0, 2).join(',')}${fileNames.length > 2 ? '…' : ''}`;
+  };
+  const crossNote = (qn: string): string => {
+    const targets = crossByCaller.get(qn);
+    return targets && targets.length > 0 ? `\n跨文件调用:\n→ ${targets.join('\n→ ')}` : '';
+  };
 
   let stepNum = 0;
+  const chainNodeByQn = new Map<string, string>();
   chain.forEach((s) => {
-    // 防御：跳过 name 为空或非法的符号（extractName 兜底失败返回代码片段的情况）
-    if (!s.name || s.name.length > 64 || !/^[A-Za-z_$]/.test(s.name)) return;
+    if (isBadName(s)) return;
     stepNum++;
     const id = `${nodePrefix}${stepNum}_${sanitize(s.qualified_name)}`;
     const shapes = signatureToShapes(s.signature, lang);
@@ -451,13 +560,14 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
       x: hx + (stepNum - 1) * 240,
       y: baseY,
       width: 220,
-      label: `${CIRCLED[stepNum - 1] ?? `${stepNum}.`} ${s.name}`,
+      label: `${CIRCLED[stepNum - 1] ?? `${stepNum}.`} ${s.name}${crossSuffix(s.qualified_name)}`,
       layer: 'detail',
       host: node_id,
-      description: s.signature,
+      description: `${s.signature}${crossNote(s.qualified_name)}`,
     };
     if (shapes.in || shapes.out) node.shapes = shapes;
     newNodes.push(node);
+    chainNodeByQn.set(s.qualified_name, id);
     chainInfo.push({ step: stepNum, name: s.name, signature: s.signature, node_id: id });
 
     if (stepNum > 1) {
@@ -470,20 +580,83 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     }
   });
 
+  // 链外节点（extra）：max_steps 截断未入链但被主链函数调用 → 建节点，编号续排
+  const chainCount = stepNum;
+  const nodeIdOf = (qn: string): string => chainNodeByQn.get(qn) ?? '';
+  extraLimited.forEach(({ fn, caller }, bi) => {
+    if (isBadName(fn)) return;
+    const num = chainCount + bi + 1;
+    const id = `${nodePrefix}${num}_${sanitize(fn.qualified_name)}`;
+    const shapes = signatureToShapes(fn.signature, lang);
+    const node: Node = {
+      id,
+      x: hx + (num - 1) * 240,
+      y: baseY,
+      width: 220,
+      label: `${CIRCLED[num - 1] ?? `${num}.`} ${fn.name}·分支${crossSuffix(fn.qualified_name)}`,
+      layer: 'detail',
+      host: node_id,
+      description: `${fn.signature}${crossNote(fn.qualified_name)}`,
+    };
+    if (shapes.in || shapes.out) node.shapes = shapes;
+    newNodes.push(node);
+    chainNodeByQn.set(fn.qualified_name, id);
+    branchInfo.push({ name: fn.name, signature: fn.signature, node_id: id, caller, kind: 'extra' });
+    const callerId = nodeIdOf(caller);
+    if (callerId) {
+      newEdges.push({
+        id: `${branchEdgePrefix}x${bi + 1}`,
+        from: callerId,
+        to: id,
+        label: '分支',
+        type: 'dashed',
+        layer: 'detail',
+      });
+    }
+  });
+
+  // 跳边（jump）：链上 A 调 B 且 B 非 A 紧邻后继 → 虚线边（谁调谁的图结构）
+  let jumpNo = 0;
+  for (const { fromQn, toQn } of jumpLimited) {
+    const fromId = nodeIdOf(fromQn);
+    const toId = nodeIdOf(toQn);
+    if (!fromId || !toId || fromId === toId) continue;
+    jumpNo++;
+    newEdges.push({
+      id: `${branchEdgePrefix}j${jumpNo}`,
+      from: fromId,
+      to: toId,
+      label: '分支',
+      type: 'dashed',
+      layer: 'detail',
+    });
+    const t = byQName.get(toQn);
+    if (t) {
+      branchInfo.push({ name: t.name, signature: t.signature, node_id: toId, caller: fromQn, kind: 'jump' });
+    }
+  }
+
   dsl.geometry.nodes.push(...newNodes);
   dsl.geometry.edges.push(...newEdges);
   saveDSL(dsl);
 
-  const relPath = path.relative(projectRoot, filePath) || path.basename(filePath);
   const lines = [
     `已推导 detail 变形链：feature "${feature}" 节点 ${node_id}`,
-    `源文件：${relPath}（${symbols.length} 个函数，入链 ${chain.length} 个${fullChain.length > chain.length ? `，max_steps=${max_steps} 截断` : ''}）`,
+    `源文件：${relPath}（${symbols.length} 个函数，入链 ${chain.length} 个${fullChain.length > chain.length ? `，max_steps=${max_steps} 截断` : ''}${branchInfo.length > 0 ? `，分支 ${branchInfo.length} 个` : ''}）`,
     '',
     '加工链（按调用顺序）：',
     ...chainInfo.map((c) => `  ${CIRCLED[c.step - 1] ?? c.step} ${c.signature}`),
+    ...(branchInfo.length > 0
+      ? ['', '分支调用（虚线边，谁调谁的图结构）：',
+        ...branchInfo.map((b) => `  ${b.name}（被 ${b.caller} 调用${b.kind === 'jump' ? '，链上跳边' : '，截断建节点'}）`)]
+      : []),
+    ...(crossCallsInfo.length > 0
+      ? ['', '跨文件调用（→ 目标文件#函数，节点 label 后缀标记）：',
+        ...crossCallsInfo.map((c) => `  ${c.caller} → ${c.targets.join(', ')}`)]
+      : []),
     '',
-    `未入链函数（不在主调用路径或被截断）: ${skipped.length > 0 ? skipped.join(', ') : '无'}`,
-    ...(chain.length === 1 && symbols.length > 1
+    `未入链函数（不在主调用路径、非分支或被截断）: ${skipped.length > 0 ? skipped.join(', ') : '无'}`,
+    ...(chain.length === 1 && branchInfo.length === 0 && symbols.length > 1
       ? [
           '',
           '提示：该文件函数互不调用（扁平 API 面），变形链退化为单节点。' +
@@ -495,7 +668,7 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     '  1. update_node 把 label 改为人话步骤名（如 "① 预算核算"）',
     '  2. update_node 给 shapes.in/out 填 label（人话描述，渲染优先于类型推导）',
     '  3. 相邻细步骤可聚合：保留语义步骤节点，删除过细节点并重连边',
-    '注意：调用边为文本匹配推导，同名方法可能误连，语义标注阶段请修正。',
+    '注意：调用边为 AST 级精确提取（parseFileFull.calls）；跨文件标注来自 cache.db，缺省无。',
   ];
 
   return {
@@ -503,6 +676,8 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
     feature,
     node_id,
     chain: chainInfo,
+    branch: branchInfo,
+    cross_calls: crossCallsInfo,
     skipped,
     nodes_created: newNodes.length,
     edges_created: newEdges.length,

@@ -129,7 +129,8 @@ describe('derive_detail_chain - Go', () => {
     // 链序 = DFS 调用序：Compose → checkBudget → assemble → helperUnused
     expect(result.chain.map((c) => c.name)).toEqual(['Compose', 'checkBudget', 'assemble', 'helperUnused']);
     expect(result.nodes_created).toBe(4);
-    expect(result.edges_created).toBe(3);
+    // 3 链边 + 2 跳边（Compose→assemble、Compose→helperUnused 非紧邻后继）
+    expect(result.edges_created).toBe(5);
 
     const dsl = getDSL('f_go')!;
     const derived = dsl.geometry.nodes.filter((n) => n.host === 'host_node');
@@ -266,14 +267,16 @@ func decode(data []byte) []byte {
     expect(proc.shapes?.out).toEqual({ type: 'string', label: '字节串' });
   });
 
-  it('max_steps 截断，其余进 skipped', async () => {
+  it('max_steps 截断：未入链但被主链调用的函数变 extra 分支节点（不再算 skipped）', async () => {
     writeFixture('compose.go', GO_FIXTURE);
     setupHost('f_go', 'compose.go');
     const result = await deriveDetailChain({ feature: 'f_go', node_id: 'host_node', project_root: tmpDir, max_steps: 2 });
-    expect(result.nodes_created).toBe(2);
-    expect(result.edges_created).toBe(1);
-    expect(result.skipped).toContain('assemble');
-    expect(result.skipped).toContain('helperUnused');
+    // 主链截断为 2：Compose、checkBudget；assemble/helperUnused 被 Compose 调用 → extra 分支节点
+    expect(result.chain.map((c) => c.name)).toEqual(['Compose', 'checkBudget']);
+    expect(result.nodes_created).toBe(4);
+    expect(result.edges_created).toBe(3); // 1 链边 + 2 extra 分支边
+    expect(result.skipped).toEqual([]);
+    expect(result.branch.filter((b) => b.kind === 'extra').map((b) => b.name).sort()).toEqual(['assemble', 'helperUnused']);
   });
 
   it('幂等重跑：旧 derived 节点/边被清理重建', async () => {
@@ -379,5 +382,140 @@ describe('derive_detail_chain - 错误', () => {
     setupHost('f_direct'); // 无 semantic file
     const result = await deriveDetailChain({ feature: 'f_direct', node_id: 'host_node', source_path: abs });
     expect(result.nodes_created).toBe(4);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// AST 调用图 + 分支 + 跨文件标注（调用边接入渲染）
+// ─────────────────────────────────────────────────────────────
+
+const BRANCH_FIXTURE = `package branch
+
+func Entry(items []string) string {
+	a := stepA(items)
+	if len(items) > 3 {
+		return a + stepB(items)
+	}
+	return a
+}
+
+func stepA(items []string) string { return "a" }
+
+func stepB(items []string) string { return "b" }
+
+func orphan(x int) int { return x }
+`;
+
+describe('derive_detail_chain - AST 调用图 + 分支', () => {
+  it('同调用者多分支：非紧邻后继画虚线跳边（谁调谁的图结构）', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    setupHost('f_branch', 'branch.go');
+    const result = await deriveDetailChain({ feature: 'f_branch', node_id: 'host_node', project_root: tmpDir });
+
+    // DFS 全遍历：Entry → stepA → stepB（stepA 无子调用）；orphan 无入边 → skipped
+    expect(result.chain.map((c) => c.name)).toEqual(['Entry', 'stepA', 'stepB']);
+    expect(result.skipped).toEqual(['orphan']);
+    expect(result.nodes_created).toBe(3);
+    expect(result.edges_created).toBe(3); // 2 链边 + 1 跳边（Entry→stepB）
+
+    // 跳边：Entry → stepB（stepB 非 Entry 紧邻后继）
+    const jumps = result.branch.filter((b) => b.kind === 'jump');
+    expect(jumps).toHaveLength(1);
+    expect(jumps[0].caller).toBe('Entry');
+    expect(jumps[0].name).toBe('stepB');
+
+    const dsl = getDSL('f_branch')!;
+    const chainByQn = new Map(result.chain.map((c) => [c.name, c.node_id]));
+    // 链上节点无 ·分支 标记；stepB 是链节点
+    expect(dsl.geometry.nodes.find((n) => n.id === chainByQn.get('stepB'))!.label).not.toContain('·分支');
+    // 跳边：虚线 + label 分支 + detail 层 + Entry → stepB
+    const branchEdges = dsl.geometry.edges.filter((e) => e.id.startsWith('host_node__branch_'));
+    expect(branchEdges).toHaveLength(1);
+    expect(branchEdges[0].type).toBe('dashed');
+    expect(branchEdges[0].label).toBe('分支');
+    expect(branchEdges[0].layer).toBe('detail');
+    expect(branchEdges[0].from).toBe(chainByQn.get('Entry'));
+    expect(branchEdges[0].to).toBe(chainByQn.get('stepB'));
+  });
+
+  it('AST 精确性：局部闭包（非符号）不再被文本法误连为调用', async () => {
+    // 文本法会把 x( 出现即连边；AST 级只认真实 call 节点且 callee 须为符号
+    const fixture = `package precise
+
+func Run(n int) int {
+	// 注释里的 foo( 与字符串 "bar(" 都不应连边
+	x := func(v int) int { return v * 2 }
+	y := x(n)
+	if y > 10 {
+		return y
+	}
+	return n
+}
+`;
+    writeFixture('precise.go', fixture);
+    setupHost('f_precise', 'precise.go');
+    const result = await deriveDetailChain({ feature: 'f_precise', node_id: 'host_node', project_root: tmpDir });
+    // x 是局部闭包（不是符号）→ 不产生符号节点；链只有 Run 一个符号
+    expect(result.chain.map((c) => c.name)).toEqual(['Run']);
+    expect(result.nodes_created).toBe(1);
+    expect(result.skipped).toEqual([]);
+    expect(result.branch).toEqual([]);
+  });
+
+  it('跨文件调用标注：cache.db 有 cross 边时节点 label 加 → 标记', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    setupHost('f_cross', 'branch.go');
+    // 造项目缓存：tmpDir/.design-canvas/cache.db，插一条跨文件调用边（绕过外键）
+    const { openDb } = await import('../../src/db/db');
+    const db = openDb(path.join(tmpDir, '.design-canvas', 'cache.db'));
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare(
+      "INSERT INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', 6, NULL, ?)",
+    ).run('branch.go#Entry', 'other.ts#OtherFn', JSON.stringify({ cross: true }));
+    db.close();
+
+    const result = await deriveDetailChain({ feature: 'f_cross', node_id: 'host_node', project_root: tmpDir });
+    expect(result.cross_calls.length).toBe(1);
+    expect(result.cross_calls[0].caller).toBe('Entry');
+    expect(result.cross_calls[0].targets).toEqual(['other.ts#OtherFn']);
+
+    const dsl = getDSL('f_cross')!;
+    const entryNode = dsl.geometry.nodes.find((n) => n.id === result.chain[0].node_id)!;
+    expect(entryNode.label).toContain('·→other.ts');
+    expect(entryNode.description).toContain('other.ts#OtherFn');
+  });
+
+  it('无 cache.db 时跨文件标注静默跳过', async () => {
+    writeFixture('branch.go', BRANCH_FIXTURE);
+    setupHost('f_nocache', 'branch.go');
+    const result = await deriveDetailChain({ feature: 'f_nocache', node_id: 'host_node', project_root: tmpDir });
+    expect(result.cross_calls).toEqual([]);
+    expect(result.nodes_created).toBe(3);
+  });
+
+  it('max_branches 限制跳边数量', async () => {
+    const fixture = `package many
+
+func Main() int {
+	a := f1()
+	b := f2()
+	c := f3()
+	return a + b + c
+}
+
+func f1() int { return 1 }
+func f2() int { return 2 }
+func f3() int { return 3 }
+`;
+    writeFixture('many.go', fixture);
+    setupHost('f_many', 'many.go');
+    const result = await deriveDetailChain({ feature: 'f_many', node_id: 'host_node', project_root: tmpDir, max_branches: 2 });
+    // DFS 全遍历：Main → f1 → f2 → f3（链边 3）；跳边 Main→f2、Main→f3（非紧邻），截 2
+    expect(result.chain.map((c) => c.name)).toEqual(['Main', 'f1', 'f2', 'f3']);
+    expect(result.branch).toHaveLength(2);
+    expect(result.branch.every((b) => b.kind === 'jump')).toBe(true);
+    expect(result.skipped).toEqual([]);
+    expect(result.nodes_created).toBe(4);
+    expect(result.edges_created).toBe(5); // 3 链边 + 2 跳边
   });
 });
