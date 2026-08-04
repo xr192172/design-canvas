@@ -279,10 +279,38 @@ describe('evaluateCond - 轻量表达式求值', () => {
     expect(r.error).toContain('未匹配变量：token');
   });
 
-  it('函数调用（len(items)）→ ok:false + 明确原因', () => {
+  it('方法调用（includes/startsWith）+ 三元 + 可选链', () => {
+    expect(evaluateCond("tags.includes('hot')", { tags: ['hot', 'new'] })).toEqual({ ok: true, value: true });
+    expect(evaluateCond("str.startsWith('示例')", { str: '示例文本' })).toEqual({ ok: true, value: true });
+    expect(evaluateCond("a > 1 ? 'x' : 'y'", { a: 2 }).value).toBe('x');
+    expect(evaluateCond("cfg?.mode === 'fast'", { cfg: { mode: 'fast' } })).toEqual({ ok: true, value: true });
+  });
+
+  it('内建纯函数可用（Math/parseInt/正则）', () => {
+    expect(evaluateCond('Math.min(a, b) > 1', { a: 5, b: 2 })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('parseInt(x, 10) === 7', { x: '7' })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('/^h/.test(s)', { s: 'hot' })).toEqual({ ok: true, value: true });
+  });
+
+  it('全局阻断：window/document/fetch 访问 → 未匹配变量（接触不到外界）', () => {
+    const r = evaluateCond('window !== undefined', {});
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('未匹配变量：window');
+    expect(evaluateCond('document.title', {}).error).toContain('未匹配变量：document');
+    expect(evaluateCond('fetch(1)', {}).error).toContain('未匹配变量：fetch');
+  });
+
+  it('语句语法（循环/声明）→ SyntaxError 无法求值（只能算表达式）', () => {
+    expect(evaluateCond('while (true) {}', {}).ok).toBe(false);
+    expect(evaluateCond('let x = 1', {}).ok).toBe(false);
+    // 赋值是合法表达式（a=1 返回 1），但只写进每次调用新建的局部 env，无副作用
+    expect(evaluateCond('a = 1', { a: 1 })).toEqual({ ok: true, value: 1 });
+  });
+
+  it('函数调用（len(items)）→ ok:false + 未匹配变量', () => {
     const r = evaluateCond('i < len(sections)', { i: 1 });
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('不支持函数调用：len');
+    expect(r.error).toContain('未匹配变量：len');
   });
 
   it('语法错误 → ok:false', () => {
@@ -327,10 +355,10 @@ describe('applyJudgements - 判定走向选择', () => {
     expect(resEmpty[0].error).toContain('未匹配变量');
 
     const resLoop = applyJudgements(js, { over: true, i: 1 });
-    // branch 可求值，loop 因 len() 调用无法求值
+    // branch 可求值，loop 因 len() 调用（函数实现不在 DSL）无法求值
     expect(resLoop[0].evaluable).toBe(true);
     expect(resLoop[0].chosenVia).toBe('是');
     expect(resLoop[1].evaluable).toBe(false);
-    expect(resLoop[1].error).toContain('不支持函数调用');
+    expect(resLoop[1].error).toContain('未匹配变量：len');
   });
 });
