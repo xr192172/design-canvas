@@ -214,7 +214,7 @@
 |------|------|-----|------|------|------|
 | **基础设施** | 1 | SQLite 存储 + 文件 hash 增量 backfill | CodeGraph | 无 | 🚧 v1 已落地（src/db/，见 7.3） |
 | | 2 | MCP 工具收敛到 ~8 个（JSON Patch 模式） | CodeGraph | 无 | ⏳ |
-| | 3 | 调用边级别提取（symbol + call_edge + dependency 表） | CodeGraph | 1 | ⏳ |
+| | 3 | 调用边级别提取（symbol + call_edge + dependency 表） | CodeGraph | 1 | 🚧 同文件调用边已落地（AST 级，self src/ 528 条），跨文件解析待做 |
 | **代码理解** | 4 | Diff Impact Analysis（变更影响范围追溯） | Understand Anything | 3 | ⏳ |
 | | 5 | architecture-analyzer 角色（推断架构层 + 职责回填） | Understand Anything | 3 | ⏳ |
 | | 6 | Guided Tours（拓扑排序学习路径 + 动画播放列表） | Understand Anything | DSL edges | ⏳ |

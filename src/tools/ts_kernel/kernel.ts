@@ -45,6 +45,21 @@ export interface ParsedImport {
   line: number;
 }
 
+/** 函数级调用边（同文件内，AST 提取，路线图序号 3 的第一步） */
+export interface ParsedCall {
+  /** 调用者符号 qualified_name（同文件内） */
+  caller: string;
+  /** 被调用名（去点后的尾部标识符，如 'Process' from 'svc.Process' / 'this.method'） */
+  callee: string;
+  /** 完整被调用表达式（含前缀，如 'svc.Process'），未解析时写入 unresolved_refs */
+  callee_expr: string;
+  line: number;
+  /** 同文件符号表命中（true）——false 表示外部/内置/跨文件候选 */
+  resolved: boolean;
+  /** resolved 时对应的同文件符号 qualified_name */
+  callee_qn?: string;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 节点类型 → 通用 Symbol kind 映射
 // ─────────────────────────────────────────────────────────────
@@ -214,6 +229,118 @@ function traverseAndExtract(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 调用边提取（函数级，AST 级，路线图序号 3）
+// ─────────────────────────────────────────────────────────────
+
+/** 各语言 call 节点类型 */
+const CALL_NODES: Record<string, string> = {
+  go: 'call_expression',
+  typescript: 'call_expression',
+  tsx: 'call_expression',
+  javascript: 'call_expression',
+  jsx: 'call_expression',
+  python: 'call',
+};
+
+function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
+  return CALL_NODES[lang.name] === node.type;
+}
+
+/** 从 call 节点提取被调用名：取 function 字段文本的尾部标识符（去点、去泛型参数） */
+function extractCallee(callNode: SyntaxNodeLike, langName: string): { name: string; expr: string } | null {
+  const fn = callNode.childForFieldName('function');
+  if (!fn) return null;
+  const expr = fn.text;
+  // 泛型调用 fn<T>(...)：取 < 前的基底再取尾部标识符（`svc.Process` → Process / `a.b.c` → c）
+  const base = expr.split('<')[0].trim();
+  const m = base.match(/([A-Za-z_$][\w$]*)\s*$/);
+  if (!m) return null;
+  const name = m[1];
+  if (!isValidIdentifier(name)) return null;
+  return { name, expr };
+}
+
+/**
+ * 遍历函数体提取调用边（跳过嵌套函数声明子树——其调用归属嵌套函数自身，
+ * 由 traverseAndExtractCalls 递归处理）。
+ */
+function extractCallsFromBody(
+  node: SyntaxNodeLike,
+  lang: LanguageEntry,
+  callerQn: string,
+  calls: ParsedCall[],
+  symbols: ParsedSymbol[],
+  depth: number = 0
+): void {
+  if (depth > 200) return;
+  if (lang.symbol_nodes.includes(node.type)) return;
+  if (isCallNode(node, lang)) {
+    const c = extractCallee(node, lang.name);
+    if (c) {
+      const sym = symbols.find((s) => s.name === c.name);
+      calls.push({
+        caller: callerQn,
+        callee: c.name,
+        callee_expr: c.expr,
+        line: node.startPosition.row + 1,
+        resolved: !!sym,
+        callee_qn: sym ? sym.qualified_name : undefined,
+      });
+    }
+    // 继续递归子节点：参数/回调中可能嵌套调用（如 fmt.Println(hello(x)) / arr.map(fn)）
+    // callee 表达式（identifier/selector）不是 call 节点，不会被误提取
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child) extractCallsFromBody(child, lang, callerQn, calls, symbols, depth + 1);
+  }
+}
+
+/**
+ * 遍历 AST 提取调用边：调用归属 = 包含它的最近函数/方法符号（class 压栈仅为限定名，
+ * 不提取调用）。与符号提取独立遍历（先符号后调用），保证 nameToQn 完整。
+ */
+function traverseAndExtractCalls(
+  node: SyntaxNodeLike,
+  lang: LanguageEntry,
+  symbols: ParsedSymbol[],
+  calls: ParsedCall[],
+  funcStack: string[] = [],
+  depth: number = 0
+): void {
+  if (depth > 200) return;
+  if (lang.symbol_nodes.includes(node.type)) {
+    const name = extractName(node, lang.field_map);
+    if (name) {
+      const qn = funcStack.length > 0 ? `${funcStack[funcStack.length - 1]}.${name}` : name;
+      const kind = nodeTypeToKind(node.type, funcStack.length > 0 ? funcStack[funcStack.length - 1] : undefined);
+      const body = node.childForFieldName('body') || node.childForFieldName('suite');
+      if (body) {
+        funcStack.push(qn);
+        if (kind === 'function' || kind === 'method') {
+          // 本函数体调用（跳过嵌套函数子树）
+          for (let i = 0; i < body.childCount; i++) {
+            const child = body.child(i);
+            if (child) extractCallsFromBody(child, lang, qn, calls, symbols, depth + 1);
+          }
+        }
+        // 继续递归找方法/嵌套函数
+        for (let i = 0; i < body.childCount; i++) {
+          const child = body.child(i);
+          if (child) traverseAndExtractCalls(child, lang, symbols, calls, funcStack, depth + 1);
+        }
+        funcStack.pop();
+      }
+      return;
+    }
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child) traverseAndExtractCalls(child, lang, symbols, calls, funcStack, depth + 1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // import 提取（逐语言）
 // ─────────────────────────────────────────────────────────────
 
@@ -360,10 +487,12 @@ export async function parseAstRoot(
 
 export type { SyntaxNodeLike };
 
-/** 单文件完整解析结果（一次 parse，符号 + import 双产出） */
+/** 单文件完整解析结果（一次 parse，符号 + import + 调用边三产出） */
 export interface ParsedFile {
   symbols: ParsedSymbol[];
   imports: ParsedImport[];
+  /** 函数级调用边（同文件解析；跨文件/外部为 resolved=false，见 ParsedCall） */
+  calls: ParsedCall[];
   /** 解析失败原因（语言包加载失败 / parse 抛错）；成功时缺省。
    *  调用方借此区分"文件本为空"与"解析静默失败"（后者会丢依赖边）。 */
   error?: string;
@@ -374,7 +503,7 @@ export interface ParsedFile {
  * 返回空数组字段表示：文件类型不支持 / 解析失败 / 无对应内容。
  */
 export async function parseFileFull(filePath: string, content: string): Promise<ParsedFile> {
-  const empty: ParsedFile = { symbols: [], imports: [] };
+  const empty: ParsedFile = { symbols: [], imports: [], calls: [] };
   const ext = '.' + (filePath.split('.').pop() || '');
   const lang = isExtSupported(ext);
   if (!lang) return empty;
@@ -386,9 +515,11 @@ export async function parseFileFull(filePath: string, content: string): Promise<
     const tree = parseContent(parser as ParserLike, content);
     const symbols: ParsedSymbol[] = [];
     const imports: ParsedImport[] = [];
+    const calls: ParsedCall[] = [];
     traverseAndExtract(tree.rootNode, lang, symbols, undefined);
     traverseAndExtractImports(tree.rootNode, lang, imports);
-    return { symbols, imports };
+    traverseAndExtractCalls(tree.rootNode, lang, symbols, calls);
+    return { symbols, imports, calls };
   } catch (e) {
     console.warn(`[ts_kernel] parse ${filePath} failed: ${(e as Error).message}`);
     return { ...empty, error: (e as Error).message };

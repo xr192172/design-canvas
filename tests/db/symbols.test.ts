@@ -1,4 +1,4 @@
-﻿/**
+/**
  * src/db 符号缓存层单元测试
  *
  * 覆盖：schema 幂等打开、初始同步、hash 增量跳过、单文件变更重同步、
@@ -84,7 +84,8 @@ describe('syncProject - 初始同步与增量跳过', () => {
     // 2 文件节点 + parseConfig/ConfigLoader/load/helperB 等符号节点
     expect(stats.files).toBe(2);
     expect(stats.nodes).toBeGreaterThanOrEqual(5);
-    expect(stats.edges).toBe(1); // a.ts → b.ts import
+    // 2 条边：a.ts → b.ts import + a.ts 内部 call（ConfigLoader.load → parseConfig）
+    expect(stats.edges).toBe(2);
   });
 
   it('hash 未变重跑全部 skipped', async () => {
@@ -122,13 +123,33 @@ describe('import 边生命周期', () => {
     expect(edgeAfter.c).toBe(1);
   });
 
-  it('removeFile 删除目标文件后级联清边', async () => {
+  it('removeFile 删除目标文件后级联清边（保留源文件内部 call 边）', async () => {
     await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
     removeFile(db, dir, path.join(dir, 'b.ts'));
     const stats = getIndexStats(db);
     expect(stats.files).toBe(1);
-    expect(stats.edges).toBe(0);
+    // import 边随 b.ts 级联删除；a.ts 内部 call 边（load→parseConfig）与 b 无关，保留
+    expect(stats.edges).toBe(1);
     expect(searchSymbols(db, 'helperB')).toEqual([]);
+  });
+});
+
+describe('调用边入库（路线图序号 3）', () => {
+  it('同文件调用写 edges(kind=call)，跨文件/外部调用进 unresolved_refs', async () => {
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
+    const callEdges = db
+      .prepare("SELECT source, target, line FROM edges WHERE kind='call'")
+      .all() as Array<{ source: string; target: string; line: number }>;
+    // a.ts 内部：ConfigLoader.load → parseConfig
+    const call = callEdges.find((e) => e.source === 'a.ts#ConfigLoader.load');
+    expect(call?.target).toBe('a.ts#parseConfig');
+
+    // unresolved：parseConfig → helperB（import 自 b.ts，同文件符号表无 → pending）
+    const unresolved = db
+      .prepare("SELECT from_node_id, reference_name, status FROM unresolved_refs WHERE status='pending'")
+      .all() as Array<{ from_node_id: string; reference_name: string; status: string }>;
+    const u = unresolved.find((r) => r.reference_name === 'helperB');
+    expect(u?.from_node_id).toBe('a.ts#parseConfig');
   });
 });
 
@@ -251,7 +272,8 @@ describe('pruneDeletedFiles - 删除侦测', () => {
     expect(pruned).toEqual(['b.ts']);
     const stats = getIndexStats(db);
     expect(stats.files).toBe(1);
-    expect(stats.edges).toBe(0); // a→b 边随 b 节点级联删除
+    // a→b import 边随 b 节点级联删除；a.ts 内部 call 边保留
+    expect(stats.edges).toBe(1);
     expect(searchSymbols(db, 'helperB')).toEqual([]);
     expect(getFileParse(db, 'b.ts')).toBeNull();
   });

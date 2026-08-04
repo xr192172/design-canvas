@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 符号索引写入路径：ts_kernel 解析结果 → cache.db（增量）
  *
  * 增量语义：
@@ -29,6 +29,7 @@ export interface SyncFileResult {
   status: SyncStatus;
   node_count: number;
   edge_count: number;
+  call_count?: number;
   error?: string;
 }
 
@@ -178,6 +179,28 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       edgeCount++;
     }
 
+    // 3.5 调用边（同文件函数级，kind='call'；未解析的跨文件/外部调用进 unresolved_refs）
+    db.prepare("DELETE FROM edges WHERE source LIKE ? AND kind = 'call'").run(`${rel}#%`);
+    db.prepare("DELETE FROM unresolved_refs WHERE from_node_id LIKE ?").run(`${rel}#%`);
+    const idOf = (qn: string) => `${rel}#${qn}`;
+    const insCall = db.prepare(
+      'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, \'call\', ?, NULL, NULL)',
+    );
+    const insUnresolved = db.prepare(
+      `INSERT OR IGNORE INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col, file_path, language, status, name_tail)
+       VALUES (?, ?, 'call', ?, 0, ?, ?, 'pending', ?)`,
+    );
+    let callCount = 0;
+    for (const c of parsed.calls) {
+      const srcId = idOf(c.caller);
+      if (c.resolved && c.callee_qn) {
+        insCall.run(srcId, idOf(c.callee_qn), c.line);
+        callCount++;
+      } else {
+        insUnresolved.run(srcId, c.callee_expr, c.line, rel, ext, c.callee);
+      }
+    }
+
     // 4. 原始 import 记录（全量种类：relative + package）
     //    import_project 缓存路径靠它重建依赖边——edges 表只有已解析的相对导入，
     //    Go 包路径 / Python 点分模块的原始 source 串只存在这里
@@ -194,7 +217,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     ).run(rel, hash, ext, stat.size, Math.round(stat.mtimeMs), now, parsed.symbols.length);
 
     db.exec('COMMIT');
-    return { path: rel, status: 'updated', node_count: parsed.symbols.length, edge_count: edgeCount };
+    return { path: rel, status: 'updated', node_count: parsed.symbols.length, edge_count: edgeCount, call_count: callCount };
   } catch (e) {
     db.exec('ROLLBACK');
     return fail((e as Error).message);
