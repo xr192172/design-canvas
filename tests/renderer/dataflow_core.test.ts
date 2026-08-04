@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mockValue, buildDataTrace } from '../../src/renderer/dataflow_core';
+import { mockValue, buildDataTrace, collectJudgements } from '../../src/renderer/dataflow_core';
 
 // ─────────────────────────────────────────────────────────────
 // mockValue
@@ -89,6 +89,67 @@ function fixtureEdges() {
     { id: 'host__branch_j1', from: 'host__s1_Entry', to: 'host__s3_stepB', label: '分支', type: 'dashed' },
   ];
 }
+
+// ─────────────────────────────────────────────────────────────
+// collectJudgements - CFG 判定提取
+// ─────────────────────────────────────────────────────────────
+
+function cfgFixture() {
+  const nodes = [
+    { id: 'host__alg_n1', label: '▶ Compose', style: { shape: 'circle' }, description: 'entry · 源码第 1 行' },
+    { id: 'host__alg_n2', label: '检查预算', style: { shape: 'diamond' }, description: 'branch · 源码第 8 行\n条件：over == true' },
+    { id: 'host__alg_n3', label: '返回错误', style: { shape: 'rounded' } },
+    { id: 'host__alg_n4', label: '组装', style: { shape: 'rounded' } },
+    { id: 'host__alg_n5', label: '遍历 sections', style: { shape: 'hexagon' }, description: 'loop · 源码第 12 行\n条件：i < len(sections)' },
+    { id: 'host__alg_n6', label: '结束', style: { shape: 'circle' } },
+  ];
+  const edges = [
+    { id: 'host__alge_0', from: 'host__alg_n1', to: 'host__alg_n2' },
+    { id: 'host__alge_1', from: 'host__alg_n2', to: 'host__alg_n3', label: '是' },
+    { id: 'host__alge_2', from: 'host__alg_n2', to: 'host__alg_n4', label: '否' },
+    { id: 'host__alge_3', from: 'host__alg_n4', to: 'host__alg_n5' },
+    { id: 'host__alge_4', from: 'host__alg_n5', to: 'host__alg_n6', label: '重复' },
+  ];
+  return { nodes, edges };
+}
+
+describe('collectJudgements - CFG 判定精确化', () => {
+  it('按 entry ▶函数名 关联，收集 branch/loop 的条件与走向', () => {
+    const { nodes, edges } = cfgFixture();
+    const js = collectJudgements(nodes, edges, 'host', 'Compose');
+
+    expect(js).toHaveLength(2);
+    // branch：条件原文 + 是/否走向
+    expect(js[0].cond).toBe('over == true');
+    expect(js[0].branches).toEqual([
+      { via: '是', to: '返回错误' },
+      { via: '否', to: '组装' },
+    ]);
+    // loop：嵌套判定也收集（BFS 深入）
+    expect(js[1].cond).toBe('i < len(sections)');
+    expect(js[1].branches[0].via).toBe('重复');
+  });
+
+  it('无 CFG（宿主无 __alg_ 节点）→ 空', () => {
+    expect(collectJudgements([], [], 'host', 'Compose')).toEqual([]);
+    expect(collectJudgements(cfgFixture().nodes, [], 'host', 'Compose')).toEqual([]);
+  });
+
+  it('entry 不存在（函数名不匹配）→ 空', () => {
+    const { nodes, edges } = cfgFixture();
+    expect(collectJudgements(nodes, edges, 'host', 'Ghost')).toEqual([]);
+  });
+
+  it('无 host/funcName → 空', () => {
+    const { nodes, edges } = cfgFixture();
+    expect(collectJudgements(nodes, edges, '', 'Compose')).toEqual([]);
+    expect(collectJudgements(nodes, edges, 'host', '')).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// buildDataTrace
+// ─────────────────────────────────────────────────────────────
 
 describe('buildDataTrace - 沿调用链推演', () => {
   it('链式传递：上一步 out → 下一步 in；跳边标注分流', () => {

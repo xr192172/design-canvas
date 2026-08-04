@@ -24,6 +24,9 @@ export interface DfNodeLike {
   layer?: string;
   host?: string;
   shapes?: { in?: unknown; out?: unknown } | null;
+  /** derive_algorithm 生成的 CFG 节点用 style.shape 区分判定形状 */
+  style?: { shape?: string; tone?: string } | null;
+  description?: string;
 }
 
 export interface DfEdgeLike {
@@ -31,6 +34,7 @@ export interface DfEdgeLike {
   from: string;
   to: string;
   type?: string;
+  label?: string;
 }
 
 export interface DfTraceStep {
@@ -51,6 +55,94 @@ export interface DfTrace {
   steps: DfTraceStep[];
   /** 途经的跳边 id（渲染时高亮虚线） */
   branchEdgeIds: string[];
+}
+
+// ─────────────────────────────────────────────────────────────
+// 判定精确化（CFG 接入）：函数内部 if/loop 的条件原文与走向
+// ─────────────────────────────────────────────────────────────
+
+export interface DfJudgementBranch {
+  /** 出边 label（是/否/进入/重复/结束…） */
+  via: string;
+  /** 走向目标节点 label（截断） */
+  to: string;
+}
+
+export interface DfJudgement {
+  /** 条件原文（如 'len(items) > 3'） */
+  cond: string;
+  /** 判定点节点 id */
+  nodeId: string;
+  /** 走向分支 */
+  branches: DfJudgementBranch[];
+}
+
+/**
+ * 收集宿主下某函数的 CFG 判定（derive_algorithm 产物，id 前缀 {host}__alg_）。
+ * 关联方式：CFG entry 节点 label 为 "▶ {funcName}"（derive_algorithm 生成规则）。
+ * 沿出边 BFS 收集 branch（diamond）/ loop（hexagon）节点的条件与走向。
+ * v1 只展示真实条件与走向结构，不做 mock 求值（mock 值是假值，求值无意义）。
+ */
+export function collectJudgements(
+  nodes: DfNodeLike[],
+  edges: DfEdgeLike[],
+  host: string,
+  funcName: string,
+): DfJudgement[] {
+  if (!host || !funcName) return [];
+  const algPrefix = host + '__alg_';
+  const algEdgePrefix = host + '__alge_';
+  const algNodes = nodes.filter((n) => n.id.startsWith(algPrefix));
+  if (algNodes.length === 0) return [];
+  const nodeById = new Map(algNodes.map((n) => [n.id, n]));
+
+  // entry：label === "▶ {funcName}"
+  const entry = algNodes.find((n) => n.label === `▶ ${funcName}`) ?? algNodes.find((n) => (n.label || '').includes(funcName) && (n.label || '').startsWith('▶'));
+  if (!entry) return [];
+
+  // 出边索引
+  const outEdges = new Map<string, DfEdgeLike[]>();
+  for (const e of edges) {
+    if (!e.id.startsWith(algEdgePrefix)) continue;
+    let arr = outEdges.get(e.from);
+    if (!arr) {
+      arr = [];
+      outEdges.set(e.from, arr);
+    }
+    arr.push(e);
+  }
+
+  const kindOf = (n: DfNodeLike): string => {
+    const shape = (n.style as { shape?: string } | undefined)?.shape;
+    if (shape === 'diamond') return 'branch';
+    if (shape === 'hexagon') return 'loop';
+    return '';
+  };
+
+  // BFS 从 entry 出发，遇判定节点收集，遇 return/throw/exit 不深入（它们是出口）
+  const judgements: DfJudgement[] = [];
+  const visited = new Set<string>();
+  const queue: string[] = [entry.id];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const kind = kindOf(nodeById.get(cur) ?? ({} as DfNodeLike));
+    const n = nodeById.get(cur);
+    if (kind === 'branch' || kind === 'loop') {
+      if (n) {
+        const branches = (outEdges.get(cur) ?? []).map((e) => {
+          const t = nodeById.get(e.to);
+          const label = (t?.label ?? e.to).replace(/\s+/g, ' ').slice(0, 40);
+          return { via: e.label || '', to: label };
+        });
+        judgements.push({ cond: (n.description ?? '').split('\n').find((l) => l.startsWith('条件：'))?.slice(3) ?? '', nodeId: cur, branches });
+      }
+      // 判定点也继续深入（嵌套 if/循环内的判定也要收集；visited 防环）
+    }
+    for (const e of outEdges.get(cur) ?? []) queue.push(e.to);
+  }
+  return judgements;
 }
 
 // ─────────────────────────────────────────────────────────────

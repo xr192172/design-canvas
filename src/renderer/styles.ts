@@ -1276,6 +1276,35 @@ footer button:active {
   color: #f0c27a;
   font-size: 11px;
 }
+.trace-judge {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.25);
+}
+.trace-judge-cond {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ffd479;
+  margin-bottom: 3px;
+  word-break: break-all;
+}
+.trace-judge-row {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: #c9d4ea;
+  margin: 1px 0;
+}
+.trace-via {
+  flex: none;
+  min-width: 26px;
+  text-align: center;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(240, 136, 62, 0.25);
+  color: #f0a050;
+  font-size: 10px;
+}
 .history-indicator {
   font-size: 11px;
   color: var(--theme-text-dim);

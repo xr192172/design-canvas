@@ -1303,7 +1303,18 @@ ${DATAFLOW_SOURCE}
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }
 
-  // 当前步骤浮层：进/出值 + 分流标注
+  // 当前步骤节点所属函数的 CFG 判定（真实条件 + 走向，来自 derive_algorithm 产物）
+  function judgementsOf(nodeId) {
+    const n = nodeById[nodeId];
+    if (!n || !n.host) return [];
+    const funcName = (n.label || '').replace(/^[①-⑫]|^\d+\.\s*/, '').replace(/·.*$/, '').trim();
+    if (!funcName) return [];
+    const nodes = (dsl.geometry?.nodes || []).map(x => ({ id: x.id, label: x.label, layer: x.layer, host: x.host, shapes: x.shapes || null, style: x.style || null, description: x.description }));
+    const edges = (dsl.geometry?.edges || []).map(x => ({ id: x.id, from: x.from, to: x.to, type: x.type }));
+    return collectJudgements(nodes, edges, n.host, funcName);
+  }
+
+  // 当前步骤浮层：进/出值 + 分流标注 + CFG 判定
   function showTraceBubble(step, cx, cy) {
     let bubble = document.getElementById('trace-bubble');
     if (!bubble) {
@@ -1316,11 +1327,21 @@ ${DATAFLOW_SOURCE}
       const s = JSON.stringify(v);
       return s && s.length > 60 ? s.slice(0, 60) + '…' : s;
     };
+    const js = judgementsOf(step.nodeId);
+    const jsHtml = js.length > 0
+      ? '<div class="trace-judge">' + js.map((j) =>
+          '<div class="trace-judge-cond">⚖ ' + escapeHtml(j.cond || '条件') + '</div>' +
+          (j.branches.map((b) =>
+            '<div class="trace-judge-row"><span class="trace-via">' + escapeHtml(b.via || '→') + '</span><span>' + escapeHtml(b.to) + '</span></div>'
+          ).join(''))
+        ).join('') + '</div>'
+      : '';
     bubble.innerHTML =
       '<div class="trace-bubble-title">' + escapeHtml(step.label) + '</div>' +
       '<div class="trace-bubble-row"><span class="trace-dir">进</span>' + escapeHtml(fmt(step.inValue)) + '</div>' +
       '<div class="trace-bubble-row"><span class="trace-dir trace-dir-out">出</span>' + escapeHtml(fmt(step.outValue)) + '</div>' +
-      (step.note ? '<div class="trace-bubble-note">' + escapeHtml(step.note) + '</div>' : '');
+      (step.note ? '<div class="trace-bubble-note">' + escapeHtml(step.note) + '</div>' : '') +
+      jsHtml;
     bubble.style.display = 'block';
     // 浮层放在节点上方居中
     bubble.style.left = Math.max(8, cx - bubble.offsetWidth / 2) + 'px';
