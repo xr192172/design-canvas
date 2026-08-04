@@ -48,3 +48,6 @@ npm-debug.log*
 # 参考库（借鉴用，不属于本项目代码）
 vendor/
 
+# codegraph 根目录残留（重复拷贝，已移至 vendor/codegraph；剩余 .git/pack 被 IDE 占用，释放后可删）
+codegraph/
+

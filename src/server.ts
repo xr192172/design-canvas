@@ -13,27 +13,25 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { renderDsl } from './tools/render_dsl.js';
-import { getDsl } from './tools/get_dsl.js';
-import { listFeatures } from './tools/list_features.js';
 import { createFeature, cloneFeature } from './tools/feature_ops.js';
 import { updateFeature } from './tools/update_feature.js';
-import { diffFeatures } from './tools/diff.js';
 import { scaffold } from './tools/scaffold.js';
 import { checkStatus } from './tools/status_tools.js';
-import { listAnnotations, resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools.js';
+import { resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools.js';
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { deriveDetailChain } from './tools/derive_chain.js';
 import { deriveAlgorithm } from './tools/derive_algorithm.js';
 import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
-import { runSimulation, getSimulationState, resetSimulation } from './tools/simulation.js';
+import { runSimulation, resetSimulation } from './tools/simulation.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
-import { submitApproval, reviewAnnotation, listApprovals, getApprovalHistory } from './tools/approval.js';
-import { saveSnapshot, listSnapshots, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
-import { listTemplates, createFromTemplate } from './tools/templates.js';
+import { submitApproval, reviewAnnotation } from './tools/approval.js';
+import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
+import { createFromTemplate } from './tools/templates.js';
 import { importProject } from './tools/import_project.js';
 import { checkMonolith } from './tools/monolith.js';
+import { queryFeature } from './tools/query_feature.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -44,7 +42,7 @@ const server = new McpServer(
     capabilities: { tools: {} },
     instructions:
       'design-canvas：人机共享的可视化协议层。支持两种工作流：' +
-      '\n\n1. 完整 DSL 模式：render_dsl 渲染并保存 → get_dsl 读取 → list_features 列出' +
+      '\n\n1. 完整 DSL 模式：render_dsl 渲染并保存 → query_feature 读取（query:"dsl"/"features" 等）' +
       '\n\n2. 增量编辑模式（推荐）：create_feature 创建 → update_feature 统一提交所有写操作 → render_dsl 渲染预览' +
       '\n   update_feature 通过 operations 列表批量执行（任一失败全部回滚）：' +
       '\n   - {op:"add",type:"node",id:"n1",data:{label,x,y,bg,shape,type,status,swimlane,layer,host,shapes,...}}' +
@@ -58,9 +56,9 @@ const server = new McpServer(
       '\n\n4. 状态回填：LLM 写完代码后，调用 backfill_scaffold 自动解析实际 API 签名回填到 DSL。' +
       '\n   然后 check_status 扫描 TODO 残留量自动推断状态，或 update_feature 的 status 操作手动标记。' +
       '\n   render_dsl 重新渲染后节点颜色随状态变化：灰=待实现, 橙=实现中, 绿=已完成。' +
-      '\n\n5. 人审流程：人类在浏览器双击节点添加标注 → list_annotations 读取 → LLM 迭代修改 → resolve_annotation 关闭。' +
+      '\n\n5. 人审流程：人类在浏览器双击节点添加标注 → query_feature（query:"annotations"）读取 → LLM 迭代修改 → resolve_annotation 关闭。' +
       '\n\n6. 自动布局：dag_layout（拓扑排序）/ force_layout（力导向）/ grid_align（网格对齐）一键整理画布，避免连线混乱。' +
-      '\n\n7. 仿真器：run_simulation 批量传入事件验证事件级联和条件触发 → get_simulation_state 读取当前状态 → reset_simulation 重置。' +
+      '\n\n7. 仿真器：run_simulation 批量传入事件验证事件级联和条件触发 → query_feature（query:"simulation_state"）读取当前状态 → reset_simulation 重置。' +
       '\n   仿真器是事件驱动状态机，不是动画播放器。用于验证"数据流入 → 规则触发 → 状态变化"是否符合预期。' +
       '\n\n8. 单文件监控：check_monolith 扫描文件行数，超阈值文件自动做 Louvain 社区发现，给出功能内聚拆分建议（仅建议不改代码）。' +
       '\n\n增量模式让你逐步完善设计，避免每次重写整个 JSON。所有修改自动保存到 .design-canvas/features/。',
@@ -106,52 +104,39 @@ server.registerTool(
 );
 
 // ─────────────────────────────────────────────────────────────
-// get_dsl：读取已保存的 DSL
+// query_feature：统一读操作入口（替代原 9 个查询工具）
 // ─────────────────────────────────────────────────────────────
 server.registerTool(
-  'get_dsl',
+  'query_feature',
   {
-    title: 'Get saved DSL',
-    description: '读取已保存的 DSL JSON。如果 feature 不存在会返回错误。',
+    title: 'Query feature data',
+    description:
+      '统一读操作入口：通过 query 参数查询 DSL、feature 列表、标注、审批、快照、模板、仿真状态、diff。' +
+      'query: dsl（DSL JSON）/ features（所有 feature）/ annotations（标注，可 node_id/severity/unresolved_only 过滤）/ ' +
+      'approvals（审批列表，可 status/assignee 过滤）/ approval_history（审批历史，需 annotation_id）/ ' +
+      'snapshots（快照列表）/ templates（模板列表）/ simulation_state（仿真状态）/ diff（对比，需 feature_a+feature_b）。',
     inputSchema: {
-      feature_name: z.string().describe('feature 名（如 user_auth）'),
+      query: z
+        .enum(['dsl', 'features', 'annotations', 'approvals', 'approval_history', 'snapshots', 'templates', 'simulation_state', 'diff'])
+        .describe('查询类型'),
+      feature: z.string().optional().describe('feature 名（dsl/annotations/approvals/approval_history/snapshots/simulation_state 必填）'),
+      node_id: z.string().optional().describe('annotations：按节点 ID 过滤'),
+      severity: z.enum(['info', 'warning', 'critical']).optional().describe('annotations：按严重程度过滤'),
+      unresolved_only: z.boolean().optional().describe('annotations：只显示未解决的'),
+      status: z.enum(['draft', 'pending_review', 'approved', 'rejected', 'needs_revision']).optional().describe('approvals：按状态过滤'),
+      assignee: z.string().optional().describe('approvals：按指派人过滤'),
+      annotation_id: z.string().optional().describe('approval_history：标注 ID'),
+      feature_a: z.string().optional().describe('diff：源 feature'),
+      feature_b: z.string().optional().describe('diff：目标 feature'),
     },
   },
   async (args) => {
     try {
-      const result = getDsl({ feature_name: args.feature_name });
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `feature: ${result.feature}\n\n${result.json}`,
-          },
-        ],
-      };
+      const result = queryFeature(args);
+      return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {
-      return {
-        content: [{ type: 'text', text: (e as Error).message }],
-        isError: true,
-      };
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
     }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// list_features：列出所有已设计的 feature
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'list_features',
-  {
-    title: 'List saved features',
-    description: '列出当前工作目录下 .design-canvas/features/ 里的所有已设计 feature。',
-    inputSchema: {},
-  },
-  async () => {
-    const result = listFeatures();
-    return {
-      content: [{ type: 'text', text: result.message }],
-    };
   },
 );
 
@@ -254,31 +239,6 @@ server.registerTool(
   },
 );
 
-// diff_features：对比两个 feature 的差异
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'diff_features',
-  {
-    title: 'Diff two features',
-    description: '对比两个 feature 的差异，包括节点、边、语义层、状态等的新增、删除和修改。可用于版本对比或方案对比。',
-    inputSchema: {
-      feature_a: z.string().describe('第一个 feature 名（基准）'),
-      feature_b: z.string().describe('第二个 feature 名（对比）'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = diffFeatures({
-        feature_a: args.feature_a,
-        feature_b: args.feature_b,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
 // ─────────────────────────────────────────────────────────────
 // scaffold：从 DSL 生成代码骨架（增强版）
 // ─────────────────────────────────────────────────────────────
@@ -350,36 +310,6 @@ server.registerTool(
         content: [{ type: 'text', text: (e as Error).message }],
         isError: true,
       };
-    }
-  },
-);
-
-// ─────────────────────────────────────────────────────────────
-// list_annotations：读取人审标注
-// ─────────────────────────────────────────────────────────────
-server.registerTool(
-  'list_annotations',
-  {
-    title: 'List review annotations',
-    description: '读取人类在浏览器中添加的审查标注。LLM 应基于这些标注迭代修改设计。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      node_id: z.string().optional().describe('按节点 ID 过滤'),
-      severity: z.enum(['info', 'warning', 'critical']).optional().describe('按严重程度过滤'),
-      unresolved_only: z.boolean().optional().describe('只显示未解决的标注'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = listAnnotations({
-        feature: args.feature,
-        node_id: args.node_id,
-        severity: args.severity,
-        unresolved_only: args.unresolved_only,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
     }
   },
 );
@@ -859,28 +789,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  'get_simulation_state',
-  {
-    title: 'Get simulation state',
-    description:
-      '读取仿真器当前状态和最近触发记录。' +
-      '用于检查上一次 run_simulation 后的状态变化。' +
-      '返回所有状态键值对和最近 5 条触发日志。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = getSimulationState({ feature: args.feature });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-server.registerTool(
   'reset_simulation',
   {
     title: 'Reset simulation to initial state',
@@ -1023,58 +931,6 @@ server.registerTool(
   },
 );
 
-server.registerTool(
-  'list_approvals',
-  {
-    title: 'List all approval requests',
-    description:
-      '列出所有审批请求，支持按状态和指派人筛选。' +
-      '返回每条标注的 ID、内容、状态、指派人、节点和历史记录数。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      status: z.enum(['draft', 'pending_review', 'approved', 'rejected', 'needs_revision']).optional().describe('按状态筛选'),
-      assignee: z.string().optional().describe('按指派人筛选'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = listApprovals({
-        feature: args.feature,
-        status: args.status,
-        assignee: args.assignee,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-server.registerTool(
-  'get_approval_history',
-  {
-    title: 'Get approval audit history',
-    description:
-      '获取单条标注的完整审批历史（审计日志）。' +
-      '包含每次状态变更的操作人、时间、意见。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-      annotation_id: z.string().describe('标注 ID'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = getApprovalHistory({
-        feature: args.feature,
-        annotation_id: args.annotation_id,
-      });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
 // ─────────────────────────────────────────────────────────────
 // 版本快照
 // ─────────────────────────────────────────────────────────────
@@ -1093,25 +949,6 @@ server.registerTool(
   async (args) => {
     try {
       const result = saveSnapshot({ feature: args.feature, label: args.label, description: args.description });
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
-
-server.registerTool(
-  'list_snapshots',
-  {
-    title: 'List version snapshots',
-    description: '列出 feature 的所有版本快照，按时间倒序排列。',
-    inputSchema: {
-      feature: z.string().describe('feature 名'),
-    },
-  },
-  async (args) => {
-    try {
-      const result = listSnapshots({ feature: args.feature });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {
       return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
@@ -1162,22 +999,6 @@ server.registerTool(
 // ─────────────────────────────────────────────────────────────
 // 模板库
 // ─────────────────────────────────────────────────────────────
-
-server.registerTool(
-  'list_templates',
-  {
-    title: 'List architecture templates',
-    description: '列出所有预置架构模板。模板可以快速生成设计起点，然后用增量编辑工具修改。',
-  },
-  async () => {
-    try {
-      const result = listTemplates();
-      return { content: [{ type: 'text', text: result.message }] };
-    } catch (e) {
-      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
-    }
-  },
-);
 
 server.registerTool(
   'create_from_template',
