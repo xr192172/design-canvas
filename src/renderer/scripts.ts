@@ -1304,18 +1304,22 @@ ${DATAFLOW_SOURCE}
   }
 
   // 当前步骤节点所属函数的 CFG 判定（真实条件 + 走向，来自 derive_algorithm 产物）
-  function judgementsOf(nodeId) {
+  // inValue：当前步骤注入值；rootInput：用户入口注入值。
+  // scope 合并两者（当前步优先）：保证入口注入的参数名贯穿整条链参与判定求值。
+  function judgementsOf(nodeId, inValue, rootInput) {
     const n = nodeById[nodeId];
     if (!n || !n.host) return [];
     const funcName = (n.label || '').replace(/^[①-⑫]|^\d+\.\s*/, '').replace(/·.*$/, '').trim();
     if (!funcName) return [];
     const nodes = (dsl.geometry?.nodes || []).map(x => ({ id: x.id, label: x.label, layer: x.layer, host: x.host, shapes: x.shapes || null, style: x.style || null, description: x.description }));
-    const edges = (dsl.geometry?.edges || []).map(x => ({ id: x.id, from: x.from, to: x.to, type: x.type }));
-    return collectJudgements(nodes, edges, n.host, funcName);
+    const edges = (dsl.geometry?.edges || []).map(x => ({ id: x.id, from: x.from, to: x.to, type: x.type, label: x.label }));
+    // 用户入口注入值优先（用户要看自己的输入走哪条路），当前步 in 值补充未注入字段
+    const scope = Object.assign({}, flattenScope(inValue), flattenScope(rootInput));
+    return applyJudgements(collectJudgements(nodes, edges, n.host, funcName), scope);
   }
 
-  // 当前步骤浮层：进/出值 + 分流标注 + CFG 判定
-  function showTraceBubble(step, cx, cy) {
+  // 当前步骤浮层：进/出值 + 分流标注 + CFG 判定（rootInput 贯穿判定求值）
+  function showTraceBubble(step, cx, cy, rootInput) {
     let bubble = document.getElementById('trace-bubble');
     if (!bubble) {
       bubble = document.createElement('div');
@@ -1327,14 +1331,18 @@ ${DATAFLOW_SOURCE}
       const s = JSON.stringify(v);
       return s && s.length > 60 ? s.slice(0, 60) + '…' : s;
     };
-    const js = judgementsOf(step.nodeId);
+    const js = judgementsOf(step.nodeId, step.inValue, rootInput);
     const jsHtml = js.length > 0
-      ? '<div class="trace-judge">' + js.map((j) =>
-          '<div class="trace-judge-cond">⚖ ' + escapeHtml(j.cond || '条件') + '</div>' +
-          (j.branches.map((b) =>
-            '<div class="trace-judge-row"><span class="trace-via">' + escapeHtml(b.via || '→') + '</span><span>' + escapeHtml(b.to) + '</span></div>'
-          ).join(''))
-        ).join('') + '</div>'
+      ? '<div class="trace-judge">' + js.map((j) => {
+          const hit = j.evaluable
+            ? '<span class="trace-judge-hit">命中 → ' + escapeHtml(j.chosenVia || '?') + '</span>'
+            : '<span class="trace-judge-note">无法求值' + (j.error ? '：' + escapeHtml(j.error) : '') + '</span>';
+          const head = '<div class="trace-judge-cond">⚖ ' + escapeHtml(j.cond || '条件') + ' ' + hit + '</div>';
+          const rows = j.branches.map((b) =>
+            '<div class="trace-judge-row"><span class="trace-via' + (j.evaluable && j.chosenVia === b.via ? ' chosen' : '') + '">' + (j.evaluable && j.chosenVia === b.via ? '→ ' : '') + escapeHtml(b.via || '→') + '</span><span>' + escapeHtml(b.to) + '</span></div>'
+          ).join('');
+          return head + rows;
+        }).join('') + '</div>'
       : '';
     bubble.innerHTML =
       '<div class="trace-bubble-title">' + escapeHtml(step.label) + '</div>' +
@@ -1390,7 +1398,7 @@ ${DATAFLOW_SOURCE}
           dot.setAttribute('cy', (dn.y || 0) + (dn.height || 60) / 2);
           dot.style.display = 'block';
         }
-        if (c) showTraceBubble(step, c.x, c.y);
+        if (c) showTraceBubble(step, c.x, c.y, inputValue);
       }
       idx++;
     };

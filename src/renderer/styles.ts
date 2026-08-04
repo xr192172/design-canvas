@@ -1305,6 +1305,25 @@ footer button:active {
   color: #f0a050;
   font-size: 10px;
 }
+.trace-via.chosen {
+  background: rgba(79, 141, 247, 0.5);
+  color: #ffffff;
+  box-shadow: 0 0 0 1px rgba(138, 182, 255, 0.7);
+}
+.trace-judge-hit {
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #8ab6ff;
+  background: rgba(79, 141, 247, 0.18);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.trace-judge-note {
+  margin-left: 4px;
+  font-size: 10px;
+  color: #8a96ab;
+}
 .history-indicator {
   font-size: 11px;
   color: var(--theme-text-dim);

@@ -8,7 +8,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mockValue, buildDataTrace, collectJudgements } from '../../src/renderer/dataflow_core';
+import {
+  mockValue,
+  buildDataTrace,
+  collectJudgements,
+  flattenScope,
+  evaluateCond,
+  applyJudgements,
+} from '../../src/renderer/dataflow_core';
 
 // ─────────────────────────────────────────────────────────────
 // mockValue
@@ -219,5 +226,111 @@ describe('buildDataTrace - 沿调用链推演', () => {
     expect(trace.steps).toHaveLength(1);
     expect(trace.steps[0].nodeId).toBe('n1');
     expect(trace.branchEdgeIds).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 判定走向选择：flattenScope / evaluateCond / applyJudgements
+// ─────────────────────────────────────────────────────────────
+
+describe('flattenScope - 注入值 → 变量查找表', () => {
+  it('顶层 key + 一层嵌套展开（不覆盖顶层）', () => {
+    const scope = flattenScope({ input: { token: 'abc', len: 3 }, flag: true });
+    expect(scope.flag).toBe(true);
+    expect(scope.token).toBe('abc');
+    expect(scope.len).toBe(3);
+    // 嵌套展开不覆盖已有顶层 key
+    expect(flattenScope({ input: { input: 'nested' } }).input).toEqual({ input: 'nested' });
+  });
+
+  it('非对象（标量/数组/null）→ 空 scope', () => {
+    expect(flattenScope(42)).toEqual({});
+    expect(flattenScope(null)).toEqual({});
+    expect(flattenScope([1, 2])).toEqual({});
+  });
+});
+
+describe('evaluateCond - 轻量表达式求值', () => {
+  it('布尔比较：over == true', () => {
+    expect(evaluateCond('over == true', { over: true })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('over == true', { over: false }).value).toBe(false);
+  });
+
+  it('成员访问：token.length > 3（字符串 length）', () => {
+    expect(evaluateCond('token.length > 3', { token: 'abcd' })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('token.length > 3', { token: 'ab' }).value).toBe(false);
+  });
+
+  it('字符串字面量 + 严格相等', () => {
+    expect(evaluateCond("name === 'Composition'", { name: 'Composition' })).toEqual({ ok: true, value: true });
+    expect(evaluateCond("name !== 'x'", { name: 'y' })).toEqual({ ok: true, value: true });
+  });
+
+  it('逻辑组合 + 括号 + 四则', () => {
+    expect(evaluateCond('a > 1 && b < 5', { a: 2, b: 3 })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('a > 1 && b < 5', { a: 2, b: 9 }).value).toBe(false);
+    expect(evaluateCond('(a + b) * 2 === 10', { a: 3, b: 2 })).toEqual({ ok: true, value: true });
+    expect(evaluateCond('!flag', { flag: false })).toEqual({ ok: true, value: true });
+  });
+
+  it('未匹配变量 → ok:false + 报错变量名', () => {
+    const r = evaluateCond('token.length > 3', {});
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('未匹配变量：token');
+  });
+
+  it('函数调用（len(items)）→ ok:false + 明确原因', () => {
+    const r = evaluateCond('i < len(sections)', { i: 1 });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('不支持函数调用：len');
+  });
+
+  it('语法错误 → ok:false', () => {
+    expect(evaluateCond('a >', { a: 1 }).ok).toBe(false);
+    expect(evaluateCond('', {}).ok).toBe(false);
+  });
+});
+
+describe('applyJudgements - 判定走向选择', () => {
+  it('注入值命中真分支（是）', () => {
+    const { nodes, edges } = cfgFixture();
+    const js = collectJudgements(nodes, edges, 'host', 'Compose');
+    const res = applyJudgements(js, flattenScope({ over: true }));
+
+    expect(res[0].evaluable).toBe(true);
+    expect(res[0].chosenVia).toBe('是');
+    expect(res[0].chosenTo).toBe('返回错误');
+  });
+
+  it('注入值命中假分支（否）', () => {
+    const { nodes, edges } = cfgFixture();
+    const js = collectJudgements(nodes, edges, 'host', 'Compose');
+    const res = applyJudgements(js, flattenScope({ over: false }));
+
+    expect(res[0].evaluable).toBe(true);
+    expect(res[0].chosenVia).toBe('否');
+    expect(res[0].chosenTo).toBe('组装');
+  });
+
+  it('嵌套注入值经扁平化命中参数', () => {
+    const { nodes, edges } = cfgFixture();
+    const js = collectJudgements(nodes, edges, 'host', 'Compose');
+    const res = applyJudgements(js, flattenScope({ payload: { over: true } }));
+    expect(res[0].chosenVia).toBe('是');
+  });
+
+  it('无法求值：未匹配变量 / 函数调用 → evaluable:false + 原因', () => {
+    const { nodes, edges } = cfgFixture();
+    const js = collectJudgements(nodes, edges, 'host', 'Compose');
+    const resEmpty = applyJudgements(js, {});
+    expect(resEmpty[0].evaluable).toBe(false);
+    expect(resEmpty[0].error).toContain('未匹配变量');
+
+    const resLoop = applyJudgements(js, { over: true, i: 1 });
+    // branch 可求值，loop 因 len() 调用无法求值
+    expect(resLoop[0].evaluable).toBe(true);
+    expect(resLoop[0].chosenVia).toBe('是');
+    expect(resLoop[1].evaluable).toBe(false);
+    expect(resLoop[1].error).toContain('不支持函数调用');
   });
 });

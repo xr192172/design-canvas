@@ -146,6 +146,245 @@ export function collectJudgements(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 判定走向选择：注入值 → 扁平 scope → 对条件轻量求值 → 命中走向
+// ─────────────────────────────────────────────────────────────
+
+/** 注入值 → 变量查找表（顶层 key + 一层嵌套属性展开，不覆盖顶层） */
+export function flattenScope(value: unknown): Record<string, unknown> {
+  const scope: Record<string, unknown> = {};
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      scope[k] = v;
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
+          if (!(k2 in scope)) scope[k2] = v2;
+        }
+      }
+    }
+  }
+  return scope;
+}
+
+export interface EvalResult {
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+}
+
+interface CondTok {
+  k: 'num' | 'str' | 'name' | 'op' | 'lp' | 'rp' | 'lb' | 'rb' | 'dot';
+  v: string;
+}
+
+/** 轻量表达式求值：条件原文（数字/字符串/布尔/null/变量/点成员/索引/四则/比较/逻辑）→ 值。
+ *  v1 支持子集：不支持函数调用（如 len(items)）、未知变量（error 给出未匹配名）→ ok:false。
+ */
+export function evaluateCond(cond: string, scope: Record<string, unknown>): EvalResult {
+  try {
+    const toks = tokenizeCond(cond);
+    if (toks.length === 0) return { ok: false, error: '空条件' };
+    let i = 0;
+    const peek = () => toks[i];
+    const next = () => toks[i++];
+    const parseOr = (): unknown => {
+      let left = parseAnd();
+      while (peek() && peek().k === 'op' && peek().v === '||') {
+        next();
+        const r = parseAnd();
+        left = Boolean(left) || Boolean(r);
+      }
+      return left;
+    };
+    const parseAnd = (): unknown => {
+      let left = parseCmp();
+      while (peek() && peek().k === 'op' && peek().v === '&&') {
+        next();
+        const r = parseCmp();
+        left = Boolean(left) && Boolean(r);
+      }
+      return left;
+    };
+    const parseCmp = (): unknown => {
+      let left = parseAdd();
+      while (peek() && peek().k === 'op' && /^(==|!=|===|!==|<=|>=|<|>)$/.test(peek().v)) {
+        const op = next().v;
+        const r = parseAdd();
+        left = compare(op, left, r);
+      }
+      return left;
+    };
+    const parseAdd = (): unknown => {
+      let left = parseMul();
+      while (peek() && peek().k === 'op' && (peek().v === '+' || peek().v === '-')) {
+        const op = next().v;
+        const r = parseMul();
+        if (op === '+') left = (left as number) + (r as number);
+        else left = (left as number) - (r as number);
+      }
+      return left;
+    };
+    const parseMul = (): unknown => {
+      let left = parseUnary();
+      while (peek() && peek().k === 'op' && /^[*\/%]$/.test(peek().v)) {
+        const op = next().v;
+        const r = parseUnary();
+        left = op === '*' ? (left as number) * (r as number) : op === '/' ? (left as number) / (r as number) : (left as number) % (r as number);
+      }
+      return left;
+    };
+    const parseUnary = (): unknown => {
+      const t = peek();
+      if (t && t.k === 'op' && (t.v === '!' || t.v === '-')) {
+        next();
+        const v = parseUnary();
+        return t.v === '!' ? !Boolean(v) : -(v as number);
+      }
+      return parseAtom();
+    };
+    const parseAtom = (): unknown => {
+      const t = next();
+      if (!t) throw new Error('表达式意外结束');
+      if (t.k === 'num') return Number(t.v);
+      if (t.k === 'str') return t.v.slice(1, -1);
+      if (t.k === 'name') {
+        if (t.v === 'true') return true;
+        if (t.v === 'false') return false;
+        if (t.v === 'null') return null;
+        if (t.v === 'undefined') return undefined;
+        if (peek() && peek().k === 'lp') throw new Error(`不支持函数调用：${t.v}()`);
+        // 成员链：a.b / a[0] / a['x'] 合并为点路径
+        let path = t.v;
+        while (peek()) {
+          if (peek().k === 'dot') {
+            next();
+            const seg = next();
+            if (!seg || (seg.k !== 'name' && seg.k !== 'num')) throw new Error('成员访问格式错误');
+            path += '.' + seg.v;
+          } else if (peek().k === 'lb') {
+            next();
+            const seg = next();
+            if (!seg) throw new Error('索引格式错误');
+            if (seg.k === 'num' || seg.k === 'name') path += '.' + seg.v;
+            else if (seg.k === 'str') path += '.' + seg.v.slice(1, -1);
+            else throw new Error('索引格式错误');
+            const rb = next();
+            if (!rb || rb.k !== 'rb') throw new Error('缺少 ]');
+          } else break;
+        }
+        return resolvePath(path, scope);
+      }
+      if (t.k === 'lp') {
+        const v = parseOr();
+        const close = next();
+        if (!close || close.k !== 'rp') throw new Error('缺少右括号');
+        return v;
+      }
+      throw new Error('无法解析的符号：' + t.v);
+    };
+    const value = parseOr();
+    if (i !== toks.length) throw new Error('多余符号：' + toks[i].v);
+    return { ok: true, value };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+function compare(op: string, a: unknown, b: unknown): boolean {
+  switch (op) {
+    case '==': return a == b;
+    case '===': return a === b;
+    case '!=': return a != b;
+    case '!==': return a !== b;
+    case '<': return (a as number) < (b as number);
+    case '<=': return (a as number) <= (b as number);
+    case '>': return (a as number) > (b as number);
+    case '>=': return (a as number) >= (b as number);
+    default: throw new Error('不支持的运算符：' + op);
+  }
+}
+
+/** 变量路径解析：根必须在 scope 中（否则抛"未匹配变量"），后续段逐层取值 */
+function resolvePath(p: string, scope: Record<string, unknown>): unknown {
+  const segs = p.split('.');
+  const root = segs[0];
+  if (!(root in scope)) throw new Error(`未匹配变量：${root}`);
+  let v: unknown = scope[root];
+  for (let k = 1; k < segs.length; k++) {
+    if (v === undefined || v === null) return undefined;
+    v = (v as Record<string, unknown>)[segs[k]];
+  }
+  return v;
+}
+
+function tokenizeCond(src: string): CondTok[] {
+  const toks: CondTok[] = [];
+  let i = 0;
+  const n = src.length;
+  const push = (k: CondTok['k'], v: string) => toks.push({ k, v });
+  while (i < n) {
+    const c = src[i];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+    if (/[0-9]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[0-9.]/.test(src[j])) j++;
+      push('num', src.slice(i, j)); i = j; continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n && src[j] !== c) {
+        if (src[j] === '\\') j++;
+        j++;
+      }
+      push('str', src.slice(i, Math.min(j + 1, n))); i = Math.min(j + 1, n); continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w$]/.test(src[j])) j++;
+      push('name', src.slice(i, j)); i = j; continue;
+    }
+    const three = src.slice(i, i + 3);
+    if (three === '===' || three === '!==') { push('op', three); i += 3; continue; }
+    const two = src.slice(i, i + 2);
+    if (two === '==' || two === '!=' || two === '<=' || two === '>=' || two === '&&' || two === '||') { push('op', two); i += 2; continue; }
+    if (two === '?.') { push('dot', '.'); i += 2; continue; }
+    if (c === '(') { push('lp', c); i++; continue; }
+    if (c === ')') { push('rp', c); i++; continue; }
+    if (c === '[') { push('lb', c); i++; continue; }
+    if (c === ']') { push('rb', c); i++; continue; }
+    if (c === '.') { push('dot', c); i++; continue; }
+    if ('+-*/%<>!'.includes(c)) { push('op', c); i++; continue; }
+    throw new Error('无法解析的字符：' + c);
+  }
+  return toks;
+}
+
+/** 走向分支的 via 标签 → 真/假分支识别（derive_algorithm 生成规则：是/否、进入/重复/结束…） */
+const TRUE_VIA = /是|进入|继续|重复|满足|成立/;
+const FALSE_VIA = /否|结束|退出|不满足|不成立/;
+
+export interface DfJudgementResult extends DfJudgement {
+  /** 是否用注入值成功求值 */
+  evaluable: boolean;
+  /** 无法求值的原因（未匹配变量 / 不支持语法） */
+  error?: string;
+  /** 实际走向的分支 via 标签（命中高亮用） */
+  chosenVia?: string;
+  /** 实际走向的目标节点 label */
+  chosenTo?: string;
+}
+
+/** 为每个判定做走向选择：注入值 scope 求值 → 真走"是/重复"类分支，假走"否/结束"类分支 */
+export function applyJudgements(judgements: DfJudgement[], scope: Record<string, unknown>): DfJudgementResult[] {
+  return judgements.map((j) => {
+    const r = evaluateCond(j.cond, scope);
+    if (!r.ok) return { ...j, evaluable: false, error: r.error };
+    const truthy = Boolean(r.value);
+    const chosen = j.branches.find((b) => (truthy ? TRUE_VIA : FALSE_VIA).test(b.via));
+    return { ...j, evaluable: true, chosenVia: chosen?.via, chosenTo: chosen?.to };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // mock 值生成：schema → 示例值（静态推演的"输出"来源）
 // ─────────────────────────────────────────────────────────────
 
