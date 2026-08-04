@@ -84,8 +84,8 @@ describe('syncProject - 初始同步与增量跳过', () => {
     // 2 文件节点 + parseConfig/ConfigLoader/load/helperB 等符号节点
     expect(stats.files).toBe(2);
     expect(stats.nodes).toBeGreaterThanOrEqual(5);
-    // 2 条边：a.ts → b.ts import + a.ts 内部 call（ConfigLoader.load → parseConfig）
-    expect(stats.edges).toBe(2);
+    // 3 条边：import(a→b) + 同文件 call(load→parseConfig) + 跨文件 call(parseConfig→helperB)
+    expect(stats.edges).toBe(3);
   });
 
   it('hash 未变重跑全部 skipped', async () => {
@@ -135,21 +135,26 @@ describe('import 边生命周期', () => {
 });
 
 describe('调用边入库（路线图序号 3）', () => {
-  it('同文件调用写 edges(kind=call)，跨文件/外部调用进 unresolved_refs', async () => {
+  it('同文件调用 + 跨文件调用（import 限定）写 edges(kind=call)', async () => {
     await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
     const callEdges = db
       .prepare("SELECT source, target, line FROM edges WHERE kind='call'")
       .all() as Array<{ source: string; target: string; line: number }>;
     // a.ts 内部：ConfigLoader.load → parseConfig
-    const call = callEdges.find((e) => e.source === 'a.ts#ConfigLoader.load');
-    expect(call?.target).toBe('a.ts#parseConfig');
+    const internal = callEdges.find((e) => e.source === 'a.ts#ConfigLoader.load');
+    expect(internal?.target).toBe('a.ts#parseConfig');
+    // 跨文件：parseConfig → helperB（沿 import './b' 限定解析）
+    const cross = callEdges.find((e) => e.source === 'a.ts#parseConfig');
+    expect(cross?.target).toBe('b.ts#helperB');
+  });
 
-    // unresolved：parseConfig → helperB（import 自 b.ts，同文件符号表无 → pending）
-    const unresolved = db
-      .prepare("SELECT from_node_id, reference_name, status FROM unresolved_refs WHERE status='pending'")
-      .all() as Array<{ from_node_id: string; reference_name: string; status: string }>;
-    const u = unresolved.find((r) => r.reference_name === 'helperB');
-    expect(u?.from_node_id).toBe('a.ts#parseConfig');
+  it('跨文件解析只处理 pending，内置调用标 external，找不到标 failed', async () => {
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
+    // helperB 已被跨文件解析 → 不再 pending
+    const pending = db
+      .prepare("SELECT reference_name, status FROM unresolved_refs WHERE reference_kind='call'")
+      .all() as Array<{ reference_name: string; status: string }>;
+    expect(pending.find((r) => r.reference_name === 'helperB')?.status).toBe('resolved');
   });
 });
 
@@ -201,6 +206,16 @@ describe('resolveImportTarget - 相对导入解析', () => {
 
   it('解析不到返回 null', () => {
     expect(resolveImportTarget(dir, 'a.ts', './nonexistent')).toBeNull();
+  });
+
+  it('TS NodeNext：.js 扩展名引 .ts 文件', () => {
+    writeProjectFile('storage.ts', 'export function getStorageRoot() { return ""; }\n');
+    expect(resolveImportTarget(dir, 'db/db.ts', '../storage.js')).toBe('storage.ts');
+  });
+
+  it('带扩展名但磁盘同扩展名（JS 项目原样命中）', () => {
+    writeProjectFile('util.js', 'module.exports = {};\n');
+    expect(resolveImportTarget(dir, 'a.ts', './util.js')).toBe('util.js');
   });
 });
 

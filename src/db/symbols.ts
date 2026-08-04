@@ -41,6 +41,8 @@ export interface SyncProjectResult {
   failed: number;
   ms: number;
   results: SyncFileResult[];
+  /** 跨文件调用解析统计（收尾步骤，见 resolveCrossFileCalls） */
+  cross?: CrossFileResolveStats;
 }
 
 export interface SymbolHit {
@@ -85,10 +87,18 @@ function countLinesOf(content: string): number {
 /** 解析相对导入到项目内文件（posix relPath）；解析不到返回 null */
 export function resolveImportTarget(projectRoot: string, fromRel: string, source: string): string | null {
   const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), source));
-  const candidates = [
-    ...IMPORT_EXTS.map((e) => base + e),
-    ...INDEX_FILES.map((f) => `${base}/${f}`),
-  ];
+  const baseExt = path.posix.extname(base);
+  const candidates: string[] = [];
+  if (IMPORT_EXTS.includes(baseExt)) {
+    // source 已带扩展名：优先原样（JS 项目），再 strip 扩展名重试（TS NodeNext 用 .js 引 .ts）
+    candidates.push(base);
+    const bare = base.slice(0, -baseExt.length);
+    for (const e of IMPORT_EXTS) candidates.push(bare + e);
+    for (const f of INDEX_FILES) candidates.push(`${bare}/${f}`);
+  } else {
+    for (const e of IMPORT_EXTS) candidates.push(base + e);
+    for (const f of INDEX_FILES) candidates.push(`${base}/${f}`);
+  }
   for (const c of candidates) {
     if (c.startsWith('..')) continue; // 不允许逃逸项目根
     if (fs.existsSync(path.join(projectRoot, c))) return c;
@@ -240,6 +250,8 @@ export async function syncProject(
     results.push(await syncFile(db, projectRoot, p));
   }
   const by = (s: SyncStatus) => results.filter((r) => r.status === s).length;
+  // 收尾：跨文件调用解析（同文件未命中的调用沿 imports 解析到目标文件符号；幂等，只处理 pending）
+  const cross = resolveCrossFileCalls(db, projectRoot);
   return {
     total: results.length,
     updated: by('updated'),
@@ -248,6 +260,12 @@ export async function syncProject(
     failed: by('failed'),
     ms: Date.now() - t0,
     results,
+    cross: {
+      total: cross.total,
+      resolved: cross.resolved,
+      external: cross.external,
+      failed: cross.failed,
+    },
   };
 }
 
@@ -261,6 +279,156 @@ function removeFileRel(db: Database, rel: string): void {
 /** 文件从项目删除时调用：清节点（级联清边与 FTS）+ files 行 + 原始 import 记录 */
 export function removeFile(db: Database, projectRoot: string, absPath: string): void {
   removeFileRel(db, toRelPath(projectRoot, absPath));
+}
+
+// ─────────────────────────────────────────────────────────────
+// 跨文件调用解析（路线图序号 3 第二步）
+// ─────────────────────────────────────────────────────────────
+
+/** 有点调用前缀：内置对象 / 内置模块 / 全局对象（外部，非项目符号） */
+const BUILTIN_PREFIXES = new Set([
+  'Math', 'JSON', 'Array', 'Object', 'String', 'Number', 'Boolean', 'Promise', 'console', 'Date',
+  'Set', 'Map', 'WeakMap', 'WeakSet', 'RegExp', 'Symbol', 'BigInt', 'globalThis', 'window',
+  'document', 'navigator', 'URL', 'TextEncoder', 'TextDecoder', 'Buffer', 'process', 'require',
+  'module', 'exports', 'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError',
+  'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'Intl', 'performance', 'structuredClone',
+  'queueMicrotask', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'undefined',
+  'NaN', 'Infinity', 'os', 'path', 'fs', 'http', 'https', 'net', 'zlib', 'util', 'assert',
+  'stream', 'events', 'crypto', 'child_process', 'url', 'querystring', 'dns', 'tls', 'buffer',
+  'node', 'String', 'Number', 'Math',
+  // Python 常用
+  'os', 'sys', 're', 'json', 'datetime', 'pathlib', 'collections', 'typing', 'functools',
+  'itertools', 'logging', 'random', 'time', 'socket', 'subprocess', 'threading', 'asyncio',
+]);
+
+/** 无点内置函数 / 构造器（外部，非项目符号） */
+const BUILTIN_CALLEES = new Set([
+  'String', 'Number', 'Boolean', 'Object', 'Array', 'Promise', 'Set', 'Map', 'Date', 'Math',
+  'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'RegExp', 'Symbol',
+  'BigInt', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'typeof', 'instanceof',
+  // Python 内置
+  'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple', 'bool',
+  'type', 'isinstance', 'sum', 'min', 'max', 'sorted', 'enumerate', 'zip', 'map', 'filter',
+  'open', 'repr', 'abs', 'round', 'any', 'all', 'next', 'iter', 'hasattr', 'getattr',
+  'ValueError', 'KeyError', 'Exception',
+]);
+
+export interface CrossFileResolveStats {
+  total: number;
+  /** import 限定解析成功，已写 edges(kind=call, cross) */
+  resolved: number;
+  /** 内置 / 外部 / 局部变量调用，标 status='external' */
+  external: number;
+  /** 未匹配到目标符号，标 status='failed'（不再重试） */
+  failed: number;
+}
+
+/**
+ * 跨文件调用解析：把 unresolved_refs 里同文件未命中的调用解析到目标文件符号。
+ *
+ * 策略（v1，保守防误连）：
+ *   - 无点调用：内置黑名单 → external；否则沿本文件 relative imports 定位目标文件，
+ *     目标文件符号表含 callee → 写 edges(kind='call', metadata.cross=true)
+ *   - 有点调用：前缀黑名单（内置对象/模块）→ external；其余前缀（局部变量/Go 包调用）
+ *     保守标 external——v1 不做别名/包路径映射，避免误连
+ *   - 找不到目标的真项目调用 → failed（不再每轮重试）
+ *
+ * 幂等：只处理 status='pending' 的行；syncProject 全量同步后调用（跨文件匹配需要全库符号表）。
+ */
+export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossFileResolveStats {
+  const rows = db
+    .prepare("SELECT id, from_node_id, reference_name, line FROM unresolved_refs WHERE status='pending' AND reference_kind='call'")
+    .all() as Array<{ id: number; from_node_id: string; reference_name: string; line: number }>;
+  if (rows.length === 0) return { total: 0, resolved: 0, external: 0, failed: 0 };
+
+  // 预加载：文件名 → 符号名集合（import 限定匹配用）
+  const symbolsByFile = new Map<string, Set<string>>();
+  for (const s of db.prepare("SELECT name, file_path FROM nodes WHERE kind != 'file'").all() as Array<{ name: string; file_path: string }>) {
+    let set = symbolsByFile.get(s.file_path);
+    if (!set) {
+      set = new Set();
+      symbolsByFile.set(s.file_path, set);
+    }
+    set.add(s.name);
+  }
+  // 预加载：文件 → relative imports
+  const relImportsByFile = new Map<string, Array<{ source: string; line: number }>>();
+  for (const i of db.prepare("SELECT file_path, source, line FROM imports WHERE kind='relative'").all() as Array<{ file_path: string; source: string; line: number }>) {
+    let arr = relImportsByFile.get(i.file_path);
+    if (!arr) {
+      arr = [];
+      relImportsByFile.set(i.file_path, arr);
+    }
+    arr.push(i);
+  }
+
+  const updResolved = db.prepare("UPDATE unresolved_refs SET status='resolved' WHERE id = ?");
+  const updExternal = db.prepare("UPDATE unresolved_refs SET status='external' WHERE id = ?");
+  const updFailed = db.prepare("UPDATE unresolved_refs SET status='failed' WHERE id = ?");
+  const insEdge = db.prepare(
+    "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', ?, NULL, ?)",
+  );
+
+  const stats: CrossFileResolveStats = { total: rows.length, resolved: 0, external: 0, failed: 0 };
+  for (const r of rows) {
+    const rel = r.from_node_id.split('#')[0];
+    const expr = r.reference_name;
+
+    if (expr.includes('.')) {
+      // 有点调用：内置前缀 external；其余（局部变量/Go 包调用）保守 external
+      const prefix = expr.split('.')[0];
+      updExternal.run(r.id);
+      stats.external++;
+      void prefix;
+      continue;
+    }
+
+    if (BUILTIN_CALLEES.has(expr)) {
+      updExternal.run(r.id);
+      stats.external++;
+      continue;
+    }
+
+    // 无点调用：沿 relative imports 定位目标文件，符号表命中即解析
+    const target = findCrossFileTarget(db, symbolsByFile, relImportsByFile, projectRoot, rel, expr);
+    if (target) {
+      insEdge.run(r.from_node_id, `${target.file}#${target.qn}`, r.line, JSON.stringify({ cross: true }));
+      updResolved.run(r.id);
+      stats.resolved++;
+    } else {
+      updFailed.run(r.id);
+      stats.failed++;
+    }
+  }
+  return stats;
+}
+
+/** 沿源文件的 relative imports 找 callee 对应的目标符号（首个命中）；找不到返回 null */
+function findCrossFileTarget(
+  db: Database,
+  symbolsByFile: Map<string, Set<string>>,
+  relImportsByFile: Map<string, Array<{ source: string; line: number }>>,
+  projectRoot: string,
+  fromRel: string,
+  callee: string,
+): { file: string; qn: string } | null {
+  const imports = relImportsByFile.get(fromRel);
+  if (!imports) return null;
+  const seen = new Set<string>();
+  for (const imp of imports) {
+    const target = resolveImportTarget(projectRoot, fromRel, imp.source);
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
+    const syms = symbolsByFile.get(target);
+    if (syms && syms.has(callee)) {
+      // 目标文件确有该符号 → 取 qualified_name（重名取首个，v1 近似）
+      const q = db
+        .prepare('SELECT qualified_name FROM nodes WHERE file_path = ? AND name = ? LIMIT 1')
+        .get(target, callee) as { qualified_name: string } | undefined;
+      if (q) return { file: target, qn: q.qualified_name };
+    }
+  }
+  return null;
 }
 
 /**

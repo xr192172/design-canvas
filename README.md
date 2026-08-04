@@ -158,7 +158,7 @@ npm start
 | 5 | 一致性检查 + 代码回填（内置 TreeSitterKernel） | ✅ 完成 |
 | 6 | 双向编辑（拖拽回写 + 撤销/重做 + 属性面板） | ✅ 完成 |
 | 7 | 代码骨架生成（scaffold 多语言） | ✅ 完成 |
-| 8 | 仿真器 + 动画系统 | ✅ 通用动画引擎 L0-L4.5（粒子流/分层/effect 注册）；⚠️ 阶段 E：conveyor.json 迁移 + 删除 scripts.ts 专用动画代码（约 1550 行） |
+| 8 | 仿真器 + 动画系统 | ✅ 通用动画引擎 L0-L4.5（粒子流/分层/条件分支/函数绑定/异常语义/effect 注册，conveyor 已迁移）；⏳ L5 反向提取（代码→动画 DSL） |
 | 9 | 分层披露（main/error/detail 三层 + 宿主角标钻入） | ✅ 完成 |
 | 10 | 工程导入（import_project/check_monolith/derive_detail_chain/derive_algorithm/inject_replay） | ✅ 完成 |
 | 11 | SQLite 符号缓存（schema v2 + 增量解析 + 删除侦测） | ✅ 完成 |
