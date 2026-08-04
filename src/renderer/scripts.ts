@@ -95,6 +95,8 @@ ${EDGE_GEOM_SOURCE}
     edgeDragging: null,       // 当前拖拽的边 ID
     edgeDragStartMouse: null, // 拖拽起始鼠标坐标（画布坐标系）
     edgeCtrlOffset: {},       // 边控制点用户偏移 { edgeId: { dx, dy } }
+    // 人端筛选：状态多选（空=全部）/ 孤岛隐藏 / 聚焦节点（null=关闭）
+    filter: { statuses: new Set(), hideIslands: false, focusId: null },
   };
 
   // ==== 撤销/重做 ====
@@ -717,6 +719,7 @@ ${EDGE_GEOM_SOURCE}
     document.querySelectorAll('.edge.highlighted').forEach(e => e.classList.remove('highlighted'));
     document.querySelectorAll('.edge.dimmed').forEach(e => e.classList.remove('dimmed'));
     document.querySelectorAll('.card.active').forEach(c => c.classList.remove('active'));
+    updateFocusButton();
   }
 
   function selectNode(nodeId) {
@@ -764,6 +767,7 @@ ${EDGE_GEOM_SOURCE}
       cardEl.classList.add('active');
       cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+    updateFocusButton();
   }
 
   function selectEdge(edgeId) {
@@ -880,6 +884,114 @@ ${EDGE_GEOM_SOURCE}
     if (!e) return false;
     const label = (e.label || '').toLowerCase();
     return label === 'contains' || label === '包含';
+  }
+
+  // ==== 人端筛选：状态 / 孤岛 / 聚焦 ====
+  // 孤岛：无几何数据边（非 contains）连接、且无 contains 子节点的节点
+  const islandIds = new Set();
+  (dsl.geometry?.nodes || []).forEach(n => {
+    const hasDataEdge = (edgesByFrom[n.id] || []).some(e => !isContainsEdge(e.id)) ||
+                        (edgesByTo[n.id] || []).some(e => !isContainsEdge(e.id));
+    const hasChildren = (childrenOf[n.id] || []).length > 0;
+    if (!hasDataEdge && !hasChildren) islandIds.add(n.id);
+  });
+
+  let focusScope = null;  // 当前聚焦范围（Set of ids），null=未聚焦
+
+  // 聚焦范围 = 选中节点 ±1 跳（走数据边；contains 边只表达嵌套，不参与）
+  function computeFocusScope(nodeId) {
+    const set = new Set([nodeId]);
+    (edgesByFrom[nodeId] || []).forEach(e => { if (!isContainsEdge(e.id)) set.add(e.to); });
+    (edgesByTo[nodeId] || []).forEach(e => { if (!isContainsEdge(e.id)) set.add(e.from); });
+    return set;
+  }
+
+  // 单节点筛选判定（与折叠/分层的 inline display 正交，最终可见 = 两者都可见）
+  function filterVisible(n) {
+    const f = state.filter;
+    if (f.statuses.size && !f.statuses.has(n.status || 'draft')) return false;
+    if (f.hideIslands && islandIds.has(n.id)) return false;
+    if (f.focusId && !focusScope.has(n.id)) return false;
+    return true;
+  }
+
+  // 全量应用筛选：节点/边用 .filter-hidden class（!important 压制 inline display）
+  function applyFilters() {
+    focusScope = state.filter.focusId ? computeFocusScope(state.filter.focusId) : null;
+    let visibleCount = 0;
+    (dsl.geometry?.nodes || []).forEach(n => {
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      if (!el) return;
+      const vis = filterVisible(n);
+      el.classList.toggle('filter-hidden', !vis);
+      if (vis) visibleCount++;
+    });
+    document.querySelectorAll('.edge').forEach(edgeEl => {
+      const eid = edgeEl.getAttribute('data-id');
+      if (!eid || isContainsEdge(eid)) return;  // contains 边由嵌套系统管理
+      const e = edgeById[eid];
+      if (!e) return;
+      const hidden = !!focusScope && (!focusScope.has(e.from) || !focusScope.has(e.to));
+      edgeEl.classList.toggle('filter-hidden', hidden);
+    });
+    // 筛选生效但结果为空时提示，避免面对空白画布困惑
+    const filterActive = state.filter.statuses.size > 0 || state.filter.hideIslands || !!state.filter.focusId;
+    if (filterActive && visibleCount === 0) showToast('筛选结果为空：没有匹配的节点', 'info');
+    updateFocusButton();
+    if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.15, true);
+  }
+
+  // 聚焦按钮状态：无选中且未聚焦 → 禁用；聚焦中 → 显示目标名 + 可点退出
+  function updateFocusButton() {
+    const btn = document.getElementById('filter-focus');
+    if (!btn) return;
+    const fid = state.filter.focusId;
+    btn.disabled = !fid && !state.selectedId;
+    btn.classList.toggle('active', !!fid);
+    if (fid) {
+      const label = (nodeById[fid] && nodeById[fid].label) || fid;
+      btn.title = '退出聚焦（Esc）';
+      btn.textContent = '🎯 ' + label + ' ✕';
+    } else {
+      btn.title = '选中节点后点击：只看它 ±1 跳的上下游；再点退出';
+      btn.textContent = '🎯 聚焦';
+    }
+  }
+
+  // 绑定筛选条事件：状态 chips 多选 toggle；孤岛开关；聚焦开关
+  function setupFilters() {
+    document.querySelectorAll('.filter-chip[data-filter-status]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const s = btn.getAttribute('data-filter-status');
+        const set = state.filter.statuses;
+        if (set.has(s)) set.delete(s); else set.add(s);
+        btn.classList.toggle('active', set.has(s));
+        applyFilters();
+      });
+    });
+    const islandBtn = document.getElementById('filter-islands');
+    if (islandBtn) {
+      const cnt = islandBtn.querySelector('.chip-count');
+      if (cnt) cnt.textContent = islandIds.size;
+      islandBtn.addEventListener('click', () => {
+        state.filter.hideIslands = !state.filter.hideIslands;
+        islandBtn.classList.toggle('active', state.filter.hideIslands);
+        applyFilters();
+      });
+    }
+    const focusBtn = document.getElementById('filter-focus');
+    if (focusBtn) {
+      focusBtn.addEventListener('click', () => {
+        if (state.filter.focusId) {
+          state.filter.focusId = null;
+        } else {
+          if (!state.selectedId) return;
+          state.filter.focusId = state.selectedId;
+        }
+        applyFilters();
+      });
+    }
+    updateFocusButton();
   }
 
   // ==== 折叠/展开 ====
@@ -2998,9 +3110,9 @@ ${EDGE_GEOM_SOURCE}
       const nodes = dsl.geometry?.nodes || [];
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, cnt = 0;
       nodes.forEach(n => {
-        // 跳过不可见节点（深层折叠 / collapse 折叠），避免幽灵占位撑大画布
+        // 跳过不可见节点（深层折叠 / collapse 折叠 / 筛选隐藏），避免幽灵占位撑大画布
         const el = document.querySelector('.node[data-id="' + n.id + '"]');
-        if (el && el.style.display === 'none') return;
+        if (el && (el.style.display === 'none' || el.classList.contains('filter-hidden'))) return;
         cnt++;
         const x = n.x || 0, y = n.y || 0;
         const w = n.width || 120, h = n.height || 60;
@@ -3423,6 +3535,12 @@ ${EDGE_GEOM_SOURCE}
         e.preventDefault();
         const zoomOut = document.getElementById('zoom-out');
         if (zoomOut) zoomOut.click();
+      }
+
+      // Esc → 退出聚焦（筛选模式）
+      if (e.key === 'Escape' && state.filter.focusId) {
+        state.filter.focusId = null;
+        applyFilters();
       }
     });
   }
@@ -4370,6 +4488,7 @@ ${EDGE_GEOM_SOURCE}
   setupToolbarAdvanced();
   setupThemeSwitcher();
   setupNodeSearch();
+  setupFilters();
   setupKeyboardShortcuts();
   setupExport();
   setupRerender();

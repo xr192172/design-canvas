@@ -1058,6 +1058,66 @@ footer button:active {
   color: #fff;
   border-color: var(--theme-primary);
 }
+/* 筛选条（人端筛选：状态/孤岛/聚焦）——胶囊 chips，多选可叠加 */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.filter-chip {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--theme-border);
+  background: var(--theme-card-bg);
+  color: var(--theme-text);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.filter-chip:hover {
+  border-color: var(--theme-primary);
+}
+.filter-chip.active {
+  background: var(--theme-primary);
+  color: #fff;
+  border-color: var(--theme-primary);
+}
+.filter-chip .chip-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  color: inherit;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  box-sizing: border-box;
+}
+.filter-chip.active .chip-count {
+  background: rgba(255, 255, 255, 0.25);
+}
+.filter-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.filter-chip.filter-focus.active {
+  background: #f0883e;
+  border-color: #f0883e;
+  color: #fff;
+}
+.filter-chip.filter-focus.active .chip-count {
+  background: rgba(255, 255, 255, 0.25);
+}
+/* 筛选隐藏：CSS class 层控制（与折叠/分层的 inline display 正交，优先级最高） */
+.filter-hidden {
+  display: none !important;
+}
 /* 层角标（SVG 内，宿主节点左上角） */
 .layer-badge {
   cursor: pointer;

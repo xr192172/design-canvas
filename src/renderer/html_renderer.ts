@@ -698,6 +698,22 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
             : '';
           return `<div class="layer-controls">${errBtn}${detBtn}</div>`;
         })()}
+        ${(() => {
+          // 人端筛选条：状态/孤岛/聚焦——把 LLM 端的查询过滤维度映射成人可点的筛选。
+          // 状态计数在渲染期算好；孤岛计数（需边数据）由 scripts 运行时填充。
+          if (dsl.geometry.nodes.length === 0) return '';
+          const stDraft = dsl.geometry.nodes.filter((n) => (n.status ?? 'draft') === 'draft').length;
+          const stDoing = dsl.geometry.nodes.filter((n) => (n.status ?? 'draft') === 'in_progress').length;
+          const stDone = dsl.geometry.nodes.filter((n) => (n.status ?? 'draft') === 'done').length;
+          return `<div class="filter-bar" title="按类目筛选画布：状态（可多选，取消选择恢复全部）/ 孤岛（无连线节点）/ 聚焦（只看选中节点 ±1 跳）">
+            <span class="toolbar-label">筛选</span>
+            <button type="button" class="filter-chip" data-filter-status="draft" title="只显示待实现节点">⬜ 待实现<span class="chip-count">${stDraft}</span></button>
+            <button type="button" class="filter-chip" data-filter-status="in_progress" title="只显示实现中的节点">🟠 实现中<span class="chip-count">${stDoing}</span></button>
+            <button type="button" class="filter-chip" data-filter-status="done" title="只显示已完成节点">✅ 已完成<span class="chip-count">${stDone}</span></button>
+            <button type="button" class="filter-chip" id="filter-islands" title="隐藏没有连线的孤立节点">🗑 孤岛<span class="chip-count"></span></button>
+            <button type="button" class="filter-chip filter-focus" id="filter-focus" disabled title="选中节点后点击：只看它 ±1 跳的上下游；再点退出">🎯 聚焦</button>
+          </div>`;
+        })()}
         <div id="toolbar-advanced" class="${options?.compact_toolbar ? 'toolbar-advanced toolbar-advanced--row hidden' : 'toolbar-advanced'}">
         <div class="history-controls">
           <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
