@@ -1,4 +1,5 @@
 import { EDGE_GEOM_SOURCE } from './edge_geom_bundle.gen.js';
+import { DATAFLOW_SOURCE } from './dataflow_core_bundle.gen.js';
 
 export function buildScript(dsl: unknown): string {
   const dslJson = JSON.stringify(dsl).replace(/</g, '\\u003c');
@@ -10,6 +11,9 @@ window.__DSL__ = ${dslJson};
 (function() {
   // ---- 边几何纯逻辑（构建期从 edge_geom.ts 内联，单源双消费，勿手改）----
 ${EDGE_GEOM_SOURCE}
+
+  // ---- 数据流追踪核心（构建期从 dataflow_core.ts 内联，单源双消费，勿手改）----
+${DATAFLOW_SOURCE}
 
   const tooltip = document.getElementById('tooltip');
   const dsl = window.__DSL__;
@@ -768,6 +772,7 @@ ${EDGE_GEOM_SOURCE}
       cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
     updateFocusButton();
+    updateDataflowButton();
   }
 
   function selectEdge(edgeId) {
@@ -1217,6 +1222,159 @@ ${EDGE_GEOM_SOURCE}
       applyLayerVisibility();
       if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.2, true);
     });
+  }
+
+  // ==== 数据流追踪（L5a 静态推演：注入数据 → 沿调用链追踪处理/分流） ====
+
+  // 数据流按钮可用性：选中 detail 层函数节点才启用
+  function updateDataflowButton() {
+    const btn = document.getElementById('dataflow-toggle');
+    if (!btn) return;
+    const n = state.selectedId ? nodeById[state.selectedId] : null;
+    btn.disabled = !n || (!(n.layer === 'detail' || n.host) && !nodeById[n.host]);
+  }
+
+  function setupDataflow() {
+    const btn = document.getElementById('dataflow-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const n = state.selectedId ? nodeById[state.selectedId] : null;
+      if (!n) { showToast('请先选中一个 detail 层函数节点'); return; }
+      const entry = n.layer === 'detail' ? n : nodeById[n.host];
+      if (!entry) { showToast('请选中 detail 层函数节点（展开 ▸ 后链上的节点）'); return; }
+      openDataflowPanel(entry);
+    });
+  }
+
+  // 注入面板：预填入口节点 shapes.in 的 mock JSON，可手改
+  function openDataflowPanel(entry) {
+    let panel = document.getElementById('dataflow-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'dataflow-panel';
+      panel.className = 'dataflow-panel';
+      document.body.appendChild(panel);
+    }
+    const prefill = entry.shapes && entry.shapes.in
+      ? JSON.stringify(mockValue(entry.shapes.in), null, 2)
+      : '{"输入":"示例"}';
+    panel.innerHTML =
+      '<div class="dataflow-title">▶ 数据流推演：' + escapeHtml(entry.label || entry.id) + '</div>' +
+      '<div class="dataflow-desc">注入数据（JSON），沿调用链推演每个函数的处理与分流。静态推演（mock 输出值），不执行代码。</div>' +
+      '<textarea id="dataflow-input" rows="6" spellcheck="false">' + escapeHtml(prefill) + '</textarea>' +
+      '<div class="dataflow-actions">' +
+      '<button id="dataflow-start" type="button">▶ 开始推演</button>' +
+      '<button id="dataflow-cancel" type="button">取消</button>' +
+      '</div>';
+    panel.style.display = 'block';
+    document.getElementById('dataflow-start').addEventListener('click', () => {
+      let input;
+      try {
+        input = JSON.parse(document.getElementById('dataflow-input').value);
+      } catch (e) {
+        showToast('JSON 解析失败：' + e.message);
+        return;
+      }
+      panel.style.display = 'none';
+      runDataTrace(entry, input);
+    });
+    document.getElementById('dataflow-cancel').addEventListener('click', () => {
+      panel.style.display = 'none';
+    });
+    document.getElementById('dataflow-input').focus();
+  }
+
+  // 清除上一轮推演的痕迹
+  function clearTrace() {
+    if (state.dataflowTimer) { clearInterval(state.dataflowTimer); state.dataflowTimer = null; }
+    document.querySelectorAll('.trace-active').forEach(el => el.classList.remove('trace-active'));
+    document.querySelectorAll('.trace-branch').forEach(el => el.classList.remove('trace-branch'));
+    const bubble = document.getElementById('trace-bubble');
+    if (bubble) bubble.remove();
+    const dot = document.getElementById('trace-dot');
+    if (dot) dot.remove();
+  }
+
+  // 节点中心（屏幕坐标，用于光点/浮层定位）
+  function nodeScreenCenter(nodeId) {
+    const el = document.querySelector('.node[data-id="' + nodeId + '"]');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  // 当前步骤浮层：进/出值 + 分流标注
+  function showTraceBubble(step, cx, cy) {
+    let bubble = document.getElementById('trace-bubble');
+    if (!bubble) {
+      bubble = document.createElement('div');
+      bubble.id = 'trace-bubble';
+      bubble.className = 'trace-bubble';
+      document.body.appendChild(bubble);
+    }
+    const fmt = (v) => {
+      const s = JSON.stringify(v);
+      return s && s.length > 60 ? s.slice(0, 60) + '…' : s;
+    };
+    bubble.innerHTML =
+      '<div class="trace-bubble-title">' + escapeHtml(step.label) + '</div>' +
+      '<div class="trace-bubble-row"><span class="trace-dir">进</span>' + escapeHtml(fmt(step.inValue)) + '</div>' +
+      '<div class="trace-bubble-row"><span class="trace-dir trace-dir-out">出</span>' + escapeHtml(fmt(step.outValue)) + '</div>' +
+      (step.note ? '<div class="trace-bubble-note">' + escapeHtml(step.note) + '</div>' : '');
+    bubble.style.display = 'block';
+    // 浮层放在节点上方居中
+    bubble.style.left = Math.max(8, cx - bubble.offsetWidth / 2) + 'px';
+    bubble.style.top = Math.max(8, cy - bubble.offsetHeight - 14) + 'px';
+  }
+
+  // 数据流播放：800ms/步点亮节点 + 更新浮层；结束后保留路径
+  function runDataTrace(entry, inputValue) {
+    clearTrace();
+    const nodes = (dsl.geometry?.nodes || []).map(n => ({ id: n.id, label: n.label, layer: n.layer, host: n.host, shapes: n.shapes || null }));
+    const edges = (dsl.geometry?.edges || []).map(e => ({ id: e.id, from: e.from, to: e.to, type: e.type }));
+    const trace = buildDataTrace(nodes, edges, entry.id, inputValue);
+    if (trace.steps.length === 0) { showToast('该节点没有可追踪的调用链'); return; }
+
+    // 途经跳边提前高亮（分流标注在浮层 note 里）
+    trace.branchEdgeIds.forEach(eid => {
+      const el = document.querySelector('.edge[data-id="' + eid + '"]');
+      if (el) el.classList.add('trace-branch');
+    });
+
+    // 光点（SVG 内部坐标系 = DSL 坐标，直接 append 到 #canvas）
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('id', 'trace-dot');
+    dot.setAttribute('r', '8');
+    dot.style.display = 'none';
+    document.querySelector('svg#canvas')?.appendChild(dot);
+
+    let idx = 0;
+    const tick = () => {
+      if (idx >= trace.steps.length) {
+        clearInterval(state.dataflowTimer);
+        state.dataflowTimer = null;
+        if (dot.parentNode) dot.parentNode.removeChild(dot);
+        showToast('✅ 推演完成 · ' + trace.steps.length + ' 步' + (trace.branchEdgeIds.length ? '（含 ' + trace.branchEdgeIds.length + ' 处分流）' : ''));
+        return;
+      }
+      const step = trace.steps[idx];
+      const el = document.querySelector('.node[data-id="' + step.nodeId + '"]');
+      if (el) {
+        el.classList.add('trace-active');
+        const c = nodeScreenCenter(step.nodeId);
+        const dn = nodeById[step.nodeId];
+        if (dn) {
+          // 光点用 DSL 坐标（SVG 内部系）
+          dot.setAttribute('cx', (dn.x || 0) + (dn.width || 200) / 2);
+          dot.setAttribute('cy', (dn.y || 0) + (dn.height || 60) / 2);
+          dot.style.display = 'block';
+        }
+        if (c) showTraceBubble(step, c.x, c.y);
+      }
+      idx++;
+    };
+    tick();
+    state.dataflowTimer = setInterval(tick, 800);
   }
 
   // ==== 卡片交互 ====
@@ -4466,6 +4624,7 @@ ${EDGE_GEOM_SOURCE}
   setupCollapseButtons();
   setupLayerBadges();
   setupLayerControls();
+  setupDataflow();
   setupSubDslButtons();
   hideContainsEdges();
   initCollapsedState();

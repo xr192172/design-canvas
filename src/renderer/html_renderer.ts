@@ -696,7 +696,10 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           const detBtn = detCount > 0
             ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})">🧩 细节 ${detCount}</button>`
             : '';
-          return `<div class="layer-controls">${errBtn}${detBtn}</div>`;
+          const dataflowBtn = detCount > 0
+            ? `<button id="dataflow-toggle" type="button" title="数据流推演：选中 detail 层函数节点后点击，注入数据沿调用链追踪处理与分流" disabled>▶ 数据流</button>`
+            : '';
+          return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}`;
         })()}
         ${(() => {
           // 人端筛选条：状态/孤岛/聚焦——把 LLM 端的查询过滤维度映射成人可点的筛选。

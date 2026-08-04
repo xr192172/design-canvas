@@ -1152,6 +1152,130 @@ footer button:active {
 .layer-badge.layer-error.expanded .badge-text {
   fill: #fff;
 }
+
+/* ==== 数据流追踪（L5a 静态推演：注入数据 → 沿调用链追踪处理/分流） ==== */
+#dataflow-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#dataflow-panel {
+  position: fixed;
+  top: 76px;
+  right: 18px;
+  z-index: 300;
+  width: 340px;
+  background: var(--theme-card-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  padding: 12px 14px;
+  display: none;
+}
+.dataflow-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: var(--theme-text);
+}
+.dataflow-desc {
+  font-size: 11px;
+  color: var(--theme-text-dim);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+#dataflow-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  background: var(--theme-input-bg);
+  color: var(--theme-text);
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+}
+.dataflow-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+.dataflow-actions button {
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--theme-border);
+  background: var(--theme-input-bg);
+  color: var(--theme-text);
+}
+.dataflow-actions #dataflow-start {
+  background: var(--theme-primary);
+  border-color: var(--theme-primary);
+  color: #fff;
+  font-weight: 600;
+}
+.node.trace-active {
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 10px var(--theme-primary));
+}
+.edge.trace-branch {
+  stroke: #f0a050 !important;
+  stroke-width: 2.5 !important;
+  opacity: 1 !important;
+}
+#trace-dot {
+  fill: var(--theme-primary);
+  stroke: #fff;
+  stroke-width: 2;
+  filter: drop-shadow(0 0 6px var(--theme-primary));
+  pointer-events: none;
+}
+#trace-bubble {
+  position: fixed;
+  z-index: 320;
+  background: rgba(16, 22, 38, 0.95);
+  border: 1px solid var(--theme-primary);
+  color: #e8eefb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-width: 300px;
+  font-size: 12px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+.trace-bubble-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+  color: var(--theme-primary);
+}
+.trace-bubble-row {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  word-break: break-all;
+}
+.trace-dir {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  background: rgba(76, 175, 80, 0.2);
+  color: #7bd88f;
+}
+.trace-dir-out {
+  background: rgba(79, 141, 247, 0.2);
+  color: #8ab6ff;
+}
+.trace-bubble-note {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.25);
+  color: #f0c27a;
+  font-size: 11px;
+}
 .history-indicator {
   font-size: 11px;
   color: var(--theme-text-dim);
