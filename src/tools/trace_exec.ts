@@ -185,15 +185,30 @@ function execTs(codeText: string, entryName: string, args: unknown[]): unknown {
   return fn(args);
 }
 
-function runSubprocess(cmd: string, args: string[], stdin: string): Promise<string> {
+function runSubprocess(cmd: string, args: string[], stdin: string, timeoutMs = 10000): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      p.kill('SIGKILL');
+      reject(new Error(`执行超时（${timeoutMs}ms），子进程已终止`));
+    }, timeoutMs);
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
-    p.on('error', (e) => reject(new Error(`无法启动 ${cmd}：${e.message}`)));
+    p.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`无法启动 ${cmd}：${e.message}`));
+    });
     p.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (code !== 0) reject(new Error((err || `退出码 ${code}`).trim().slice(0, 200)));
       else resolve(out);
     });

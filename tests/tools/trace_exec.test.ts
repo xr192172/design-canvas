@@ -8,6 +8,7 @@
  * - 链式传递：上一步真实 out → 下一步 in
  * - Python：exec 子进程（本机无 python 时标注，不失败）
  * - Go：go run 单文件（本机无 go 工具链时标注，不失败）
+ * - 子进程超时：死循环 → error + 超时提示
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -17,6 +18,12 @@ import os from 'node:os';
 import { traceExecChain } from '../../src/tools/trace_exec';
 
 let tmpDir: string;
+
+/** Check if subprocess error is due to missing environment (command not found) */
+function isMissingEnv(note: string | undefined): boolean {
+  if (!note) return false;
+  return note.includes('9009') || note.includes('ENOENT');
+}
 
 function writeFixture(name: string, content: string): string {
   const p = path.join(tmpDir, name);
@@ -167,12 +174,9 @@ describe('trace_exec - Python 真实执行', () => {
       steps: [{ node_id: 'n1', func_name: 'classify', file_path: f }],
       input_value: { score: 85 },
     });
-    if (result.steps[0].status === 'error') {
-      expect(result.steps[0].note).toContain('无法启动'); // 本机无 python
-    } else {
-      expect(result.steps[0].status).toBe('ok');
-      expect(result.steps[0].out_value).toBe('pass');
-    }
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
+    expect(result.steps[0].status).toBe('ok');
+    expect(result.steps[0].out_value).toBe('pass');
   });
 });
 
@@ -193,11 +197,33 @@ describe('trace_exec - Go 真实执行', () => {
       steps: [{ node_id: 'n1', func_name: 'Half', file_path: f }],
       input_value: { n: 10 },
     });
-    if (result.steps[0].status === 'error') {
-      expect(result.steps[0].note).toContain('无法启动'); // 本机无 go 工具链
-    } else {
-      expect(result.steps[0].status).toBe('ok');
-      expect(result.steps[0].out_value).toBe(5);
-    }
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
+    expect(result.steps[0].status).toBe('ok');
+    expect(result.steps[0].out_value).toBe(5);
   });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 子进程超时：死循环函数 → error + 超时提示
+// ─────────────────────────────────────────────────────────────
+
+describe('trace_exec - 子进程超时保护', () => {
+  it('Python 死循环 → 超时终止 + error 标注', async () => {
+    const f = writeFixture('loop.py', `def loop_forever(x: int) -> int:
+    while True:
+        pass
+    return x
+`);
+    const result = await traceExecChain({
+      steps: [{ node_id: 'n1', func_name: 'loop_forever', file_path: f }],
+      input_value: { x: 1 },
+    });
+    // 本机无 python → error + "无法启动"，不算超时
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) {
+      return; // 跳过：环境缺失
+    }
+    // 有 python → 应被超时终止
+    expect(result.steps[0].status).toBe('error');
+    expect(result.steps[0].note).toContain('超时');
+  }, 15000); // 15 秒：10 秒子进程超时 + 余量
 });
