@@ -215,7 +215,7 @@
 | **基础设施** | 1 | SQLite 存储 + 文件 hash 增量 backfill | CodeGraph | 无 | 🚧 v1 已落地（src/db/，见 7.3） |
 | | 2 | MCP 工具收敛到 ~8 个（JSON Patch 模式） | CodeGraph | 无 | ⏳ |
 | | 3 | 调用边级别提取（symbol + call_edge + dependency 表） | CodeGraph | 1 | ✅ 同文件（AST 级，self src/ 509 条）+ 跨文件（import 限定，155 条）调用边已落地；内置/外部/失败三态标记；已接入渲染（derive_detail_chain AST 级调用图 + 虚线跳边 + 跨文件标注）+ 数据流追踪（L5a 静态推演：注入数据沿链推演，每步进/出值浮层 + 分流高亮 + CFG 判定展示 if/loop 条件原文与走向） |
-| **代码理解** | 4 | Diff Impact Analysis（变更影响范围追溯） | Understand Anything | 3 | ⏳ |
+| **代码理解** | 4 | Diff Impact Analysis（变更影响范围追溯） | Understand Anything | 3 | ✅ 已落地（2026-08-06，见 7.5） |
 | | 5 | architecture-analyzer 角色（推断架构层 + 职责回填） | Understand Anything | 3 | ⏳ |
 | | 6 | Guided Tours（拓扑排序学习路径 + 动画播放列表） | Understand Anything | DSL edges | ⏳ |
 | **可视化** | 7 | Layer Visualization（按 type 分层着色 + legend） | Understand Anything | 5 | ⏳ |
@@ -392,3 +392,25 @@ design-canvas 路线图第 1 项（SQLite 缓存 + 文件 hash 增量）与 ai-b
 
 5. **MCP server 接入**：`import_project` 工具经 `getProjectCacheDb(project_dir)` 拿缓存——连接池按项目根复用（MCP 是长进程），缓存放**被分析项目的** `<project_dir>/.design-canvas/cache.db`（缓存跟着项目走，相对路径键才不撞车；与数据主目录的 cache.db 是两个独立用途）。node:sqlite 走**动态 import**：加载失败（Node <22.5）或打开失败（目标目录只读）都退化为全量解析，缓存失败绝不阻塞工具调用
 6. **删除侦测（prune 模式）**：每次 sync 顺带比对 files 表与本次全量扫描列表（`pruneDeletedFiles`），清掉磁盘上已不存在文件的缓存行（nodes 级联清边与 FTS）。两个防误删约束：比对基准必须是 **max_files 截断前**的完整列表；只 prune 受支持扩展名的文件（与 sync 同域），.md 等其他工具写入的行不受影响——多工具共享项目缓存时不互踩。实时 fs 监听仍归序号 11，届时换 removeFile 实时触发
+
+### 7.5 Diff Impact Analysis（2026-08-06，路线图序号 4）
+
+在符号级调用图上做有向 BFS，再按 file_path 聚合回 DSL 文件级节点。只读，不修改 DSL。
+
+1. **工具 `diff_impact(feature, project_dir, changed[], direction?, max_depth?)`**：`direction` 为 `callers`（谁调用受影响，默认）/`callees`（受影响调用了谁）/`both`；`max_depth` 默认 3。沿 `edges(kind='call')` 追溯，种子 = changed 文件里的全部符号（depth 0），结果含受影响文件（DSL `file_<rel>` id 锚定）+ 受影响符号明细 + 文本报告
+2. **serve.ts 端点 `POST /api/diff-impact`**：与 MCP 工具同实现，浏览器端可直接调用
+3. **数据源零新增**：复用序号 1 的 SQLite 缓存 + 序号 3 的调用边，无新数据管线
+4. **验证**：402/402 测试通过（新增 6 个，覆盖 callers/callees/both/深度截断/跨文件/降级）；冒烟脚本 [diff_impact_smoke.mjs](../scripts/diff_impact_smoke.mjs)——改 `src/db/db.ts` 正确波及 `diff_impact.ts`(depth1) 与 `serve.ts`(depth2)，符合直觉
+5. **降级路径**：缓存无调用边 / changed 文件不在缓存，均给出明确警告而非崩溃；缓存打开失败返回提示性空结果
+6. **待做（D2）**：渲染层标红受影响节点/边 + 影响清单面板（见 [docs/plans/2026-08-06-diff-impact.md](./plans/2026-08-06-diff-impact.md)）
+
+### 7.6 Architecture Layer Visualization（2026-08-06，路线图序号 5+7）
+
+按文件路径目录/文件名模式启发式推断架构层，渲染器提供「🎨 图层」开关在语言色/层色间切换 + 分层图例。纯函数加工副本，不动存储 DSL。
+
+1. **分层模块** [layer_detect.ts](../src/tools/layer_detect.ts)：`detectArchLayers(dsl)` 为每个 file 节点推断 `arch_layer` 并生成 `dsl.layers`（api/service/data/ui/middleware/utility/config/types/test/entry，未匹配兜底 core；层名回填 semantic responsibility 前缀）
+2. **DSL 扩展**：Node 加 `arch_layer`；DesignDSL 加 `layers?: ArchLayer[]`
+3. **渲染层**：节点 `data-arch-layer` 属性 + `🎨 图层` 按钮 + 动态层色 CSS + 右上角图例；`setupLayerViz` 绑定切换
+4. **接入**：self_analyze 渲染前调 `detectArchLayers`，指标加「架构层」数
+5. **验证**：63 文件节点全部着色，data 层 computed fill #5a9e6f 与层定义一致，切换往返正常，无报错。详见 [2026-08-06-arch-layer-viz.md](./plans/2026-08-06-arch-layer-viz.md)
+6. **工具化（L7）**：MCP 工具 `arch_layer(feature, persist?)`（[arch_layer.ts](../src/tools/arch_layer.ts)）+ `POST /api/arch-layer`；`persist=true` 把 layering 写回 feature 供渲染显示图层着色；单测 [arch_layer.test.ts](../tests/tools/arch_layer.test.ts) 4 通过 + 冒烟 [arch_layer_smoke.mjs](../scripts/arch_layer_smoke.mjs) + HTTP 端到端验证通过

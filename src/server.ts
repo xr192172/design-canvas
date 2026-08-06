@@ -24,6 +24,8 @@ import { deriveDetailChain } from './tools/derive_chain.js';
 import { deriveAlgorithm } from './tools/derive_algorithm.js';
 import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
+import { diffImpact } from './tools/diff_impact.js';
+import { archLayer } from './tools/arch_layer.js';
 import { runSimulation, resetSimulation } from './tools/simulation.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { submitApproval, reviewAnnotation } from './tools/approval.js';
@@ -746,6 +748,72 @@ server.registerTool(
         code_dir: args.code_dir,
       });
       return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// diff_impact：变更影响分析
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'diff_impact',
+  {
+    title: 'Analysis of change impact',
+    description:
+      '变更影响分析：给定一组已变更文件，沿符号缓存（cache.db）中的调用边（kind=call）' +
+      '追溯"这次改动波及了哪些符号/文件"，聚合到 DSL 文件级节点。' +
+      'direction: callers=谁调用受影响（默认）/ callees=受影响调用了谁 / both=双向；max_depth 控制追溯深度。' +
+      '只读，不修改 DSL。需要先对该项目运行 import_project 建立符号缓存。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      project_dir: z.string().describe('被分析项目的根目录（其下 .design-canvas/cache.db 是符号缓存）'),
+      changed: z.array(z.string()).describe('已变更文件清单（相对项目根的路径，或绝对路径）'),
+      direction: z.enum(['callers', 'callees', 'both']).optional().describe('追溯方向，默认 callers'),
+      max_depth: z.number().int().min(1).optional().describe('最大追溯深度，默认 3'),
+    },
+  },
+  (args) => {
+    try {
+      const result = diffImpact({
+        feature: args.feature,
+        project_dir: args.project_dir,
+        changed: args.changed,
+        direction: args.direction,
+        max_depth: args.max_depth,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// arch_layer：架构分层分析（序号5+7）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'arch_layer',
+  {
+    title: 'Architecture layer analysis',
+    description:
+      '架构分层分析：按文件路径的目录/文件名模式启发式推断每个文件所属架构层' +
+      '（api/service/data/ui/middleware/utility/config/types/test/entry，未匹配归入核心层），' +
+      '返回层定义（含配色/文件数）与每个文件节点的层归属。' +
+      'persist=true 时把 arch_layer + layers 写回 feature，渲染即可显示 🎨 图层着色与图例。只读分析（persist=false）。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      persist: z.boolean().optional().describe('是否把分层结果写回 feature，默认 false（仅分析）'),
+    },
+  },
+  (args) => {
+    try {
+      const result = archLayer({
+        feature: args.feature,
+        persist: args.persist,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
     }

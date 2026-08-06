@@ -183,6 +183,26 @@ export interface EvalResult {
 export function evaluateCond(cond: string, scope: Record<string, unknown>): EvalResult {
   try {
     if (!cond || !cond.trim()) return { ok: false, error: '空条件' };
+
+    // 安全预过滤：阻断原型链逃逸模式（new Function + with + Proxy 的已知绕路）。
+    // 危险模式说明：
+    //   - .constructor / .prototype / __proto__：绕过 Proxy 直接访问原生原型链
+    //     典型攻击：({}).constructor.constructor('return payload')()
+    //   - Function( / eval(：直接构造可执行函数
+    // 这些模式在合法的 if/loop 条件表达式中不应出现。
+    const DANGEROUS_PATTERNS: readonly RegExp[] = [
+      /\.constructor/,
+      /\.prototype/,
+      /__proto__/,
+      /\bFunction\s*\(/,
+      /\beval\s*\(/,
+    ];
+    for (const pat of DANGEROUS_PATTERNS) {
+      if (pat.test(cond)) {
+        return { ok: false, error: '安全限制：条件包含禁止的模式' };
+      }
+    }
+
     // 白名单内建（纯函数，无 I/O/副作用）
     const env: Record<string, unknown> = Object.assign(
       {

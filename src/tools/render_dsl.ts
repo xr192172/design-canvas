@@ -15,6 +15,7 @@ import path from 'node:path';
 import { validateDSLJson } from '../dsl/validator.js';
 import { saveDSL, getDataHome } from '../storage.js';
 import { renderHTML } from '../renderer/html_renderer.js';
+import { artifactFromDsl, registerArtifact } from './registry.js';
 
 export interface RenderDslInput {
   dsl_json: string;
@@ -65,6 +66,13 @@ export function renderDsl(input: RenderDslInput): RenderDslResult {
   const htmlFile = path.resolve(output_path ?? defaultOutputPath(dsl.feature));
   ensureOutputDir(htmlFile);
   fs.writeFileSync(htmlFile, html, 'utf-8');
+
+  // 4.5 注册到产物注册表（供 Hub 首页统一索引 / 语义化）
+  try {
+    registerArtifact(artifactFromDsl(dsl, htmlFile));
+  } catch {
+    // 注册失败不影响渲染主流程
+  }
 
   // 5. 返回路径信息
   const fileUrl = `file:///${htmlFile.replace(/\\/g, '/')}`;

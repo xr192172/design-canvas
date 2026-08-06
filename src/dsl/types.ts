@@ -97,6 +97,20 @@ export interface ThemeConfig {
 /** 主题 ID */
 export type ThemeId = 'blue' | 'sakura' | 'forest' | 'ocean' | 'star';
 
+/** 架构分层定义（序号5/7：architecture-analyzer + Layer Visualization） */
+export interface ArchLayer {
+  /** 层标识（kebab-case，如 api/service/data/ui） */
+  id: string;
+  /** 层名（中文，如 "API 层"） */
+  name: string;
+  /** 层职责一句话描述 */
+  description: string;
+  /** 该层统一着色（深色主题协调的填充色） */
+  color: string;
+  /** 该层包含的文件节点数 */
+  count: number;
+}
+
 /** 顶层 DSL 文档 */
 export interface DesignDSL {
   /** DSL ID（可选，用于全局唯一标识） */
@@ -123,4 +137,6 @@ export interface DesignDSL {
   animations_v2?: AnimationSystem;
   /** 仿真器定义（事件驱动状态机，替代动画时间轴） */
   simulation?: Simulation;
+  /** 架构分层结果（序号5/7）：每层定义 + 文件归属，供图层着色与图例 */
+  layers?: ArchLayer[];
 }

@@ -1058,6 +1058,61 @@ footer button:active {
   color: #fff;
   border-color: var(--theme-primary);
 }
+/* 架构分层图例（序号5/7）：🎨 图层开关显示，右上角悬浮 */
+.layer-legend {
+  position: absolute;
+  top: 70px;
+  right: 20px;
+  background: var(--theme-card-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  padding: 12px;
+  z-index: 100;
+  max-width: 320px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+.layer-legend-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--theme-text);
+}
+.layer-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--theme-text);
+}
+.layer-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.layer-legend-name {
+  flex: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.layer-legend-desc {
+  flex: 2;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.layer-legend-count {
+  background: rgba(125, 211, 252, 0.15);
+  color: #7dd3fc;
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
 /* 筛选条（人端筛选：状态/孤岛/聚焦）——胶囊 chips，多选可叠加 */
 .filter-bar {
   display: flex;
@@ -1275,6 +1330,181 @@ footer button:active {
   border-top: 1px dashed rgba(255, 255, 255, 0.25);
   color: #f0c27a;
   font-size: 11px;
+}
+.trace-status-unsupported {
+  color: #f0a050;
+}
+.trace-status-error {
+  color: #f4706a;
+}
+/* LLM 关键节点聚焦：关键点高亮，非关键压缩过渡 */
+.node.trace-focus {
+  stroke: var(--theme-primary);
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 12px var(--theme-primary)) brightness(1.12);
+  opacity: 1;
+}
+.node.trace-dim {
+  opacity: 0.25;
+  transition: opacity 0.5s ease;
+}
+#focus-panel {
+  position: fixed;
+  right: 16px;
+  top: 76px;
+  width: 300px;
+  max-height: 62vh;
+  overflow: auto;
+  z-index: 330;
+  background: rgba(16, 22, 38, 0.96);
+  border: 1px solid var(--theme-primary);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #e8eefb;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.focus-panel-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--theme-primary);
+}
+.focus-close {
+  float: right;
+  cursor: pointer;
+  color: #9fb0cc;
+  font-size: 13px;
+}
+.focus-row {
+  padding: 6px;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+.focus-row:last-child {
+  border-bottom: none;
+}
+.focus-row:hover {
+  background: rgba(var(--theme-primary-rgb), 0.12);
+}
+.focus-row b {
+  display: block;
+  color: var(--theme-primary-light);
+  font-size: 12px;
+}
+.focus-row span {
+  color: #9fb0cc;
+  font-size: 11px;
+}
+/* 变更影响（D2）：受影响节点/边标红，受影响清单面板 */
+.node.impacted {
+  stroke: #ff5252 !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 10px rgba(255, 82, 82, 0.6)) brightness(1.1);
+}
+.node.impacted-direct {
+  stroke: #ff3d3d !important;
+  stroke-width: 3 !important;
+}
+.edge.impacted path {
+  stroke: #ff5252 !important;
+  stroke-width: 3 !important;
+  filter: drop-shadow(0 0 6px rgba(255, 82, 82, 0.6));
+}
+.diff-input-panel {
+  position: fixed;
+  left: 50%;
+  top: 120px;
+  transform: translateX(-50%);
+  width: 380px;
+  z-index: 340;
+  background: rgba(16, 22, 38, 0.97);
+  border: 1px solid var(--theme-primary);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  color: #e8eefb;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.diff-input-desc {
+  color: #9fb0cc;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.diff-input-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0d1322;
+  color: #e8eefb;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 6px;
+  font-family: monospace;
+  font-size: 11px;
+}
+.diff-input-opts {
+  display: flex;
+  gap: 12px;
+  margin: 8px 0;
+  align-items: center;
+}
+.diff-input-opts select,
+.diff-input-opts input {
+  background: #0d1322;
+  color: #e8eefb;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.diff-input-actions {
+  display: flex;
+  gap: 8px;
+}
+.diff-input-actions button {
+  background: var(--theme-primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.diff-input-actions button#diff-input-gitdiff {
+  background: rgba(24, 144, 255, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(125, 211, 252, 0.45);
+}
+.diff-input-actions button#diff-input-gitdiff:hover:not(:disabled) {
+  background: rgba(24, 144, 255, 0.28);
+}
+.diff-input-actions button#diff-input-gitdiff:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.diff-input-status {
+  margin-top: 8px;
+  color: #f0a050;
+  min-height: 14px;
+}
+.diff-sub {
+  color: #9fb0cc;
+  margin-bottom: 6px;
+}
+.diff-files-label {
+  font-weight: 600;
+  color: var(--theme-primary);
+  margin: 6px 0 2px;
+}
+.diff-symbols {
+  font-family: monospace;
+  font-size: 10px;
+  color: #9fb0cc;
+  max-height: 120px;
+  overflow: auto;
+}
+.diff-sym-depth {
+  color: #f0a050;
+}
+.diff-warn {
+  color: #f0a050;
 }
 .trace-judge {
   margin-top: 6px;

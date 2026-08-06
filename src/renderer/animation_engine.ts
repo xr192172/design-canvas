@@ -1008,6 +1008,34 @@ ${ANIM_CORE_SOURCE}
     return true;
   }
 
+  // D3 变更影响联动：flow 对应的边当前带 .impacted（scripts.ts 标红）→ 粒子流改红
+  var IMPACTED_PARTICLE_COLOR = '#ff5252';
+  function impactedFlowColor(flow) {
+    if (!flow || !flow.edgeId) return null;
+    var el = document.querySelector('.edge[data-id="' + flow.edgeId + '"].impacted');
+    return el ? IMPACTED_PARTICLE_COLOR : null;
+  }
+
+  // 重绘已发射粒子：凡落在 .impacted 边上的粒子，圆点改成红色（标红后立即生效，无需等下一轮 interval）
+  function repaintImpactedParticles() {
+    var layer = ensureAnimLayer();
+    if (!layer) return;
+    var particles = layer.querySelectorAll('.anim-particle-v2');
+    for (var i = 0; i < particles.length; i++) {
+      var g = particles[i];
+      var flowId = g.getAttribute('data-flow-id') || '';
+      // 默认流 id 形如 default_flow_<edgeId>；显式流/仿真流不重绘
+      if (flowId.indexOf('default_flow_') !== 0) continue;
+      var edgeId = flowId.slice('default_flow_'.length);
+      var impactedEl = document.querySelector('.edge[data-id="' + edgeId + '"].impacted');
+      var circle = g.querySelector('circle');
+      if (!circle) continue;
+      if (impactedEl) {
+        circle.setAttribute('fill', IMPACTED_PARTICLE_COLOR);
+      }
+    }
+  }
+
   function spawnDefaultParticle(flow, payloadData) {
     // ---- 职责分层激活门控：深层 flow 跟随层展开状态 ----
     if (!flowDomVisible(flow)) return;
@@ -1083,7 +1111,7 @@ ${ANIM_CORE_SOURCE}
       pathEl: findFlowPathEl(flow),
       from: flow.from,
       to: flow.to,
-      color: flow.color || cssVar('--theme-accent', '#4fc3f7'),
+      color: impactedFlowColor(flow) || flow.color || cssVar('--theme-accent', '#4fc3f7'),
       label: flow.label,
       valueLabel: flow.valueLabel,
       valueType: flow.valueType,
@@ -2207,6 +2235,8 @@ ${ANIM_CORE_SOURCE}
     step: step,
     reset: reset,
     spawnParticle: spawnDefaultParticle,
+    // D3 变更影响联动：把当前已发射的、落在 .impacted 边上（或端点受影响）的粒子重绘成红色
+    repaintImpacted: repaintImpactedParticles,
     // D3 注入回放：__animV2__.replayFlow('flow_id', {error:{code:'X'}}, valueCtx?)
     replayFlow: replayFlow,
     // 纯逻辑核心（进料口面板静态报告用，与 MCP inject_replay 工具同源）

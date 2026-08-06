@@ -323,6 +323,45 @@ describe('evaluateCond - 轻量表达式求值', () => {
     expect(evaluateCond('fetch(1)', {}).error).toContain('未匹配变量：fetch');
   });
 
+  it('安全沙箱：原型链逃逸模式被预过滤阻断', () => {
+    // 原型链逃逸：({}).constructor.constructor('return payload')()
+    // 这是 new Function + with + Proxy 的经典绕路——对象字面量不经 Proxy，
+    // 通过原型链直达原生 Function 构造器，从而执行任意代码。
+    const r1 = evaluateCond('({}).constructor.constructor("return 42")()', {});
+    expect(r1.ok).toBe(false);
+    expect(r1.error).toContain('安全限制');
+
+    // 数组字面量同样可逃逸
+    const r2 = evaluateCond('[].constructor.constructor("return 42")()', {});
+    expect(r2.ok).toBe(false);
+    expect(r2.error).toContain('安全限制');
+
+    // 字符串字面量同样可逃逸
+    const r3 = evaluateCond('"".constructor.constructor("return 42")()', {});
+    expect(r3.ok).toBe(false);
+    expect(r3.error).toContain('安全限制');
+
+    // 直接 Function 构造器调用
+    const r4 = evaluateCond('Function("return 42")()', {});
+    expect(r4.ok).toBe(false);
+    expect(r4.error).toContain('安全限制');
+
+    // eval 调用
+    const r5 = evaluateCond('eval("return 42")', {});
+    expect(r5.ok).toBe(false);
+    expect(r5.error).toContain('安全限制');
+
+    // __proto__ 访问
+    const r6 = evaluateCond('({}).__proto__', {});
+    expect(r6.ok).toBe(false);
+    expect(r6.error).toContain('安全限制');
+
+    // .prototype 访问
+    const r7 = evaluateCond('Object.prototype', {});
+    expect(r7.ok).toBe(false);
+    expect(r7.error).toContain('安全限制');
+  });
+
   it('语句语法（循环/声明）→ SyntaxError 无法求值（只能算表达式）', () => {
     expect(evaluateCond('while (true) {}', {}).ok).toBe(false);
     expect(evaluateCond('let x = 1', {}).ok).toBe(false);

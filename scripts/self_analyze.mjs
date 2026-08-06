@@ -14,7 +14,14 @@ const { checkMonolith } = await import('../dist/src/tools/monolith.js');
 const { deriveDetailChain } = await import('../dist/src/tools/derive_chain.js');
 const { deriveAlgorithm } = await import('../dist/src/tools/derive_algorithm.js');
 const { renderHTML } = await import('../dist/src/renderer/html_renderer.js');
+const { detectArchLayers } = await import('../dist/src/tools/layer_detect.js');
 const { openDb } = await import('../dist/src/db/db.js');
+const { registerArtifactTo } = await import('../dist/src/tools/registry.js');
+
+// 产物注册表：self_analyze 用隔离的 DESIGN_CANVAS_HOME，但产物落在 cwd/output，
+// 需显式写往 serve 读取的 cwd/output/.registry.json，供 Hub 首页统一索引。
+const REG_FILE = path.resolve('output', '.registry.json');
+const regArt = (rel, meta) => { try { registerArtifactTo(REG_FILE, { path: rel, ...meta }); } catch { /* 注册失败不阻塞 */ } };
 
 const FEATURE = 'self_analyze';
 const SRC = 'src';
@@ -105,8 +112,10 @@ for (const t of ALG_TARGETS) {
 // ── 5. 渲染星图 HTML ────────────────────────────────────────────
 console.log('\n═══ 5/5 渲染星图 ═══');
 const dsl = getDSL(FEATURE);
-const nNodes = dsl.geometry.nodes.length;
-const nDeep = dsl.geometry.nodes.filter((n) => (n.layer || 'main') !== 'main').length;
+// 架构分层（序号5/7）：按目录/文件名推断每个文件所属架构层并生成 layers 定义，供图层着色
+const dslLayered = detectArchLayers(dsl);
+const nNodes = dslLayered.geometry.nodes.length;
+const nDeep = dslLayered.geometry.nodes.filter((n) => (n.layer || 'main') !== 'main').length;
 
 // 导读面板数据：概况指标 + 巨石榜单（点击直达节点）+ 推荐探索路径
 const topHotspots = [...flagged].sort((a, b) => b.lines - a.lines).slice(0, 5);
@@ -118,6 +127,7 @@ const report = {
     { label: '依赖边', value: String(imp.dep_edges) },
     { label: '超阈值文件', value: String(flagged.length) },
     { label: '深层节点', value: String(nDeep) },
+    { label: '架构层', value: String(dslLayered.layers?.length ?? 0) },
   ],
   hotspots: topHotspots.map((r) => ({
     node_id: fileNodeId(r.path),
@@ -133,7 +143,7 @@ const report = {
     { node_id: fileNodeId('tools/derive_algorithm.ts'), text: '再展开 derive_algorithm.ts，钻入算法控制流：分支=◆ 循环=⬡' },
   ],
 };
-const html0 = renderHTML(dsl, {
+const html0 = renderHTML(dslLayered, {
   report,
   nav: { home_href: './index.html', home_label: '主页' },
   compact_toolbar: true,
@@ -190,6 +200,7 @@ const html = html0
 fs.mkdirSync('output', { recursive: true });
 const out = path.resolve('output', 'self_analyze.html');
 fs.writeFileSync(out, html, 'utf-8');
+regArt('self_analyze.html', { feature: FEATURE, title: '项目星图', type: 'feature_diagram', language: 'ts', status: dsl.status || 'done' });
 
 console.log(`节点 ${nNodes}（深层 ${nDeep}）· 边 ${dsl.geometry.edges.length}`);
 console.log(`\n[输出] ${out} (${(html.length / 1024).toFixed(0)}KB)`);
@@ -202,6 +213,133 @@ const critCount = flagged.filter((r) => r.status === 'crit').length;
 const generatedAt = new Date().toLocaleString('zh-CN');
 
 /** Hub 子页面共享的星图风格 CSS（深空底 + 玻璃卡片） */
+const HUB_REGISTRY_CSS = `
+  .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; max-width:1100px; margin:0 auto; padding:6px 28px 18px; }
+  .toolbar input[type=text], .toolbar select { background:rgba(6,11,31,.75); border:1px solid rgba(125,211,252,.25); color:#dbe7ff; border-radius:8px; padding:7px 12px; font-size:13px; outline:none; }
+  .toolbar input[type=text]{ flex:1; min-width:180px; }
+  .toolbar button { background:rgba(125,211,252,.12); border:1px solid rgba(125,211,252,.25); color:#7dd3fc; border-radius:8px; padding:7px 14px; font-size:13px; cursor:pointer; }
+  .toolbar .count { font-size:12px; opacity:.6; }
+  #artifact-cards { max-width:1100px; margin:0 auto; padding:0 28px 40px; }
+  .group { margin-bottom:22px; }
+  .group-title { font-size:13px; opacity:.6; margin-bottom:10px; letter-spacing:1px; display:flex; align-items:center; gap:8px; }
+  .group-title span { background:rgba(125,211,252,.15); color:#7dd3fc; border-radius:20px; padding:1px 9px; font-size:12px; }
+  .group-title .tour-btn { margin-left:auto; font-size:12px; color:#7dd3fc; background:rgba(125,211,252,.1); border:1px solid rgba(125,211,252,.25); border-radius:8px; padding:3px 12px; text-decoration:none; }
+  .group-title .tour-btn:hover { background:rgba(125,211,252,.2); }
+  .group-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:16px; }
+  .card { background:rgba(6,11,31,.75); border:1px solid rgba(125,211,252,.16); border-radius:14px; padding:18px 18px 14px; transition:all .18s ease; }
+  .card:hover { border-color:#7dd3fc; transform:translateY(-2px); box-shadow:0 10px 30px rgba(125,211,252,.12); }
+  .card-top { display:flex; gap:6px; align-items:center; margin-bottom:10px; }
+  .card h3 { font-size:16px; margin-bottom:6px; }
+  .card h3 a { color:#e8f1ff; }
+  .card .meta { font-size:12px; opacity:.55; margin-bottom:8px; }
+  .card .note { font-size:12px; color:#c4b5fd; background:rgba(196,181,253,.08); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .tags { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; min-height:4px; }
+  .tag { font-size:11px; color:#7dd3fc; background:rgba(125,211,252,.1); padding:2px 8px; border-radius:20px; }
+  .cchip { font-size:10px; padding:2px 8px; border-radius:20px; color:#04121f; font-weight:600; }
+  .card .type { font-size:11px; opacity:.5; margin-left:auto; }
+  .acts { display:flex; align-items:center; justify-content:space-between; }
+  .ago { font-size:11px; opacity:.45; }
+  .card .edit { font-size:12px; color:#7dd3fc; background:transparent; border:1px solid rgba(125,211,252,.25); border-radius:7px; padding:4px 10px; cursor:pointer; }
+  .card .edit:hover { background:rgba(125,211,252,.12); }
+  .empty { text-align:center; opacity:.6; padding:40px 0; font-size:13px; }
+  .empty code { background:rgba(125,211,252,.1); padding:2px 8px; border-radius:5px; }
+  .modal { display:none; position:fixed; inset:0; background:rgba(2,4,13,.7); backdrop-filter:blur(4px); align-items:center; justify-content:center; z-index:50; }
+  .modal-panel { background:#0a1226; border:1px solid rgba(125,211,252,.25); border-radius:16px; padding:22px; width:min(420px,92vw); }
+  .modal-panel h3 { margin-bottom:4px; }
+  .modal-panel .e-path { font-size:12px; opacity:.55; margin-bottom:14px; word-break:break-all; }
+  .modal-panel label { display:block; font-size:12px; opacity:.6; margin:10px 0 4px; }
+  .modal-panel input, .modal-panel select, .modal-panel textarea { width:100%; background:rgba(125,211,252,.06); border:1px solid rgba(125,211,252,.2); color:#dbe7ff; border-radius:8px; padding:7px 10px; font-size:13px; outline:none; }
+  .modal-panel textarea { min-height:64px; resize:vertical; }
+  .modal-acts { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+  .modal-acts button { padding:7px 16px; border-radius:8px; font-size:13px; cursor:pointer; border:1px solid rgba(125,211,252,.25); }
+  #e-cancel { background:transparent; color:#dbe7ff; }
+  #e-save { background:rgba(125,211,252,.15); color:#7dd3fc; }
+`;
+
+const HUB_REGISTRY_JS = `<script>
+(function(){
+  var STATUS_COLOR = { done:'#4ade80', in_progress:'#fbbf24', draft:'#94a3b8' };
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  var state = { list:[], q:'', status:'', grouped:true };
+  function chip(label, color){ return '<span class="cchip" style="background:'+color+'">'+esc(label)+'</span>'; }
+  function card(a){
+    var title = a.title || a.path;
+    var tags = (a.tags||[]).map(function(t){ return '<span class="tag">#'+esc(t)+'</span>'; }).join('');
+    var st = a.status || 'draft';
+    var lang = a.language ? chip(a.language.toUpperCase(), 'rgba(125,211,252,0.2)') : '';
+    var stc = chip(st, STATUS_COLOR[st] || '#94a3b8');
+    var note = a.note ? '<p class="note">'+esc(a.note)+'</p>' : '';
+    return '<div class="card" data-path="'+esc(a.path)+'">'
+      + '<div class="card-top">'+lang+stc+'<span class="type">'+esc(a.type||'')+'</span></div>'
+      + '<h3><a href="'+esc(a.path)+'" target="_blank" rel="noopener">'+esc(title)+'</a></h3>'
+      + '<p class="meta">'+esc(a.feature||'')+' · '+esc(a.path)+'</p>'
+      + note
+      + '<div class="tags">'+tags+'</div>'
+      + '<div class="acts"><span class="ago">'+esc((a.updated_at||'').slice(0,10))+'</span><button class="edit" data-p="'+esc(a.path)+'">✎ 标记</button></div>'
+      + '</div>';
+  }
+  function render(){
+    var box = document.getElementById('artifact-cards');
+    var list = state.list.filter(function(a){
+      if(state.q){ var hay=(a.title+' '+a.path+' '+a.feature+' '+(a.tags||[]).join(' ')).toLowerCase(); if(hay.indexOf(state.q.toLowerCase())===-1) return false; }
+      if(state.status && a.status!==state.status) return false;
+      return true;
+    });
+    if(!list.length){ box.innerHTML = '<div class="empty">'+(state.q||state.status?'无匹配产物':'暂无注册产物，请先 <code>npm run serve</code> 并生成产物')+'</div>'; return; }
+    var html = '';
+    if(state.grouped){
+      var byF = {};
+      list.forEach(function(a){ var k=a.feature||'(未分组)'; (byF[k]=byF[k]||[]).push(a); });
+      Object.keys(byF).sort().forEach(function(f){ html += '<div class="group"><div class="group-title">'+esc(f)+' <span>'+byF[f].length+'</span><a class="tour-btn" href="./tour.html?feature='+encodeURIComponent(f)+'" target="_blank">▶ 导览</a></div><div class="group-cards">'+byF[f].map(card).join('')+'</div></div>'; });
+    } else { html = list.map(card).join(''); }
+    box.innerHTML = html;
+    box.querySelectorAll('.edit').forEach(function(b){ b.onclick = function(){ openEdit(b.getAttribute('data-p')); }; });
+    var c = document.getElementById('count'); if(c) c.textContent = list.length + ' / ' + state.list.length;
+  }
+  function openEdit(path){
+    var a = state.list.filter(function(x){ return x.path===path; })[0] || {};
+    document.getElementById('e-path').textContent = path;
+    document.getElementById('e-title').value = a.title || '';
+    document.getElementById('e-status').value = a.status || 'draft';
+    document.getElementById('e-tags').value = (a.tags||[]).join(', ');
+    document.getElementById('e-note').value = a.note || '';
+    document.getElementById('e-save').dataset.path = path;
+    document.getElementById('edit-modal').style.display = 'flex';
+  }
+  function saveEdit(){
+    var path = document.getElementById('e-save').dataset.path;
+    var payload = { path:path, patch:{
+      title: document.getElementById('e-title').value.trim(),
+      status: document.getElementById('e-status').value,
+      tags: document.getElementById('e-tags').value.split(',').map(function(s){ return s.trim(); }).filter(Boolean),
+      note: document.getElementById('e-note').value.trim()
+    }};
+    fetch('/api/registry', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if(j.success){ document.getElementById('edit-modal').style.display='none'; loadArtifacts(); } else { alert(j.error||'保存失败'); } })
+      .catch(function(){ alert('保存失败：请确认已用 npm run serve 启动'); });
+  }
+  function loadArtifacts(){
+    fetch('/api/registry').then(function(r){ return r.json(); }).then(function(j){
+      state.list = j.artifacts || [];
+      render();
+    }).catch(function(){
+      document.getElementById('artifact-cards').innerHTML = '<div class="empty">无法连接产物注册表。请先 <code>npm run serve</code>（或 <code>npm run hub</code>）启动服务后刷新。</div>';
+    });
+  }
+  function onReady(){ document.addEventListener('DOMContentLoaded', bind); if(document.readyState!=='loading') bind(); }
+  function bind(){
+    document.getElementById('q').addEventListener('input', function(e){ state.q=e.target.value; render(); });
+    document.getElementById('status-filter').addEventListener('change', function(e){ state.status=e.target.value; render(); });
+    document.getElementById('group-toggle').addEventListener('click', function(){ state.grouped=!state.grouped; this.classList.toggle('on', state.grouped); render(); });
+    document.getElementById('e-cancel').addEventListener('click', function(){ document.getElementById('edit-modal').style.display='none'; });
+    document.getElementById('e-save').addEventListener('click', saveEdit);
+    loadArtifacts();
+  }
+  onReady();
+})();
+</script>`;
+
 const HUB_CSS = `
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -397,6 +535,7 @@ ${FRESHNESS_JS}
 </body>
 </html>`;
 fs.writeFileSync(path.resolve('output', 'monolith_report.html'), monolithPage, 'utf-8');
+regArt('monolith_report.html', { feature: FEATURE, title: '巨石拆分建议', type: 'report', language: 'ts', status: 'done' });
 console.log(`[输出] output/monolith_report.html（${flagged.length} 个巨石卡片）`);
 
 // ── 7. Hub 主页（项目入口：导航到各产物页） ─────────────────────
@@ -415,20 +554,10 @@ const hubPage = `<!DOCTYPE html>
   .metric { background: rgba(6, 11, 31, 0.75); border: 1px solid rgba(125, 211, 252, 0.18); border-radius: 12px; padding: 14px 22px; text-align: center; min-width: 100px; }
   .metric .v { font-size: 24px; font-weight: 700; color: #7dd3fc; }
   .metric .l { font-size: 12px; opacity: 0.65; margin-top: 3px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; max-width: 900px; margin: 0 auto; padding: 0 28px 40px; }
-  .big-card {
-    display: block; background: rgba(6, 11, 31, 0.75);
-    border: 1px solid rgba(125, 211, 252, 0.18); border-radius: 16px;
-    padding: 26px 26px 22px; transition: all 0.18s ease; color: inherit;
-  }
-  .big-card:hover { border-color: #7dd3fc; transform: translateY(-3px); box-shadow: 0 12px 40px rgba(125, 211, 252, 0.15); }
-  .big-card .icon { font-size: 34px; margin-bottom: 12px; }
-  .big-card h2 { font-size: 19px; margin-bottom: 8px; }
-  .big-card p { font-size: 13px; opacity: 0.7; line-height: 1.6; }
-  .big-card .stat { margin-top: 14px; font-size: 12px; color: #7dd3fc; opacity: 0.9; }
   .page-foot { text-align: center; font-size: 12px; opacity: 0.5; padding: 0 28px 40px; line-height: 1.9; }
   .page-foot code { background: rgba(125, 211, 252, 0.1); padding: 2px 8px; border-radius: 5px; }
 ${FRESHNESS_CSS}
+${HUB_REGISTRY_CSS}
 </style>
 </head>
 <body>
@@ -443,25 +572,45 @@ ${FRESHNESS_CSS}
     <div class="metric"><div class="v">${flagged.length}</div><div class="l">超阈值文件</div></div>
     <div class="metric"><div class="v">${nDeep}</div><div class="l">深层节点</div></div>
   </div>
-  <div class="cards">
-    <a class="big-card" href="./self_analyze.html">
-      <div class="icon">🌌</div>
-      <h2>项目星图</h2>
-      <p>目录结构、文件依赖、调用链、算法控制流一体视图。打开先读体检摘要，点击"开始探索"直达最大巨石。</p>
-      <div class="stat">${nNodes} 节点 · ${dsl.geometry.edges.length} 边 · 可逐层钻入 →</div>
-    </a>
-    <a class="big-card" href="./monolith_report.html">
-      <div class="icon">🪓</div>
-      <h2>巨石拆分建议</h2>
-      <p>超阈值文件的社区拆分方案：建议新文件、声明归属、跨社区引用清单。</p>
-      <div class="stat">${flagged.length} 个文件超阈值 · ${critCount} 个严重 →</div>
-    </a>
+  <div class="toolbar">
+    <input type="text" id="q" placeholder="🔍 搜索标题 / 文件 / 标签…">
+    <select id="status-filter">
+      <option value="">全部状态</option>
+      <option value="done">done</option>
+      <option value="in_progress">in_progress</option>
+      <option value="draft">draft</option>
+    </select>
+    <button id="group-toggle" class="on">按 feature 分组</button>
+    <span class="count" id="count"></span>
   </div>
+  <div id="artifact-cards"><div class="empty">加载产物注册表…</div></div>
   <div class="page-foot">
-    重新生成：<code>npm run self-analyze</code> 或一键启动：<code>npm run hub</code><br>
-    星图操作：单击节点=选中 · 左上 ▸ 角标=展开内部 · 滚轮=缩放 · 拖拽=平移
+    产物由生成时自动注册 + 人工打标记（点卡片「✎ 标记」）。重新生成：<code>npm run self-analyze</code> 或 <code>npm run hub</code>。
+  </div>
+  <div class="modal" id="edit-modal">
+    <div class="modal-panel">
+      <h3>✎ 编辑产物</h3>
+      <div class="e-path" id="e-path"></div>
+      <label>标题</label>
+      <input id="e-title" type="text">
+      <label>状态</label>
+      <select id="e-status">
+        <option value="done">done</option>
+        <option value="in_progress">in_progress</option>
+        <option value="draft">draft</option>
+      </select>
+      <label>标签（逗号分隔）</label>
+      <input id="e-tags" type="text" placeholder="如: 核心, 星图, 导览">
+      <label>备注</label>
+      <textarea id="e-note" placeholder="给自己/团队看的说明…"></textarea>
+      <div class="modal-acts">
+        <button id="e-cancel">取消</button>
+        <button id="e-save">保存</button>
+      </div>
+    </div>
   </div>
 ${FRESHNESS_JS}
+${HUB_REGISTRY_JS}
 </body>
 </html>`;
 fs.writeFileSync(path.resolve('output', 'index.html'), hubPage, 'utf-8');

@@ -175,6 +175,8 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
   const layerAttr = layer !== 'main' ? ` data-layer="${layer}"` : '';
   const hostAttr = n.host ? ` data-host="${esc(n.host)}"` : '';
   const hiddenAttr = layer !== 'main' ? ' style="display:none"' : '';
+  // 架构分层（序号5/7）：图层着色模式下由 CSS 按 data-arch-layer 覆写 fill
+  const archAttr = n.arch_layer ? ` data-arch-layer="${esc(n.arch_layer)}"` : '';
 
   // 状态指示器：右上角小圆点
   const statusColors: Record<string, string> = {
@@ -248,7 +250,7 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
     }
   }
 
-  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${layerAttr}${hostAttr}${hiddenAttr}>
+  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${archAttr}${layerAttr}${hostAttr}${hiddenAttr}>
       ${shapeSvg}
       ${contentSvg}
       <circle cx="${dotX}" cy="${dotY}" r="4" fill="${dotColor}" stroke="#ffffff" stroke-width="0.5"/>
@@ -699,7 +701,13 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           const dataflowBtn = detCount > 0
             ? `<button id="dataflow-toggle" type="button" title="数据流推演：选中 detail 层函数节点后点击，注入数据沿调用链追踪处理与分流" disabled>▶ 数据流</button>`
             : '';
-          return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}`;
+          const diffImpactBtn = dsl.geometry.nodes.length > 0
+            ? `<button id="diff-impact-toggle" type="button" title="变更影响分析：填入已改文件清单，沿调用边追溯波及范围并在图上标红(需要 serve 模式+符号缓存)">🖍 影响</button>`
+            : '';
+          const layerVizBtn = (dsl.layers?.length ?? 0) > 0
+            ? `<button id="layer-viz-toggle" type="button" title="架构分层着色：按目录/文件名推断文件所属架构层并统一着色，点击切换 语言色/层色">🎨 图层</button>`
+            : '';
+          return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}${diffImpactBtn}${layerVizBtn}`;
         })()}
         ${(() => {
           // 人端筛选条：状态/孤岛/聚焦——把 LLM 端的查询过滤维度映射成人可点的筛选。
@@ -745,6 +753,13 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           <button id="zoom-reset" type="button" title="重置">⟲ 重置</button>
         </div>
       </div>
+      ${(dsl.layers?.length ?? 0) > 0 ? `<style id="layer-viz-css">
+${dsl.layers!.map((l) => `#canvas.layer-viz .node[data-arch-layer="${l.id}"] > [data-shape]{fill:${l.color};stroke:${l.color};}`).join('\n')}
+</style>
+      <div id="layer-legend" class="layer-legend hidden" title="架构分层图例（🎨 图层开关显示）">
+        <div class="layer-legend-title">🎨 架构分层</div>
+${dsl.layers!.map((l) => `<div class="layer-legend-row"><span class="layer-legend-swatch" style="background:${l.color}"></span><span class="layer-legend-name">${esc(l.name)}</span><span class="layer-legend-desc">${esc(l.description)}</span><span class="layer-legend-count">${l.count}</span></div>`).join('\n')}
+      </div>` : ''}
       ${options?.report ? buildReportPanel(dsl, options.report) : ''}
       <div id="context-menu" class="context-menu hidden">
         <div class="context-menu-item" data-action="edit-label">✏️ 编辑标签</div>

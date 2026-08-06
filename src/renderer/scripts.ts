@@ -1246,6 +1246,193 @@ ${DATAFLOW_SOURCE}
     });
   }
 
+  // ==== 变更影响分析（D2 渲染层）：填入已改文件 → /api/diff-impact → 标红 + 清单面板 ====
+
+  // 绑定"影响"按钮 → 打开输入面板
+  function setupDiffImpact() {
+    const btn = document.getElementById('diff-impact-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', openDiffImpactInput);
+  }
+
+  // ==== 架构分层着色（序号5/7 渲染层）：🎨 图层按钮 ↔ #canvas.layer-viz 类 + 图例显隐 ====
+  function setupLayerViz() {
+    const btn = document.getElementById('layer-viz-toggle');
+    const canvas = document.getElementById('canvas');
+    const legend = document.getElementById('layer-legend');
+    if (!btn || !canvas) return;
+    btn.addEventListener('click', () => {
+      const on = !canvas.classList.contains('layer-viz');
+      canvas.classList.toggle('layer-viz', on);
+      btn.classList.toggle('active', on);
+      if (legend) legend.classList.toggle('hidden', !on);
+    });
+  }
+
+  // 输入面板：填 changed 文件清单（相对项目根，每行一个）+ 方向/深度
+  function openDiffImpactInput() {
+    let panel = document.getElementById('diff-input-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'diff-input-panel';
+      panel.className = 'diff-input-panel';
+      panel.innerHTML =
+        '<div class="focus-panel-title">🖍 变更影响分析<span class="focus-close" id="diff-input-close">✕</span></div>' +
+        '<div class="diff-input-desc">填入已变更文件（相对项目根，每行一个，或逗号分隔），沿调用边追溯这次改动波及谁，并在图上标红。需 serve 模式（localhost 网页服务）+ 已建符号缓存。</div>' +
+        '<textarea id="diff-input-files" rows="4" spellcheck="false" placeholder="例如：\\nsrc/db/db.ts\\nsrc/tools/serve.ts"></textarea>' +
+        '<div class="diff-input-opts">' +
+        '<label>方向 <select id="diff-input-dir"><option value="callers">谁调用受影响</option><option value="callees">受影响调用了谁</option><option value="both">双向</option></select></label>' +
+        '<label>深度 <input id="diff-input-depth" type="number" min="1" max="10" value="3" style="width:52px"></label>' +
+        '</div>' +
+        '<div class="diff-input-actions">' +
+        '<button id="diff-input-gitdiff" type="button" title="自动取 git 未提交/未跟踪的改动文件并分析">📡 从 git diff 取</button>' +
+        '<button id="diff-input-run" type="button">▶ 分析并标红</button>' +
+        '<button id="diff-input-clear" type="button">清除标记</button>' +
+        '</div>' +
+        '<div id="diff-input-status" class="diff-input-status"></div>';
+      document.body.appendChild(panel);
+      document.getElementById('diff-input-close').addEventListener('click', () => { panel.remove(); });
+      document.getElementById('diff-input-gitdiff').addEventListener('click', gitDiffFetch);
+      document.getElementById('diff-input-run').addEventListener('click', runDiffImpact);
+      document.getElementById('diff-input-clear').addEventListener('click', clearDiffImpact);
+    } else {
+      panel.style.display = 'block';
+    }
+    document.getElementById('diff-input-files').focus();
+  }
+
+  // 清空受影响标红与面板
+  function clearDiffImpact() {
+    document.querySelectorAll('.node.impacted').forEach(el => el.classList.remove('impacted'));
+    document.querySelectorAll('.edge.impacted').forEach(el => el.classList.remove('impacted'));
+    const p = document.getElementById('diff-panel'); if (p) p.remove();
+    const st = document.getElementById('diff-input-status'); if (st) st.textContent = '已清除受影响标记';
+  }
+
+  // 从 git 取改动文件 → 填充输入框并立即分析（D4 一键"本次未提交改动波及谁"）
+  function gitDiffFetch() {
+    const st = document.getElementById('diff-input-status');
+    const filesInput = document.getElementById('diff-input-files');
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+      st.textContent = '需在 serve 模式（localhost 网页服务）下使用';
+      return;
+    }
+    st.textContent = '读取 git 改动…';
+    const btn = document.getElementById('diff-input-gitdiff');
+    if (btn) btn.disabled = true;
+    fetch('/api/git-diff')
+      .then(r => r.json())
+      .then((data) => {
+        if (!data || !Array.isArray(data.changed)) { st.textContent = '读取 git 改动失败'; return; }
+        if (data.changed.length === 0) { st.textContent = data.message || 'git 未检出改动文件'; return; }
+        filesInput.value = data.changed.join('\\n');
+        st.textContent = '已填入 ' + data.changed.length + ' 个改动文件，开始分析…';
+        runDiffImpact();
+      })
+      .catch(() => { st.textContent = '请求 git 改动失败（serve 模式才可用）'; })
+      .finally(() => { if (btn) btn.disabled = false; });
+  }
+
+  // 调后端分析，结果交给 applyDiffImpact
+  function runDiffImpact() {
+    const st = document.getElementById('diff-input-status');
+    const filesInput = document.getElementById('diff-input-files');
+    const changed = (filesInput.value || '').split(/[\\n,，]/).map(s => s.trim()).filter(Boolean);
+    if (changed.length === 0) { st.textContent = '请至少填一个变更文件'; return; }
+    const direction = document.getElementById('diff-input-dir').value;
+    const max_depth = parseInt(document.getElementById('diff-input-depth').value, 10) || 3;
+    st.textContent = '分析中…';
+    const body = { feature: dsl.feature, changed, direction, max_depth };
+    const apply = (data) => {
+      if (!data || !data.impacted_files) {
+        st.textContent = '分析失败：' + ((data && data.detail) || (data && data.message) || '未知错误');
+        return;
+      }
+      applyDiffImpact(data);
+      const panel = document.getElementById('diff-input-panel');
+      if (panel) panel.style.display = 'none';
+    };
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      fetch('/api/diff-impact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+        .then(r => r.json())
+        .then(apply)
+        .catch(() => { st.textContent = '请求后端失败（serve 模式才可用）'; });
+    } else {
+      st.textContent = '需在 serve 模式（localhost 网页服务）下使用，并先对项目跑 import_project 建符号缓存';
+    }
+  }
+
+  // 标红受影响节点/边 + 渲染受影响清单面板（内容与 D1 文本报告一致）
+  function applyDiffImpact(data) {
+    document.querySelectorAll('.node.impacted').forEach(el => el.classList.remove('impacted'));
+    document.querySelectorAll('.edge.impacted').forEach(el => el.classList.remove('impacted'));
+    let old = document.getElementById('diff-panel'); if (old) old.remove();
+
+    const impactedNodes = new Map(); // dsl_node_id → direct?
+    data.impacted_files.forEach((f) => { if (f.dsl_node_id) impactedNodes.set(f.dsl_node_id, f.direct); });
+    impactedNodes.forEach((direct, id) => {
+      const el = document.querySelector('.node[data-id="' + id + '"]');
+      if (el) el.classList.add('impacted', direct ? 'impacted-direct' : 'impacted-indirect');
+    });
+    // 受影响节点之间的边标红
+    (dsl.geometry?.edges || []).forEach(e => {
+      if (impactedNodes.has(e.from) && impactedNodes.has(e.to)) {
+        const el = document.querySelector('.edge[data-id="' + e.id + '"]');
+        if (el) el.classList.add('impacted');
+      }
+    });
+
+    // 受影响清单面板（样式复用 focus-panel）
+    const panel = document.createElement('div');
+    panel.id = 'diff-panel';
+    const direct = data.impacted_files.filter(f => f.direct);
+    const indirect = data.impacted_files.filter(f => !f.direct);
+    const dirLabel = data.direction === 'callers' ? '谁调用受影响' : data.direction === 'callees' ? '受影响调用了谁' : '双向';
+    const fileRow = (f, icon) => {
+      const label = (f.dsl_node_id && nodeById[f.dsl_node_id]) ? (nodeById[f.dsl_node_id].label || f.dsl_node_id) : f.path;
+      return '<div class="focus-row" data-node="' + escapeHtml(f.dsl_node_id || '') + '"><b>' + icon + ' ' + escapeHtml(label) + '</b><span>' + escapeHtml(f.path) + (f.symbol_count ? ' · ' + f.symbol_count + ' 符号' : '') + (f.direct ? '' : ' · 深度 ' + f.depth) + '</span></div>';
+    };
+    let html = '<div class="focus-panel-title">🖍 变更影响<span class="focus-close" id="diff-close">✕</span></div>' +
+      '<div class="diff-sub">' + dirLabel + ' · 深度≤' + data.max_depth + '</div>' +
+      '<div class="diff-files-label">直接受影响（' + direct.length + '）</div>' +
+      direct.map(f => fileRow(f, '⬛')).join('') +
+      '<div class="diff-files-label">间接波及（' + indirect.length + '）</div>' +
+      indirect.map(f => fileRow(f, '🔴')).join('');
+    if (data.impacted_symbols && data.impacted_symbols.length) {
+      html += '<div class="diff-files-label">受影响符号明细</div><div class="diff-symbols">';
+      data.impacted_symbols.forEach(s => {
+        const icon = s.role === 'changed' ? '⬛' : s.role === 'caller' ? '⬆' : '⬇';
+        html += '<div class="diff-sym">' + icon + ' ' + escapeHtml(s.file_path) + (s.start_line ? ':' + s.start_line : '') + ' · ' + escapeHtml(s.qualified_name) + ' <span class="diff-sym-depth">d' + s.depth + '</span></div>';
+      });
+      html += '</div>';
+    }
+    if (data.warnings && data.warnings.length) {
+      html += '<div class="diff-files-label">警告</div>';
+      data.warnings.forEach(w => { html += '<div class="diff-sym diff-warn">⚠ ' + escapeHtml(w) + '</div>'; });
+    }
+    html += '</div>';
+    panel.innerHTML = html;
+    document.body.appendChild(panel);
+    document.getElementById('diff-close').addEventListener('click', () => panel.remove());
+    panel.querySelectorAll('.focus-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const id = row.getAttribute('data-node');
+        if (id && nodeById[id]) selectNode(id);
+        const el = document.querySelector('.node[data-id="' + id + '"]');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    });
+    showToast('已标红 ' + impactedNodes.size + ' 个受影响节点');
+    // D3 动画联动：受影响边上的粒子流重绘成红色
+    if (window.__animV2__ && window.__animV2__.repaintImpacted) {
+      try { window.__animV2__.repaintImpacted(); } catch (e) { /* 动画未启动时静默 */ }
+    }
+  }
+
   // 注入面板：预填入口节点 shapes.in 的 mock JSON，可手改
   function openDataflowPanel(entry) {
     let panel = document.getElementById('dataflow-panel');
@@ -1260,9 +1447,10 @@ ${DATAFLOW_SOURCE}
       : '{"输入":"示例"}';
     panel.innerHTML =
       '<div class="dataflow-title">▶ 数据流推演：' + escapeHtml(entry.label || entry.id) + '</div>' +
-      '<div class="dataflow-desc">注入数据（JSON），沿调用链推演每个函数的处理与分流。静态推演（mock 输出值），不执行代码。</div>' +
+      '<div class="dataflow-desc">注入数据（JSON），沿调用链推演每个函数的处理与分流。serve 模式真实执行代码，file:// 模式静态推演（mock 输出值）。</div>' +
       '<textarea id="dataflow-input" rows="6" spellcheck="false">' + escapeHtml(prefill) + '</textarea>' +
       '<div class="dataflow-actions">' +
+      '<button id="dataflow-focus" type="button">✨ 聚焦关键节点</button>' +
       '<button id="dataflow-start" type="button">▶ 开始推演</button>' +
       '<button id="dataflow-cancel" type="button">取消</button>' +
       '</div>';
@@ -1277,6 +1465,10 @@ ${DATAFLOW_SOURCE}
       }
       panel.style.display = 'none';
       runDataTrace(entry, input);
+    });
+    document.getElementById('dataflow-focus').addEventListener('click', () => {
+      panel.style.display = 'none';
+      focusKeyNodes(entry);
     });
     document.getElementById('dataflow-cancel').addEventListener('click', () => {
       panel.style.display = 'none';
@@ -1293,6 +1485,73 @@ ${DATAFLOW_SOURCE}
     if (bubble) bubble.remove();
     const dot = document.getElementById('trace-dot');
     if (dot) dot.remove();
+  }
+
+  // 本地启发式选点（无后端/后端失败时降级）：判定节点 → 跨文件 → 其余处理
+  function localFocusNodes() {
+    const all = dsl.geometry?.nodes || [];
+    const judgeNodes = all.filter((n) => n.id.includes('__alg_') && /branch|loop/.test(n.description || ''));
+    const judged = new Set(judgeNodes.map((n) => n.id));
+    const chain = all.filter((n) => n.layer === 'detail' && !n.id.includes('__alg_'));
+    const cross = chain.filter((n) => !judged.has(n.id) && n.id.includes('__sx'));
+    const rest = chain.filter((n) => !judged.has(n.id) && !n.id.includes('__sx'));
+    return [...judgeNodes, ...cross, ...rest].slice(0, 5).map((n) => ({
+      node_id: n.id,
+      reason: judged.has(n.id) ? '判定点：数据在此分流' : (n.id.includes('__sx') ? '跨文件调用：数据流出本文件' : '关键处理'),
+    }));
+  }
+
+  // LLM 关键节点聚焦：关键点高亮展开、非关键压缩过渡；悬浮窗列理由，点击跳转
+  function focusKeyNodes(entry) {
+    const hostId = entry.host || entry.id;
+    const applyFocus = (data) => {
+      if (!data || !data.key_nodes || data.key_nodes.length === 0) { showToast('没有可聚焦的节点'); return; }
+      document.querySelectorAll('.node.trace-focus').forEach(el => el.classList.remove('trace-focus'));
+      document.querySelectorAll('.node.trace-dim').forEach(el => el.classList.remove('trace-dim'));
+      const old = document.getElementById('focus-panel');
+      if (old) old.remove();
+      const keys = new Set(data.key_nodes.map((k) => k.node_id));
+      document.querySelectorAll('.node[data-layer="detail"]').forEach((el) => {
+        if (keys.has(el.getAttribute('data-id'))) el.classList.add('trace-focus');
+        else el.classList.add('trace-dim');
+      });
+      const panel = document.createElement('div');
+      panel.id = 'focus-panel';
+      panel.innerHTML =
+        '<div class="focus-panel-title">✨ 关键节点' + (data.llm ? '' : ' · 启发式') +
+        '<span class="focus-close" id="focus-close">✕</span></div>' +
+        data.key_nodes.map((k) => {
+          const lbl = nodeById[k.node_id] ? (nodeById[k.node_id].label || k.node_id) : k.node_id;
+          return '<div class="focus-row" data-node="' + escapeHtml(k.node_id) + '"><b>' + escapeHtml(lbl) + '</b><span>' + escapeHtml(k.reason || '') + '</span></div>';
+        }).join('');
+      document.body.appendChild(panel);
+      document.getElementById('focus-close').addEventListener('click', () => {
+        document.querySelectorAll('.node.trace-focus').forEach(el => el.classList.remove('trace-focus'));
+        document.querySelectorAll('.node.trace-dim').forEach(el => el.classList.remove('trace-dim'));
+        panel.remove();
+      });
+      panel.querySelectorAll('.focus-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const id = row.getAttribute('data-node');
+          if (id && nodeById[id]) selectNode(id);
+          const el = document.querySelector('.node[data-id="' + id + '"]');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+      });
+      showToast('已聚焦 ' + data.key_nodes.length + ' 个关键节点' + (data.note ? '（' + data.note + '）' : ''));
+    };
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      fetch('/api/focus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feature: dsl.feature, node_id: hostId }),
+      })
+        .then((r) => r.json())
+        .then(applyFocus)
+        .catch(() => applyFocus({ key_nodes: localFocusNodes(), llm: false, note: '后端不可用，本地启发式选点' }));
+    } else {
+      applyFocus({ key_nodes: localFocusNodes(), llm: false, note: '无后端，本地启发式选点' });
+    }
   }
 
   // 节点中心（屏幕坐标，用于光点/浮层定位）
@@ -1344,11 +1603,15 @@ ${DATAFLOW_SOURCE}
           return head + rows;
         }).join('') + '</div>'
       : '';
+    const statusHtml = step.status && step.status !== 'ok'
+      ? '<div class="trace-bubble-note trace-status-' + escapeHtml(step.status) + '">' + (step.status === 'unsupported' ? '⚠ 未真实执行：' : '✖ 执行出错：') + escapeHtml(step.note || '') + '</div>'
+      : '';
     bubble.innerHTML =
       '<div class="trace-bubble-title">' + escapeHtml(step.label) + '</div>' +
       '<div class="trace-bubble-row"><span class="trace-dir">进</span>' + escapeHtml(fmt(step.inValue)) + '</div>' +
       '<div class="trace-bubble-row"><span class="trace-dir trace-dir-out">出</span>' + escapeHtml(fmt(step.outValue)) + '</div>' +
-      (step.note ? '<div class="trace-bubble-note">' + escapeHtml(step.note) + '</div>' : '') +
+      (step.note && step.status === 'ok' ? '<div class="trace-bubble-note">' + escapeHtml(step.note) + '</div>' : '') +
+      statusHtml +
       jsHtml;
     bubble.style.display = 'block';
     // 浮层放在节点上方居中
@@ -1356,16 +1619,54 @@ ${DATAFLOW_SOURCE}
     bubble.style.top = Math.max(8, cy - bubble.offsetHeight - 14) + 'px';
   }
 
-  // 数据流播放：800ms/步点亮节点 + 更新浮层；结束后保留路径
+  // 数据流播放调度：serve 模式（http）→ 真实执行（用户输入真实流过链路，可挖逻辑 bug）；
+  // 无后端（file://）或请求失败 → 回退静态 mock 推演
   function runDataTrace(entry, inputValue) {
     clearTrace();
+    const hostId = entry.host || entry.id;
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      fetch('/api/trace-exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feature: dsl.feature, node_id: hostId, input_value: inputValue }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data && data.success && data.steps && data.steps.length > 0) {
+            const steps = data.steps.map((s) => ({
+              nodeId: s.node_id,
+              label: nodeById[s.node_id] ? (nodeById[s.node_id].label || s.node_id) : s.node_id,
+              inValue: s.in_value,
+              outValue: s.out_value,
+              note: s.note,
+              status: s.status,
+            }));
+            playTrace(steps, entry, inputValue, []);
+          } else {
+            fallbackMockTrace(entry, inputValue);
+          }
+        })
+        .catch(() => fallbackMockTrace(entry, inputValue));
+    } else {
+      fallbackMockTrace(entry, inputValue);
+    }
+  }
+
+  // 回退：静态 mock 推演（无执行环境时看处理/判定/分流结构）
+  function fallbackMockTrace(entry, inputValue) {
     const nodes = (dsl.geometry?.nodes || []).map(n => ({ id: n.id, label: n.label, layer: n.layer, host: n.host, shapes: n.shapes || null }));
     const edges = (dsl.geometry?.edges || []).map(e => ({ id: e.id, from: e.from, to: e.to, type: e.type }));
     const trace = buildDataTrace(nodes, edges, entry.id, inputValue);
     if (trace.steps.length === 0) { showToast('该节点没有可追踪的调用链'); return; }
+    trace.steps.forEach((s) => { s.status = 'ok'; });
+    playTrace(trace.steps, entry, inputValue, trace.branchEdgeIds);
+  }
 
+  // 通用播放器：800ms/步点亮节点 + 更新浮层；结束后保留路径
+  function playTrace(steps, entry, rootInput, branchEdgeIds) {
+    clearTrace();
     // 途经跳边提前高亮（分流标注在浮层 note 里）
-    trace.branchEdgeIds.forEach(eid => {
+    (branchEdgeIds || []).forEach(eid => {
       const el = document.querySelector('.edge[data-id="' + eid + '"]');
       if (el) el.classList.add('trace-branch');
     });
@@ -1379,14 +1680,15 @@ ${DATAFLOW_SOURCE}
 
     let idx = 0;
     const tick = () => {
-      if (idx >= trace.steps.length) {
+      if (idx >= steps.length) {
         clearInterval(state.dataflowTimer);
         state.dataflowTimer = null;
         if (dot.parentNode) dot.parentNode.removeChild(dot);
-        showToast('✅ 推演完成 · ' + trace.steps.length + ' 步' + (trace.branchEdgeIds.length ? '（含 ' + trace.branchEdgeIds.length + ' 处分流）' : ''));
+        const bad = steps.filter((s) => s.status && s.status !== 'ok').length;
+        showToast('✅ 推演完成 · ' + steps.length + ' 步' + (bad > 0 ? '（' + bad + ' 步未真实执行）' : ''));
         return;
       }
-      const step = trace.steps[idx];
+      const step = steps[idx];
       const el = document.querySelector('.node[data-id="' + step.nodeId + '"]');
       if (el) {
         el.classList.add('trace-active');
@@ -1398,7 +1700,7 @@ ${DATAFLOW_SOURCE}
           dot.setAttribute('cy', (dn.y || 0) + (dn.height || 60) / 2);
           dot.style.display = 'block';
         }
-        if (c) showTraceBubble(step, c.x, c.y, inputValue);
+        if (c) showTraceBubble(step, c.x, c.y, rootInput);
       }
       idx++;
     };
@@ -4654,6 +4956,8 @@ ${DATAFLOW_SOURCE}
   setupLayerBadges();
   setupLayerControls();
   setupDataflow();
+  setupDiffImpact();
+  setupLayerViz();
   setupSubDslButtons();
   hideContainsEdges();
   initCollapsedState();

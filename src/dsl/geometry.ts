@@ -125,6 +125,8 @@ export interface Node {
   layer?: NodeLayer;
   /** 深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关 */
   host?: string;
+  /** 架构分层（L2 序号5/7）：启发式推断文件所属架构层（api/service/data/ui/...），供图层着色切换 */
+  arch_layer?: string;
   /** 数据形状卡（D1）：进/出该节点的数据形状（人话版 JSON Schema 渲染，纯展示） */
   shapes?: NodeShapes;
 }

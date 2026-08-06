@@ -94,6 +94,7 @@ npm start
 | `derive_detail_chain(feature, file, ...)` | 变形链推导：AST 级调用图生成 detail 层节点/边（主链 + 虚线跳边 + 截断分支节点）+ 数据形状卡 + 跨文件调用标注 |
 | `derive_algorithm(feature, file, ...)` | 算法控制流推导：函数内部结构解析挂载 detail 层 |
 | `inject_replay(feature, ...)` | 注入回放：进料口 JSON/预设异常场景注入，静态推演暴露问题 |
+| `diff_impact(feature, project_dir, changed[], ...)` | 变更影响分析：沿调用边追溯"这次改动波及谁"，聚合到文件级（direction: callers/callees/both） |
 
 ### 自动布局（按需）
 
@@ -146,6 +147,8 @@ npm start
 - `POST /api/save` / `GET /api/load` — DSL 读写
 - `GET /api/features` — 列出 feature
 - `/api/layout` / `/api/scaffold` / `/api/consistency` — 布局/生成/检查能力
+- `POST /api/trace-exec` — 数据流真实执行：喂用户输入，链上纯函数子集真实运行（TS/Py/Go 三语言），不支持/出错如实标注
+- `POST /api/focus` — LLM 关键节点选点（`.design-canvas/config.json` 配置 apiKey/model/baseURL；未配置降级启发式）
 - 静态文件服务（output/ 目录）
 
 ## 开发路线（实际进度）
@@ -166,7 +169,8 @@ npm start
 | 12 | MCP 工具收敛（写→update_feature，读→query_feature） | ✅ 完成 |
 | 13 | 人端筛选（筛选条 + 聚焦模式） | ✅ 完成 |
 | 14 | 调用边接入渲染 + 数据流追踪（AST 级调用图 → detail 层虚线跳边/分支节点 → 注入数据静态推演 + CFG 判定展示） | ✅ 完成（L5a 静态推演，判定展示条件原文与走向） |
-| 15 | 全量借鉴路线图（Diff Impact / 语义搜索 / 文件监听 / 多平台分发） | ⏳ 见 [docs/evolution.md](./docs/evolution.md) §6 |
+| 15 | 数据流真实执行 + LLM 关键节点聚焦（trace_exec 三语言真实执行，用户输入空间，不支持如实标注；/api/focus LLM 选点，前端聚焦高亮 + 非关键压缩） | ✅ 完成（验证产物 output/trace_demo.html、output/xf_trace.html） |
+| 16 | 全量借鉴路线图（Diff Impact / 语义搜索 / 文件监听 / 多平台分发） | ⏳ 见 [docs/evolution.md](./docs/evolution.md) §6 |
 
 > 设计文档原意与实际实现的偏离追溯见 [docs/evolution.md](./docs/evolution.md)。
 
