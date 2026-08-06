@@ -31,7 +31,13 @@ import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
-import { loadExplainConfig, generateModuleNarrations } from './explain_gen.js';
+import {
+  loadExplainConfig,
+  generateModuleNarrations,
+  loadGeneratedNarrations,
+  saveGeneratedNarrations,
+  getExplainGenFile,
+} from './explain_gen.js';
 
 const PORT = parseInt(process.argv[2]) || 3000;
 const PUBLIC_DIR = path.join(process.cwd(), 'output');
@@ -843,14 +849,19 @@ function handleApiExplain(req: http.IncomingMessage, res: http.ServerResponse): 
   const q = new URL(req.url ?? '/', 'http://localhost').searchParams;
   const role = (q.get('role') ?? 'newbie') as keyof Narrations;
   const validRole = role === 'senior' || role === 'pm' ? role : 'newbie';
-  const steps = EXPLAIN_SCRIPT.map((s) => ({
-    title: s.title,
-    nodeId: s.nodeId,
-    narration: s.n[validRole],
-    // 附全部角色文案，播放器切换角色无需重新请求
-    narrations: s.n,
-  }));
-  sendJson(res, 200, { success: true, role: validRole, steps });
+  // 已持久化的 LLM 文案优先，覆盖手写文案；无则用内置 EXPLAIN_SCRIPT
+  const persisted = loadGeneratedNarrations();
+  const steps = EXPLAIN_SCRIPT.map((s) => {
+    const n = persisted[s.title] ?? s.n;
+    return {
+      title: s.title,
+      nodeId: s.nodeId,
+      narration: n[validRole],
+      // 附全部角色文案，播放器切换角色无需重新请求
+      narrations: n,
+    };
+  });
+  sendJson(res, 200, { success: true, role: validRole, steps, persisted: Object.keys(persisted).length });
 }
 
 /**
@@ -900,15 +911,23 @@ async function handleApiExplainGenerate(req: http.IncomingMessage, res: http.Ser
         failures.push({ title: m.title, error: (e as Error).message });
       }
     }
+
+    // 持久化：把本次成功生成的文案落盘，播放器下次打开自动加载，无需重新调用 LLM
+    let persistedFile = '';
+    if (generated.length > 0) {
+      persistedFile = saveGeneratedNarrations(generated.map((g) => ({ title: g.title, narrations: g.narrations })));
+    }
+
     sendJson(res, 200, {
       success: true,
       model: cfg.model,
       baseURL: cfg.baseURL,
       generated,
       failures,
+      persisted_file: persistedFile,
       note: failures.length > 0
         ? `${failures.length} 个模块生成失败（${failures[0]?.title}：${failures[0]?.error}），可重试或保留手写文案`
-        : `已用 ${cfg.model} 生成 ${generated.length} 个模块的三档文案`,
+        : `已用 ${cfg.model} 生成 ${generated.length} 个模块的三档文案并持久化`,
     });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
@@ -1207,7 +1226,7 @@ function handleExplainPage(res: http.ServerResponse): void {
             }
           }
         });
-        genBtn.textContent = '✅ 已用 ' + j.model + ' 生成 ' + j.generated.length + ' 个模块';
+        genBtn.textContent = '✅ 已用 ' + j.model + ' 生成并持久化 ' + j.generated.length + ' 个模块';
         render();
       })
       .catch(function(e){
@@ -1229,6 +1248,10 @@ function handleExplainPage(res: http.ServerResponse): void {
         dots.appendChild(b);
       });
       if(!steps.length){ loading.textContent = '暂无讲解脚本'; return; }
+      // 已持久化的 LLM 文案：加载时提示，避免重复生成
+      if(j.persisted > 0){
+        genBtn.textContent = '📦 已加载 ' + j.persisted + ' 个模块的持久化文案';
+      }
       // 先载入星图
       frame.src = STAR;
       render();

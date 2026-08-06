@@ -15,7 +15,9 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { configFilePath } from './llm_focus.js';
+import { getStorageRoot } from '../storage.js';
 
 // ─────────────────────────────────────────────────────────────
 // 配置
@@ -171,4 +173,49 @@ export async function generateModuleNarrations(
     throw new Error('Agnes 返回的文案为空');
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 三档文案持久化
+// ─────────────────────────────────────────────────────────────
+
+/** 生成文案落盘路径：<dataHome>/.design-canvas/explain.gen.json */
+export function getExplainGenFile(): string {
+  return path.join(getStorageRoot(), 'explain.gen.json');
+}
+
+/**
+ * 读取已生成的 LLM 三档文案，按模块标题索引。
+ * 返回空对象表示尚无持久化文案（此时播放器用回手写 EXPLAIN_SCRIPT）。
+ */
+export function loadGeneratedNarrations(): Record<string, GeneratedNarrations> {
+  const file = getExplainGenFile();
+  if (!fs.existsSync(file)) return {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const map: Record<string, GeneratedNarrations> = {};
+    if (raw && typeof raw === 'object') {
+      for (const [title, v] of Object.entries(raw)) {
+        const n = v as GeneratedNarrations;
+        if (n && typeof n.newbie === 'string' && typeof n.pm === 'string' && typeof n.senior === 'string') {
+          map[title] = n;
+        }
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+/** 合并保存一批生成文案（按标题覆盖），返回落盘路径。 */
+export function saveGeneratedNarrations(entries: Array<{ title: string; narrations: GeneratedNarrations }>): string {
+  const map = loadGeneratedNarrations();
+  for (const e of entries) {
+    if (e.title && e.narrations) map[e.title] = e.narrations;
+  }
+  const file = getExplainGenFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(map, null, 2), 'utf-8');
+  return file;
 }
