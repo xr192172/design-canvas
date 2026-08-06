@@ -222,7 +222,7 @@
 | | 8 | Fuzzy & Semantic Search（语义搜索"哪部分处理认证"） | Understand Anything | 无 | ✅ |
 | | 9 | Persona-Adaptive UI（角色自适应详细度） | Understand Anything | 无 | ⏳ |
 | | 10 | Language Concepts（12 种编程模式上下文解释） | Understand Anything | 3 | ⏳ |
-| **自动同步** | 11 | 文件监听自动同步（FSEvents/inotify） | CodeGraph | 1, 3 | ⏳ |
+| **自动同步** | 11 | 文件监听自动同步（FSEvents/inotify） | CodeGraph | 1, 3 | ✅ 已落地（2026-08-06，见 7.6） |
 | | 12 | 多平台插件分发（Claude Code/Cursor/VS Code/Codex） | 两者 | MCP 已就绪 | ⏳ |
 | **独有能力** | 13 | 动画系统阶段 E（conveyor 迁移） | 自有 | 无 | ⏳ |
 | | 14 | L3-L5 动画（条件分支 / 函数绑定 / 异常 / 反向提取） | 自有 | 13 | ⏳ |
@@ -420,3 +420,25 @@ design-canvas 路线图第 1 项（SQLite 缓存 + 文件 hash 增量）与 ai-b
 4. **接入**：self_analyze 渲染前调 `detectArchLayers`，指标加「架构层」数
 5. **验证**：63 文件节点全部着色，data 层 computed fill #5a9e6f 与层定义一致，切换往返正常，无报错。详见 [2026-08-06-arch-layer-viz.md](./plans/2026-08-06-arch-layer-viz.md)
 6. **工具化（L7）**：MCP 工具 `arch_layer(feature, persist?)`（[arch_layer.ts](../src/tools/arch_layer.ts)）+ `POST /api/arch-layer`；`persist=true` 把 layering 写回 feature 供渲染显示图层着色；单测 [arch_layer.test.ts](../tests/tools/arch_layer.test.ts) 4 通过 + 冒烟 [arch_layer_smoke.mjs](../scripts/arch_layer_smoke.mjs) + HTTP 端到端验证通过
+
+### 7.7 文件监听自动同步（2026-08-06，路线图序号 11）
+
+项目文件变更/新增/删除 → 实时增量同步到 cache.db，可选重建"实际 DSL"（live/ 快照），实现"永不 stale"。分三阶段落地：
+
+1. **S1 监听核心** [watch_project.ts](../src/tools/watch_project.ts)：fs.watch 递归监听（旧平台降级手动注册子目录），事件去重 + debounce 批量 `flushBatch`；`shouldSyncRel` 过滤（忽略 `.design-canvas/`/node_modules/.git 等防反馈循环 + 非源码扩展名 + 测试生成物）；增改走 `syncFile`（content_hash 增量，未变 skipped），删走 `removeFile`，批量收尾 `resolveCrossFileCalls`。单测 [watch_project.test.ts](../tests/tools/watch_project.test.ts) 8 用例 + 真实 fs.watch 冒烟 [watch_project_smoke.mjs](../scripts/watch_project_smoke.mjs)
+2. **S2 双文件 DSL + 视图切换**：实际 DSL 存 `<live_dir>/.design-canvas/live/<feature>.dsl.json`（[storage.ts](../src/storage.ts) `saveLiveFeature`/`getLiveFeature`，带 `_sync.source=live`，不覆盖设计 DSL）；导入支持 `live_only`/`live_dir`（[import_project.ts](../src/tools/import_project.ts)）；serve 增 `GET /api/live`、`POST /api/live/rebuild`（[serve.ts](../src/tools/serve.ts)）；前端工具栏「🎭 设计 / ⚡ 实际」切换（localStorage `dc-view` + reload），实际视图下状态筛选按钮灰显（`body[data-view="actual"] .filter-chip[data-filter-status]`）。端到端验证 [verify_view_switch.mjs](../scripts/verify_view_switch.mjs) 10 项通过
+3. **S3 MCP 工具**：server.ts 注册 `watch_project`（[watch_project_tool.ts](../src/tools/watch_project_tool.ts)），按 project_dir 维护注册表，`action=start`（幂等）/`status`/`stop`，可选按 feature 在变更后重建实际 DSL 到该项目 live/；单测 [watch_project_tool.test.ts](../tests/tools/watch_project_tool.test.ts) 5 用例 + MCP 冒烟 [watch_project_mcp_smoke.mjs](../scripts/watch_project_mcp_smoke.mjs)（真实变更→重建含新符号 beta）
+4. **边界加固**（真实项目落地）：① 临时文件过滤——`SKIP_FILE_RE` 吸收 `.tmp/.temp/.crswap/.crdownload/.swp/.swo/.swx/.bak/.orig/.rej/`~/ 等编辑器临时存取（[watch_project.ts](../src/tools/watch_project.ts) 与 [import_project.ts](../src/tools/import_project.ts) 同步）；② rebuild 节流——`createRebuildThrottler`（尾随 debounce + 防并发）在冷却窗口内合并连续变更，运行中再触发排队补跑，`stop` 时 `flush` 冲刷未落库变更（[watch_project_tool.ts](../src/tools/watch_project_tool.ts)），`rebuild_window_ms` 可配，默认 2000ms；③ 定期 reconcile 兜底——`reconcileProject` 全量扫描磁盘 vs cache.db stat（size/mtime），补齐 fs.watch 漏事件（目录级整树删除 / 事件合并丢失），`scanSyncFiles` 循环遍历防深目录栈溢出，`reconcile_interval_ms` 可配（默认 0=关闭），接入 `watchProject` 定时器 + `onReconcile` 回调，`status` 暴露 `last_reconcile` 摘要
+
+### 7.8 Guided Tours（2026-08-06，路线图序号 6）
+
+按依赖边拓扑排序生成"先看依赖 → 再看依赖者"的学习路径，逐个高亮节点 / 串联产物。呼应动画系统"演示文稿"定位——Guided Tour 就是播放列表。只读，不修改 DSL。
+
+1. **单 feature 拓扑导览** [guided_tour.ts](../src/tools/guided_tour.ts)：Kahn 拓扑排序（跳过 contains 边），`include_deep`（默认跳过 layer=detail/error）/`include_containers`（默认跳过 type=module）/`max_steps`（默认 40）可配；环/孤立残留补末尾不卡死。MCP 工具 `guided_tour` + `POST /api/guided-tour`；画布内播放器 [scripts.ts](../src/renderer/scripts.ts) `setupGuidedTour`（▶ 导览 → 逐个高亮叠加 `tour-step` 脉冲 + 上一步/下一步/自动播放）。单测 [guided_tour.test.ts](../tests/tools/guided_tour.test.ts) 7 用例
+2. **G0 产物注册表** [registry.ts](../src/tools/registry.ts)：`<dataHome>/output/.registry.json` 统一登记生成产物（render_dsl 自动注册 + 人工打标记/编辑），供 Hub 首页动态渲染 + 为跨产物导览铺路。`GET/POST /api/registry`
+3. **G1 跨 feature 串联**：`/api/tour` 支持 `features=A,B,C`（按给定顺序拼接各 feature 产物，可选 `tags` 过滤），保留 `feature=X` 单参兼容；跨产物播放器 `/tour.html?features=A,B,C`（进度点 + iframe 嵌入 + 上一步/下一步 + 当前 feature 标签）；Hub 首页新增「⛓ 串联导览」按钮一键串联全部 feature 产物。冒烟 [guided_tour_smoke.mjs](../scripts/guided_tour_smoke.mjs)
+4. **G2 科普式讲解导览**：`/api/explain` 返回核心主链路讲解脚本（14 步：入口 MCP → 双层 DSL → 几何层 → 语义层 → 校验器 → 渲染器 → 画布脚本 → 自我分析 → AST 内核 → SQLite 缓存 → 实时同步 → 语义搜索 → 产物注册表 → 导览），每步含 title/narration/nodeId；播放器 `/explain.html` 左侧嵌星图 + 右侧字幕条，切步时通过 `postMessage({ source:'dc-tour', action:'fly', nodeId })` 让星图 flyToNode 定位高亮对应模块（[scripts.ts](../src/renderer/scripts.ts) 新增 message 接收器）；Hub 首页 hero 区新增「🎬 科普式讲解导览」入口按钮。
+5. **Persona-Adaptive UI（角色自适应）**：`EXPLAIN_SCRIPT` 每步文案拆成三档（`newbie` 口语化 / `pm` 业务价值 / `senior` 技术实现），`/api/explain?role=` 支持筛选并返回全部角色；播放器字幕条下方新增「👤 新人 / 📊 PM / 🔧 资深」切换器，切换时本地零请求更新当前步文案并重新 postMessage 定位星图（对应路线图序号9）。
+6. **角色文案 LLM 生成（DeepSeek）**：新增 [explain_gen.ts](../src/tools/explain_gen.ts)，复用 ai-base 的 LLM 文本接入（OpenAI 兼容 `/chat/completions`），默认后端 DeepSeek（`https://api.deepseek.com/v1`、模型 `deepseek-v4-flash`，`DEEPSEEK_API_KEY` 环境变量 / config.json `explain` 段），未配置 DeepSeek 时兼容 Agnes；`POST /api/explain/generate` 逐模块生成三档文案并返回可整体替换的 steps；播放器新增「✨ LLM 生成文案」按钮，成功后按 title 替换本地 narrations 并重渲染。未配置 / 网络失败时逐模块记录失败并优雅回退手写文案，不阻塞讲解。已用 deepseek-v4-flash 全量生成 14 模块三档文案验证通过（详细度梯度 newbie < pm < senior）。
+
+**验收**：`npm run serve` → 打开 Hub `/tour.html?features=<f1>,<f2>` 依次 iframe 播放各 feature 产物，进度点可跳转、当前 feature 标签跟随。科普式讲解：打开 Hub 的「🎬 科普式讲解导览」或直接访问 `/explain.html`，左侧星图 + 右侧字幕条，点「下一步」星图自动 flyToNode 定位高亮当前讲解模块；点「👤 新人 / 📊 PM / 🔧 资深」字幕立即切换为对应详细度文案，星图保持定位当前模块。

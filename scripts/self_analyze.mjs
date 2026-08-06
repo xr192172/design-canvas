@@ -572,6 +572,10 @@ ${HUB_REGISTRY_CSS}
     <div class="metric"><div class="v">${flagged.length}</div><div class="l">超阈值文件</div></div>
     <div class="metric"><div class="v">${nDeep}</div><div class="l">深层节点</div></div>
   </div>
+  <div class="hero-acts" style="display:flex;gap:12px;justify-content:center;padding:0 28px 24px;flex-wrap:wrap;">
+    <a href="./explain.html" style="display:inline-block;padding:10px 22px;border-radius:10px;background:rgba(125,211,252,.14);border:1px solid rgba(125,211,252,.35);color:#7dd3fc;text-decoration:none;font-size:14px;font-weight:600;">🎬 科普式讲解导览</a>
+    <a href="./self_analyze.html" style="display:inline-block;padding:10px 22px;border-radius:10px;background:rgba(125,211,252,.08);border:1px solid rgba(125,211,252,.2);color:#7dd3fc;text-decoration:none;font-size:14px;">🌌 打开星图</a>
+  </div>
   <div class="toolbar">
     <input type="text" id="q" placeholder="🔍 搜索标题 / 文件 / 标签…">
     <select id="status-filter">

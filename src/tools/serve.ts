@@ -15,7 +15,9 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { saveDSL, getDSL, getLiveDslFile, onDslChange } from '../storage.js';
+import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '../storage.js';
+import { importProject } from './import_project.js';
+import { getProjectCacheDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
 import { dagLayout, forceLayout, gridAlign } from './dag_layout.js';
 import { scaffold } from './scaffold.js';
@@ -29,6 +31,7 @@ import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
+import { loadExplainConfig, generateModuleNarrations } from './explain_gen.js';
 
 const PORT = parseInt(process.argv[2]) || 3000;
 const PUBLIC_DIR = path.join(process.cwd(), 'output');
@@ -129,6 +132,55 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
       return { feature: dsl.feature, title: dsl.title || dsl.feature };
     });
     sendJson(res, 200, { features });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/live?feature=：读取实际 DSL（代码实时快照，live/ 目录） */
+function handleApiLive(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const dsl = getLiveFeature(feature);
+    if (!dsl) {
+      sendError(res, 404, '实际 DSL 未生成，请先 POST /api/live/rebuild 或等待自动同步');
+      return;
+    }
+    sendJson(res, 200, dsl);
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/live/rebuild?feature=：从当前项目重建实际 DSL 到 live/（不覆盖设计 DSL） */
+async function handleApiLiveRebuild(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const projectRoot = process.cwd();
+    let cacheDb;
+    try {
+      cacheDb = getProjectCacheDb(projectRoot);
+    } catch {
+      cacheDb = undefined;
+    }
+    const result = await importProject({ project_dir: projectRoot, feature, cache_db: cacheDb, live_only: true });
+    sendJson(res, 200, {
+      success: true,
+      message: result.message.split('\n')[0],
+      files: result.files_parsed,
+      symbols: result.symbols_found,
+      cache: result.cache ?? null,
+    });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -640,13 +692,271 @@ async function handleApiRegistry(req: http.IncomingMessage, res: http.ServerResp
   }
 }
 
-/** GET /api/tour?feature=X：返回该 feature 的产物导览序列（按注册顺序） */
+/**
+ * 科普式讲解导览脚本（核心主链路）：按"双层DSL → 渲染器 → 自我分析星图 → 代码理解 →
+ * 缓存 → 实时同步 → 语义搜索 → 导览"的顺序，逐模块讲解 design-canvas 自身的工作机制。
+ * 播放器（/explain.html）每步显示字幕条，并通过 postMessage 让星图定位高亮对应节点。
+ */
+/**
+ * 角色：新人 / PM / 资深开发。同一模块三档讲解，详细度递增。
+ *   - newbie：口语、少术语，讲"这是什么、用来干嘛"
+ *   - pm：偏业务，讲"解决什么问题、价值在哪"
+ *   - senior：偏技术，讲"内部怎么实现、关键 API / 机制"
+ */
+type Narrations = { newbie: string; pm: string; senior: string };
+
+const EXPLAIN_SCRIPT: Array<{ title: string; n: Narrations; nodeId: string }> = [
+  {
+    title: '入口：MCP 服务',
+    n: {
+      newbie: 'design-canvas 的"大门"是一个叫 MCP 服务的东西。它把画布的各种能力包装成一个个小工具，让 AI 助手（比如 Claude、Cursor）能直接调用。简单说：AI 想用画布，都得先通过这个入口。',
+      pm: 'MCP 是当前 AI 编程工具的标准接口。我们把它做成标准 MCP 服务，意味着 Claude Code、Cursor、VS Code 等任何客户端都能无缝接入，不用为每个工具单独适配——这是"一次开发、处处可用"的关键投资。',
+      senior: 'server.ts 实现标准 MCP stdio 传输，注册 40+ 工具（render_dsl / import_project / guided_tour 等），JSON-RPC 协议。工具集是画布能力的程序化暴露层，也是后续 MCP 收敛（路线图序号2）的改造主体。',
+    },
+    nodeId: 'file_server_ts',
+  },
+  {
+    title: '协议核心：双层 DSL',
+    n: {
+      newbie: '所有设计都存在一个叫"双层 DSL"的结构里。它分两层：一层记录图形怎么摆（位置、大小、颜色），一层记录代码信息（哪些文件、哪些函数）。人和 AI 各改各的层，互不打扰。',
+      pm: '双层 DSL 是"人机协作"的协议层：几何层给人看（拖拽改位置），语义层给 AI 读（代码分析自动填充）。两层通过 id 锚定对齐，避免人和 AI 同时改一个文件造成冲突。这是产品差异化的核心。',
+      senior: 'DesignDSL 分 geometry（nodes/edges 位置样式）与 semantic（files/apis/dependencies），以 id 锚定。几何层由人编辑，语义层由 import_project 等自动填充。类型定义见 dsl/types.ts，校验由 dsl/validator.ts 保证锚定完整性。',
+    },
+    nodeId: 'file_dsl_types_ts',
+  },
+  {
+    title: '几何层：人画的位置',
+    n: {
+      newbie: '你在图上看到的框、线、颜色，位置都记在这一层。你可以直接拖拽改位置，改完就存回这一层。',
+      pm: '几何层保管"呈现"数据——每个节点拖到哪、多大、什么颜色。它让设计图可以被人肉眼直接操作，是"活图纸"体验的基础。修改自动回写持久化。',
+      senior: 'geometry.nodes 记录 x/y/width/height/style，支持 layout 自动布局（dag/force/grid）与画布拖拽回写。渲染器据此定位节点，是本层唯一的"画布坐标真相源"。',
+    },
+    nodeId: 'file_dsl_geometry_ts',
+  },
+  {
+    title: '语义层：LLM 理解的代码',
+    n: {
+      newbie: '这一层记的是代码信息：每个文件有哪些函数、依赖哪些文件、做完了没有。它是代码分析自动填的，你不用手动维护。',
+      pm: '语义层把"代码讲了什么"结构化——文件、API、依赖、实现状态。它由分析工具自动生成，让 AI 能读懂设计图对应的真实代码，是"设计对得上实现"的保证。',
+      senior: 'semantic.files 记录每个文件的 apis（ExpectedApi，含签名）、dependencies、status。由 import_project/backfill_scaffold 填充，consistency_check 校验与真实代码是否一致。status 驱动节点着色（待实现/实现中/已完成）。',
+    },
+    nodeId: 'file_dsl_semantic_ts',
+  },
+  {
+    title: '校验器：守住 DSL 边界',
+    n: {
+      newbie: 'DSL 不是想怎么写就怎么写的。这个校验器会检查语法对不对、引用的编号对不对得上，防止错误数据混进来。',
+      pm: '校验器相当于"质检关卡"——保证几何层和语义层引用的 id 都对得上、schema 合法。它把脏数据挡在门外，避免后续渲染和 AI 分析读到坏数据。',
+      senior: 'validator.ts 校验 ①schema 字段合法性 ②锚定完整性（几何节点 id 与语义引用是否一一对应）。非法 DSL 在进入渲染/AI 分析前即被拦截，返回结构化错误。',
+    },
+    nodeId: 'file_dsl_validator_ts',
+  },
+  {
+    title: '渲染器：把 DSL 变成活画布',
+    n: {
+      newbie: '这个部分把 DSL 变成一张你眼前这样的网页画布。整张网页是一个独立文件，双击能编辑、拖拽能改，不依赖任何外面加载的东西。',
+      pm: '渲染器把协议数据变成"活"的成果——一张自包含 HTML 画布，零外部依赖、可离线打开。它是产品价值的最终呈现层：人看到的、操作的都是它渲染出来的。',
+      senior: 'renderer/html_renderer.ts 将 DSL 拼成自包含 HTML（内联 CSS+JS），零外部依赖。支持双击编辑、拖拽回写、撤销重做、动画引擎（animation_engine）、图层着色等功能。scripts.ts（5290 行）是交互脑。',
+    },
+    nodeId: 'file_renderer_html_renderer_ts',
+  },
+  {
+    title: '画布交互脚本',
+    n: {
+      newbie: '画布上的拖拽、放大缩小、搜索、撤销这些操作，都靠这个脚本来实现。它就像画布的"大脑"。',
+      pm: 'scripts.ts 是画布的交互核心——决定了用户能怎么操作、反馈是否流畅。拖拽、缩放、搜索、撤销重做、右键菜单都在这层实现，直接决定上手体验。',
+      senior: 'scripts.ts（5290 行）实现画布全部交互：setupNodes/Edges、拖拽回写、撤销重做（Ctrl+Z/Y，localStorage 持久化）、搜索定位、动画、以及本讲解导览的 postMessage flyToNode 接收器（source:"dc-tour"）。是单文件巨石，待拆。',
+    },
+    nodeId: 'file_renderer_scripts_ts',
+  },
+  {
+    title: '自我分析：把 src 变成星图',
+    n: {
+      newbie: '我们用这个工具分析它自己——把我们自己的代码文件夹扫描一遍，生成一张像星空一样的图，每个点代表一个文件。你现在看的就是这张图。',
+      pm: '这是"吃自己的狗粮"：用工具分析自身代码库，把 68 个文件、660 个符号、100 条依赖关系可视化。既验证工具能力，又让新人一眼看懂项目结构——这是最好的产品演示。',
+      senior: 'importProject 用 TreeSitterKernel 解析 src/ 全量文件，产出符号 + 依赖边 + 目录容器节点，渲染成 self_analyze 星图（349 节点）。支持 max_files 截断（默认200）、缓存增量（content_hash）、删除侦测。',
+    },
+    nodeId: 'file_tools_import_project_ts',
+  },
+  {
+    title: 'AST 内核：理解每种语言',
+    n: {
+      newbie: '要让 AI 读懂代码，得先有个工具能"看懂"代码的结构。这个内核就是干这个的：它把代码拆成一层层结构，找出函数、调用、依赖。',
+      pm: 'AST 内核是"代码理解"的地基——它决定了工具能读懂哪些语言、读懂多深。基于 tree-sitter，动态加载语言包，是导入分析、一致性检查等能力的共同底座。',
+      senior: 'ts_kernel 基于 tree-sitter，动态检测 node_modules/tree-sitter-* 语言包，无硬编码 import，支持 go/ts/py/js。提供符号、调用边、CFG 提取；优雅降级（缺语言包时解析失败不崩溃）。被 import_project/consistency/derive_* 共享。',
+    },
+    nodeId: 'file_tools_ts_kernel_kernel_ts',
+  },
+  {
+    title: 'SQLite 缓存：只重算变更',
+    n: {
+      newbie: '代码改来改去，每次都重新分析全部太慢。这个缓存会记住分析过的结果，只有改过的文件才重新分析，快很多。',
+      pm: '缓存是"效率"的关键——用 SQLite 存符号与调用边，配合文件 hash 增量，只重算变更文件。二次运行 68 个文件几乎全命中，分析从"分钟级"降到"秒级"，这是规模化使用的根基。',
+      senior: 'db/ 用 node:sqlite（零原生依赖），schema v2：nodes/edges/files/imports + FTS5 trigram 索引。syncFile 按 content_hash 增量，未变更 skipped；pruneDeletedFiles 侦测删除。跨 feature 复用同一 AST 内核避免冗余。',
+    },
+    nodeId: 'file_db_db_ts',
+  },
+  {
+    title: '实时同步：文件一改就更新',
+    n: {
+      newbie: '代码一保存，星图就能跟着变，不用手动重新生成。这个功能就是干这个的：一直盯着文件，变了就更新。',
+      pm: '"永不 stale"是核心卖点：文件监听自动把代码变更同步进缓存，还能按 feature 重建"实际 DSL"。代码改了，设计图跟着走，人永远看到最新状态。',
+      senior: 'watch_project 用 fs.watch 递归监听 + debounce 批量 flushBatch；SKIP_FILE_RE 过滤临时文件防反馈循环；reconcileProject 定期全量扫描兜底（目录级删除/事件丢失）；重建实际 DSL 到 live/（saveLiveFeature）。rebuild_window_ms 节流。',
+    },
+    nodeId: 'file_tools_watch_project_ts',
+  },
+  {
+    title: '语义搜索：问自然语言',
+    n: {
+      newbie: '你可以直接打一句话问它，比如"哪个部分处理登录"，它就能在代码里找到相关的地方回答你。',
+      pm: '语义搜索让"找代码"从翻目录变成提问——用 embedding 把符号向量化，支持自然语言查询。降低代码检索门槛，是产品易用性的重要一环。',
+      senior: 'semantic_search 复用 cache.db 符号表，硅基流动 BAAI/bge-m3（1024维，OpenAI 兼容）向量化符号，query 余弦相似度 top-k；进程内向量缓存（model:sha256）实现向量化一次复用；未配置自动降级 FTS trigram。',
+    },
+    nodeId: 'file_tools_semantic_search_ts',
+  },
+  {
+    title: '产物注册表',
+    n: {
+      newbie: '每次生成的网页（星图、报告、示例）都会被记到一个清单里，主页会根据这个清单展示所有成果。',
+      pm: '注册表是"成果目录"——统一登记每次生成的产物，让主页动态展示、可人工打标。它让项目成果可检索、可组织，也是跨产物导览的数据基础。',
+      senior: 'registry 把产物登记到 <dataHome>/output/.registry.json，render_dsl 自动注册 + 人工编辑（tags/note/title/status）。GET/POST /api/registry 暴露，Hub 首页据此动态渲染产物卡片。',
+    },
+    nodeId: 'file_tools_registry_ts',
+  },
+  {
+    title: '导览：你正在用的功能',
+    n: {
+      newbie: '你现在看的这个"讲解"功能，就是它在起作用。它能把散落的模块按顺序连成一条学习路线，一步步带你熟悉。',
+      pm: '导览把"理解项目"变成可消费的体验——按依赖顺序生成学习路径，逐个高亮。你正在用的科普式导览，就是它和注册表、播放器一起实现的。',
+      senior: 'guided_tour 用 Kahn 拓扑排序（跳过 contains 边）生成学习路径；/api/explain 提供本讲解脚本，/explain.html 播放器 postMessage 驱动星图 flyToNode。G0/G1/G2 三档（单feature/串联/科普）已全落地。',
+    },
+    nodeId: 'file_tools_guided_tour_ts',
+  },
+];
+
+/**
+ * GET /api/explain?role=senior：返回科普式讲解导览脚本（核心主链路）。
+ * `role` ∈ newbie | pm | senior，默认 newbie。每步返回 { title, narration, nodeId }，
+ * 其中 narration 为对应角色讲解文案；同时返回本文档含全部角色（供播放器本地切换）。
+ */
+function handleApiExplain(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const q = new URL(req.url ?? '/', 'http://localhost').searchParams;
+  const role = (q.get('role') ?? 'newbie') as keyof Narrations;
+  const validRole = role === 'senior' || role === 'pm' ? role : 'newbie';
+  const steps = EXPLAIN_SCRIPT.map((s) => ({
+    title: s.title,
+    nodeId: s.nodeId,
+    narration: s.n[validRole],
+    // 附全部角色文案，播放器切换角色无需重新请求
+    narrations: s.n,
+  }));
+  sendJson(res, 200, { success: true, role: validRole, steps });
+}
+
+/**
+ * POST /api/explain/generate：用 Agnes LLM 为讲解模块生成三档角色文案。
+ * body（可选）{ steps: [{ title, background }] }，缺省用内置 EXPLAIN_SCRIPT
+ * （以现有 senior 文案作为权威背景）。逐模块调用 Agnes，返回可整体替换的
+ * steps（含 narrations 三档），播放器据此刷新本地文案。
+ * 未配置 / 调用失败：返回 { success:false, note }，播放器应回退手写文案。
+ */
+async function handleApiExplainGenerate(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const cfg = loadExplainConfig();
+    if (!cfg) {
+      sendJson(res, 200, {
+        success: false,
+        note: '未配置 LLM（config.json 缺 explain 段，或未设 DEEPSEEK_API_KEY / AGNES_API_KEY 环境变量），已保留手写文案',
+      });
+      return;
+    }
+
+    let body: { steps?: Array<{ title?: string; background?: string }> } = {};
+    const raw = await readBody(req);
+    if (raw.length > 0) {
+      try {
+        body = JSON.parse(raw.toString('utf-8'));
+      } catch {
+        body = {};
+      }
+    }
+    const requested = Array.isArray(body.steps) ? body.steps : [];
+    const modules = requested.length > 0
+      ? requested.map((s) => ({ title: s.title || '', background: s.background || '' }))
+      : EXPLAIN_SCRIPT.map((s) => ({ title: s.title, background: s.n.senior }));
+
+    const generated: Array<{ title: string; nodeId: string; narrations: { newbie: string; pm: string; senior: string } }> = [];
+    const failures: Array<{ title: string; error: string }> = [];
+    for (const m of modules) {
+      try {
+        const narrations = await generateModuleNarrations(m.title, m.background, cfg);
+        const src = requested.length > 0 ? EXPLAIN_SCRIPT.find((s) => s.title === m.title) : undefined;
+        generated.push({
+          title: m.title,
+          nodeId: src?.nodeId ?? '',
+          narrations,
+        });
+      } catch (e) {
+        failures.push({ title: m.title, error: (e as Error).message });
+      }
+    }
+    sendJson(res, 200, {
+      success: true,
+      model: cfg.model,
+      baseURL: cfg.baseURL,
+      generated,
+      failures,
+      note: failures.length > 0
+        ? `${failures.length} 个模块生成失败（${failures[0]?.title}：${failures[0]?.error}），可重试或保留手写文案`
+        : `已用 ${cfg.model} 生成 ${generated.length} 个模块的三档文案`,
+    });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/**
+ * GET /api/tour?feature=X 或 ?features=A,B,C：返回产物导览序列。
+ *   - feature=X：单 feature 的全部注册产物（按注册顺序）
+ *   - features=A,B,C：跨 feature 串联——按给定顺序拼接各 feature 的产物（G1）
+ *   - 可选 &tags=foo,bar：仅保留命中任一标签的产物
+ * 返回 steps 数组，每步含 { path, title, type, feature, tags }。
+ */
 function handleApiTour(req: http.IncomingMessage, res: http.ServerResponse): void {
   const q = new URL(req.url ?? '/', 'http://localhost').searchParams;
   const feature = q.get('feature') ?? '';
-  const steps = readRegistry()
-    .filter((e) => e.feature === feature)
-    .map((e) => ({ path: e.path, title: e.title || e.path, type: e.type || '' }));
+  const features = (q.get('features') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const tags = (q.get('tags') ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const all = readRegistry();
+  const match = (e: { feature?: string; tags?: string[] }): boolean => {
+    if (tags.length > 0 && !(e.tags ?? []).some((t) => tags.includes(t.toLowerCase()))) return false;
+    return true;
+  };
+
+  // 跨 feature 串联：按 given 顺序逐 feature 拼接
+  if (features.length > 0) {
+    const steps: Array<{ path: string; title: string; type: string; feature: string; tags: string[] }> = [];
+    for (const f of features) {
+      for (const e of all) {
+        if (e.feature !== f || !match(e)) continue;
+        steps.push({ path: e.path, title: e.title || e.path, type: e.type || '', feature: e.feature || '', tags: e.tags ?? [] });
+      }
+    }
+    sendJson(res, 200, { success: true, features, steps });
+    return;
+  }
+
+  // 单 feature（兼容旧用法）
+  const steps = all
+    .filter((e) => e.feature === feature && match(e))
+    .map((e) => ({ path: e.path, title: e.title || e.path, type: e.type || '', feature: e.feature || '', tags: e.tags ?? [] }));
   sendJson(res, 200, { success: true, feature, steps });
 }
 
@@ -666,6 +976,7 @@ function handleTourPage(res: http.ServerResponse): void {
   .head a:hover { background: rgba(125,211,252,.1); }
   .head .ftitle { font-size: 15px; font-weight: 600; }
   .head .prog { margin-left: auto; font-size: 12px; opacity: .6; }
+  .head .fchip { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(125,211,252,.12); border: 1px solid rgba(125,211,252,.2); color: #7dd3fc; }
   .stage { flex: 1; position: relative; }
   .stage iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
   .nav { display: flex; align-items: center; justify-content: center; gap: 18px; padding: 10px 18px; border-top: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.85); }
@@ -682,6 +993,7 @@ function handleTourPage(res: http.ServerResponse): void {
   <div class="head">
     <a href="./index.html">← 主页</a>
     <span class="ftitle" id="ftitle"></span>
+    <span class="fchip" id="fchip"></span>
     <span class="prog" id="prog"></span>
   </div>
   <div class="stage">
@@ -695,16 +1007,23 @@ function handleTourPage(res: http.ServerResponse): void {
   </div>
 <script>
 (function(){
-  var feature = new URLSearchParams(location.search).get('feature') || '';
+  var qs = new URLSearchParams(location.search);
+  var feature = qs.get('feature') || '';
+  var featuresParam = qs.get('features') || '';
+  var url = featuresParam
+    ? '/api/tour?features=' + encodeURIComponent(featuresParam)
+    : '/api/tour?feature=' + encodeURIComponent(feature);
   var steps = [], i = 0;
   var frame = document.getElementById('frame');
   var loading = document.getElementById('loading');
+  var fchip = document.getElementById('fchip');
   function go(k){
     if(!steps.length) return;
     i = Math.max(0, Math.min(steps.length-1, k));
     loading.style.display = 'block';
     frame.style.opacity = '0.3';
     frame.src = steps[i].path;
+    if(fchip) fchip.textContent = steps[i].feature ? 'feature: ' + steps[i].feature : '';
   }
   function update(){
     document.querySelectorAll('#dots .dot').forEach(function(b, k){ b.classList.toggle('cur', k === i); b.title = steps[k].title; });
@@ -712,11 +1031,11 @@ function handleTourPage(res: http.ServerResponse): void {
     document.getElementById('prev').disabled = i === 0;
     document.getElementById('next').disabled = i === steps.length-1;
   }
-  fetch('/api/tour?feature=' + encodeURIComponent(feature))
+  fetch(url)
     .then(function(r){ return r.json(); })
     .then(function(j){
       steps = j.steps || [];
-      document.getElementById('ftitle').textContent = j.feature || '';
+      document.getElementById('ftitle').textContent = featuresParam ? featuresParam.split(',').join(' → ') : (j.feature || '');
       var dots = document.getElementById('dots');
       dots.innerHTML = '';
       steps.forEach(function(_, k){
@@ -725,7 +1044,7 @@ function handleTourPage(res: http.ServerResponse): void {
         b.onclick = function(){ go(k); };
         dots.appendChild(b);
       });
-      if(!steps.length){ loading.textContent = '该 feature 暂无注册产物'; return; }
+      if(!steps.length){ loading.textContent = '该产物序列暂无注册产物'; return; }
       go(0);
     })
     .catch(function(){ loading.textContent = '需要 npm run serve 启动服务'; });
@@ -734,6 +1053,189 @@ function handleTourPage(res: http.ServerResponse): void {
   document.getElementById('next').addEventListener('click', function(){ go(i+1); });
   var t = setInterval(update, 150);
   window.addEventListener('beforeunload', function(){ clearInterval(t); });
+})();
+</script>
+</body>
+</html>`;
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+/**
+ * GET /explain.html：科普式讲解导览播放器。
+ * 左侧嵌入 self_analyze.html 星图，右侧字幕条逐模块讲解。
+ * 每步通过 postMessage({ source:'dc-tour', action:'fly', nodeId }) 让星图定位高亮。
+ */
+function handleExplainPage(res: http.ServerResponse): void {
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>科普式讲解导览 · design-canvas</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #02040d; color: #dbe7ff; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  .head { display: flex; align-items: center; gap: 14px; padding: 10px 18px; border-bottom: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.85); backdrop-filter: blur(8px); }
+  .head a { color: #7dd3fc; text-decoration: none; font-size: 13px; padding: 5px 12px; border: 1px solid rgba(125,211,252,.2); border-radius: 8px; }
+  .head a:hover { background: rgba(125,211,252,.1); }
+  .head .ftitle { font-size: 15px; font-weight: 600; }
+  .head .prog { margin-left: auto; font-size: 12px; opacity: .6; }
+  .body { flex: 1; display: flex; min-height: 0; }
+  .stage { flex: 1; position: relative; min-width: 0; }
+  .stage iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+  .side { width: 340px; min-width: 340px; border-left: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.92); display: flex; flex-direction: column; }
+  .caption { flex: 1; overflow-y: auto; padding: 18px; }
+  .caption .c-title { font-size: 17px; font-weight: 700; color: #7dd3fc; margin-bottom: 10px; }
+  .caption .c-body { font-size: 14px; line-height: 1.75; color: #dbe7ff; }
+  .nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-top: 1px solid rgba(125,211,252,.15); }
+  .nav-btn { background: rgba(125,211,252,.12); border: 1px solid rgba(125,211,252,.25); color: #7dd3fc; border-radius: 9px; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+  .nav-btn:hover:not(:disabled) { background: rgba(125,211,252,.2); }
+  .nav-btn:disabled { opacity: .3; cursor: default; }
+  .dots { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(125,211,252,.4); background: transparent; cursor: pointer; padding: 0; }
+  .dot.cur { background: #7dd3fc; box-shadow: 0 0 8px rgba(125,211,252,.8); }
+  .loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #04060f; color: #7dd3fc; font-size: 14px; z-index: 5; }
+  .hint { font-size: 11px; opacity: .5; padding: 0 16px 10px; }
+  .persona { display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid rgba(125,211,252,.12); }
+  .p-btn { flex: 1; background: rgba(125,211,252,.08); border: 1px solid rgba(125,211,252,.18); color: #a8c4e8; border-radius: 8px; padding: 6px 6px; font-size: 12px; cursor: pointer; text-align: center; }
+  .p-btn:hover { background: rgba(125,211,252,.16); }
+  .p-btn.cur { background: rgba(125,211,252,.22); color: #7dd3fc; border-color: rgba(125,211,252,.5); font-weight: 600; }
+  .gen-row { padding: 0 16px; }
+  .gen-btn { width: 100%; background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.25); color: #4ade80; border-radius: 8px; padding: 7px; font-size: 12px; cursor: pointer; }
+  .gen-btn:hover:not(:disabled) { background: rgba(34,197,94,.18); }
+  .gen-btn:disabled { opacity: .4; cursor: default; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <a href="./index.html">← 主页</a>
+    <span class="ftitle">科普式讲解导览 · design-canvas 主链路</span>
+    <span class="prog" id="prog"></span>
+  </div>
+  <div class="body">
+    <div class="stage">
+      <div class="loading" id="loading">加载星图…</div>
+      <iframe id="frame" title="星图"></iframe>
+    </div>
+    <div class="side">
+      <div class="caption">
+        <div class="c-title" id="c-title"></div>
+        <div class="c-body" id="c-body"></div>
+      </div>
+      <div class="persona" id="persona">
+        <button class="p-btn cur" data-role="newbie" title="口语讲解，适合第一次接触">👤 新人</button>
+        <button class="p-btn" data-role="pm" title="偏业务价值，适合产品/管理">📊 PM</button>
+        <button class="p-btn" data-role="senior" title="技术实现细节，适合资深开发">🔧 资深</button>
+      </div>
+      <div class="gen-row">
+        <button class="gen-btn" id="genBtn" title="调用 LLM（DeepSeek/Agnes）为全部模块生成三档角色文案">✨ LLM 生成文案</button>
+      </div>
+      <div class="hint">字幕讲解 · 右侧星图自动定位高亮对应模块</div>
+      <div class="nav">
+        <button class="nav-btn" id="prev">◀ 上一步</button>
+        <div class="dots" id="dots"></div>
+        <button class="nav-btn" id="next">下一步 ▶</button>
+      </div>
+    </div>
+  </div>
+<script>
+(function(){
+  var steps = [], i = 0, role = 'newbie';
+  var frame = document.getElementById('frame');
+  var loading = document.getElementById('loading');
+  var cTitle = document.getElementById('c-title');
+  var cBody = document.getElementById('c-body');
+  var STAR = 'self_analyze.html';
+  function go(k){
+    if(!steps.length) return;
+    i = Math.max(0, Math.min(steps.length-1, k));
+    render();
+  }
+  function render(){
+    var s = steps[i];
+    if(!s) return;
+    cTitle.textContent = (i+1) + '. ' + s.title;
+    // Persona-Adaptive：按当前角色取文案（narrations 各档齐全，本地切换零请求）
+    cBody.textContent = (s.narrations && s.narrations[role]) || s.narration || '';
+    // 星图已加载后，通过 postMessage 定位高亮对应模块
+    if(frameReady && frame.contentWindow){
+      frame.contentWindow.postMessage({ source:'dc-tour', action:'fly', nodeId:s.nodeId }, '*');
+    }
+    update();
+  }
+  function update(){
+    document.querySelectorAll('#dots .dot').forEach(function(b, k){ b.classList.toggle('cur', k === i); });
+    document.getElementById('prog').textContent = (steps.length ? (i+1) + ' / ' + steps.length : '0 / 0');
+    document.getElementById('prev').disabled = i === 0;
+    document.getElementById('next').disabled = i === steps.length-1;
+  }
+  // Persona 角色切换：更新高亮 + 重渲染当前步文案
+  document.querySelectorAll('#persona .p-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      role = btn.getAttribute('data-role');
+      document.querySelectorAll('#persona .p-btn').forEach(function(b){ b.classList.toggle('cur', b === btn); });
+      if(steps.length) render();
+    });
+  });
+  var frameReady = false;
+  frame.addEventListener('load', function(){
+    loading.style.display = 'none';
+    frameReady = true;
+    // 载入后定位当前步
+    if(steps.length) render();
+  });
+
+  // ✨ LLM 生成文案：调用 /api/explain/generate，成功后整体替换本地 narrations
+  var genBtn = document.getElementById('genBtn');
+  genBtn.addEventListener('click', function(){
+    genBtn.disabled = true;
+    genBtn.textContent = '⏳ 生成中…（逐模块调用 LLM）';
+    fetch('/api/explain/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(!j.success || !j.generated || !j.generated.length){
+          genBtn.textContent = '⚠ ' + (j.note || '生成失败');
+          return;
+        }
+        // 按 title 匹配，替换对应步骤的 narrations
+        j.generated.forEach(function(g){
+          for(var k=0; k<steps.length; k++){
+            if(steps[k].title === g.title){
+              steps[k].narrations = g.narrations;
+              break;
+            }
+          }
+        });
+        genBtn.textContent = '✅ 已用 ' + j.model + ' 生成 ' + j.generated.length + ' 个模块';
+        render();
+      })
+      .catch(function(e){
+        genBtn.textContent = '⚠ 生成失败：' + (e && e.message ? e.message : '网络错误');
+      })
+      .finally(function(){ setTimeout(function(){ genBtn.disabled = false; }, 800); });
+  });
+  fetch('/api/explain')
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      steps = j.steps || [];
+      var dots = document.getElementById('dots');
+      dots.innerHTML = '';
+      steps.forEach(function(_, k){
+        var b = document.createElement('button');
+        b.className = 'dot';
+        b.title = (k+1) + '. ' + steps[k].title;
+        b.onclick = function(){ go(k); };
+        dots.appendChild(b);
+      });
+      if(!steps.length){ loading.textContent = '暂无讲解脚本'; return; }
+      // 先载入星图
+      frame.src = STAR;
+      render();
+    })
+    .catch(function(){ loading.textContent = '需要 npm run serve 启动服务'; });
+  document.getElementById('prev').addEventListener('click', function(){ go(i-1); });
+  document.getElementById('next').addEventListener('click', function(){ go(i+1); });
 })();
 </script>
 </body>
@@ -836,6 +1338,16 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/live/rebuild') && method === 'POST') {
+      handleApiLiveRebuild(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/live') && method === 'GET') {
+      handleApiLive(req, res);
+      return;
+    }
+
     if (url.startsWith('/api/report_status') && method === 'GET') {
       handleApiReportStatus(req, res);
       return;
@@ -908,6 +1420,21 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/tour') && method === 'GET') {
       handleApiTour(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/explain') && method === 'GET') {
+      handleApiExplain(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/explain/generate') && method === 'POST') {
+      handleApiExplainGenerate(req, res);
+      return;
+    }
+
+    if (url === '/explain.html' || url.startsWith('/explain.html?')) {
+      handleExplainPage(res);
       return;
     }
 
