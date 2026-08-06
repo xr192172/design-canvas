@@ -1269,6 +1269,108 @@ ${DATAFLOW_SOURCE}
     });
   }
 
+  // ==== Guided Tours（序号6）：▶ 导览 → /api/guided-tour → 按拓扑序逐个高亮 ====
+  var __tour__ = { steps: [], index: -1, timer: null, playing: false };
+
+  function setupGuidedTour() {
+    const btn = document.getElementById('guided-tour-start');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      if (__tour__.steps.length > 0) { openTourPanel(); return; }
+      fetch('/api/guided-tour', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feature: dsl.feature }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data || !data.success) throw new Error((data && data.message) || '生成导览失败');
+          __tour__.steps = data.steps || [];
+          if (__tour__.steps.length === 0) { showToast('该画布无可导览节点'); return; }
+          openTourPanel();
+        })
+        .catch((e) => showToast('导览失败：' + (e && e.message ? e.message : e) + '（需 serve 模式）'));
+    });
+  }
+
+  // 高亮单个节点（叠加 tour-step 类，底色描边脉冲）
+  function tourHighlight(id) {
+    document.querySelectorAll('.node.tour-step').forEach((el) => el.classList.remove('tour-step'));
+    const el = document.querySelector('.node[data-id="' + id + '"]');
+    if (el) el.classList.add('tour-step');
+  }
+
+  function tourGo(i) {
+    const S = __tour__.steps;
+    if (i < 0 || i >= S.length) return;
+    __tour__.index = i;
+    const s = S[i];
+    tourHighlight(s.node_id);
+    flyToNode(s.node_id);
+    const panel = document.getElementById('guided-tour-panel');
+    if (panel) {
+      panel.querySelector('#gt-prog').textContent = (i + 1) + ' / ' + S.length;
+      panel.querySelector('#gt-label').textContent = s.label || s.node_id;
+      panel.querySelector('#gt-reason').textContent = s.reason || '';
+      panel.querySelector('#gt-prev').disabled = i === 0;
+      panel.querySelector('#gt-next').disabled = i === S.length - 1;
+    }
+  }
+
+  function openTourPanel() {
+    let panel = document.getElementById('guided-tour-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'guided-tour-panel';
+      panel.className = 'guided-tour-panel';
+      panel.innerHTML =
+        '<div class="focus-panel-title">▶ 导览路径<span class="focus-close" id="gt-close">✕</span></div>' +
+        '<div class="gt-head"><span id="gt-prog" class="gt-prog">-</span><span class="gt-hint">按依赖拓扑序，先依赖后依赖者</span></div>' +
+        '<div class="gt-label" id="gt-label">-</div>' +
+        '<div class="gt-reason" id="gt-reason">-</div>' +
+        '<div class="gt-actions">' +
+        '<button id="gt-prev" type="button">◀ 上一步</button>' +
+        '<button id="gt-play" type="button">▶ 播放</button>' +
+        '<button id="gt-next" type="button">下一步 ▶</button>' +
+        '</div>';
+      document.body.appendChild(panel);
+      document.getElementById('gt-close').addEventListener('click', closeTour);
+      document.getElementById('gt-prev').addEventListener('click', () => tourGo(__tour__.index - 1));
+      document.getElementById('gt-next').addEventListener('click', () => { setTourPlaying(false); tourGo(__tour__.index + 1); });
+      document.getElementById('gt-play').addEventListener('click', () => {
+        if (__tour__.playing) { setTourPlaying(false); return; }
+        if (__tour__.index < 0) tourGo(0);
+        setTourPlaying(true);
+      });
+    }
+    panel.style.display = 'block';
+    if (__tour__.index < 0) tourGo(0);
+  }
+
+  function setTourPlaying(on) {
+    __tour__.playing = on;
+    const btn = document.getElementById('gt-play');
+    if (btn) btn.textContent = on ? '⏸ 暂停' : '▶ 播放';
+    if (on) {
+      __tour__.timer = setInterval(() => {
+        if (__tour__.index >= __tour__.steps.length - 1) { setTourPlaying(false); return; }
+        tourGo(__tour__.index + 1);
+      }, 1600);
+    } else if (__tour__.timer) {
+      clearInterval(__tour__.timer);
+      __tour__.timer = null;
+    }
+  }
+
+  function closeTour() {
+    setTourPlaying(false);
+    const p = document.getElementById('guided-tour-panel');
+    if (p) p.remove();
+    tourHighlight(null);
+    __tour__.steps = [];
+    __tour__.index = -1;
+  }
+
   // 输入面板：填 changed 文件清单（相对项目根，每行一个）+ 方向/深度
   function openDiffImpactInput() {
     let panel = document.getElementById('diff-input-panel');
@@ -3892,18 +3994,24 @@ ${DATAFLOW_SOURCE}
     if (!searchInput) return;
 
     let searchTimeout = null;
+    let semTimeout = null;
     searchInput.addEventListener('input', (e) => {
       if (searchTimeout) clearTimeout(searchTimeout);
       searchTimeout = setTimeout(() => doSearch(e.target.value), 200);
+      // 语义搜索 debounce 稍长：本地子串匹配即时，语义走网络等结果
+      if (semTimeout) clearTimeout(semTimeout);
+      semTimeout = setTimeout(() => runSemanticSearch(e.target.value), 350);
     });
 
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         doSearch(searchInput.value, true);
+        runSemanticSearch(searchInput.value);
       } else if (e.key === 'Escape') {
         searchInput.value = '';
         doSearch('');
+        clearSemanticResults();
         searchInput.blur();
       }
     });
@@ -3963,6 +4071,97 @@ ${DATAFLOW_SOURCE}
       if (count === 0 && query) {
         showToast('未找到匹配的节点', 'info');
       }
+    }
+
+    // ---- 语义搜索结果 (序号8 S2)：调后端 → 映射 file_path → 画布节点 → 高亮 + 结果面板 ----
+    // file_path → 节点 id 映射：优先 feature 的 semantic.files（authoritative），
+    // 与 diff_impact 对齐；无 semantic 时回退 file_<rel> 字符串拼接。
+    function semanticNodeId(filePath) {
+      const semanticFiles = (dsl.semantic && dsl.semantic.files) || [];
+      for (const f of semanticFiles) {
+        if (f.path && (f.path === filePath)) return f.id;
+      }
+      // 去 src/ 前缀再比一次（feature 可能以 src/ 为根）
+      const stripped = filePath.startsWith('src/') ? filePath.slice(4) : null;
+      if (stripped) {
+        for (const f of semanticFiles) {
+          if (f.path && f.path === stripped) return f.id;
+        }
+      }
+      // 无 semantic 匹配：回退 import_project 的 fileNodeId 规则
+      return 'file_' + filePath.replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+
+    function clearSemanticResults() {
+      document.querySelectorAll('.node.semantic-hit').forEach(n => n.classList.remove('semantic-hit'));
+      const old = document.getElementById('sem-panel');
+      if (old) old.remove();
+    }
+
+    function runSemanticSearch(query) {
+      clearSemanticResults();
+      query = (query || '').trim();
+      if (!query) return;
+      // 非 serve 模式（file://）无法调后端，静默跳过（本地子串搜索已兜底）
+      if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+      fetch('/api/semantic-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, limit: 8 }),
+      })
+        .then(r => r.json())
+        .then((data) => {
+          if (!data || !data.success || !data.hits || data.hits.length === 0) {
+            if (data && data.hits && data.hits.length === 0) showToast('语义搜索无结果', 'info');
+            return;
+          }
+          applySemanticResults(data);
+        })
+        .catch(() => { /* 网络失败静默，本地搜索已兜底 */ });
+    }
+
+    function applySemanticResults(data) {
+      const hits = data.hits || [];
+      const hitIds = [];
+      hits.forEach(h => {
+        const id = semanticNodeId(h.file_path);
+        if (!id) return;
+        hitIds.push({ id, score: h.score, name: h.qualified_name || h.name, file: h.file_path, line: h.start_line });
+        const el = document.querySelector('.node[data-id="' + id + '"]');
+        if (el) el.classList.add('semantic-hit');
+      });
+
+      // 结果面板
+      let panel = document.getElementById('sem-panel');
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'sem-panel';
+        panel.className = 'sem-panel';
+        document.body.appendChild(panel);
+      }
+      const rows = hitIds.map(h =>
+        '<div class="sem-hit-row" data-id="' + h.id + '">' +
+          '<span class="sem-score">' + h.score.toFixed(3) + '</span>' +
+          '<b>' + escapeHtml(h.name) + '</b>' +
+          '<div class="sem-file">' + escapeHtml(h.file) + (h.line ? ':' + h.line : '') + '</div>' +
+        '</div>'
+      ).join('');
+      panel.innerHTML =
+        '<div class="sem-panel-title">🔎 语义结果 (' + hits.length + ')<span class="sem-hint">' + escapeHtml(data.provider === 'semantic' ? '向量检索' : '降级全文') + '</span><span class="focus-close" id="sem-close">✕</span></div>' +
+        rows;
+      document.getElementById('sem-close').addEventListener('click', () => { clearSemanticResults(); });
+      panel.querySelectorAll('.sem-hit-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const id = row.getAttribute('data-id');
+          if (id && nodeById[id]) flyToNode(id);
+          else {
+            const el = document.querySelector('.node[data-id="' + id + '"]');
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        });
+      });
+      if (hitIds.length > 0) showToast('语义搜索命中 ' + hitIds.length + ' 个节点');
     }
   }
 
@@ -4958,6 +5157,7 @@ ${DATAFLOW_SOURCE}
   setupDataflow();
   setupDiffImpact();
   setupLayerViz();
+  setupGuidedTour();
   setupSubDslButtons();
   hideContainsEdges();
   initCollapsedState();

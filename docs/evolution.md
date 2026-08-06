@@ -219,7 +219,7 @@
 | | 5 | architecture-analyzer 角色（推断架构层 + 职责回填） | Understand Anything | 3 | ⏳ |
 | | 6 | Guided Tours（拓扑排序学习路径 + 动画播放列表） | Understand Anything | DSL edges | ⏳ |
 | **可视化** | 7 | Layer Visualization（按 type 分层着色 + legend） | Understand Anything | 5 | ⏳ |
-| | 8 | Fuzzy & Semantic Search（语义搜索"哪部分处理认证"） | Understand Anything | 无 | ⏳ |
+| | 8 | Fuzzy & Semantic Search（语义搜索"哪部分处理认证"） | Understand Anything | 无 | ✅ |
 | | 9 | Persona-Adaptive UI（角色自适应详细度） | Understand Anything | 无 | ⏳ |
 | | 10 | Language Concepts（12 种编程模式上下文解释） | Understand Anything | 3 | ⏳ |
 | **自动同步** | 11 | 文件监听自动同步（FSEvents/inotify） | CodeGraph | 1, 3 | ⏳ |
@@ -278,6 +278,12 @@
 - 借鉴点：Understand Anything 支持语义搜索（"哪部分处理认证"）
 - 落地：节点搜索从当前的 label/id 模糊匹配升级为语义搜索
 - 依赖：无（独立）
+- 状态：✅ 已落地（2026-08-06）
+  - S1 核心引擎 [semantic_search.ts](../src/tools/semantic_search.ts)：复用 cache.db 符号表，硅基流动 BAAI/bge-m3（1024 维，OpenAI 兼容 /embeddings）向量化符号（name/qualified_name/signature/file_path），query 向量化后余弦相似度 top-k；进程内向量缓存（model:sha256(text)→vec）实现"向量化一次即可复用"；未配置/调用失败自动降级 FTS trigram。
+  - 配置：`<dataHome>/.design-canvas/config.json` 的 `embedding` 段（apiKey/model/baseURL/dim），环境变量 `EMBEDDING_*` 覆盖；key 复用 ai-base 记忆模块的硅基流动 key。
+  - S2 渲染层：serve 新增 `POST /api/semantic-search`；画布搜索框接入——输入即触发（debounce 350ms），结果面板 + 命中节点语义高亮，点击结果 flyToNode 定位。
+  - S3 MCP 工具：server.ts 注册 `semantic_search` 工具（project_dir/query/limit/min_score），返回按相似度排序的符号清单；配套单元测试 [semantic_search.test.ts](../tests/tools/semantic_search.test.ts)（纯逻辑 + FTS 降级，8 用例）+ MCP 冒烟 [sem_search_mcp_smoke.mjs](../scripts/sem_search_mcp_smoke.mjs)。
+  - 冒烟验证：617 符号全量向量化，多查询准确命中对应模块，重复查询零新增 API 调用。
 
 **9. Persona-Adaptive UI**
 - 借鉴点：Understand Anything 面板按角色调整详细度

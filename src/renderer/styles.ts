@@ -1475,6 +1475,78 @@ footer button:active {
 .diff-input-actions button#diff-input-gitdiff:hover:not(:disabled) {
   background: rgba(24, 144, 255, 0.28);
 }
+/* Guided Tours（序号6）：▸ 当前导览节点（脉冲描边，与选中态区分）+ 导览控制面板 */
+@keyframes tourPulse {
+  0% { stroke-width: 3; filter: drop-shadow(0 0 4px rgba(125, 211, 252, 0.7)); }
+  50% { stroke-width: 5; filter: drop-shadow(0 0 14px rgba(125, 211, 252, 0.95)); }
+  100% { stroke-width: 3; filter: drop-shadow(0 0 4px rgba(125, 211, 252, 0.7)); }
+}
+.node.tour-step > [data-shape] {
+  stroke: #7dd3fc !important;
+  stroke-width: 3 !important;
+  animation: tourPulse 1.2s ease-in-out infinite;
+}
+.guided-tour-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 70px;
+  width: 300px;
+  z-index: 340;
+  background: rgba(16, 22, 38, 0.97);
+  border: 1px solid var(--theme-primary);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  color: #e8eefb;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.gt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.gt-prog {
+  font-weight: 700;
+  color: #7dd3fc;
+  font-size: 14px;
+}
+.gt-hint {
+  color: #9fb0cc;
+  font-size: 11px;
+}
+.gt-label {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.gt-reason {
+  color: #9fb0cc;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.gt-actions {
+  display: flex;
+  gap: 8px;
+}
+.gt-actions button {
+  background: var(--theme-primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.gt-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.gt-actions button#gt-play {
+  background: rgba(24, 144, 255, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(125, 211, 252, 0.45);
+}
 .diff-input-actions button#diff-input-gitdiff:disabled {
   opacity: 0.6;
   cursor: wait;
@@ -1575,6 +1647,54 @@ footer button:active {
   0%, 100% { filter: drop-shadow(0 0 0 var(--theme-primary)); }
   50% { filter: drop-shadow(0 0 12px var(--theme-primary)); }
 }
+
+/* 语义搜索结果高亮（序号8 S2）：与本地搜索 pulse 区分，用主题强调色描边脉冲 */
+.node.semantic-hit {
+  animation: semanticPulse 1.6s ease-in-out 3;
+}
+.node.semantic-hit .node-label { color: var(--theme-accent); font-weight: 700; }
+@keyframes semanticPulse {
+  0%, 100% { filter: drop-shadow(0 0 0 var(--theme-accent)); }
+  50% { filter: drop-shadow(0 0 14px var(--theme-accent)); }
+}
+/* 语义搜索结果面板 */
+.sem-panel {
+  position: fixed;
+  top: 96px;
+  right: 16px;
+  width: 360px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--theme-card-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+  z-index: 900;
+  padding-bottom: 8px;
+}
+.sem-panel-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--theme-border);
+  position: sticky;
+  top: 0;
+  background: var(--theme-card-bg);
+  border-radius: 10px 10px 0 0;
+}
+.sem-hint { font-size: 11px; color: var(--theme-text-dim); font-weight: 400; }
+.sem-hit-row {
+  padding: 8px 14px;
+  cursor: pointer;
+  border-bottom: 1px dashed var(--theme-border);
+}
+.sem-hit-row:hover { background: var(--theme-accent-bg); }
+.sem-hit-row b { font-size: 12.5px; }
+.sem-hit-row .sem-file { font-size: 11px; color: var(--theme-text-dim); font-family: "JetBrains Mono", Consolas, monospace; }
+.sem-hit-row .sem-score { float: right; font-size: 11px; color: var(--theme-accent); }
 
 .editor-mask {
   position: fixed;

@@ -22,6 +22,8 @@ import { scaffold } from './scaffold.js';
 import { checkConsistency } from './consistency.js';
 import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
+import { guidedTour } from './guided_tour.js';
+import { semanticSearch } from './semantic_search.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
@@ -527,6 +529,23 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
   }
 }
 
+/** POST /api/semantic-search：全项目符号语义搜索（序号8） */
+async function handleApiSemanticSearch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const result = await semanticSearch({
+      project_dir: params.project_dir || process.cwd(),
+      query: params.query || '',
+      limit: params.limit,
+      min_score: params.min_score,
+    });
+    sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
 /** POST /api/arch-layer：架构分层分析（序号5+7） */
 async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
@@ -535,6 +554,23 @@ async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerRes
     const result = archLayer({
       feature: params.feature || 'conveyor',
       persist: params.persist,
+    });
+    sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/guided-tour：Guided Tours 学习路径生成（序号6） */
+async function handleApiGuidedTour(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const result = guidedTour({
+      feature: params.feature || 'conveyor',
+      include_deep: params.include_deep,
+      include_containers: params.include_containers,
+      max_steps: params.max_steps,
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
@@ -850,6 +886,16 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/guided-tour') && method === 'POST') {
+      handleApiGuidedTour(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/semantic-search') && method === 'POST') {
+      handleApiSemanticSearch(req, res);
+      return;
+    }
+
     if (url.startsWith('/api/git-diff') && method === 'GET') {
       handleApiGitDiff(req, res);
       return;
@@ -893,6 +939,7 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 一致性检查 API: POST /api/consistency`);
       console.log(`  - 变更影响分析 API: POST /api/diff-impact`);
       console.log(`  - 架构分层分析 API: POST /api/arch-layer`);
+      console.log(`  - 导览路径 API: POST /api/guided-tour`);
       console.log(`  - git 改动清单 API: GET /api/git-diff`);
       console.log(`  - 产物注册表 API: GET/POST /api/registry`);
       console.log(`  - SSE 实时推送: GET /api/events`);

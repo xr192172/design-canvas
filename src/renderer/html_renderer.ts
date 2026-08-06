@@ -707,7 +707,10 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           const layerVizBtn = (dsl.layers?.length ?? 0) > 0
             ? `<button id="layer-viz-toggle" type="button" title="架构分层着色：按目录/文件名推断文件所属架构层并统一着色，点击切换 语言色/层色">🎨 图层</button>`
             : '';
-          return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}${diffImpactBtn}${layerVizBtn}`;
+          const tourBtn = dsl.geometry.nodes.length > 0
+            ? `<button id="guided-tour-start" type="button" title="导览：按依赖拓扑序自动生成学习路径，逐个高亮节点（需要 serve 模式）">▶ 导览</button>`
+            : '';
+          return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}${diffImpactBtn}${layerVizBtn}${tourBtn}`;
         })()}
         ${(() => {
           // 人端筛选条：状态/孤岛/聚焦——把 LLM 端的查询过滤维度映射成人可点的筛选。

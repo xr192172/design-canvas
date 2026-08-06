@@ -25,7 +25,9 @@ import { deriveAlgorithm } from './tools/derive_algorithm.js';
 import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
 import { diffImpact } from './tools/diff_impact.js';
+import { semanticSearch } from './tools/semantic_search.js';
 import { archLayer } from './tools/arch_layer.js';
+import { guidedTour } from './tools/guided_tour.js';
 import { runSimulation, resetSimulation } from './tools/simulation.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { submitApproval, reviewAnnotation } from './tools/approval.js';
@@ -821,6 +823,39 @@ server.registerTool(
 );
 
 // ─────────────────────────────────────────────────────────────
+// guided_tour：Guided Tours 学习路径（序号6）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'guided_tour',
+  {
+    title: 'Guided tour generation',
+    description:
+      'Guided Tours：按依赖边拓扑排序，把一个 feature 的节点排成"先看依赖 → 再看依赖者"的学习路径，' +
+      '供导览播放器逐个高亮。include_deep=是否展开深层节点（默认 false）；include_containers=是否含目录容器（默认 false）；' +
+      'max_steps=最大步数（默认 40）。只读，不修改 DSL。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      include_deep: z.boolean().optional().describe('是否展开深层节点，默认 false'),
+      include_containers: z.boolean().optional().describe('是否包含目录容器节点，默认 false'),
+      max_steps: z.number().int().min(1).optional().describe('最大步数，默认 40'),
+    },
+  },
+  (args) => {
+    try {
+      const result = guidedTour({
+        feature: args.feature,
+        include_deep: args.include_deep,
+        include_containers: args.include_containers,
+        max_steps: args.max_steps,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
 // 仿真器工具
 // ─────────────────────────────────────────────────────────────
 
@@ -1087,6 +1122,47 @@ server.registerTool(
         title: args.title,
       });
       return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// semantic_search：全项目符号语义搜索（序号8）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'semantic_search',
+  {
+    title: 'Semantic search across project symbols',
+    description:
+      '全项目符号语义搜索：给定一句自然语言/抽象语义描述（如"哪部分处理认证""审批一个设计变更"），' +
+      '对 SQLite 符号缓存（cache.db）中的符号（name/qualified_name/signature/file_path）做向量化检索，' +
+      '返回按余弦相似度排序的 top-k 符号（含所属文件与行号）。' +
+      '使用硅基流动 BAAI/bge-m3（OpenAI 兼容 /embeddings，1024 维），同文本向量化一次即可复用（进程内缓存）。' +
+      '未配置 embedding 或调用失败时自动降级为 FTS trigram 关键词检索（provider=fts）。' +
+      '只读，不修改 DSL。需要先对该项目运行 import_project 建立符号缓存。',
+    inputSchema: {
+      project_dir: z.string().describe('被搜索项目的根目录（其下 .design-canvas/cache.db 是符号缓存）'),
+      query: z.string().describe('自然语言/语义描述查询，如"哪部分处理认证"' ),
+      limit: z.number().int().min(1).max(100).optional().describe('返回条数，默认 20'),
+      min_score: z.number().min(0).max(1).optional().describe('最低余弦相似度阈值，默认 0'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await semanticSearch({
+        project_dir: args.project_dir,
+        query: args.query,
+        limit: args.limit,
+        min_score: args.min_score,
+      });
+      const lines = [
+        `provider=${result.provider}  索引符号=${result.indexed}`,
+        result.message,
+        ...result.hits.map((h) => `${h.score.toFixed(3)}\t${h.file_path}${h.start_line ? ':' + h.start_line : ''}\t${h.qualified_name}  (${h.kind})`),
+      ];
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
     } catch (e) {
       return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
     }
