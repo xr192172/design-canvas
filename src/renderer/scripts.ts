@@ -18,6 +18,11 @@ ${DATAFLOW_SOURCE}
   const tooltip = document.getElementById('tooltip');
   const dsl = window.__DSL__;
 
+  // ==== 数据源视图（实际/设计）====
+  // 'design'=人编辑的布局/状态（默认静态）；'actual'=代码实时同步快照（只读，serve 模式）
+  const dcView = (typeof localStorage !== 'undefined' && localStorage.getItem('dc-view')) || 'design';
+  document.body.setAttribute('data-view', dcView);
+
   // ==== 数据预处理 ====
   const annoByTarget = {};
   (dsl.annotations || []).forEach(a => {
@@ -997,6 +1002,27 @@ ${DATAFLOW_SOURCE}
       });
     }
     updateFocusButton();
+  }
+
+  // ==== 数据源视图切换（实际/设计）====
+  // 设计=人编辑的布局/状态（静态）；实际=代码实时快照（只读，serve 模式）。
+  // 切换通过 localStorage 记录视图模式 + reload 重新渲染对应 DSL。
+  function setDcView(view) {
+    if (view === dcView) return;
+    try { localStorage.setItem('dc-view', view); } catch (e) { /* 隐私模式下忽略 */ }
+    location.reload();
+  }
+
+  function setupViewSwitcher() {
+    const desBtn = document.getElementById('src-design');
+    const actBtn = document.getElementById('src-actual');
+    if (!desBtn || !actBtn) return;
+    // 标记当前视图为 active
+    const isActual = (dcView === 'actual');
+    desBtn.classList.toggle('active', !isActual);
+    actBtn.classList.toggle('active', isActual);
+    desBtn.addEventListener('click', () => setDcView('design'));
+    actBtn.addEventListener('click', () => setDcView('actual'));
   }
 
   // ==== 折叠/展开 ====
@@ -3876,6 +3902,18 @@ ${DATAFLOW_SOURCE}
     flyToNode: flyToNode,
   };
 
+  // 讲解导览外部控制：父页（/tour.html）通过 postMessage 让本画布定位高亮某节点。
+  // 消息格式：{ source: 'dc-tour', action: 'fly', nodeId: '<id>' }
+  window.addEventListener('message', function(ev) {
+    const d = ev.data;
+    if (!d || d.source !== 'dc-tour' || d.action !== 'fly') return;
+    const id = d.nodeId;
+    if (!id || !nodeById[id]) return;
+    const overlay = document.getElementById('report-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    flyToNode(id);
+  });
+
   // ==== 多选工具栏 ====
   function setupMultiSelectBar() {
     const delBtn = document.getElementById('select-delete');
@@ -4438,9 +4476,14 @@ ${DATAFLOW_SOURCE}
       });
     }
 
-    // 页面启动时：尝试 fetch 同目录的 design-canvas.json（如果通过 http serve）
+    // 页面启动时：尝试 fetch 最新数据（如果通过 http serve）
+    // 实际视图 → 拉取实际 DSL（/api/live，代码实时快照）；设计视图 → 拉取活态 design-canvas.json
     if (window.location.protocol !== 'file:') {
-      fetch('design-canvas.json')
+      const feature = (window.__DSL__ && window.__DSL__.feature) || '';
+      const url = dcView === 'actual'
+        ? '/api/live?feature=' + encodeURIComponent(feature)
+        : 'design-canvas.json';
+      fetch(url)
         .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
         .then(data => {
           if (data.feature && data.geometry && data._sync && data._sync.saved_at) {
@@ -4449,12 +4492,12 @@ ${DATAFLOW_SOURCE}
             if (!inlineTime || fileTime > inlineTime) {
               window.__DSL__ = data;
               saveLocal();
-              showToast('已同步最新 DSL（来自 design-canvas.json）', 'info');
+              showToast(dcView === 'actual' ? '已加载实际 DSL（代码实时快照）' : '已同步最新 DSL（来自 design-canvas.json）', 'info');
             }
           }
         })
         .catch(() => {
-          // 活态文件不存在，使用内联 DSL
+          // 活态/实际文件不存在，使用内联 DSL
         });
     }
   }
@@ -5181,6 +5224,7 @@ ${DATAFLOW_SOURCE}
   setupThemeSwitcher();
   setupNodeSearch();
   setupFilters();
+  setupViewSwitcher();
   setupKeyboardShortcuts();
   setupExport();
   setupRerender();

@@ -682,10 +682,17 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
       <div class="canvas-toolbar">
         <input type="text" id="node-search" class="search-input" placeholder="🔍 搜索节点 (label / id)..." autocomplete="off">
         ${options?.report ? `<button id="report-open" class="report-open-btn" type="button" title="查看分析摘要">📋 摘要</button>` : ''}
-        ${(dsl.animations_v2?.flows?.length ?? 0) > 0 ? `<div class="view-switcher" title="切换视图：节点=静态结构 / 动画=交互式数据步进">
-          <button id="view-nodes" class="active" type="button">🗂 节点</button>
-          <button id="view-anim" type="button">🎬 动画</button>
-        </div>` : ''}
+        ${(() => {
+          // 数据源切换：设计=人编辑的布局与实现状态（静态）/ 实际=代码实时同步快照（动态，serve 模式）
+          const hasAnimView = (dsl.animations_v2?.flows?.length ?? 0) > 0;
+          return `<div class="view-switcher" id="dsl-source-switcher" title="切换数据源：设计=人编辑的布局/标注/实现状态（静态）；实际=按代码实时同步的真实现状（只读，serve 模式）">
+            <button id="src-design" type="button" title="设计视图：人编辑的布局、标注、实现进度。默认视图。">🎭 设计</button>
+            <button id="src-actual" type="button" title="实际视图：按代码实时同步的真实现状（LLM 了解项目用）。需 serve 模式 + 实际 DSL 已生成。">⚡ 实际</button>
+          </div>` + (hasAnimView ? `<div class="view-switcher" title="切换视图：节点=静态结构 / 动画=交互式数据步进">
+            <button id="view-nodes" class="active" type="button">🗂 节点</button>
+            <button id="view-anim" type="button">🎬 动画</button>
+          </div>` : '');
+        })()}
         ${options?.compact_toolbar ? `<button id="advanced-toggle" class="advanced-toggle" type="button" title="更多工具（撤销/重做、重新布局）">⋯ 工具</button>` : ''}
         ${(() => {
           // 职责分层：统计深层节点，有才显示层开关

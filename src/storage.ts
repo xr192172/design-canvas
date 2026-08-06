@@ -50,6 +50,45 @@ export function getFeatureFile(feature: string): string {
   return path.join(getFeaturesDir(), `${feature}.json`);
 }
 
+/** 实际 DSL 目录（动态快照）：<dataHome>/.design-canvas/live */
+export function getLiveDir(baseDir?: string): string {
+  return path.join(baseDir ?? getDataHome(), '.design-canvas', 'live');
+}
+
+/** 实际 DSL 文件路径：<dataHome>/.design-canvas/live/<feature>.dsl.json */
+export function getLiveFeatureFile(feature: string, baseDir?: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(feature)) {
+    throw new Error(`非法 feature 名: "${feature}"，必须匹配 ^[a-zA-Z0-9_-]+$`);
+  }
+  return path.join(getLiveDir(baseDir), `${feature}.dsl.json`);
+}
+
+/** 保存实际 DSL（动态快照，带 _sync 标记；不触发 dslChangeCallback，避免打扰设计视图刷新）
+ *  baseDir 可选：指定写入的项目根（默认 dataHome）。watch_project 监听任意项目时传 project_dir，
+ *  使实际 DSL 与该项目 cache.db 同目录归位。 */
+export function saveLiveFeature(dsl: DesignDSL, baseDir?: string): string {
+  const dir = getLiveDir(baseDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = getLiveFeatureFile(dsl.feature, baseDir);
+  const data = {
+    ...dsl,
+    _sync: { saved_at: new Date().toISOString(), source: 'live', feature: dsl.feature },
+  };
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+  return file;
+}
+
+/** 读取实际 DSL，不存在返回 null */
+export function getLiveFeature(feature: string, baseDir?: string): DesignDSL | null {
+  const file = getLiveFeatureFile(feature, baseDir);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as DesignDSL;
+  } catch {
+    return null;
+  }
+}
+
 /** 确保 features 目录存在 */
 function ensureFeaturesDir(): void {
   fs.mkdirSync(getFeaturesDir(), { recursive: true });

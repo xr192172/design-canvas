@@ -22,7 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi } from '../dsl/types.js';
-import { saveDSL } from '../storage.js';
+import { saveDSL, saveLiveFeature } from '../storage.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
 import { countLines, assessLines } from './monolith.js';
@@ -46,6 +46,16 @@ export interface ImportProjectInput {
    * 变更文件由 syncFile 解析并写回缓存，下次运行受益。
    */
   cache_db?: Database;
+  /**
+   * 可选：仅生成"实际 DSL"（代码实时快照，写 live/ 目录，不覆盖设计 DSL）。
+   * 供 watch_project 变更回调 / serve 重建实际视图用。默认 false=写设计 DSL。
+   */
+  live_only?: boolean;
+  /**
+   * 可选：live_only 时实际 DSL 归属的项目根（默认 dataHome）。
+   * watch_project 监听任意项目时传 project_dir，使实际 DSL 与该项目 cache.db 同目录归位。
+   */
+  live_dir?: string;
 }
 
 export interface ImportProjectResult {
@@ -72,8 +82,8 @@ const SKIP_DIRS = new Set([
   '.pytest_cache', '.mypy_cache', '.tox', 'egg-info',
 ]);
 
-/** 跳过的文件模式（测试/生成物，非架构） */
-const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|\.gen\.[tj]sx?$|test_.*\.py$|.*_test\.py$)/;
+/** 跳过的文件模式（测试/生成物 / 编辑器临时存取，非架构） */
+const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|\.gen\.[tj]sx?$|test_.*\.py$|.*_test\.py$|\.tmp$|\.temp$|\.crswap$|\.crdownload$|\.swp$|\.swo$|\.swx$|\.bak$|\.orig$|\.rej$|~$|^~)/;
 
 /** 布局常量（与渲染器父节点约定一致：padding 20 + title 30） */
 const FILE_W = 240;
@@ -859,7 +869,11 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     semantic: { files: semanticFiles },
   } as DesignDSL;
 
-  saveDSL(dsl);
+  if (input.live_only) {
+    saveLiveFeature(dsl, input.live_dir); // 只写实际 DSL（live/），不覆盖设计 DSL
+  } else {
+    saveDSL(dsl); // 写设计 DSL（features/ + design-canvas.json）
+  }
 
   const dirCount = nodes.filter((n) => n.type === 'module').length;
   // 单文件化预警：行数超阈值的文件点名（仅行数统计，详细拆分建议走 check_monolith）

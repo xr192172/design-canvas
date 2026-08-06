@@ -36,6 +36,7 @@ import { createFromTemplate } from './tools/templates.js';
 import { importProject } from './tools/import_project.js';
 import { checkMonolith } from './tools/monolith.js';
 import { queryFeature } from './tools/query_feature.js';
+import { watchProjectTool } from './tools/watch_project_tool.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -1162,6 +1163,61 @@ server.registerTool(
         result.message,
         ...result.hits.map((h) => `${h.score.toFixed(3)}\t${h.file_path}${h.start_line ? ':' + h.start_line : ''}\t${h.qualified_name}  (${h.kind})`),
       ];
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// watch_project：项目文件实时监听自动同步（序号11）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'watch_project',
+  {
+    title: 'Watch project files for live sync',
+    description:
+      '启动/查询/停止对目标项目目录的常驻文件监听。文件变更/新增/删除时增量同步到符号缓存 cache.db，' +
+      '可选（给 feature）在变更后重建"实际 DSL"到 live/（saveLiveFeature，不覆盖设计 DSL）。' +
+      'action=start（默认，幂等，同一目录重复 start 复用既有句柄）/ status / stop。' +
+      '供 LLM 在交互中开启"项目保鲜"，与 serve 共享 cache.db 与 live/ 目录。',
+    inputSchema: {
+      project_dir: z.string().describe('被监听项目根目录（绝对路径或相对 cwd）'),
+      action: z.enum(['start', 'status', 'stop']).optional().describe('start（默认）| status | stop'),
+      feature: z.string().optional().describe('提供时，变更后按该 feature 重建实际 DSL 到 live/（不覆盖设计 DSL）'),
+      debounce_ms: z.number().int().min(10).optional().describe('事件合并窗口（ms），默认 150'),
+      rebuild_on_change: z.boolean().optional().describe('变更后是否重建实际 DSL（默认：给了 feature 才重建）'),
+      rebuild_window_ms: z.number().int().min(50).optional().describe('rebuild 节流冷却窗口（ms），默认 2000'),
+      reconcile_interval_ms: z.number().int().min(1000).optional().describe('定期 reconcile 兜底间隔（ms），周期性全量扫描补齐 fs.watch 漏事件；默认 0=关闭'),
+    },
+  },
+  async (args) => {
+    try {
+      const r = await watchProjectTool({
+        project_dir: args.project_dir,
+        action: args.action,
+        feature: args.feature,
+        debounce_ms: args.debounce_ms,
+        rebuild_on_change: args.rebuild_on_change,
+        rebuild_window_ms: args.rebuild_window_ms,
+        reconcile_interval_ms: args.reconcile_interval_ms,
+      });
+      const lines = [
+        `action=${r.action}  watching=${r.watching}  rebuild=${r.rebuild}`,
+        r.message,
+      ];
+      if (r.started_at) lines.push(`started_at=${r.started_at}`);
+      if (r.last_change_at) lines.push(`last_change_at=${r.last_change_at}`);
+      if (r.last_rebuild_at) lines.push(`last_rebuild_at=${r.last_rebuild_at}`);
+      if (r.last_summary) {
+        const s = r.last_summary;
+        lines.push(`last_batch: changed=${s.changed} deleted=${s.deleted} ignored=${s.ignored} cross=${s.cross.resolved}/${s.cross.total}`);
+      }
+      if (r.last_reconcile) {
+        const c = r.last_reconcile;
+        lines.push(`last_reconcile: scanned=${c.scanned} changed=${c.changed} deleted=${c.deleted} cross=${c.cross.resolved}/${c.cross.total}`);
+      }
       return { content: [{ type: 'text', text: lines.join('\n') }] };
     } catch (e) {
       return { content: [{ type: 'text', text: (e as Error).message }], isError: true };

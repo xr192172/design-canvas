@@ -1161,6 +1161,13 @@ footer button:active {
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* 实际视图：状态筛选无意义（实际 DSL 是代码实时快照，节点全为真实现状），灰显禁用；
+   孤岛/聚焦仍可用（实际结构同样有孤立点与聚焦需求） */
+body[data-view="actual"] .filter-chip[data-filter-status] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .filter-chip.filter-focus.active {
   background: #f0883e;
   border-color: #f0883e;
