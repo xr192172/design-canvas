@@ -3,6 +3,7 @@
 import path from 'node:path';
 import { importProject } from '../dist/src/tools/import_project.js';
 import { archLayer } from '../dist/src/tools/arch_layer.js';
+import { getDSL } from '../dist/src/storage.js';
 import { openDb, closeAllProjectCacheDbs } from '../dist/src/db/db.js';
 
 const ROOT = process.cwd();
@@ -12,6 +13,15 @@ const FEATURE = 'smoke_arch';
 const db = openDb(path.join(ROOT, '.design-canvas', 'cache.db'));
 const imp = await importProject({ project_dir: ROOT, feature: FEATURE, cache_db: db });
 db.close();
+
+// 1.5 验证 import_project 已集成架构分层：semantic.files[].layer 应已回填
+const dsl = getDSL(FEATURE);
+const withLayer = (dsl.semantic?.files ?? []).filter((f) => f.layer);
+console.log(`[import] semantic.files=${dsl.semantic?.files?.length} layer 回填=${withLayer.length} dsl.layers=${dsl.layers?.length ?? 0}`);
+if ((dsl.semantic?.files ?? []).length > 0 && withLayer.length === 0) {
+  console.error('[FAIL] import_project 未回填 semantic.files[].layer');
+  process.exit(1);
+}
 
 // 2. 架构分层分析（只读）
 const r = archLayer({ feature: FEATURE });

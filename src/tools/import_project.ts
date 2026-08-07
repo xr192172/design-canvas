@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi } from '../dsl/types.js';
 import { saveDSL, saveLiveFeature } from '../storage.js';
+import { detectArchLayers } from './layer_detect.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
 import { countLines, assessLines } from './monolith.js';
@@ -40,6 +41,11 @@ export interface ImportProjectInput {
   max_files?: number;
   /** 是否包含测试文件（默认 false，测试文件通常是架构噪声） */
   include_tests?: boolean;
+  /**
+   * 是否索引归档/历史目录（_archive/archive/_old/…，默认 false）。
+   * 遗留项目归档代码不是主体，默认跳过以防稀释活跃社区；true 时索引且截断排序靠后。
+   */
+  include_archive?: boolean;
   /**
    * 可选：符号缓存（openDb 的返回值）。提供时走增量路径——
    * content_hash 未变的文件直接读 cache.db，跳过重解析；
@@ -82,6 +88,17 @@ const SKIP_DIRS = new Set([
   '.pytest_cache', '.mypy_cache', '.tox', 'egg-info',
 ]);
 
+/**
+ * 归档/历史目录名单：遗留项目里"已弃用但保留"的代码堆（如 _archive/）。
+ * 默认【不索引】——它们不是项目主体，混进 cache.db 会稀释/淹没真正活跃的社区
+ * （analyze_monolith / derive_chain 等基于调用边的工具全部失真）。
+ * include_archive=true 时才索引，且这些文件在 max_files 截断时排序靠后（优先保活跃主体）。
+ */
+const ARCHIVE_DIRS = new Set([
+  '_archive', 'archive', 'archived', '_old', 'old', '_backup', '_deprecated',
+  '_sandbox', '_wip', '_draft', '_legacy', '_stale', '_dead', '_scratch',
+]);
+
 /** 跳过的文件模式（测试/生成物 / 编辑器临时存取，非架构） */
 const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|\.gen\.[tj]sx?$|test_.*\.py$|.*_test\.py$|\.tmp$|\.temp$|\.crswap$|\.crdownload$|\.swp$|\.swo$|\.swx$|\.bak$|\.orig$|\.rej$|~$|^~)/;
 
@@ -113,7 +130,7 @@ const DIR_STYLE = { bg: '#152141', color: '#90caf9' };
 // 文件扫描
 // ─────────────────────────────────────────────────────────────
 
-function walkFiles(root: string, includeTests: boolean): string[] {
+function walkFiles(root: string, includeTests: boolean, includeArchive = false): string[] {
   const out: string[] = [];
   const stack: string[] = [root];
   while (stack.length > 0) {
@@ -127,15 +144,32 @@ function walkFiles(root: string, includeTests: boolean): string[] {
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) stack.push(full);
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        // 归档目录默认跳过（不索引）；include_archive=true 才深入
+        if (!includeArchive && ARCHIVE_DIRS.has(e.name)) continue;
+        stack.push(full);
       } else if (e.isFile()) {
         if (!includeTests && SKIP_FILE_RE.test(e.name)) continue;
         if (isSupported(path.extname(e.name))) out.push(full);
       }
     }
   }
-  // 确定性顺序
+  // 确定性顺序；include_archive=true 时归档文件排后（max_files 截断优先保活跃主体）
+  if (includeArchive) {
+    return out.sort((a, b) => {
+      const aArc = inArchiveDir(a) ? 1 : 0;
+      const bArc = inArchiveDir(b) ? 1 : 0;
+      if (aArc !== bArc) return aArc - bArc;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+  }
   return out.sort();
+}
+
+/** 路径是否落在某个归档目录下 */
+function inArchiveDir(p: string): boolean {
+  const parts = p.split(path.sep);
+  return parts.some((seg) => ARCHIVE_DIRS.has(seg));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -468,7 +502,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   }
 
   // 1. 扫描文件
-  let absFiles = walkFiles(root, include_tests);
+  let absFiles = walkFiles(root, include_tests, input.include_archive ?? false);
   const skipped: string[] = [];
   // 截断前的完整列表——pruneDeletedFiles 的比对基准（拿截断后列表会误删）
   const walkedAll = absFiles;
@@ -869,10 +903,14 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     semantic: { files: semanticFiles },
   } as DesignDSL;
 
+  // 架构分层（序号5：architecture-analyzer）：按路径启发式推断每文件所属层，
+  // 回填 node.arch_layer + semantic.files[].layer，并生成 dsl.layers 供图例/着色。
+  const layered = detectArchLayers(dsl);
+
   if (input.live_only) {
-    saveLiveFeature(dsl, input.live_dir); // 只写实际 DSL（live/），不覆盖设计 DSL
+    saveLiveFeature(layered, input.live_dir); // 只写实际 DSL（live/），不覆盖设计 DSL
   } else {
-    saveDSL(dsl); // 写设计 DSL（features/ + design-canvas.json）
+    saveDSL(layered); // 写设计 DSL（features/ + design-canvas.json）
   }
 
   const dirCount = nodes.filter((n) => n.type === 'module').length;

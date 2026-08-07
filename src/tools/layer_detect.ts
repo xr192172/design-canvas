@@ -130,7 +130,7 @@ export function detectArchLayers(dsl: DesignDSL): DesignDSL {
     return n.arch_layer ? n : { ...n, arch_layer: layer };
   });
 
-  // 职责回填：把层名加进 SemanticFile 的 responsibility 前缀（若尚未包含）
+  // 职责回填：把层名加进 SemanticFile 的 responsibility 前缀（若尚未包含），并写入 layer 字段
   let semantic = dsl.semantic;
   if (semantic && semantic.files.length > 0) {
     const layerNameById = (id: string): string => defOf(id).name;
@@ -139,8 +139,10 @@ export function detectArchLayers(dsl: DesignDSL): DesignDSL {
       const layer = node?.arch_layer;
       if (!layer) return f;
       const name = layerNameById(layer);
-      if (f.responsibility && f.responsibility.includes(name)) return f;
-      return { ...f, responsibility: `${name} · ${f.responsibility ?? ''}`.replace(/\s*·\s*$/, '') };
+      const responsibility = f.responsibility && f.responsibility.includes(name)
+        ? f.responsibility
+        : `${name} · ${f.responsibility ?? ''}`.replace(/\s*·\s*$/, '');
+      return { ...f, responsibility, layer };
     });
     semantic = { ...semantic, files };
   }

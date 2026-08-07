@@ -362,7 +362,13 @@
 - **结果暴露**：`verification.test`（command/ok/output/skipped）+ message 追加测试级验收行；dry_run 不运行
 - 测试 3 用例：dry_run 不运行测试验收 / 项目无测试文件时 skipped 不失败 / 真实 Go 项目（go.mod + tool_test.go）编译+测试双通过且新文件落盘不回滚。全量 523 用例通过，`tsc` 无错误。
 
-下一步（P3 之后）：P2/P3 拆分链路已闭环（候选圈定 → 社区子拆分评估 → derive_split 自动拆 → 编译+测试级验收）。后续可考虑在真实项目（ai-base）上端到端跑通一次自动拆分，验证评估结果与人工判断一致。
+已完成 **P3 端到端真实验证（ai-base 项目）**（2026-08-07）：在真实项目 ai-base/agent-shell（321 文件、4422 符号、2580 依赖边）的**临时副本**上跑通一次完整自动拆分，验证评估结果与代码拆分均正确：
+- **流程**：副本建立索引 → `analyze_monolith` 圈出 5 个建议再拆社区 → `derive_split` 编排（dry_run=false）自动按类型单元二次拆分 → 模块级 `go build ./...` → `go test ./...`
+- **结果**：14 次拆分全部成功（Hub 47 方法 / Engine 21 方法 / PageSession 7+14 方法 / DeepRetriever 15 方法等），每次拆分均经 `go build` 编译级验收；`go build ./...` 全模块通过
+- **测试级验收**：`go test ./...` 仅 1 个失败——`internal/agent/v2` 的 `TestAgentRunCancellation`（取消时序敏感，与本次拆分无关，该包未被触碰；在真实项目重跑 3/3 通过，确认为既存 flaky）
+- **修复 Go 导入裁剪缺陷**：`pruneGoImports` 原先只收集 `selector_expression` 的根操作数，把 Go **类型引用**（`context.Context`/`sync.Mutex` 解析为 `qualified_type` 节点）误判为未用，导致拆分后原/新文件被裁掉整个 import 块而编译失败（`undefined: context`）。修复：遍历同时识别 `selector_expression` 与 `qualified_type`，`resolveBase` 分别下钻到根操作数/包名。以最小复现（diag_import）验证：新文件保留 `sync`、原文件保留 `context`，`go build` 通过、`rolled_back=false`
+- 全量 523 用例通过，`tsc` 无错误
+- **真实项目落盘（2026-08-07）**：按规划报告 `docs/split-plan-ai-base.md`（5 社区 / 14 单元），在真实 ai-base/agent-shell 上执行 `derive_split` dry_run=false 全部落盘——14/14 成功，`go build ./...` 通过；拆分触及的包（hub/v2、orchestrator、memory）`go test` 全 `ok`（browser 无测试文件）。唯一失败包 `internal/hub/v2/themes` 与本次拆分无关（其 `theme.go` 有先前未提交的二次改动 52+/4-，拆分未触碰该包）。规划/执行脚本：`plan_subsplit_ai_base.mjs` / `apply_subsplit_ai_base.mjs`
 
 已完成 **P2.6（编译级验收闭环）**（2026-08-07）：`derive_split` 在 `dry_run=false` 落盘后跑**真实编译器**验证拆分结果，失败自动回滚，保证项目不被拆坏：
 - **真实编译**：Go → `go build -o <临时目录> <包>`（输出重定向系统临时目录避免污染项目）；TS → `npx tsc --noEmit`；Python → `python -m py_compile`。缺构建清单（go.mod/tsconfig.json）时置 `verification.skipped` 跳过而非报错
@@ -502,3 +508,14 @@ design-canvas 路线图第 1 项（SQLite 缓存 + 文件 hash 增量）与 ai-b
 7. **角色文案持久化**：生成结果落盘到 `<dataHome>/.design-canvas/explain.gen.json`（按模块标题索引，三档齐全才入库，损坏/残缺自动丢弃回退手写）。`POST /api/explain/generate` 成功后自动落盘；`GET /api/explain` 加载时优先合并已持久化文案（返回 `persisted` 计数），播放器下次打开无需重新调用 LLM 即可复用，刷新不丢。单测 [explain_gen.test.ts](../tests/tools/explain_gen.test.ts) 3 用例。
 
 **验收**：`npm run serve` → 打开 Hub `/tour.html?features=<f1>,<f2>` 依次 iframe 播放各 feature 产物，进度点可跳转、当前 feature 标签跟随。科普式讲解：打开 Hub 的「🎬 科普式讲解导览」或直接访问 `/explain.html`，左侧星图 + 右侧字幕条，点「下一步」星图自动 flyToNode 定位高亮当前讲解模块；点「👤 新人 / 📊 PM / 🔧 资深」字幕立即切换为对应详细度文案，星图保持定位当前模块。持久化：首次打开 `/explain.html` 点「✨ LLM 生成文案」→ 按钮显示「✅ 已用 … 生成并持久化 N 个模块」；刷新页面自动显示「📦 已加载 N 个模块的持久化文案」，无需重新生成，文案与生成时一致。
+
+### 7.9 import_project 集成架构分层（2026-08-07，路线图序号 5 补全）
+
+把 architecture-analyzer 的分层能力下沉到导入入口，使 **backfill 一次到位**：import_project 生成的 DSL 无需再手动跑 `arch_layer`，即自动带层归属与职责回填。
+
+1. **SemanticFile 加 `layer` 字段**（[semantic.ts](../src/dsl/semantic.ts)）：新增 `layer?: string`（架构层 id），schema [design_dsl.schema.json](../schema/design_dsl.schema.json) 的 File 定义同步加 `layer`。
+2. **detectArchLayers 回填 `layer`**（[layer_detect.ts](../src/tools/layer_detect.ts)）：职责回填逻辑顺带写入 `semantic.files[].layer`（此前只回填 responsibility 前缀）。
+3. **import_project 调用 detectArchLayers**（[import_project.ts](../src/tools/import_project.ts)）：组装 DSL 后、落盘（设计 DSL 或 live 实际 DSL）前调用 `detectArchLayers(dsl)`，一次性写入 `node.arch_layer` + `semantic.files[].layer` + `dsl.layers`。
+4. **渲染 bug 修复**：[html_renderer.ts](../src/renderer/html_renderer.ts) 工具栏 IIFE 原先在 `errCount===0 && detCount===0` 时提前 `return ''`，导致 🎨 图层 / 🖍 影响 / ▶ 导览 按钮整体不渲染——而 import_project 生成的节点用 `arch_layer`（非 `layer`），err/det 恒为 0，图层按钮永不出现。改为条件化 err/det 按钮，其余按钮始终渲染。
+
+**验证**：[arch_layer_smoke.mjs](../scripts/arch_layer_smoke.mjs) 增断言——import_project 后 `semantic.files[].layer` 须全部回填；实测 142 文件 layer 回填 142、生成 7 层（核心 66/工具 54/类型 7/UI 9/数据 4/入口 1/测试 1），代表性归属正确（src/db/db.ts→data、src/dsl/types.ts→types、src/renderer/html_renderer.ts→ui、src/server.ts→entry、src/tools/import_project.ts→utility）。渲染产物（[render_arch_smoke.mjs](../scripts/render_arch_smoke.mjs)）浏览器截图确认：工具栏出现 🎨 图层按钮，点击后画布按层统一着色、右上角图例显示 7 层色块+计数。

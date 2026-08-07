@@ -191,7 +191,8 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "expected_behavior": { "type": "string" }
+        "expected_behavior": { "type": "string" },
+        "layer": { "type": "string", "description": "架构层 id（序号5：architecture-analyzer 推断，如 api/service/data/ui）" }
       }
     },
     "Annotation": {

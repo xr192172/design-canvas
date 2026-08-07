@@ -695,10 +695,9 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
         })()}
         ${options?.compact_toolbar ? `<button id="advanced-toggle" class="advanced-toggle" type="button" title="更多工具（撤销/重做、重新布局）">⋯ 工具</button>` : ''}
         ${(() => {
-          // 职责分层：统计深层节点，有才显示层开关
+          // 职责分层：统计深层节点，有才显示对应层开关
           const errCount = dsl.geometry.nodes.filter((n) => n.layer === 'error').length;
           const detCount = dsl.geometry.nodes.filter((n) => n.layer === 'detail').length;
-          if (errCount === 0 && detCount === 0) return '';
           const errBtn = errCount > 0
             ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})">🛡 异常 ${errCount}</button>`
             : '';
@@ -747,6 +746,7 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           <button id="layout-grid" type="button" title="网格对齐">📐 网格</button>
         </div>
         </div><!-- /toolbar-advanced -->
+        <button id="dict-open" type="button" title="伪维基词典：收录通用概念/项目专有词，LLM 生成三档解释并与已收录词互链">📖 伪维基</button>
         <div class="theme-switcher" title="切换主题">
           <span class="toolbar-label">主题</span>
           <button id="theme-blue" class="theme-blue ${theme === 'blue' ? 'active' : ''}" title="蓝色"></button>
@@ -783,26 +783,6 @@ ${dsl.layers!.map((l) => `<div class="layer-legend-row"><span class="layer-legen
         <span id="select-count">已选 0 个节点</span>
         <button id="select-delete" type="button">批量删除</button>
         <button id="select-clear" type="button">取消选择</button>
-      </div>
-      <div id="anim-panel" class="anim-panel hidden">
-        <div class="anim-row">
-          <select id="anim-select" class="anim-select" title="选择动画"></select>
-          <button id="anim-prev" type="button" title="上一阶段">◀</button>
-          <button id="anim-play" type="button" title="播放/暂停">▶</button>
-          <button id="anim-next" type="button" title="下一阶段">▶▶</button>
-          <span id="anim-stage-info" class="anim-stage-info">0 / 0</span>
-          <div class="anim-speed-wrap">
-            <label>速度</label>
-            <input type="range" id="anim-speed" min="0.5" max="3" step="0.5" value="1" title="播放速度">
-            <span id="anim-speed-label">1×</span>
-          </div>
-        </div>
-        <div class="anim-row">
-          <div id="anim-progress-bar" class="anim-progress-bar">
-            <div id="anim-progress-fill" class="anim-progress-fill" style="width:0%"></div>
-          </div>
-          <span id="anim-stage-name" class="anim-stage-name">-</span>
-        </div>
       </div>
       <svg id="canvas" viewBox="0 0 ${canvas.width} ${canvas.height}" xmlns="http://www.w3.org/2000/svg">
         <defs>

@@ -30,6 +30,8 @@ export interface SemanticFile {
   actual_apis?: ExpectedApi[];
   /** 文件行数（import_project 扫描时填充，供单文件化预警/星图 tooltip 从 DSL 读取） */
   lines?: number;
+  /** 架构层 id（序号5：architecture-analyzer 按路径启发式推断，如 api/service/data/ui） */
+  layer?: string;
 }
 
 /** 代码模板配置 */
