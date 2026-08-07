@@ -519,3 +519,14 @@ design-canvas 路线图第 1 项（SQLite 缓存 + 文件 hash 增量）与 ai-b
 4. **渲染 bug 修复**：[html_renderer.ts](../src/renderer/html_renderer.ts) 工具栏 IIFE 原先在 `errCount===0 && detCount===0` 时提前 `return ''`，导致 🎨 图层 / 🖍 影响 / ▶ 导览 按钮整体不渲染——而 import_project 生成的节点用 `arch_layer`（非 `layer`），err/det 恒为 0，图层按钮永不出现。改为条件化 err/det 按钮，其余按钮始终渲染。
 
 **验证**：[arch_layer_smoke.mjs](../scripts/arch_layer_smoke.mjs) 增断言——import_project 后 `semantic.files[].layer` 须全部回填；实测 142 文件 layer 回填 142、生成 7 层（核心 66/工具 54/类型 7/UI 9/数据 4/入口 1/测试 1），代表性归属正确（src/db/db.ts→data、src/dsl/types.ts→types、src/renderer/html_renderer.ts→ui、src/server.ts→entry、src/tools/import_project.ts→utility）。渲染产物（[render_arch_smoke.mjs](../scripts/render_arch_smoke.mjs)）浏览器截图确认：工具栏出现 🎨 图层按钮，点击后画布按层统一着色、右上角图例显示 7 层色块+计数。
+
+### 7.10 多平台插件分发 install_mcp（2026-08-07，路线图序号 12）
+
+把 MCP server（已是标准协议）包装成各主流 client 的一键安装配置，免手工编辑 JSON/TOML。新增 [install_mcp.mjs](../scripts/install_mcp.mjs)：
+
+1. **平台覆盖 8 种**：Claude Code/Desktop（`~/.claude.json`）、Cursor（`~/.cursor/mcp.json`）、VS Code（项目 `.vscode/mcp.json`）、Codex CLI（`~/.codex/config.toml`，TOML `[[mcp_servers]]`）、GitHub Copilot（`~/.github/copilot-mcp.json`）、Gemini CLI（`~/.gemini/settings.json`）、Windsurf（`~/.codeium/windsurf/mcp_config.json`）、Cline（`~/.cline/mcp_settings.json`）。
+2. **安全合并**：JSON 型按 keyPath 深合并（保留已有其他 server）；TOML 型剔除同名 server 后追加。写入前把原文件备份为 `<file>.design-canvas.bak`；损坏的 JSON 按空重建（原文件已备份）。
+3. **参数**：`--list`（不写，列路径/状态）/`--dry-run`/`--check`/`--target <platform>`/`--server <path>`（覆盖 server 入口，默认 `<root>/dist/src/server.js`）。`command` 用 `process.execPath` 锚定当前 node，避免 PATH 歧义。
+4. **Windows 兼容**：JSON 解析容忍 UTF-8 BOM（PowerShell `Out-File utf8` 常见），避免 BOM 导致解析失败误当"损坏"重建丢配置。
+
+**验证**：隔离 HOME（置 `USERPROFILE`）分平台实测——空文件生成 JSON/TOML 块正确；预置 `existing-tool` server 后合并保留 + 追加 design-canvas；带 BOM 的既有 JSON 合并后 existing-tool 不丢。清理测试产物。

@@ -50,6 +50,15 @@ npm start
 # }
 ```
 
+或一键分发到各主流 MCP client（Claude/Cursor/VS Code/Codex/Copilot/Gemini/Windsurf/Cline）：
+
+```bash
+node scripts/install_mcp.mjs          # 写入全部已安装 client 的配置（自动合并+备份）
+node scripts/install_mcp.mjs --list   # 查看各平台配置路径与写入状态
+node scripts/install_mcp.mjs --dry-run# 预览将写入的内容（不落盘）
+node scripts/install_mcp.mjs --target claude  # 只写指定平台
+```
+
 ## MCP 工具一览（29 个）
 
 > 工具分 **高频**（LLM 常用，推荐优先暴露）和 **按需**（浏览器/人审/版本管理场景）两组。
