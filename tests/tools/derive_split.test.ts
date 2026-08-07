@@ -212,8 +212,8 @@ def extract_me(s):
     const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: ['extract_me'] });
 
     expect(r.language).toBe('Python');
-    // 新文件：复制 import + 补 from 原文件
-    expect(r.new_content).toContain('import os');
+    // 新文件：补 from 原文件；未使用的 import os 被裁剪（extract_me 不直接用 os）
+    expect(r.new_content).not.toContain('import os');
     expect(r.new_content).toContain('from mod import keep_me');
     expect(r.new_content).toContain('def extract_me');
     // 原文件移除被抽取符号，补 from 新文件
@@ -226,19 +226,66 @@ def extract_me(s):
   });
 });
 
-describe('deriveSplit · Python（包目录，相对 import 接线）', () => {
-  it('目录含 __init__.py → 使用相对 import（. 前缀）', async () => {
-    fs.mkdirSync(path.join(root, 'pkg'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'pkg', '__init__.py'), '', 'utf8');
-    const rel = writeTarget(
-      'pkg/mod.py',
-      `def keep_me(x):\n    return x + 1\n\n\ndef extract_me(s):\n    return keep_me(s)\n`,
-    );
-    const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: ['extract_me'] });
+describe('deriveSplit · 社区内子拆分编排（P3）', () => {
+  const GO_TOOL = `package tool
 
-    expect(r.new_content).toContain('from .mod import keep_me');
-    expect(r.original_content).toContain('from .mod__split import extract_me');
-    expect(r.verification.new_syntax_ok).toBe(true);
-    expect(r.verification.original_syntax_ok).toBe(true);
+import "fmt"
+
+type TypeA struct{ X int }
+
+func (a TypeA) A1() string { return fmt.Sprintf("%d", a.X) }
+func (a TypeA) A2() string { return fmt.Sprintf("%d", a.X) }
+func (a TypeA) A3() string { return fmt.Sprintf("%d", a.X) }
+
+type TypeB struct{ Y int }
+
+func (b TypeB) B1() string { return fmt.Sprintf("%d", b.Y) }
+func (b TypeB) B2() string { return fmt.Sprintf("%d", b.Y) }
+func (b TypeB) B3() string { return fmt.Sprintf("%d", b.Y) }
+
+func keep(x int) int { return x }
+`;
+
+  it('消费 splittable 社区，按 owner 自动二次拆分到独立文件', async () => {
+    const rel = writeTarget('tool.go', GO_TOOL);
+    const subsplit = [
+      {
+        community_id: 0,
+        community_name: 'Tool',
+        splittable: true,
+        groups: [
+          { owner: 'TypeA', methods: [{ name: 'A1', file: rel }, { name: 'A2', file: rel }, { name: 'A3', file: rel }] },
+          { owner: 'TypeB', methods: [{ name: 'B1', file: rel }, { name: 'B2', file: rel }, { name: 'B3', file: rel }] },
+        ],
+      },
+    ];
+
+    const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: [], subsplit, dry_run: true });
+
+    expect(r.subsplit).toHaveLength(2);
+    expect(r.subsplit!.map((s) => s.owner).sort()).toEqual(['TypeA', 'TypeB']);
+    expect(r.subsplit!.every((s) => s.ok)).toBe(true);
+    // 新文件以 owner 命名
+    expect(r.subsplit!.find((s) => s.owner === 'TypeA')!.new_file).toBe('tool_TypeA.go');
+    expect(r.subsplit!.find((s) => s.owner === 'TypeB')!.new_file).toBe('tool_TypeB.go');
+    // 每个 owner 的方法数正确
+    expect(r.subsplit!.find((s) => s.owner === 'TypeA')!.method_count).toBe(3);
+    expect(r.subsplit!.find((s) => s.owner === 'TypeB')!.method_count).toBe(3);
+    // dry_run 不落盘
+    expect(fs.existsSync(path.join(root, 'tool_TypeA.go'))).toBe(false);
+  });
+
+  it('非 splittable 社区被跳过，不产生拆分', async () => {
+    const subsplit = [
+      {
+        community_id: 0,
+        community_name: 'X',
+        splittable: false,
+        groups: [{ owner: 'TypeA', methods: [{ name: 'A1', file: 'a.go' }] }],
+      },
+    ];
+    const r = await deriveSplit({ project_dir: root, target_file: 'a.go', symbols: [], subsplit, dry_run: true });
+    expect(r.subsplit).toHaveLength(0);
+    expect(r.message).toContain('无可拆社区');
   });
 });

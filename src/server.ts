@@ -572,23 +572,37 @@ server.registerTool(
       'LLM 看证据后设 dry_run=false 才落盘）。支持 TypeScript/JavaScript（.ts/.tsx/.js/.jsx/.mjs/.cjs）、' +
       'Go（.go，同包拆分无需跨文件 import）、Python（.py，自动检测包目录用相对 import）。' +
       '产出 new_content / original_content（草稿）、extracted（被抽符号）、imports_copied/added、' +
-      'references_to_extracted（原文件指向被抽符号的引用点）、verification（双文件语法校验）。',
+      'references_to_extracted（原文件指向被抽符号的引用点）、verification（双文件语法校验）。' +
+      '传入 subsplit（analyze_monolith 的 community_subsplit 的 JSON 字符串）则进入社区内子拆分编排，' +
+      '对每个可拆社区的类型单元自动二次拆分；dry_run=false 落盘后跑真实编译器，失败自动回滚。',
     inputSchema: {
       project_dir: z.string().describe('项目根（相对路径解析基准）'),
       target_file: z.string().describe('目标文件（相对 project_dir，如 src/tools/serve.ts）'),
       symbols: z.array(z.string()).describe('要抽取的符号名（顶层函数/类的 name 或 qualified_name）'),
       new_file: z.string().optional().describe('新文件路径（相对 project_dir；默认 <dir>/<basename>__split.<ext>）'),
       dry_run: z.boolean().optional().describe('true=只出草稿不落盘（默认）；false=写文件'),
+      verify_compile: z.boolean().optional().describe('编译级验收：dry_run=false 落盘后跑真实编译器，失败自动回滚（默认开启）'),
+      subsplit: z.string().optional().describe('社区内子拆分计划（analyze_monolith 的 community_subsplit JSON 字符串）；提供后进入自动二次拆分编排'),
     },
   },
   async (args) => {
     try {
+      let subsplit: Parameters<typeof deriveSplit>[0]['subsplit'];
+      if (args.subsplit) {
+        try {
+          subsplit = JSON.parse(args.subsplit);
+        } catch (e) {
+          return { content: [{ type: 'text', text: `subsplit 不是合法 JSON：${(e as Error).message}` }], isError: true };
+        }
+      }
       const result = await deriveSplit({
         project_dir: args.project_dir,
         target_file: args.target_file,
         symbols: args.symbols,
         new_file: args.new_file,
         dry_run: args.dry_run,
+        verify_compile: args.verify_compile,
+        subsplit,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

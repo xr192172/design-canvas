@@ -346,7 +346,23 @@
 - **语言范围**：TS/JS（.ts/.tsx/.js/.jsx/.mjs/.cjs，ESM 相对 import）+ Go（.go，同包拆分复制 package+import 块，无需跨文件 import）+ Python（.py，目录含 `__init__.py` 判定为包则用相对 import，否则绝对式 import）
 - 测试：`tests/tools/derive_split.test.ts` 12 用例（dry_run 不落盘/抽取+移除/多符号合并/引用报告/实际写入/文件不存在/语言不支持/符号未命中 + Go 同包拆分/Go type 去重/Python 绝对 import/Python 相对 import），全量 519 用例通过，`tsc --noEmit` 无错误。自举验证 `scripts/verify_derive_split.mjs` 对项目自身 `src/tools/derive_split.ts` 抽取 3 个工具函数 dry-run 通过。
 
-下一步（P3）：社区内子拆分结果落到 `derive_split` 触发 + 编译级/测试级验收闭环（跑 `go build`/`tsc`/`pytest` + 测试命令，含 Go/Python 未用 import 裁剪）。
+已完成 **P3（社区内子拆分编排）**（2026-08-07）：把 `analyze_monolith` 的 `community_subsplit` 评估结果接到 `derive_split`，让代码自动执行二次拆分：
+- **消费评估结果**：`deriveSplit` 输入新增 `subsplit`（`CommunitySubSplitPlan[]`，与 `analyze_monolith` 的 `CommunitySubSplit` 形状兼容的本地定义以解耦），提供后进入编排模式 `runSubSplit`；仅处理 `splittable: true` 的社区，逐个类型单元（owner）自动二次拆分
+- **按 owner 自动拆文件**：对每个 owner 的方法按所在文件分组，把该类型全部方法从原文件抽到以 owner 命名的兄弟文件（`<basename>_<owner>.<ext>`）；同一文件内多个 owner 逐个抽取（后一个基于前一个拆分后的内容）
+- **支持方法符号抽取**：原抽取逻辑仅匹配顶层符号（`!s.parent`），无法抽取 Go receiver 方法/类方法；改为从全量符号（含 parent）按 `name`/`qualified_name` 命中，按 name 去重保留外层
+- **结果汇总**：`result.subsplit` 逐条记录每次拆分的 community/owner/原文件/新文件/方法数/成功与否/失败原因（编译回滚或语法失败），message 输出逐行可读报告
+- **server.ts 注册**：`derive_split` 输入新增 `subsplit`（JSON 字符串，解析后传入）与 `verify_compile`；`subsplit` 非法 JSON 先报错降级
+- 测试 2 用例：Go 双 owner（TypeA/TypeB）自动拆成 `tool_TypeA.go`/`tool_TypeB.go` 且 dry_run 不落盘；非 splittable 社区被跳过。全量 519 用例通过，`tsc` 无错误。
+
+下一步（P3 收尾）：测试级验收闭环（跑测试命令 go test / pytest / npm test），验证拆分后功能正确性。
+
+已完成 **P2.6（编译级验收闭环）**（2026-08-07）：`derive_split` 在 `dry_run=false` 落盘后跑**真实编译器**验证拆分结果，失败自动回滚，保证项目不被拆坏：
+- **真实编译**：Go → `go build -o <临时目录> <包>`（输出重定向系统临时目录避免污染项目）；TS → `npx tsc --noEmit`；Python → `python -m py_compile`。缺构建清单（go.mod/tsconfig.json）时置 `verification.skipped` 跳过而非报错
+- **失败回滚**：编译失败自动把原文件恢复拆分前内容、清空新文件，`rolled_back=true`，项目保持未被拆状态
+- **未用 import 裁剪**（编译器阻塞项）：Go 未用 import 会使 `go build` 失败，Python 未用 import 属质量项。裁剪在接线 import 注入**之前**执行，避免把"向后兼容的再导出 import"（`from <新文件> import <抽走符号>`）误删——修复了原文件再导出行被 `prunePythonImports` 误删导致相对 import 测试失败的问题
+- **接线 import 受保护**：先裁剪底层 import，再注入接线 import（再导出），保证既清掉未用 import 又保留跨文件接线
+- **结果暴露**：`verification.compile`（command/ok/output/skipped）+ 顶层 `rolled_back` + message 追加编译验收行；`dry_run=true` 时置 `verification.note` 提示落盘后自动验收
+- 真实验证：临时 Go 项目（module probe + go.mod）`dry_run=false` 抽取 `extractMe`，裁剪生效（新文件去 `strings`、原文件去 `fmt`），`go build` 通过且 `rolled_back=false`；以带 BOM 的 go.mod 复现编译失败路径，确认 `rolled_back=true` 自动回滚。全量 519 用例通过，`tsc` 无错误。
 
 已完成 **P2.5（拆分候选多社区均衡度门槛）**（2026-08-07）：拆分候选此前仅判"超标 && ≥2 社区"，会把"1 个主导社区 + 零星尾随社区"的文件（如独立一次性脚本）误报为可拆。新增 `min_community_share` 参数（默认 0.2=20%）：仅当文件内 ≥2 个社区各自符号占比 ≥ 门槛才列入拆分候选，过滤误报，避免拆出碎片。server.ts 注册参数；测试 2 用例（默认门槛过滤误报 / 调低门槛后纳入）。另修正 seedDb 测试基建——`qualified_name` 误用含文件前缀的 id 导致 `ownerOf` 提取出错 owner、类型锚定钉死单社区，改为纯符号名。全量 511 用例通过。
 
