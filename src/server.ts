@@ -582,6 +582,7 @@ server.registerTool(
       new_file: z.string().optional().describe('新文件路径（相对 project_dir；默认 <dir>/<basename>__split.<ext>）'),
       dry_run: z.boolean().optional().describe('true=只出草稿不落盘（默认）；false=写文件'),
       verify_compile: z.boolean().optional().describe('编译级验收：dry_run=false 落盘后跑真实编译器，失败自动回滚（默认开启）'),
+      verify_test: z.boolean().optional().describe('测试级验收：编译通过后跑项目测试命令（go test/pytest/npm test），失败自动回滚（默认=verify_compile）'),
       subsplit: z.string().optional().describe('社区内子拆分计划（analyze_monolith 的 community_subsplit JSON 字符串）；提供后进入自动二次拆分编排'),
     },
   },
@@ -602,6 +603,7 @@ server.registerTool(
         new_file: args.new_file,
         dry_run: args.dry_run,
         verify_compile: args.verify_compile,
+        verify_test: args.verify_test,
         subsplit,
       });
       return { content: [{ type: 'text', text: result.message }] };

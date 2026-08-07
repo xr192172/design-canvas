@@ -354,7 +354,15 @@
 - **server.ts 注册**：`derive_split` 输入新增 `subsplit`（JSON 字符串，解析后传入）与 `verify_compile`；`subsplit` 非法 JSON 先报错降级
 - 测试 2 用例：Go 双 owner（TypeA/TypeB）自动拆成 `tool_TypeA.go`/`tool_TypeB.go` 且 dry_run 不落盘；非 splittable 社区被跳过。全量 519 用例通过，`tsc` 无错误。
 
-下一步（P3 收尾）：测试级验收闭环（跑测试命令 go test / pytest / npm test），验证拆分后功能正确性。
+已完成 **P3 收尾（测试级验收闭环）**（2026-08-07）：在编译级验收通过后，跑该语言的项目测试命令，验证拆分后功能正确性，失败同样自动回滚：
+- **测试命令**：Go → `go test <拆分所在包>`（同包可直接引用抽走符号）；Python → `python -m pytest -q`（pytest 未安装时置 skipped 而非失败）；TS → 包用 vitest 则 `npx vitest run <文件>`，否则 `npm test`
+- **跳过策略**（与编译级一致，避免误报失败）：缺 go.mod / package.json 无 test 脚本 / 项目无测试文件（Go `*_test.go`、Python `test_*.py`/`*_test.py`）时返回 `verification.test.skipped`
+- **失败回滚**：测试失败把原文件恢复拆分前内容、清空新文件，`rolled_back=true`，项目保持未被拆状态
+- **控制项**：`derive_split` 输入与 server.ts 新增 `verify_test`（默认 = `verify_compile`，即可独立关闭）；编排 `runSubSplit` 同样透传
+- **结果暴露**：`verification.test`（command/ok/output/skipped）+ message 追加测试级验收行；dry_run 不运行
+- 测试 3 用例：dry_run 不运行测试验收 / 项目无测试文件时 skipped 不失败 / 真实 Go 项目（go.mod + tool_test.go）编译+测试双通过且新文件落盘不回滚。全量 523 用例通过，`tsc` 无错误。
+
+下一步（P3 之后）：P2/P3 拆分链路已闭环（候选圈定 → 社区子拆分评估 → derive_split 自动拆 → 编译+测试级验收）。后续可考虑在真实项目（ai-base）上端到端跑通一次自动拆分，验证评估结果与人工判断一致。
 
 已完成 **P2.6（编译级验收闭环）**（2026-08-07）：`derive_split` 在 `dry_run=false` 落盘后跑**真实编译器**验证拆分结果，失败自动回滚，保证项目不被拆坏：
 - **真实编译**：Go → `go build -o <临时目录> <包>`（输出重定向系统临时目录避免污染项目）；TS → `npx tsc --noEmit`；Python → `python -m py_compile`。缺构建清单（go.mod/tsconfig.json）时置 `verification.skipped` 跳过而非报错

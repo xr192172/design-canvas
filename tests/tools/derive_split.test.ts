@@ -289,3 +289,68 @@ func keep(x int) int { return x }
     expect(r.message).toContain('无可拆社区');
   });
 });
+
+describe('deriveSplit · 测试级验收闭环（P3 收尾）', () => {
+  const GO_MOD = `module probe
+
+go 1.21
+`;
+
+  const GO_TOOL = `package tool
+
+import "fmt"
+
+type TypeA struct{ X int }
+
+func (a TypeA) A1() string { return fmt.Sprintf("%d", a.X) }
+func (a TypeA) A2() string { return fmt.Sprintf("%d", a.X) }
+func (a TypeA) A3() string { return fmt.Sprintf("%d", a.X) }
+
+func keep(x int) int { return x }
+`;
+
+  const GO_TEST = `package tool
+
+import "testing"
+
+func TestTypeA(t *testing.T) {
+  a := TypeA{X: 5}
+  if got := a.A1(); got != "5" {
+    t.Fatalf("A1() = %q, want %q", got, "5")
+  }
+}
+`;
+
+  it('dry_run=true：不运行测试级验收，verification 无 test 字段', async () => {
+    writeTarget('go.mod', GO_MOD);
+    const rel = writeTarget('tool.go', GO_TOOL);
+    writeTarget('tool_test.go', GO_TEST);
+    const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: ['TypeA'] });
+    expect(r.dry_run).toBe(true);
+    expect(r.verification.test).toBeUndefined();
+    expect(r.rolled_back).toBe(false);
+  });
+
+  it('项目无测试文件：测试级验收跳过（skipped），不失败', async () => {
+    writeTarget('go.mod', GO_MOD);
+    const rel = writeTarget('tool.go', GO_TOOL);
+    const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: ['TypeA'], dry_run: false, verify_test: true });
+    expect(r.verification.test).toBeDefined();
+    expect(r.verification.test!.skipped).toContain('无 _test.go 测试文件');
+    expect(r.rolled_back).toBe(false);
+  });
+
+  it('真实 Go 项目：编译 + 测试通过，不回滚', async () => {
+    writeTarget('go.mod', GO_MOD);
+    const rel = writeTarget('tool.go', GO_TOOL);
+    writeTarget('tool_test.go', GO_TEST);
+    const r = await deriveSplit({ project_dir: root, target_file: rel, symbols: ['TypeA'], dry_run: false, verify_test: true });
+    expect(r.verification.compile).toBeDefined();
+    expect(r.verification.test).toBeDefined();
+    expect(r.verification.compile!.ok).toBe(true);
+    expect(r.verification.test!.ok).toBe(true);
+    expect(r.rolled_back).toBe(false);
+    // 新文件已落盘
+    expect(fs.existsSync(path.join(root, 'tool__split.go'))).toBe(true);
+  });
+});

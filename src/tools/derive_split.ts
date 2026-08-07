@@ -26,7 +26,7 @@
  */
 
 import path from 'node:path';
-import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -73,6 +73,9 @@ export interface DeriveSplitInput {
   /** 编译级验收：dry_run=false 落盘后跑真实编译器（go build/tsc/py_compile），失败自动回滚。
    *  默认 = !dry_run（写文件即验收）；显式传 false 可关闭。 */
   verify_compile?: boolean;
+  /** 测试级验收（P3 收尾）：编译级验收通过后，跑该语言的项目测试命令（go test/pytest/npm test），
+   *  验证拆分后功能正确性，失败同样自动回滚。默认 = verify_compile；显式传 false 可关闭。 */
+  verify_test?: boolean;
   /** 社区内子拆分计划（P3）：提供后进入编排模式，对每个 splittable 社区的每个类型单元
    *  自动按 owner 拆到独立文件。此时 target_file/symbols/new_file 由编排内部生成。 */
   subsplit?: CommunitySubSplitPlan[];
@@ -101,6 +104,8 @@ export interface DeriveSplitResult {
     imports_pruned_original: string[];
     /** 真实编译器验收结果（dry_run=false 且未关闭时存在） */
     compile?: { command: string; ok: boolean; output: string; skipped?: string };
+    /** 测试级验收结果（编译通过后、dry_run=false 且未关闭时存在） */
+    test?: { command: string; ok: boolean; output: string; skipped?: string };
     note?: string;
   };
   /** 编译级验收失败后是否已回滚原文件（项目保持拆分前状态） */
@@ -620,6 +625,91 @@ async function runCompile(
   }
 }
 
+/** shell 执行统一封装：返回 {ok, output}，异常路径收敛为 ok=false */
+async function runShell(command: string, cwd: string): Promise<{ ok: boolean; output: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, [], { cwd, shell: true, timeout: 600000, windowsHide: true });
+    return { ok: true, output: (stdout + stderr).trim() };
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    return { ok: false, output: ((err.stdout || '') + (err.stderr || '')).trim() || (err.message || '命令执行失败') };
+  }
+}
+
+/** 在 projectDir（含子目录）下递归查找是否含匹配 re 的测试文件 */
+function hasTestFiles(projectDir: string, re: RegExp): boolean {
+  const stack = [projectDir];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: Array<{ name: string; isDirectory(): boolean }>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(abs);
+      else if (re.test(e.name)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 测试级验收（P3 收尾）：在编译级验收通过后，跑该语言的项目测试命令，验证拆分后功能正确性。
+ * 未落盘（dry_run）、缺测试清单（go.mod / package.json.test 脚本）或项目无测试文件时跳过（skipped）。
+ * 测试失败同样触发自动回滚，保证项目不被拆坏。
+ */
+async function runTest(
+  lang: LangId,
+  projectDir: string,
+  targetRel: string,
+  newRel: string,
+): Promise<{ command: string; ok: boolean; output: string; skipped?: string }> {
+  if (lang === 'go') {
+    if (!existsSync(path.join(projectDir, 'go.mod'))) {
+      return { command: 'go test', ok: true, output: '', skipped: '项目无 go.mod，跳过 Go 测试级验收' };
+    }
+    const pkgDir = path.posix.dirname(targetRel.replace(/\\/g, '/')) || '.';
+    const pkgAbs = path.join(projectDir, pkgDir === '.' ? '' : pkgDir);
+    if (!hasTestFiles(pkgAbs, /_test\.go$/)) {
+      return { command: 'go test', ok: true, output: '', skipped: '拆分所在包无 _test.go 测试文件，跳过' };
+    }
+    const spec = pkgDir === '.' ? '.' : `./${pkgDir}`;
+    const command = `go test ${spec}`;
+    const r = await runShell(command, projectDir);
+    return { command, ok: r.ok, output: r.output };
+  }
+  if (lang === 'python') {
+    if (!hasTestFiles(projectDir, /(^|[\\/])(test_.*|.*_test)\.py$/)) {
+      return { command: 'python -m pytest -q', ok: true, output: '', skipped: '项目无测试文件（test_*.py / *_test.py），跳过' };
+    }
+    const command = 'python -m pytest -q';
+    const r = await runShell(command, projectDir);
+    if (!r.ok && /No module named ['"]pytest['"]|pytest: command not found/i.test(r.output)) {
+      return { command, ok: true, output: r.output, skipped: 'pytest 未安装，跳过 Python 测试级验收' };
+    }
+    return { command, ok: r.ok, output: r.output };
+  }
+  // TypeScript
+  let pkg: { scripts?: Record<string, string>; devDependencies?: Record<string, string>; dependencies?: Record<string, string> } | undefined;
+  try {
+    pkg = JSON.parse(readFileSync(path.join(projectDir, 'package.json'), 'utf8'));
+  } catch {
+    /* 无 package.json */
+  }
+  if (!pkg?.scripts?.test) {
+    return { command: 'npm test', ok: true, output: '', skipped: 'package.json 无 test 脚本，跳过 TS 测试级验收' };
+  }
+  const useVitest = !!(pkg.devDependencies?.vitest || pkg.dependencies?.vitest);
+  const files = [targetRel, newRel].map((f) => shq(f)).join(' ');
+  const command = useVitest ? `npx vitest run ${files}` : 'npm test';
+  const r = await runShell(command, projectDir);
+  return { command, ok: r.ok, output: r.output };
+}
+
 // 单次拆分核心（从某一文件抽取若干符号到新文件）。deriveSplit 单次模式与
 // 社区内子拆分编排（runSubSplit）都复用它。input 不含 subsplit。
 async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
@@ -770,6 +860,18 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
     }
   }
 
+  // —— 测试级验收（P3 收尾）：编译通过后跑项目测试命令，失败同样回滚 ——
+  const verifyTest = input.verify_test ?? verifyCompile;
+  let testResult: { command: string; ok: boolean; output: string; skipped?: string } | undefined;
+  if (!dryRun && !rolledBack && verifyCompile && compileResult?.ok && verifyTest) {
+    testResult = await runTest(lang, projectRoot, targetRel, newRel);
+    if (!testResult.ok) {
+      writeFileSync(targetAbs, content, 'utf8');
+      if (existsSync(newAbs)) writeFileSync(newAbs, '', 'utf8');
+      rolledBack = true;
+    }
+  }
+
   // 报告
   const langLabel = lang === 'ts' ? 'TypeScript/JavaScript' : lang === 'go' ? 'Go' : 'Python';
   const wiringNote =
@@ -819,6 +921,20 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
     lines.push('', ' 编译级验收：dry_run=true 未运行（落盘后自动执行）');
   }
 
+  // 测试级验收信息
+  if (testResult) {
+    if (testResult.skipped) {
+      lines.push('', `测试级验收：已跳过（${testResult.skipped}）`);
+    } else if (testResult.ok) {
+      lines.push('', `测试级验收：${testResult.command} → 通过`);
+    } else {
+      lines.push('', `测试级验收：${testResult.command} → 失败${rolledBack ? '（已回滚原文件，项目未被拆坏）' : ''}`);
+      lines.push(testResult.output.split('\n').slice(0, 20).map((l) => `  ${l}`).join('\n'));
+    }
+  } else if (verifyTest && dryRun) {
+    lines.push('', ' 测试级验收：dry_run=true 未运行（落盘后自动执行）');
+  }
+
   return {
     message: lines.join('\n'),
     dry_run: dryRun,
@@ -846,7 +962,8 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
       imports_pruned_new: prunedNew.pruned,
       imports_pruned_original: prunedOrig.pruned,
       ...(compileResult ? { compile: compileResult } : {}),
-      ...(verifyCompile && dryRun ? { note: 'dry_run=true，未运行编译级验收（落盘后自动执行）' } : {}),
+      ...(testResult ? { test: testResult } : {}),
+      ...(verifyCompile && dryRun ? { note: 'dry_run=true，未运行编译/测试级验收（落盘后自动执行）' } : {}),
     },
     rolled_back: rolledBack,
   };
@@ -885,6 +1002,7 @@ async function runSubSplit(input: DeriveSplitInput): Promise<DeriveSplitResult> 
           new_file: newFile,
           dry_run: dryRun,
           verify_compile: input.verify_compile,
+          verify_test: input.verify_test,
         });
         const ok = !r.rolled_back && (r.verification?.new_syntax_ok ?? false) && (r.verification?.original_syntax_ok ?? false);
         summary.push({
