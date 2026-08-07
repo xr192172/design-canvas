@@ -21,6 +21,7 @@ import { resolveAnnotation, addAnnotationByTool } from './tools/annotation_tools
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { deriveDetailChain } from './tools/derive_chain.js';
+import { deriveAnimFlow } from './tools/derive_anim_flow.js';
 import { deriveAlgorithm } from './tools/derive_algorithm.js';
 import { injectReplay } from './tools/inject_replay.js';
 import { checkConsistency } from './tools/consistency.js';
@@ -35,6 +36,8 @@ import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './tools/snapshot
 import { createFromTemplate } from './tools/templates.js';
 import { importProject } from './tools/import_project.js';
 import { checkMonolith } from './tools/monolith.js';
+import { analyzeMonolith } from './tools/analyze_monolith.js';
+import { deriveSplit } from './tools/derive_split.js';
 import { queryFeature } from './tools/query_feature.js';
 import { watchProjectTool } from './tools/watch_project_tool.js';
 
@@ -441,6 +444,7 @@ server.registerTool(
       title: z.string().optional().describe('显示标题（默认等于 feature）'),
       max_files: z.number().optional().describe('最多解析文件数（默认 200）'),
       include_tests: z.boolean().optional().describe('是否包含测试文件（默认 false）'),
+      include_archive: z.boolean().optional().describe('是否索引归档/历史目录 _archive/archive/_old 等（默认 false，防稀释活跃社区）'),
     },
   },
   async (args) => {
@@ -461,6 +465,7 @@ server.registerTool(
         title: args.title,
         max_files: args.max_files,
         include_tests: args.include_tests,
+        include_archive: args.include_archive,
         cache_db: cacheDb,
       });
       return { content: [{ type: 'text', text: result.message }] };
@@ -506,6 +511,84 @@ server.registerTool(
         max_files: args.max_files,
         save_preview: args.save_preview,
         preview_feature: args.preview_feature,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// analyze_monolith：跨文件功能社区圈定（基于 cache.db 调用边 + 功能锚点）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'analyze_monolith',
+  {
+    title: 'Analyze cross-file functional communities via call edges',
+    description:
+      '基于 cache.db 调用边做【跨文件】功能社区圈定：从既存结构自动推导功能锚点' +
+      '（高频被调 / 语义命名 xxxService/Handler/Repo / 导出入口），锚点带权重做标签传播，' +
+      '把"同一功能"的符号聚进同一社区——功能再大再碎也整块聚在一起（社区锚点是功能/业务，不是纯代码结构）。' +
+      '产出功能社区清单（锚点+符号+跨文件+行数）、社区间依赖（决定拆完 import 怎么补）、' +
+      '文件视图与"多社区共占的超标文件"拆分候选。只给证据与启发，不落盘改代码。' +
+      '依赖：先对项目执行 import_project / watch_project 建立 cache.db 索引。',
+    inputSchema: {
+      project_dir: z.string().describe('项目根（定位 <root>/.design-canvas/cache.db）'),
+      warn_lines: z.number().optional().describe('warning 阈值（默认 300 行）'),
+      crit_lines: z.number().optional().describe('critical 阈值（默认 600 行）'),
+      max_anchors: z.number().optional().describe('锚点数上限（默认 0=取全部正分锚点）'),
+      max_iter: z.number().optional().describe('标签传播迭代次数（默认 12）'),
+      min_community_share: z.number().optional().describe('拆分候选均衡度门槛：文件内每社区符号占比 ≥ 此值才算实质社区，且 ≥2 个实质社区才建议拆分（默认 0.2）'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = analyzeMonolith({
+        project_dir: args.project_dir,
+        warn_lines: args.warn_lines,
+        crit_lines: args.crit_lines,
+        max_anchors: args.max_anchors,
+        max_iter: args.max_iter,
+        min_community_share: args.min_community_share,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// derive_split：执行文件拆分（P2，承接 analyze_monolith 社区分析）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'derive_split',
+  {
+    title: 'Execute file split by extracting a community into a sibling file',
+    description:
+      '承接 analyze_monolith 的社区分析：把一个"多社区共占文件"里指定社区/符号的操作' +
+      '（默认 dry_run=true，只出两份文件草稿 + import 接线 + 交叉引用 + tree-sitter 语法级验收，' +
+      'LLM 看证据后设 dry_run=false 才落盘）。支持 TypeScript/JavaScript（.ts/.tsx/.js/.jsx/.mjs/.cjs）、' +
+      'Go（.go，同包拆分无需跨文件 import）、Python（.py，自动检测包目录用相对 import）。' +
+      '产出 new_content / original_content（草稿）、extracted（被抽符号）、imports_copied/added、' +
+      'references_to_extracted（原文件指向被抽符号的引用点）、verification（双文件语法校验）。',
+    inputSchema: {
+      project_dir: z.string().describe('项目根（相对路径解析基准）'),
+      target_file: z.string().describe('目标文件（相对 project_dir，如 src/tools/serve.ts）'),
+      symbols: z.array(z.string()).describe('要抽取的符号名（顶层函数/类的 name 或 qualified_name）'),
+      new_file: z.string().optional().describe('新文件路径（相对 project_dir；默认 <dir>/<basename>__split.<ext>）'),
+      dry_run: z.boolean().optional().describe('true=只出草稿不落盘（默认）；false=写文件'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await deriveSplit({
+        project_dir: args.project_dir,
+        target_file: args.target_file,
+        symbols: args.symbols,
+        new_file: args.new_file,
+        dry_run: args.dry_run,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {
@@ -639,6 +722,59 @@ server.registerTool(
         project_root: args.project_root,
         entry: args.entry,
         max_steps: args.max_steps,
+      });
+      return { content: [{ type: 'text', text: result.message }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// derive_anim_flow：路线图序号 14，调用链 + CFG → 动画流声明（L4 函数绑定 + L3 条件分支）
+// 生成层：把 derive_detail_chain 已提取的调用链/CFG 自动转成 animations_v2.flows，
+// 驱动引擎已实现的 L3/L4 能力（此前只能手工写 flows，如 examples/conveyor.json）
+// ─────────────────────────────────────────────────────────────
+server.registerTool(
+  'derive_anim_flow',
+  {
+    title: 'Derive animation flows from call chain + CFG (L4 binding + L3 branches + cross-file)',
+    description:
+      'L3/L4/L4.5 动画声明生成：复用 derive_detail_chain 的调用链 + CFG，自动生成 animations_v2.flows。' +
+      '生成三类 flow：chain flow（L4 函数绑定，调用链相邻对 handler 绑定调用方）+ branch flow（L3 条件分支，CFG 判定 → 分支路由，附 L4.5 handler.errors 异常声明）' +
+      '+ cross flow（序号 15：基于 cache.db 跨文件调用边，L4 绑定越出本文件到宿主节点）。' +
+      '依赖：先运行 derive_detail_chain 生成 detail 节点（flow 的 from/to 引用这些节点 id）。' +
+      '幂等：重跑只重建自身前缀的 flows，保留手写 flows。支持 .go/.ts/.js/.py。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      node_id: z.string().describe('主干文件节点 id（handler.file_id 用它，detail 节点 host 也用它）'),
+      source_path: z
+        .string()
+        .optional()
+        .describe('源文件路径（缺省取 semantic.files[node_id].path，相对 project_root）'),
+      project_root: z.string().optional().describe('源文件根目录，默认当前工作目录'),
+      entry: z.string().optional().describe('入口函数名（缺省自动推导：入度 0 且优先导出）'),
+      max_steps: z.number().optional().describe('入链函数上限，默认 12'),
+      interval: z.number().optional().describe('periodic flow 周期间隔毫秒，默认 4000'),
+      max_cfg_branches: z.number().optional().describe('单个函数最多提取的 CFG 分支条件数，默认 3'),
+      max_cross: z
+        .number()
+        .optional()
+        .describe('跨文件 L4 chain flow 上限（读 cache.db 跨文件调用边，0=关闭），默认 3'),
+    },
+  },
+  async (args) => {
+    try {
+      const result = await deriveAnimFlow({
+        feature: args.feature,
+        node_id: args.node_id,
+        source_path: args.source_path,
+        project_root: args.project_root,
+        entry: args.entry,
+        max_steps: args.max_steps,
+        interval: args.interval,
+        max_cfg_branches: args.max_cfg_branches,
+        max_cross: args.max_cross,
       });
       return { content: [{ type: 'text', text: result.message }] };
     } catch (e) {

@@ -105,17 +105,20 @@
 | B | ✅ | L0 默认粒子流自动推导（跳过 sim-edge / contains）+ L1 状态闪烁 + in_progress 呼吸 |
 | C | ✅ | L2 显式 flow（periodic/event 触发器）+ 粒子值类型标签 + 节点 IO 提示浮层 + 仿真器事件桥接 |
 | D | ✅ | 内置 effect 注册：card_create / card_fold / card_evict + triggerEffect 手动触发接口 |
-| E | ⏳ | conveyor.json 迁移到 L2 + 删除 scripts.ts 专用动画代码 |
+| E | ✅ | conveyor.json 迁移到 L2 + 删除 scripts.ts 专用动画代码（2026-08-07） |
 
-**仍存在的问题**（阶段 E 待解决）：
-1. **专用代码未清除**——scripts.ts 中的 `createSectionCardContainer` / `updateSectionVisuals` 等约 1550 行专用动画代码仍在运行，与通用引擎并存（双份卡片渲染逻辑）
-2. **scripts.ts 体积**——171KB 未缩减，待阶段 E 删除专用代码后预期降至约 155KB
-3. **暂停/步进**——通用引擎已实现 pause/resume/step，但未接入 UI 按钮
+**阶段 E 已解决**（2026-08-07）：
+1. ~~专用代码未清除~~ → 已删除 scripts.ts 中旧动画播放器（animState / initAnimationPlayer 全块）与 html_renderer.ts 旧 anim-panel UI、styles.ts 旧动画样式
+2. ~~scripts.ts 体积~~ → 旧专用动画代码已删除；体积因上一阶段词典渲染代码新增而回涨至 ~217KB（非动画代码）
+3. ~~缺乏声明层~~ → conveyor.json 已显式声明 5 个 L2 flow（含 card_sync 全量同步；card_create/fold/evict 由 card_sync 统一驱动），浏览器验证卡片创建/折叠/淘汰/新增均通过
+
+**仍存在的问题**（阶段 14 待解决）：
+1. **暂停/步进 UI**——通用引擎已实现 pause/resume/step，动画控制按钮已在仿真器面板接入
 
 **已解决**（相对旧版 evolution.md 记录的问题）：
 - ~~高度专用化~~ → 通用引擎不硬编码节点 ID，通过 effect 注册表扩展
 - ~~动画逻辑与渲染耦合~~ → 独立 animation_engine.ts 模块，由 html_renderer.ts 注入
-- ~~缺乏动画声明层~~ → animations_v2 字段已支持，conveyor.json 已有 3 个 L2 flow 验证
+- ~~缺乏动画声明层~~ → animations_v2 字段已支持，conveyor.json 已有 5 个 L2 flow 验证（含 card_sync）
 
 ## 3. 当前实现 vs 设计文档对照
 
@@ -141,11 +144,11 @@
 
 | 项 | 现状 | 待决策 |
 |---|---|---|
-| ~~动画系统专用化~~ | ~~硬编码 conveyor 节点 ID~~ → ✅ 通用引擎已实现，待阶段 E 清除专用代码 | 阶段 E 删除 scripts.ts 专用动画代码 |
+| ~~动画系统专用化~~ | ~~硬编码 conveyor 节点 ID~~ → ✅ 通用引擎已实现，专用代码已清除 | 阶段 E 已完成 |
 | 消息粒子终点处理 | 当前淡出移除（违反 project_memory 旧约束） | 保留淡出？还是恢复"转换为可拖拽容器"？ |
 | 文档更新 | design.md / mvp-plan.md / README.md 严重滞后 | 更新旧文档？还是以 evolution.md + animation-design.md 为准？ |
 | tmp_backfill_* 污染 | 80+ 临时目录未清理 | backfill.ts 改用 os.tmpdir() 或运行后清理 |
-| scripts.ts 体积 | 171KB 单文件 | 阶段 E 删除专用动画代码后预期降至约 155KB |
+| scripts.ts 体积 | ~217KB 单文件（含词典渲染代码，非动画） | 后续随词典/动画能力独立化逐步拆分 |
 
 ## 4. 设计哲学演化
 
@@ -199,7 +202,7 @@
 
 ### 待完成
 
-6. **阶段 E：conveyor.json 迁移**——在 conveyor.json 显式声明 card_* flow + 删除 scripts.ts 专用动画代码（约 1550 行）
+6. ~~**阶段 E：conveyor.json 迁移**~~——已完成（2026-08-07）：conveyor.json 显式声明 card_sync flow + 删除 scripts.ts 专用动画代码（旧动画播放器全块）
 7. **L3-L5 动画能力**——条件分支 / 函数绑定 / 异常语义 / 反向提取（中低优先级）
 
 ---
@@ -224,9 +227,9 @@
 | | 10 | Language Concepts（12 种编程模式上下文解释） | Understand Anything | 3 | ⏳ |
 | **自动同步** | 11 | 文件监听自动同步（FSEvents/inotify） | CodeGraph | 1, 3 | ✅ 已落地（2026-08-06，见 7.6） |
 | | 12 | 多平台插件分发（Claude Code/Cursor/VS Code/Codex） | 两者 | MCP 已就绪 | ⏳ |
-| **独有能力** | 13 | 动画系统阶段 E（conveyor 迁移） | 自有 | 无 | ⏳ |
-| | 14 | L3-L5 动画（条件分支 / 函数绑定 / 异常 / 反向提取） | 自有 | 13 | ⏳ |
-| | 15 | L5 反向提取增强（基于 SQLite + 调用边） | 自有 | 1, 3, 14 | ⏳ |
+| **独有能力** | 13 | 动画系统阶段 E（conveyor 迁移） | 自有 | 无 | ✅（2026-08-07） |
+| | 14 | L3-L5 动画（条件分支 / 函数绑定 / 异常 / 反向提取） | 自有 | 13 | ✅ P1 全（L4 绑定 + L3 分支 + L4.5 异常，2026-08-07 见 6.6） |
+| | 15 | L5 反向提取增强（基于 SQLite + 调用边） | 自有 | 1, 3, 14 | ✅ 跨文件 L4 chain flow（2026-08-07 见 6.6） |
 
 ### 6.2 第一批：基础设施
 
@@ -309,15 +312,47 @@
 
 ### 6.6 第五批：独有能力推进（不因借鉴而停）
 
-**13. 动画系统阶段 E**——conveyor.json 显式声明 card_* flow + 删除 scripts.ts 专用动画代码
+**13. ~~动画系统阶段 E~~**——已完成（2026-08-07）：conveyor.json 显式声明 card_* flow + 删除 scripts.ts 专用动画代码
 
 **14. L3-L5 动画**——条件分支 / 函数绑定 / 异常语义 / 反向提取
 
+已完成 **P1 全（L4 函数绑定 + L3 条件分支 + L4.5 异常语义）**（2026-08-07）：新增 `src/tools/derive_anim_flow.ts`，补齐"生成层"——动画引擎（animation_engine.ts / anim_core.ts）运行时已支持 L3 分支、L4 绑定、L4.5 异常，但 flows 声明此前只能手写（如 examples/conveyor.json）。本工具把 `derive_detail_chain` 已提取的调用链 + CFG 自动转成 `animations_v2.flows`：
+- **chain flow（L4 函数绑定）**：按调用链相邻函数对生成，`handler` 绑定调用方函数（file_id=宿主节点, api=调用方），periodic 触发
+- **branch flow（L3 条件分支）**：对含 CFG 判定的函数生成，`branches` 取自 CFG 条件（去重/截断/去 entry-exit），末位 else 兜底到宿主节点；`mock_values` 从 detail 节点 `shapes.in` 属性集合生成数值/布尔极端对（false/true 覆盖两分支）
+- **errors（L4.5 异常语义）**：从函数体源码扫描错误返回/抛出，注入 branch flow 的 `handler.errors`——Go `return ..., ErrXxx`（expected，particle_red 红路径）+ `panic(...)`（unexpected，node_flash_red + log）；JS/TS `throw new Xxx(...)`、Python `raise Xxx(...)`（均 unexpected）。让引擎 L4.5 异常短路（expected 红路径不报警 / unexpected 标"疑似 bug"）可被自动驱动
+- **幂等**：只重建自身前缀 `${node_id}__flow_` 的 flows，保留手写 flows；依赖先跑 `derive_detail_chain` 生成 detail 节点（flow 的 from/to 引用这些节点 id）
+- **MCP**：`server.ts` 注册 `derive_anim_flow` 工具（参数 feature/node_id/source_path/project_root/entry/max_steps/interval/max_cfg_branches）
+- 测试：`tests/tools/derive_anim_flow.test.ts` 10 用例（依赖检查、L4/L3 生成、mock_values、L4.5 异常 expected/unexpected、幂等、错误边界），全量 493 用例通过
+
 **15. L5 反向提取增强**——基于 SQLite + 调用边，让反向提取更扎实；从代码提取的调用链直接驱动 L4 函数绑定动画
+
+已完成（2026-08-07）：`derive_anim_flow` 新增**跨文件 L4 chain flow**——读取 cache.db 的跨文件调用边（`kind='call'` + `metadata.cross=true`），为链上函数的跨文件调用生成 cross flow（from=调用方 detail 节点，to=宿主节点，handler 绑定调用方，value 标注目标文件#函数），让 L4 函数绑定动画跨越文件边界。新增 `max_cross` 参数（默认 3，0=关闭）；无 cache.db 时静默跳过不影响主流程。server.ts 注册 `max_cross` 参数。测试 `tests/tools/derive_anim_flow.test.ts` 13 用例（新增跨文件生成/无缓存跳过/关闭开关），全量 496 用例通过。至此序号 14/15 的 L3-L5 动画生成层全部落地。
+
+**16. 巨石文件分析（跨文件功能社区圈定）**——基于 cache.db 调用边 + 从既存结构推导功能锚点
+
+已完成 **P1（锚点推导 + 标签传播圈社区）**（2026-08-07）：新增 `src/tools/analyze_monolith.ts`（MCP 工具 `analyze_monolith`），补上 `check_monolith` 缺失的两块——跨文件视角 + 功能锚点机制。核心口径（用户愿景）：**社区锚点是功能/业务，不是纯代码结构**；一个功能再大再碎、甚至跨多个文件，只要被同一锚点沿调用边串起就整块聚在一起，不做"拆碎"下限。三步：
+- **锚点推导（从既存结构，全自动）**：语义命名（`xxxService/Handler/Repo/…`）/ 导出入口（Go 大写、Python 非下划线顶层）/ 入度最高档（≥3，真实"功能门面"）三信号。入度归一化不再让所有被调函数成弱锚点（避免切碎）
+- **标签传播圈社区**：锚点带权重沿调用边双向传染，普通函数被吸收到最强锚点社区
+- **产出**：功能社区清单（锚点+符号+横跨文件+估算行数）、社区间依赖边（决定拆完 import 怎么补）、文件视图 + "多社区共占的超标文件"拆分候选。只给证据与启发，不落盘改代码
+
+与 `check_monolith` 分工：后者是单文件内文本引用近似（Louvain），无跨文件视角、无功能锚点；前者读 cache.db 调用边做跨文件圈定。测试 `tests/tools/analyze_monolith.test.ts` 5 用例（锚点信号判定/锚点传染不切碎/跨文件聚一起+拆分候选/社区间依赖/空缓存降级），全量 501 用例通过，`tsc --noEmit` 无错误。
+
+已完成 **P2（`derive_split` 执行拆分，MVP）**（2026-08-07）：新增 `src/tools/derive_split.ts`（MCP 工具 `derive_split`），把 analyze_monolith 圈出的社区从"多社区共占文件"抽出到新兄弟文件，接线 import，并从原文件移除。承接上一句的"自动验收闭环"落地为**语法级验收**（tree-sitter 重解析两份草稿）：
+- **抽取**：按符号名/qualified_name 命中顶层函数/类；行区间合并相邻段；默认新文件 `<dir>/<basename>__split.<ext>`（可用 `new_file` 覆盖）
+- **import 接线**：新文件复制原文件非自引用 import + 从原文件补被引用符号；原文件补 `import { 被抽符号 } from './<新文件>'`
+- **交叉引用报告**：原文件中指向被抽符号的引用点（拆后走新文件 import）
+- **验收**：`verification` 报告双文件语法 OK/FAILED + 符号对账
+- **人确认**：默认 `dry_run=true` 只出草稿；设 `dry_run=false` 才写文件
+- **语言范围**：TS/JS（.ts/.tsx/.js/.jsx/.mjs/.cjs，ESM 相对 import）+ Go（.go，同包拆分复制 package+import 块，无需跨文件 import）+ Python（.py，目录含 `__init__.py` 判定为包则用相对 import，否则绝对式 import）
+- 测试：`tests/tools/derive_split.test.ts` 12 用例（dry_run 不落盘/抽取+移除/多符号合并/引用报告/实际写入/文件不存在/语言不支持/符号未命中 + Go 同包拆分/Go type 去重/Python 绝对 import/Python 相对 import），全量 519 用例通过，`tsc --noEmit` 无错误。自举验证 `scripts/verify_derive_split.mjs` 对项目自身 `src/tools/derive_split.ts` 抽取 3 个工具函数 dry-run 通过。
+
+下一步（P3）：社区内子拆分结果落到 `derive_split` 触发 + 编译级/测试级验收闭环（跑 `go build`/`tsc`/`pytest` + 测试命令，含 Go/Python 未用 import 裁剪）。
+
+已完成 **P2.5（拆分候选多社区均衡度门槛）**（2026-08-07）：拆分候选此前仅判"超标 && ≥2 社区"，会把"1 个主导社区 + 零星尾随社区"的文件（如独立一次性脚本）误报为可拆。新增 `min_community_share` 参数（默认 0.2=20%）：仅当文件内 ≥2 个社区各自符号占比 ≥ 门槛才列入拆分候选，过滤误报，避免拆出碎片。server.ts 注册参数；测试 2 用例（默认门槛过滤误报 / 调低门槛后纳入）。另修正 seedDb 测试基建——`qualified_name` 误用含文件前缀的 id 导致 `ownerOf` 提取出错 owner、类型锚定钉死单社区，改为纯符号名。全量 511 用例通过。
 
 ### 6.7 和现有规划的关系
 
-- 原"待完成 6（阶段 E）"→ 归入序号 13
+- 原"待完成 6（阶段 E）"→ 归入序号 13，已完成
 - 原"待完成 7（MCP 工具分层暴露）"→ 归入序号 2，从"~12 个"收敛到"~8 个"
 - 原"待完成 8（L3-L5）"→ 归入序号 14
 - 原 evolution.md 3.3 的 `tmp_backfill_*` 项 → 由序号 1 解决
