@@ -46,6 +46,13 @@ ${DATAFLOW_SOURCE}
     edgesByTo[e.to].push(e);
   });
 
+  // DOM 元素缓存：避免 selectNode 等高频路径反复 document.querySelector 全量扫描
+  const nodeElById = {};
+  const edgeElById = {};
+
+  // 节点 shape 元素缓存：getNodePos 高频调用，避免重复 querySelector('[data-shape="true"]')
+  const nodeShapeElCache = new WeakMap();
+
   // 通过 contains 边推断父子关系
   const childrenOf = {};
   const parentOf = {};
@@ -92,6 +99,10 @@ ${DATAFLOW_SOURCE}
     globalLayers: { error: false, detail: false },  // 全局层开关
     dragging: null,
     dragOffset: { x: 0, y: 0 },
+    dragStartPos: null,
+    dragMoved: false,
+    snapCandidates: null,   // 拖拽吸附候选节点框（startDrag 时构建一次）
+    snapGuides: null,       // 拖拽吸附参考线（<g> 元素）
     connecting: null,
     tempLine: null,
     dirty: false,
@@ -174,6 +185,9 @@ ${DATAFLOW_SOURCE}
 
     // 清除现有节点和边
     svg.querySelectorAll('.node, .edge').forEach(el => el.remove());
+    // 清空 DOM 元素缓存
+    Object.keys(nodeElById).forEach(k => delete nodeElById[k]);
+    Object.keys(edgeElById).forEach(k => delete edgeElById[k]);
 
     // 重建节点
     (dsl.geometry?.nodes || []).forEach(n => {
@@ -199,6 +213,7 @@ ${DATAFLOW_SOURCE}
       g.appendChild(text);
 
       svg.appendChild(g);
+      nodeElById[n.id] = g;
 
       // 重新绑定事件
       bindNodeEvents(g, n.id);
@@ -235,6 +250,7 @@ ${DATAFLOW_SOURCE}
       }
 
       svg.appendChild(g);
+      edgeElById[e.id] = g;
       bindEdgeEvents(g, e.id);
     });
 
@@ -267,42 +283,16 @@ ${DATAFLOW_SOURCE}
     nodeEl.addEventListener('dblclick', e => {
       e.stopPropagation();
       e.preventDefault();
-
-      const svg = document.getElementById('canvas');
-      if (!svg) return;
-
-      const svgRect = svg.getBoundingClientRect();
-      const viewBox = svg.getAttribute('viewBox').split(' ').map(Number);
-      const scaleX = viewBox[2] / svgRect.width;
-      const scaleY = viewBox[3] / svgRect.height;
-
-      const mouseX = (e.clientX - svgRect.left) * scaleX;
-      const mouseY = (e.clientY - svgRect.top) * scaleY;
-
-      var pos = getNodePos(nodeEl);
-      if (!pos) return;
-
-      const nodeX = pos.x;
-      const nodeY = pos.y;
-
-      state.dragging = nodeId;
-      state.dragOffset = { x: mouseX - nodeX, y: mouseY - nodeY };
-      nodeEl.style.cursor = 'grabbing';
-      document.body.style.userSelect = 'none';
-
-      pushUndo();
+      // 双击节点 → 选中并打开该节点的留言面板（比拖拽更符合人机协作直觉）
+      openAnnoPanel(nodeId);
     });
     nodeEl.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
       e.stopPropagation();
-      state.dragging = nodeId;
-      const transform = nodeEl.getAttribute('transform') || '';
-      const match = transform.match(/translate\\(([^,]+),\\s*([^)]+)\\)/);
-      const cx = match ? parseFloat(match[1]) : 0;
-      const cy = match ? parseFloat(match[2]) : 0;
-      state.dragOffset = { x: e.clientX - cx, y: e.clientY - cy };
-      nodeEl.style.cursor = 'grabbing';
-      document.body.style.userSelect = 'none';
+      // 与 setupNodes 的拖拽保持一致：统一走 startDrag（基于 getNodePos 计算 offset，
+      // 兼容含 transform 与不含 transform 的节点）。此前这里用 transform 坐标重设 offset，
+      // 会把容器节点（无 transform）的拖拽偏移算成屏幕坐标，导致拖不动 / 节点夹。
+      startDrag(nodeEl, e);
     });
   }
 
@@ -567,6 +557,25 @@ ${DATAFLOW_SOURCE}
   //    初始只留顶层架构逐级披露，避免开局一团乱麻（v3）
   // 3. 其余 → 默认全部展开（v2 决策保留）
   function initCollapsedState() {
+    // 功能树归类模式：只显示「项目根 + 各功能」，社区/文件/目录容器全部默认隐藏（折叠逐级下钻）
+    if (dsl.feature_tree) {
+      var isTop = function (id) { return id === '__project__' || id.indexOf('ft:') === 0; };
+      (dsl.geometry?.nodes || []).forEach(function (n) {
+        if (isTop(n.id)) return;
+        var el = document.querySelector('.node[data-id="' + n.id + '"]');
+        if (el) el.style.display = 'none';
+      });
+      // 标记折叠态：功能/社区容器呈角标，展开时才逐级披露后代
+      (dsl.geometry?.nodes || []).forEach(function (n) {
+        if (n.id.indexOf('ft:') !== 0 && n.id.indexOf('ct:') !== 0) return;
+        if (!childrenOf[n.id]) return;
+        state.collapsed.add(n.id);
+        var nodeEl = document.querySelector('.node[data-id="' + n.id + '"]');
+        if (nodeEl) nodeEl.classList.add('collapsed');
+      });
+      applyLayerVisibility();
+      return;
+    }
     var restored = null;
     try {
       var collapsedKey = 'design-canvas-collapsed:' + (dsl.feature || 'unknown');
@@ -608,11 +617,513 @@ ${DATAFLOW_SOURCE}
   }
 
   // ==== Tooltip ====
+  // 语言概念缓存（序号10）：<file_path → {concepts:[id], detail:{id→explanation}}>
+  var lcByFile = null; // { filePath: { concepts: [id], explanations: {id: text} } }
+  var lcConceptName = {}; // id → 展示名
+
+  function loadLanguageConcepts() {
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+    if (lcByFile) return;
+    fetch('/api/language-concepts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 500 }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data || !data.success) return;
+        var map = {};
+        (data.hits || []).forEach(h => {
+          if (!map[h.file_path]) {
+            map[h.file_path] = { concepts: [], explanations: {} };
+          }
+          var e = map[h.file_path];
+          (h.concepts || []).forEach(id => {
+            if (e.concepts.indexOf(id) === -1) e.concepts.push(id);
+          });
+        });
+        // 概念展示名 + 解释（从后端概念统计取 name；explanation 由前端常量补，避免重复请求）
+        var names = {};
+        (data.concept_counts || []).forEach(c => { names[c.id] = c.name; });
+        lcConceptName = names;
+        lcByFile = map;
+      })
+      .catch(() => { /* 网络失败静默 */ });
+  }
+
+  // 概念 id → 解释文案（与后端 language_concepts.ts CONCEPTS 同步，前端展示用）
+  var LC_EXPLAIN = {
+    generic: '用类型参数（如 <T>）让函数/类/接口适配多种类型，调用时再指定具体类型，提升复用性与类型安全。',
+    generator: '用 function* 或 yield 惰性产出序列值，每次 next() 时才计算，适合流式/大数据的按需生成。',
+    closure: '函数捕获并记住其定义时的外部作用域变量，即使外层已返回仍可访问，常用于回调和状态封装。',
+    decorator: '以 @ 语法附加到类/方法上，在运行时包装或增强原有行为，实现横切关注点（日志、鉴权、缓存）。',
+    async: '通过 async/await、Promise 或回调处理非阻塞操作，避免阻塞主线程，协调并发与 I/O。',
+    'dependency-injection': '把依赖从外部传入而非内部 new 出来，降低耦合、便于测试与替换实现。',
+    factory: '将对象创建逻辑集中到一个方法/类，按参数返回不同类型实例，隐藏构造细节。',
+    singleton: '保证一个类全局只有唯一实例，并提供一个全局访问点（如 getInstance / instance）。',
+    observer: '通过订阅/发布机制让对象在事件发生时通知监听者，实现解耦的事件驱动通信。',
+    strategy: '把可互换的算法封装为独立策略对象，运行时动态选择，避免大量条件分支。',
+    'template-method': '在基类中固定算法骨架，把可变步骤留给子类覆写，复用餐具流程、定制细节。',
+    'error-handling': '通过 try/catch、抛出异常或返回错误值，对流式失败做捕获、传播与恢复。',
+    'state-machine': '用显式的状态集合与转移规则建模对象行为，避免用散乱的布尔/分支管理复杂状态。'
+  };
+
+  // ==== 伪维基词典（序号12）====
+  // 词典聚合视图缓存：{ entries, links, aliasesIndex }
+  var dictView = null;
+  var dictLoaded = false;
+
+  function loadDict() {
+    if (dictLoaded) return;
+    dictLoaded = true;
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+    fetch('/api/dict/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}), // 默认 cwd 项目
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data || !data.success) return;
+        // 只保留前端渲染需要的字段
+        dictView = {
+          entries: data.entries || [],
+          links: data.links || {},
+        };
+      })
+      .catch(() => { /* 静默 */ });
+  }
+
+  // 把一段文本按命中词典的词拆成高亮 HTML（命中词包成可点击词条）
+  function dictHighlightHtml(text) {
+    if (!text || !dictView || !dictView.entries || dictView.entries.length === 0) return escapeHtml(text);
+    var lower = text.toLowerCase();
+    // 收集命中区间
+    var spans = [];
+    for (var i = 0; i < dictView.entries.length; i++) {
+      var e = dictView.entries[i];
+      var cands = [e.term].concat(e.aliases || []).filter(function (t) { return t && t.length > 0; });
+      for (var j = 0; j < cands.length; j++) {
+        var c = cands[j].toLowerCase();
+        var from = 0;
+        var idx = lower.indexOf(c, from);
+        while (idx !== -1) {
+          spans.push({ start: idx, end: idx + c.length, term: e.term });
+          from = idx + c.length;
+          idx = lower.indexOf(c, from);
+        }
+      }
+    }
+    if (spans.length === 0) return escapeHtml(text);
+    // 排序 + 合并重叠
+    spans.sort(function (a, b) { return a.start - b.start || b.end - a.end; });
+    var merged = [];
+    for (var k = 0; k < spans.length; k++) {
+      var s = spans[k];
+      var last = merged[merged.length - 1];
+      if (last && s.start < last.end) { if (s.end > last.end) last.end = s.end; }
+      else merged.push(s);
+    }
+    // 拼接 HTML
+    var out = '';
+    var cursor = 0;
+    for (var m = 0; m < merged.length; m++) {
+      var sp = merged[m];
+      if (sp.start > cursor) out += escapeHtml(text.slice(cursor, sp.start));
+      out += '<span class="dict-term" data-dict="' + escapeAttr(sp.term) + '">' + escapeHtml(text.slice(sp.start, sp.end)) + '</span>';
+      cursor = sp.end;
+    }
+    if (cursor < text.length) out += escapeHtml(text.slice(cursor));
+    return out;
+  }
+
+  // ---- 伪维基词卡（点击高亮词弹出，三档切换 + 互链词展开）----
+  var dictCardEl = null; // 当前词卡 DOM
+  var dictCardState = { term: null, level: 'newbie' }; // 词卡当前词条 + 档位
+
+  function dictEntryByTerm(term) {
+    if (!dictView || !dictView.entries) return null;
+    for (var i = 0; i < dictView.entries.length; i++) {
+      if (dictView.entries[i].term === term) return dictView.entries[i];
+    }
+    return null;
+  }
+  function dictCardLinks(term) {
+    return (dictView && dictView.links && dictView.links[term]) || [];
+  }
+  // 词卡正文：根据档位展示解释，并把正文里的已收录词也做成可跳转链接
+  function dictCardBody(entry, level, srcTerm) {
+    var text = entry[level] || '';
+    var html = '<div class="dc-body">';
+    if (!text) {
+      html += '<div style="color:var(--theme-text-sub);">该档暂无解释。</div>';
+    } else {
+      // 复用高亮拆分，但链入词用 dict-link 样式（可继续跳转）
+      var parts = splitHighlightsForHtml(text, level, srcTerm);
+      html += parts;
+    }
+    var links = dictCardLinks(entry.term);
+    if (links.length > 0) {
+      html += '<div class="dc-links"><div class="dc-links-title">🔗 相关词条</div>';
+      html += links.map(function (t) {
+        var active = t === srcTerm ? ' dict-link--active' : '';
+        return '<span class="dict-link' + active + '" data-dict="' + escapeAttr(t) + '">' + escapeHtml(t) + '</span>';
+      }).join(' ');
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  // 把解释文本拆成 HTML，命中词典的词包成可点击 dict-link（跳转词卡）
+  function splitHighlightsForHtml(text, level, srcTerm) {
+    if (!dictView || !dictView.entries || dictView.entries.length === 0) return escapeHtml(text);
+    var lower = text.toLowerCase();
+    var spans = [];
+    for (var i = 0; i < dictView.entries.length; i++) {
+      var e = dictView.entries[i];
+      var cands = [e.term].concat(e.aliases || []).filter(function (t) { return t && t.length > 0; });
+      for (var j = 0; j < cands.length; j++) {
+        var c = cands[j].toLowerCase();
+        var from = 0;
+        var idx = lower.indexOf(c, from);
+        while (idx !== -1) {
+          spans.push({ start: idx, end: idx + c.length, term: e.term });
+          from = idx + c.length;
+          idx = lower.indexOf(c, from);
+        }
+      }
+    }
+    if (spans.length === 0) return escapeHtml(text);
+    spans.sort(function (a, b) { return a.start - b.start || b.end - a.end; });
+    var merged = [];
+    for (var k = 0; k < spans.length; k++) {
+      var s = spans[k];
+      var last = merged[merged.length - 1];
+      if (last && s.start < last.end) { if (s.end > last.end) last.end = s.end; }
+      else merged.push(s);
+    }
+    var out = '';
+    var cursor = 0;
+    for (var m = 0; m < merged.length; m++) {
+      var sp = merged[m];
+      if (sp.start > cursor) out += escapeHtml(text.slice(cursor, sp.start));
+      var active = sp.term === srcTerm ? ' dict-link--active' : '';
+      out += '<span class="dict-link' + active + '" data-dict="' + escapeAttr(sp.term) + '">' + escapeHtml(text.slice(sp.start, sp.end)) + '</span>';
+      cursor = sp.end;
+    }
+    if (cursor < text.length) out += escapeHtml(text.slice(cursor));
+    return out;
+  }
+  function renderDictCard(term) {
+    var entry = dictEntryByTerm(term);
+    if (!entry) return;
+    dictCardState.term = term;
+    var level = dictCardState.level;
+    var kindLabel = entry.kind === 'project' ? '项目词' : '通用词';
+    var html = '<div class="dc-head">' +
+      '<span class="dc-term">' + escapeHtml(entry.term) + '</span>' +
+      '<span style="display:flex;align-items:center;gap:6px;">' +
+      '<span class="dc-badge">' + kindLabel + '</span>' +
+      '<span class="dc-close" data-dictclose="1">✕</span>' +
+      '</span></div>';
+    html += '<div class="dc-tabs">' +
+      '<button class="dc-tab' + (level === 'newbie' ? ' active' : '') + '" data-dictlevel="newbie">新人</button>' +
+      '<button class="dc-tab' + (level === 'pm' ? ' active' : '') + '" data-dictlevel="pm">产品</button>' +
+      '<button class="dc-tab' + (level === 'senior' ? ' active' : '') + '" data-dictlevel="senior">资深</button>' +
+      '</div>';
+    html += dictCardBody(entry, level, null);
+    dictCardEl.innerHTML = html;
+  }
+  function showDictCard(term, clientX, clientY) {
+    if (!dictView || !dictView.entries) return;
+    if (!dictEntryByTerm(term)) return;
+    if (!dictCardEl) {
+      dictCardEl = document.createElement('div');
+      dictCardEl.className = 'dict-card';
+      document.body.appendChild(dictCardEl);
+      // 词卡内点击：档位切换 / 跳转 / 关闭
+      dictCardEl.addEventListener('click', function (ev) {
+        var t = ev.target;
+        var lvl = t.getAttribute && t.getAttribute('data-dictlevel');
+        if (lvl) {
+          dictCardState.level = lvl;
+          renderDictCard(dictCardState.term);
+          ev.stopPropagation();
+          return;
+        }
+        var jump = t.getAttribute && t.getAttribute('data-dict');
+        if (jump) {
+          renderDictCard(jump); // 跳转到链入词条
+          ev.stopPropagation();
+          return;
+        }
+        if (t.getAttribute && t.getAttribute('data-dictclose')) {
+          closeDictCard();
+          ev.stopPropagation();
+          return;
+        }
+      });
+    }
+    dictCardState.level = 'newbie';
+    dictCardState.term = term;
+    renderDictCard(term);
+    dictCardEl.style.display = 'block';
+    // 定位：优先放在点击点右侧，越界则左侧
+    var w = dictCardEl.offsetWidth || 340;
+    var h = dictCardEl.offsetHeight || 200;
+    var x = clientX + 14;
+    var y = clientY + 14;
+    if (x + w > window.innerWidth) x = clientX - w - 14;
+    if (y + h > window.innerHeight) y = clientY - h - 14;
+    dictCardEl.style.left = x + 'px';
+    dictCardEl.style.top = y + 'px';
+  }
+  function closeDictCard() {
+    if (dictCardEl) dictCardEl.style.display = 'none';
+  }
+
+  // 点击 tooltip 内高亮词（dict-term）→ 弹出词卡；外部点击关闭词卡
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (t && t.getAttribute && t.getAttribute('data-dict')) {
+      // 词卡内部点击由 dictCardEl 自己的监听处理，这里只处理 tooltip 内的高亮词
+      if (t.className && t.className.indexOf && t.className.indexOf('dict-term') !== -1) {
+        var term = t.getAttribute('data-dict');
+        showDictCard(term, ev.clientX, ev.clientY);
+        ev.stopPropagation();
+        return;
+      }
+    }
+    // 点击词卡外部 → 关闭词卡
+    if (dictCardEl && dictCardEl.style.display !== 'none' && !(dictCardEl.contains(t))) {
+      closeDictCard();
+    }
+  });
+
+  // ---- 伪维基 收录面板（P3 动态学习：LLM 分类+生成 → 审批 → 注入 → 下次命中高亮）----
+  var dictPanelEl = null;
+  var dictPreview = null; // { term, kind, entry }
+  var dictPanelSelLevel = 'newbie';
+
+  function dictProjectHint() {
+    // 从 DSL 取项目名做上下文提示，帮助 LLM 判断是否项目专有词
+    return dsl.meta?.title || dsl.feature || '';
+  }
+  function dictOpenPanel() {
+    if (!dictPanelEl) {
+      dictPanelEl = document.createElement('div');
+      dictPanelEl.className = 'dict-panel';
+      dictPanelEl.innerHTML =
+        '<div class="dp-head"><span class="dp-title">📖 伪维基词典</span>' +
+        '<span class="dp-close" data-dpclose="1" title="关闭">✕</span></div>' +
+        '<div class="dp-desc">收录通用概念或项目专有词，LLM 生成三档解释，并与已收录词自动互链。</div>' +
+        '<div class="dp-form">' +
+        '<input type="text" id="dp-term" class="dp-input" placeholder="输入要收录的词（如：依赖注入 / cache）">' +
+        '<button id="dp-preview" type="button" class="dp-btn-primary" title="调用 LLM 分类并生成三档解释（不落库）">⚡ 生成预览</button>' +
+        '</div>' +
+        '<div id="dp-result" class="dp-result hidden"></div>' +
+        '<div class="dp-confirm hidden" id="dp-confirm">' +
+        '<button id="dp-save" type="button" class="dp-btn-save" title="确认收录到词典，下次解释文本命中即高亮">✅ 确认收录</button>' +
+        '<button id="dp-cancel" type="button" class="dp-btn-ghost" title="仅预览，不收录">取消</button>' +
+        '</div>' +
+        '<div class="dp-list-title">已收录词条</div>' +
+        '<div id="dp-list" class="dp-list"></div>';
+      document.body.appendChild(dictPanelEl);
+      dictPanelEl.addEventListener('click', function (ev) {
+        var t = ev.target;
+        if (t.getAttribute && t.getAttribute('data-dpclose')) { dictPanelEl.style.display = 'none'; return; }
+        if (t.getAttribute && t.getAttribute('data-dplevel')) {
+          dictPanelSelLevel = t.getAttribute('data-dplevel');
+          renderDictPreview();
+          return;
+        }
+        if (t.id === 'dp-preview') { dictRunPreview(); return; }
+        if (t.id === 'dp-save') { dictRunSave(); return; }
+        if (t.id === 'dp-cancel') { dictResetPreview(); return; }
+      });
+    }
+    // 预填：若当前有选中文本（长按/拖选），自动带入
+    var ss = (window.getSelection && window.getSelection().toString()) || '';
+    var inp = document.getElementById('dp-term');
+    if (ss && ss.trim().length > 0 && inp.value === '') inp.value = ss.trim().slice(0, 40);
+    dictPanelEl.style.display = 'block';
+    dictRenderList();
+    setTimeout(function () { if (inp) inp.focus(); }, 50);
+  }
+  function dictClosePanel() { if (dictPanelEl) dictPanelEl.style.display = 'none'; }
+  function dictRenderList() {
+    var box = document.getElementById('dp-list');
+    if (!box) return;
+    var list = (dictView && dictView.entries) || [];
+    if (list.length === 0) { box.innerHTML = '<div class="dp-empty">暂无词条，收录第一个吧。</div>'; return; }
+    box.innerHTML = list.map(function (e) {
+      var badge = e.kind === 'project' ? '项目' : '通用';
+      return '<span class="dp-chip" data-dictterm="' + escapeAttr(e.term) + '">' +
+        '<span class="dp-chip-badge">' + badge + '</span>' + escapeHtml(e.term) + '</span>';
+    }).join('');
+  }
+  function dictResetPreview() {
+    dictPreview = null;
+    var r = document.getElementById('dp-result');
+    var c = document.getElementById('dp-confirm');
+    if (r) { r.classList.add('hidden'); r.innerHTML = ''; }
+    if (c) c.classList.add('hidden');
+  }
+  function renderDictPreview() {
+    var r = document.getElementById('dp-result');
+    if (!r || !dictPreview) return;
+    var entry = dictPreview.entry;
+    var level = dictPanelSelLevel;
+    var kindLabel = entry.kind === 'project' ? '项目词' : '通用词';
+    var html = '<div class="dp-result-head">' +
+      '<span class="dp-term">' + escapeHtml(entry.term) + '</span>' +
+      '<span class="dp-badge">' + kindLabel + '</span>' +
+      '<span class="dp-alias">别名：' + escapeHtml((entry.aliases || []).join('、') || '无') + '</span></div>' +
+      '<div class="dp-tabs">' +
+      '<button class="dp-tab' + (level === 'newbie' ? ' active' : '') + '" data-dplevel="newbie">新人</button>' +
+      '<button class="dp-tab' + (level === 'pm' ? ' active' : '') + '" data-dplevel="pm">产品</button>' +
+      '<button class="dp-tab' + (level === 'senior' ? ' active' : '') + '" data-dplevel="senior">资深</button>' +
+      '</div>' +
+      '<div class="dp-text">' + escapeHtml(entry[level] || '') + '</div>';
+    r.innerHTML = html;
+    r.classList.remove('hidden');
+    var c = document.getElementById('dp-confirm');
+    if (c) c.classList.remove('hidden');
+  }
+  function dictRunPreview() {
+    var inp = document.getElementById('dp-term');
+    var term = (inp && inp.value.trim()) || '';
+    if (!term) { alert('请输入要收录的词'); return; }
+    var r = document.getElementById('dp-result');
+    if (r) { r.classList.remove('hidden'); r.innerHTML = '<div class="dp-loading">⏳ 正在调用 LLM 分类并生成三档解释…</div>'; }
+    var c = document.getElementById('dp-confirm');
+    if (c) c.classList.add('hidden');
+    fetch('/api/dict/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term: term, dry_run: true, project_hint: dictProjectHint(), feature: dsl.feature }),
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (!data || !data.success) {
+          if (r) r.innerHTML = '<div class="dp-error">生成失败：' + escapeHtml((data && data.message) || '未知错误') + '</div>';
+          return;
+        }
+        dictPreview = { term: data.term, kind: data.kind, entry: data.entry };
+        dictPanelSelLevel = 'newbie';
+        renderDictPreview();
+      })
+      .catch(function () {
+        if (r) r.innerHTML = '<div class="dp-error">网络错误，请确认 serve 已启动。</div>';
+      });
+  }
+  function dictRunSave() {
+    if (!dictPreview) return;
+    var term = dictPreview.term;
+    var saveBtn = document.getElementById('dp-save');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ 收录中…'; }
+    fetch('/api/dict/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term: term, dry_run: false, project_hint: dictProjectHint(), feature: dsl.feature }),
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✅ 确认收录'; }
+        if (!data || !data.success) {
+          alert('收录失败：' + ((data && data.message) || '未知错误'));
+          return;
+        }
+        // 收录成功：重新加载词典，词条下次即被高亮
+        dictLoaded = false;
+        dictView = null;
+        loadDict();
+        dictRenderList();
+        dictResetPreview();
+        dictClosePanel();
+        showDictToast('✅ 已收录「' + term + '」，下次解释文本命中即高亮');
+      })
+      .catch(function () {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✅ 确认收录'; }
+        alert('网络错误，请确认 serve 已启动。');
+      });
+  }
+  function showDictToast(msg) {
+    var t = document.createElement('div');
+    t.className = 'dict-toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function () { t.classList.add('show'); }, 20);
+    setTimeout(function () {
+      t.classList.remove('show');
+      setTimeout(function () { t.remove(); }, 300);
+    }, 2600);
+  }
+
+  // 工具栏「📖 伪维基」按钮
+  function setupDictPanel() {
+    var btn = document.getElementById('dict-open');
+    if (btn) btn.addEventListener('click', dictOpenPanel);
+    // 面板打开状态下，点击列表里的词条 chip → 回填输入框
+    document.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (t && t.getAttribute && t.getAttribute('data-dictterm')) {
+        var inp = document.getElementById('dp-term');
+        if (inp) inp.value = t.getAttribute('data-dictterm');
+        dictResetPreview();
+      }
+    });
+  }
+
+  // 节点 id → file_path（复用 semantic 映射，与 diff_impact/semantic 对齐）
+  function lcNodeToFile(nodeId) {
+    const semanticFiles = (dsl.semantic && dsl.semantic.files) || [];
+    for (const f of semanticFiles) {
+      if (f.id === nodeId) return f.path;
+    }
+    // 回退：file_<rel> 字符串逆推
+    if (nodeId && nodeId.indexOf('file_') === 0) {
+      return nodeId.slice(5).replace(/_/g, '/') + '.ts';
+    }
+    return null;
+  }
+
+  // 生成 tooltip 里的语言概念徽章 + 解释片段（无命中返回 ''）
+  function lcTooltipHtml(nodeId) {
+    if (!lcByFile) return '';
+    var filePath = lcNodeToFile(nodeId);
+    if (!filePath) return '';
+    var entry = lcByFile[filePath];
+    if (!entry || !entry.concepts || entry.concepts.length === 0) return '';
+    var chips = entry.concepts.map(id => {
+      var name = lcConceptName[id] || id;
+      return '<span class="lc-chip" data-id="' + id + '">' + escapeHtml(name) + '</span>';
+    }).join('');
+    var details = entry.concepts.map(id => {
+      var name = lcConceptName[id] || id;
+      var exp = LC_EXPLAIN[id] || '';
+      return '<div class="lc-detail" data-id="' + id + '"><b>' + escapeHtml(name) + '</b>' +
+        (exp ? '<div>' + dictHighlightHtml(exp) + '</div>' : '') + '</div>';
+    }).join('');
+    return '<div class="lc-block">' +
+      '<div class="lc-title">💡 语言概念</div>' +
+      '<div class="lc-chips">' + chips + '</div>' +
+      '<div class="lc-details">' + details + '</div>' +
+      '</div>';
+  }
+
   function showTooltip(e, targetId) {
     const annos = annoByTarget[targetId] || [];
     const label = e.currentTarget.getAttribute('data-label') || '';
+    const title = e.currentTarget.getAttribute('data-title') || '';
     let html = '';
-    html += '<div style="font-weight:600;margin-bottom:4px;">' + escapeHtml(label || targetId) + '</div>';
+    const headLine = title
+      ? '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(title) + '</div><div style="font-size:11px;color:var(--theme-text-sub);margin-bottom:4px;">' + escapeHtml(label || targetId) + '</div>'
+      : '<div style="font-weight:600;margin-bottom:4px;">' + escapeHtml(label || targetId) + '</div>';
+    html += headLine;
+
+    // 语言概念徽章（序号10）
+    html += lcTooltipHtml(targetId);
 
     // 仿真信息
     if (dsl.simulation) {
@@ -642,7 +1153,8 @@ ${DATAFLOW_SOURCE}
       html += annos.map(a => '<div class="anno"><span class="author">[' + (a.author || '?') + ']</span>' + escapeHtml(a.text) + '</div>').join('');
     }
 
-    if (!annos.length && !getSimInfoForNode(targetId)) {
+    // 仅当无语言概念、无批注、无仿真信息时才回退到空占位
+    if (!annos.length && !getSimInfoForNode(targetId) && html.indexOf('lc-block') === -1) {
       html = '<div class="empty">' + escapeHtml(label || targetId) + '</div>';
     }
 
@@ -736,7 +1248,7 @@ ${DATAFLOW_SOURCE}
     state.selectedId = nodeId;
 
     // 选中节点
-    const nodeEl = document.querySelector('.node[data-id="' + nodeId + '"]');
+    const nodeEl = nodeElById[nodeId];
     if (nodeEl) nodeEl.classList.add('selected');
 
     // 高亮相关边：入边 + 出边
@@ -746,7 +1258,7 @@ ${DATAFLOW_SOURCE}
 
     const allEdgeIds = Object.keys(edgeById);
     allEdgeIds.forEach(eid => {
-      const edgeEl = document.querySelector('.edge[data-id="' + eid + '"]');
+      const edgeEl = edgeElById[eid];
       if (!edgeEl) return;
       if (relatedEdges.has(eid)) {
         edgeEl.classList.add('highlighted');
@@ -763,7 +1275,7 @@ ${DATAFLOW_SOURCE}
       relatedNodes.add(e.to);
     });
     Object.keys(nodeById).forEach(nid => {
-      const nEl = document.querySelector('.node[data-id="' + nid + '"]');
+      const nEl = nodeElById[nid];
       if (!nEl) return;
       if (!relatedNodes.has(nid)) {
         nEl.classList.add('dimmed');
@@ -1053,6 +1565,9 @@ ${DATAFLOW_SOURCE}
       });
       // 边可见性交由全局规则统一计算（层可见 ∧ 两端点 DOM 可见），避免跨容器边悬空
       applyLayerVisibility();
+      // 功能树下钻：展开后把「宿主 + 可见后代」一起取景钻入，避免新节点落在图外
+      // （社区/文件按原星图坐标排布，可能远离宿主，必须把相机框到它们）
+      drillAfterExpand(nodeId);
     } else {
       // 折叠
       state.collapsed.add(nodeId);
@@ -1062,8 +1577,46 @@ ${DATAFLOW_SOURCE}
         if (descEl) descEl.style.display = 'none';
       });
       applyLayerVisibility();
+      // 收起：退回展开前的相机检查点（无则按可见内容收束）
+      if (!drillOutAfterCollapse(nodeId)) {
+        if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.2, true);
+      }
     }
     updateCanvasViewBox();
+  }
+
+  // 展开后取景：把宿主 + 刚披露的可见后代一起框入镜头（一步钻入该分支）
+  function drillAfterExpand(nodeId) {
+    // 记录展开前相机作为收起时的退路检查点
+    cameraAnim.checkpoints[nodeId + ':collapse'] = { scale: canvasState.scale, panX: canvasState.panX, panY: canvasState.panY };
+    const visible = [nodeId];
+    getCollapsedDescendants(nodeId).forEach(did => {
+      const el = document.querySelector('.node[data-id="' + did + '"]');
+      if (isNodeVisible(did) && el && el.style.display !== 'none') visible.push(did);
+    });
+    const fit = cameraFitNodes(visible, 1.2);
+    if (fit) animateCamera(fit, 420);
+  }
+
+  // 收起时退回展开前检查点；返回是否命中检查点（未命中则调用方自行收束镜头）
+  function drillOutAfterCollapse(nodeId) {
+    const key = nodeId + ':collapse';
+    const cp = cameraAnim.checkpoints[key];
+    if (!cp) return false;
+    delete cameraAnim.checkpoints[key];
+    animateCamera(cp, 380);
+    return true;
+  }
+
+  // 宿主直接可见的后代（不含嵌套折叠容器内的深层后代）
+  function getCollapsedDescendants(nodeId) {
+    const out = [];
+    (childrenOf[nodeId] || []).forEach(cid => {
+      out.push(cid);
+      if (state.collapsed.has(cid)) return;
+      getCollapsedDescendants(cid).forEach(d => out.push(d));
+    });
+    return out;
   }
 
   // 后代 id 到 stopId（不含）的父链上是否存在已折叠容器
@@ -1168,6 +1721,10 @@ ${DATAFLOW_SOURCE}
       edgeEl.style.display = vis ? '' : 'none';
     });
     updateCanvasViewBox();
+    // 功能树下钻/折叠后：重同步动画可见边，让新增文件调用边自动出粒子
+    if (window.__animV2__ && window.__animV2__.resyncFlows) {
+      try { window.__animV2__.resyncFlows(); } catch (e) { /* 动画未启动时静默 */ }
+    }
   }
 
   // 生成层角标：error=⚠n（橙红）/ detail=▸n（主题色），宿主节点左上角
@@ -1874,10 +2431,18 @@ ${DATAFLOW_SOURCE}
         if (pathEl) pathEl.appendChild(indicator);
       }
     });
+
+    // 分组卡片：点击路径行 → 定位并选中图上节点
+    document.querySelectorAll('.card-group-item').forEach(item => {
+      const id = item.getAttribute('data-id');
+      item.addEventListener('click', () => {
+        if (id) selectNode(id);
+      });
+    });
   }
 
   // ==== 标注系统（人审） ====
-  function renderAnnotationPanel() {
+  function renderAnnotationPanel(focusNodeId) {
     let panel = document.getElementById('annotation-panel');
     if (!panel) {
       panel = document.createElement('div');
@@ -1900,6 +2465,26 @@ ${DATAFLOW_SOURCE}
 
     const list = document.getElementById('annotation-list');
     list.innerHTML = '';
+
+    // 聚焦节点：顶部提供快速留言输入框
+    if (focusNodeId) {
+      const focusNode = nodeById[focusNodeId];
+      const label = focusNode ? (focusNode.label || focusNode.id) : focusNodeId;
+      const quickAdd = document.createElement('div');
+      quickAdd.style.cssText = 'margin-bottom:10px;padding:8px;background:rgba(var(--theme-primary-rgb),0.1);border:1px solid var(--theme-border);border-radius:6px;';
+      quickAdd.innerHTML = '<div style="font-size:11px;color:var(--theme-text-sub);margin-bottom:6px;">📍 节点：<span style="color:var(--theme-accent);">' + escapeHtml(label) + '</span></div>';
+      const input = document.createElement('input');
+      input.placeholder = '写一句留言，Enter 提交…';
+      input.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;background:rgba(0,0,0,0.3);border:1px solid var(--theme-border);border-radius:4px;color:#fff;font-size:12px;';
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && input.value.trim()) {
+          addAnnotation(focusNodeId, input.value.trim(), 'comment', 'info');
+          input.value = '';
+        }
+      });
+      quickAdd.appendChild(input);
+      list.appendChild(quickAdd);
+    }
 
     const annotations = dsl.annotations || [];
     if (annotations.length === 0) {
@@ -1961,7 +2546,111 @@ ${DATAFLOW_SOURCE}
     });
     saveLocal();
     renderAnnotationPanel();
+    renderAnnoWall();
     showToast('已添加标注', 'success');
+  }
+
+  // ==== 侧边留言墙（按模块分组，点击定位到图上节点） ====
+  function moduleNameOf(nodeId) {
+    // 沿 contains 边向上找最近的 module 型父节点；找不到则用文件路径首段
+    let cur = nodeId, guard = 0;
+    while (cur && guard++ < 50) {
+      const n = nodeById[cur];
+      if (!n) break;
+      if ((n.type === 'module' && !/^dir_/.test(n.id))) return n.label || n.id;
+      cur = parentOf[cur];
+    }
+    const n = nodeById[nodeId];
+    if (n && n.description) {
+      const seg = String(n.description).split('/')[0];
+      if (seg) return seg;
+    }
+    return '未分组';
+  }
+
+  function renderAnnoWall() {
+    const wall = document.getElementById('anno-wall');
+    if (!wall) return;
+    const annos = (dsl.annotations || []).filter(a => !a.resolved);
+    if (annos.length === 0) {
+      wall.innerHTML = '<div class="anno-wall-head"><span class="anno-wall-title">💬 留言墙</span><span class="anno-wall-empty">暂无未解决留言</span></div>';
+      return;
+    }
+    // 按模块分组
+    const groups = {};
+    annos.forEach(a => {
+      const nid = a.node_id || a.target_id || '';
+      const m = moduleNameOf(nid);
+      if (!groups[m]) groups[m] = [];
+      groups[m].push(a);
+    });
+    const sevLabel = { critical: '紧急', warning: '注意', info: '普通' };
+    const typeIcon = { question: '❓', issue: '⚠️', suggestion: '💡', approval: '✅', comment: '📌' };
+    const headers = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
+    const maxOpen = 3; // 默认只展开留言最多的 3 个模块，其余折叠
+    wall.innerHTML =
+      '<div class="anno-wall-head"><span class="anno-wall-title">💬 留言墙</span>' +
+      '<span class="anno-wall-count">' + annos.length + ' 未解决</span></div>' +
+      headers.map((m, hi) => {
+        const items = groups[m];
+        const open = hi < maxOpen;
+        return '<details class="anno-group" ' + (open ? 'open' : '') + ' data-module="' + escapeHtml(m) + '">' +
+          '<summary><span class="anno-group-name">' + escapeHtml(m) + '</span>' +
+          '<span class="anno-group-count">' + items.length + '</span></summary>' +
+          items.map(a => {
+            const nid = a.node_id || a.target_id || '';
+            const sev = a.severity || 'info';
+            return '<div class="anno-item" data-anno-id="' + escapeHtml(a.id) + '" data-node="' + escapeHtml(nid) + '">' +
+              '<div class="anno-item-head"><span class="anno-sev sev-' + sev + '">' + (sevLabel[sev] || sev) + '</span>' +
+              '<span class="anno-type">' + (typeIcon[a.type] || '📌') + '</span>' +
+              '<span class="anno-node">' + escapeHtml(nid) + '</span></div>' +
+              '<div class="anno-item-text">' + escapeHtml(a.text) + '</div>' +
+              '<div class="anno-item-meta">— ' + escapeHtml(a.author || '?') + ' · ' + escapeHtml(a.timestamp || '') + '</div>' +
+              '</div>';
+          }).join('') +
+          '</details>';
+      }).join('');
+    // 点击留言 → 定位并悬停到图上节点
+    wall.querySelectorAll('.anno-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const nid = item.getAttribute('data-node');
+        if (nid && nodeById[nid]) {
+          flyToNode(nid);
+          // 临时高亮留言项
+          wall.querySelectorAll('.anno-item').forEach(x => x.classList.remove('active'));
+          item.classList.add('active');
+        }
+      });
+    });
+  }
+
+  function setupAnnoWall() {
+    const wall = document.getElementById('anno-wall');
+    if (!wall) return;
+    renderAnnoWall();
+  }
+
+  // ==== 图上留言角标：点击打开该节点留言 / 追加留言 ====
+  function openAnnoPanel(nodeId) {
+    if (!nodeId) return;
+    // 选中节点并定位到画布
+    selectNode(nodeId);
+    if (nodeById[nodeId]) flyToNode(nodeId);
+    const panel = document.getElementById('annotation-panel');
+    if (panel) {
+      panel.style.display = 'block';
+      renderAnnotationPanel(nodeId);
+    }
+  }
+
+  function setupAnnoBadgeClick() {
+    document.querySelectorAll('.anno-badge').forEach(badge => {
+      badge.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const nodeId = badge.getAttribute('data-node-id');
+        openAnnoPanel(nodeId);
+      });
+    });
   }
 
   function setupAnnotationTriggers() {
@@ -2309,13 +2998,7 @@ ${DATAFLOW_SOURCE}
       reportEl.classList.remove('hidden');
     });
 
-    document.querySelectorAll('.node').forEach(nodeEl => {
-      const id = nodeEl.getAttribute('data-id');
-      nodeEl.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        openEditor(id);
-      });
-    });
+    // 双击已在 setupNodes 中统一绑定为「打开留言面板」，这里不再重复绑定 openEditor，避免冲突。
   }
 
   // ==== 边流动画 ====
@@ -2457,22 +3140,52 @@ ${DATAFLOW_SOURCE}
     return map;
   }
 
-  function collectObstacles(excludeMap) {
+  function collectObstacles(excludeMap, precomputed) {
     var obs = [];
-    var els = document.querySelectorAll('.node');
-    for (var i = 0; i < els.length; i++) {
-      var id = els[i].getAttribute('data-id');
+    if (precomputed) {
+      // 拖动等高频路径：位置已预计算，仅按 excludeMap 过滤
+      for (var p = 0; p < precomputed.length; p++) {
+        var pc = precomputed[p];
+        if (excludeMap[pc.id]) continue;
+        obs.push({ x: pc.x, y: pc.y, w: pc.w, h: pc.h });
+      }
+      return obs;
+    }
+    var ids = Object.keys(nodeElById);
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
       if (excludeMap[id]) continue;
-      var pos = getNodePos(els[i]);
+      var el = nodeElById[id];
+      if (!el) continue;
+      var pos = getNodePos(el);
       if (pos) obs.push({ x: pos.x, y: pos.y, w: pos.w, h: pos.h });
     }
     return obs;
   }
 
+  // 预计算所有节点位置（含 id），供拖动等高频路径复用
+  function precomputeNodePositions() {
+    var ids = Object.keys(nodeElById);
+    var arr = [];
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      var el = nodeElById[id];
+      if (!el) continue;
+      var pos = getNodePos(el);
+      if (pos) arr.push({ id: id, x: pos.x, y: pos.y, w: pos.w, h: pos.h });
+    }
+    return arr;
+  }
+
   // 辅助：获取节点位置（通过 data-shape 标记识别形状元素，兼容 rect/circle/polygon）
   function getNodePos(nodeEl) {
-    var shapeEl = nodeEl.querySelector('[data-shape="true"]');
-    if (!shapeEl) return null;
+    if (!nodeEl) return null;
+    var shapeEl = nodeShapeElCache.get(nodeEl);
+    if (!shapeEl || !shapeEl.isConnected) {
+      shapeEl = nodeEl.querySelector('[data-shape="true"]');
+      if (!shapeEl) return null;
+      nodeShapeElCache.set(nodeEl, shapeEl);
+    }
     var tag = shapeEl.tagName.toLowerCase();
     if (tag === 'rect') {
       return {
@@ -2591,6 +3304,87 @@ ${DATAFLOW_SOURCE}
     });
   }
 
+  // ==== 拖拽吸附对齐 ====
+  var SNAP_THRESHOLD = 8; // viewBox 单位的吸附容差
+
+  // 计算被拖节点 box 相对候选框的吸附偏移 {dx, dy, sx, sy}，sx/sy 为吸附的参考线坐标（无则 NaN）
+  function computeSnapOffset(box, candidates, threshold) {
+    var res = { dx: 0, dy: 0, sx: NaN, sy: NaN };
+    if (!candidates || candidates.length === 0) return res;
+    var edgesX = [box.x, box.x + box.w / 2, box.x + box.w];
+    var edgesY = [box.y, box.y + box.h / 2, box.y + box.h];
+    var bestX = null, bestY = null; // {dist, target, off}
+    candidates.forEach(function(c) {
+      var cEx = [c.x, c.x + c.w / 2, c.x + c.w];
+      for (var i = 0; i < 3; i++) {
+        for (var j = 0; j < 3; j++) {
+          var off = cEx[j] - edgesX[i];
+          var d = Math.abs(off);
+          if (d < threshold && (bestX === null || d < bestX.dist)) bestX = { dist: d, target: cEx[j], off: off };
+        }
+      }
+      var cEy = [c.y, c.y + c.h / 2, c.y + c.h];
+      for (var i = 0; i < 3; i++) {
+        for (var j = 0; j < 3; j++) {
+          var offY = cEy[j] - edgesY[i];
+          var dY = Math.abs(offY);
+          if (dY < threshold && (bestY === null || dY < bestY.dist)) bestY = { dist: dY, target: cEy[j], off: offY };
+        }
+      }
+    });
+    if (bestX) { res.dx = bestX.off; res.sx = bestX.target; }
+    if (bestY) { res.dy = bestY.off; res.sy = bestY.target; }
+    return res;
+  }
+
+  // 更新吸附参考线（垂直 sx、水平 sy）
+  function updateSnapGuides(sx, sy) {
+    var svg = document.getElementById('canvas');
+    if (!svg) return;
+    if (!state.snapGuides || !state.snapGuides.isConnected) {
+      var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'snap-guides');
+      var vline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      var hline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      vline.setAttribute('class', 'snap-v');
+      hline.setAttribute('class', 'snap-h');
+      // 参考线内联样式（不依赖外部 CSS，保证可见）
+      [vline, hline].forEach(function(l) {
+        l.setAttribute('stroke', '#38bdf8');
+        l.setAttribute('stroke-width', '1');
+        l.setAttribute('stroke-dasharray', '4 3');
+        l.setAttribute('fill', 'none');
+        l.setAttribute('pointer-events', 'none');
+      });
+      g.appendChild(vline);
+      g.appendChild(hline);
+      svg.appendChild(g);
+      state.snapGuides = g;
+    }
+    var vb = svg.getAttribute('viewBox').split(' ').map(Number);
+    var vx0 = vb[0], vy0 = vb[1], vw = vb[2], vh = vb[3];
+    var vline = state.snapGuides.querySelector('.snap-v');
+    var hline = state.snapGuides.querySelector('.snap-h');
+    if (isFinite(sx)) {
+      vline.setAttribute('x1', sx); vline.setAttribute('x2', sx);
+      vline.setAttribute('y1', vy0); vline.setAttribute('y2', vy0 + vh);
+      vline.style.display = '';
+    } else { vline.style.display = 'none'; }
+    if (isFinite(sy)) {
+      hline.setAttribute('x1', vx0); hline.setAttribute('x2', vx0 + vw);
+      hline.setAttribute('y1', sy); hline.setAttribute('y2', sy);
+      hline.style.display = '';
+    } else { hline.style.display = 'none'; }
+  }
+
+  function clearSnapGuides() {
+    if (state.snapGuides && state.snapGuides.isConnected) {
+      state.snapGuides.remove();
+    }
+    state.snapGuides = null;
+    state.snapCandidates = null;
+  }
+
   function startDrag(nodeEl, e) {
     var pos = getNodePos(nodeEl);
     if (!pos) return;
@@ -2610,11 +3404,21 @@ ${DATAFLOW_SOURCE}
 
     state.dragging = nodeEl.getAttribute('data-id');
     state.dragOffset = { x: mouseX - nodeX, y: mouseY - nodeY };
+    state.dragStartPos = { x: nodeX, y: nodeY };
+    state.dragMoved = false;
+    // 构建吸附候选：拖拽节点及其后代之外的所有节点（拖拽期间静态，只需一次）
+    var dragId = state.dragging;
+    var exclude = new Set([dragId].concat(getAllDescendants(dragId)));
+    state.snapCandidates = (dsl.geometry?.nodes || []).map(function(n) {
+      var el = nodeElById[n.id];
+      if (!el || exclude.has(n.id)) return null;
+      var p = getNodePos(el);
+      return p ? { x: p.x, y: p.y, w: p.w, h: p.h } : null;
+    }).filter(Boolean);
+    console.log('[dbg-drag] startDrag', state.dragging, 'nodeXY=', nodeX, nodeY, 'mouseXY=', mouseX, mouseY, 'offset=', JSON.stringify(state.dragOffset));
 
     nodeEl.style.cursor = 'grabbing';
     document.body.style.userSelect = 'none';
-
-    pushUndo();
   }
 
   function handleDrag(e) {
@@ -2634,16 +3438,31 @@ ${DATAFLOW_SOURCE}
     const newX = Math.max(0, mouseX - state.dragOffset.x);
     const newY = Math.max(0, mouseY - state.dragOffset.y);
 
-    const nodeEl = document.querySelector('.node[data-id="' + state.dragging + '"]');
-    if (!nodeEl) return;
+    const nodeEl = nodeElById[state.dragging];
+    if (!nodeEl) { console.log('[dbg-drag] handleDrag no nodeEl', state.dragging); return; }
 
     var pos = getNodePos(nodeEl);
-    if (!pos) return;
+    if (!pos) { console.log('[dbg-drag] handleDrag no pos'); return; }
 
     const oldX = pos.x;
     const oldY = pos.y;
-    const dx = newX - oldX;
-    const dy = newY - oldY;
+
+    // 吸附对齐：在目标坐标上做吸附校正 + 画参考线
+    const box = { x: newX, y: newY, w: pos.w, h: pos.h };
+    var snap = computeSnapOffset(box, state.snapCandidates, SNAP_THRESHOLD);
+    const snappedX = newX + snap.dx;
+    const snappedY = newY + snap.dy;
+    updateSnapGuides(snap.sx, snap.sy);
+
+    const dx = snappedX - oldX;
+    const dy = snappedY - oldY;
+    console.log('[dbg-drag] handleDrag', state.dragging, 'oldX=', oldX, 'newX=', newX, 'snappedX=', snappedX, 'snapDX=', snap.dx, 'dx=', dx, 'mouseXY=', mouseX, mouseY);
+
+    // 首次实际移动时才记录 undo 快照（避免单纯点击触发全量序列化）
+    if (!state.dragMoved && (dx !== 0 || dy !== 0)) {
+      state.dragMoved = true;
+      pushUndo();
+    }
 
     // 移动节点本身（支持 rect/circle/polygon）
     _applyNodeDelta(nodeEl, dx, dy);
@@ -2651,7 +3470,7 @@ ${DATAFLOW_SOURCE}
     // 拖动父节点时，所有后代跟随移动（contains 关系）
     const descendants = getAllDescendants(state.dragging);
     descendants.forEach(function(childId) {
-      const childEl = document.querySelector('.node[data-id="' + childId + '"]');
+      const childEl = nodeElById[childId];
       if (!childEl) return;
       _applyNodeDelta(childEl, dx, dy);
       // 更新 DSL 中子节点坐标
@@ -2664,15 +3483,17 @@ ${DATAFLOW_SOURCE}
 
     // 更新相关边的位置（包括子节点相关的边和仿真边）
     const affectedNodeIds = [state.dragging].concat(descendants);
+    // 单帧内障碍位置只计算一次，供所有边复用，避免每条边重复全量遍历
+    const precomputed = precomputeNodePositions();
     affectedNodeIds.forEach(function(nid) {
-      updateConnectedEdges(nid);
+      updateConnectedEdges(nid, precomputed, true);
     });
 
-    // 更新 DSL 中父节点坐标
+    // 更新 DSL 中父节点坐标（用吸附后坐标，保证 DOM 与 DSL 一致）
     const node = nodeById[state.dragging];
     if (node) {
-      node.x = newX;
-      node.y = newY;
+      node.x = snappedX;
+      node.y = snappedY;
     }
 
     // 如果被拖动的是子节点，自动调整父节点大小以容纳所有子节点
@@ -2682,7 +3503,7 @@ ${DATAFLOW_SOURCE}
   }
 
   function resizeParentToFitChildren(parentId) {
-    var parentEl = document.querySelector('.node[data-id="' + parentId + '"]');
+    var parentEl = nodeElById[parentId];
     if (!parentEl) return;
     var parentPos = getNodePos(parentEl);
     if (!parentPos) return;
@@ -2698,7 +3519,7 @@ ${DATAFLOW_SOURCE}
     var maxY = -Infinity;
 
     for (var i = 0; i < children.length; i++) {
-      var childEl = document.querySelector('.node[data-id="' + children[i] + '"]');
+      var childEl = nodeElById[children[i]];
       if (!childEl) continue;
       var childPos = getNodePos(childEl);
       if (!childPos) continue;
@@ -2758,7 +3579,7 @@ ${DATAFLOW_SOURCE}
       parentNode.height = newH;
     }
 
-    updateConnectedEdges(parentId);
+    updateConnectedEdges(parentId, null, true);
 
     if (parentOf[parentId]) {
       resizeParentToFitChildren(parentOf[parentId]);
@@ -2768,16 +3589,32 @@ ${DATAFLOW_SOURCE}
   function endDrag() {
     if (!state.dragging) return;
 
-    const nodeEl = document.querySelector('.node[data-id="' + state.dragging + '"]');
+    const nodeEl = state.dragging ? nodeElById[state.dragging] : null;
     if (nodeEl) nodeEl.style.cursor = 'pointer';
 
-    // 碰撞退避：同层级节点重叠时自动推开
-    resolveOverlaps();
+    // 仅在节点确实发生移动时执行碰撞退避与保存，避免单纯点击触发 O(n²) 退避 + 全量序列化
+    const moved = state.dragMoved || (state.dragStartPos &&
+      (state.dragStartPos.x !== (nodeById[state.dragging]?.x ?? 0) ||
+        state.dragStartPos.y !== (nodeById[state.dragging]?.y ?? 0)));
+    if (moved) {
+      // 拖动结束后用完整障碍避让重算一次相关边，恢复路径质量（fast 模式只用了廉价曲线）
+      const descendants = getAllDescendants(state.dragging);
+      const affectedNodeIds = [state.dragging].concat(descendants);
+      const precomputed = precomputeNodePositions();
+      affectedNodeIds.forEach(function(nid) {
+        updateConnectedEdges(nid, precomputed, false);
+      });
+      // 手动编辑允许节点自由落位：不再自动互推重叠节点（resolveOverlaps 会让拖过去的节点被弹回=「拖不动」、邻居被挤开=「节点夹」）
+      saveLocal();
+      saveToServer();
+    }
 
     state.dragging = null;
+    state.dragStartPos = null;
+    state.dragMoved = false;
+    clearSnapGuides();
     document.body.style.userSelect = '';
-    saveLocal();
-    saveToServer();
+    if (nodeEl) nodeEl.style.cursor = '';
   }
 
   // ==== 边拖拽：拖动曲线控制点 ====
@@ -2846,7 +3683,7 @@ ${DATAFLOW_SOURCE}
     saveToServer();
   }
 
-  function updateConnectedEdges(nodeId) {
+  function updateConnectedEdges(nodeId, precomputed, fast) {
     function getCenter(nodeEl) {
       var pos = getNodePos(nodeEl);
       if (!pos) return null;
@@ -2873,11 +3710,11 @@ ${DATAFLOW_SOURCE}
     });
 
     allEdges.forEach(function(e) {
-      var edgeEl = document.querySelector('.edge[data-id="' + e.id + '"]');
+      var edgeEl = edgeElById[e.id];
       if (!edgeEl) return;
 
-      var fromNode = document.querySelector('.node[data-id="' + e.from + '"]');
-      var toNode = document.querySelector('.node[data-id="' + e.to + '"]');
+      var fromNode = nodeElById[e.from];
+      var toNode = nodeElById[e.to];
       var fromPos = getNodePos(fromNode);
       var toPos = getNodePos(toNode);
       if (!fromPos || !toPos) return;
@@ -2893,7 +3730,8 @@ ${DATAFLOW_SOURCE}
         selfLoop: e.from === e.to,
         edgeType: edgeEl.getAttribute('data-type') || 'curve',
         offset: pathOffset,
-        obstacles: isContains ? undefined : collectObstacles(obstacleExcludeMap(e.from, e.to)),
+        // 拖动中的 fast 模式：跳过障碍避让（A* 太贵），用廉价二次曲线，拖完再全量重算
+        obstacles: (fast || isContains) ? undefined : collectObstacles(obstacleExcludeMap(e.from, e.to), precomputed),
         manualCtrl: ctrlOff ? { dx: ctrlOff.dx, dy: ctrlOff.dy } : null,
       });
 
@@ -2934,8 +3772,8 @@ ${DATAFLOW_SOURCE}
       var toId = simEl.getAttribute('data-to');
       var simId = simEl.getAttribute('data-id');
 
-      var fromNodeEl = document.querySelector('.node[data-id="' + fromId + '"]');
-      var toNodeEl = document.querySelector('.node[data-id="' + toId + '"]');
+      var fromNodeEl = nodeElById[fromId];
+      var toNodeEl = nodeElById[toId];
       var fromPos = getNodePos(fromNodeEl);
       var toPos = getNodePos(toNodeEl);
       if (!fromPos || !toPos) return;
@@ -2950,7 +3788,7 @@ ${DATAFLOW_SOURCE}
         selfLoop: fromId === toId,
         edgeType: 'curve',
         offset: simPathOffset,
-        obstacles: collectObstacles(obstacleExcludeMap(fromId, toId)),
+        obstacles: fast ? undefined : collectObstacles(obstacleExcludeMap(fromId, toId), precomputed),
         manualCtrl: simCtrlOff ? { dx: simCtrlOff.dx, dy: simCtrlOff.dy } : null,
       });
 
@@ -2965,77 +3803,10 @@ ${DATAFLOW_SOURCE}
     });
   }
 
-  // ==== 碰撞退避：检测重叠节点并自动推开 ====
-  function resolveOverlaps() {
-    var moved = true;
-    var iterations = 0;
-    var maxIter = 8;
-    var gap = 12;
-
-    var allNodes = [];
-    (dsl.geometry?.nodes || []).forEach(function(n) { allNodes.push(n); });
-    if (nodeById['msg_flow_node']) {
-      var mn = nodeById['msg_flow_node'];
-      if (allNodes.every(function(n) { return n.id !== 'msg_flow_node'; })) {
-        allNodes.push(mn);
-      }
-    }
-
-    while (moved && iterations < maxIter) {
-      moved = false;
-      iterations++;
-
-      for (var i = 0; i < allNodes.length; i++) {
-        var a = allNodes[i];
-        var aEl = document.querySelector('.node[data-id="' + a.id + '"]');
-        if (!aEl) continue;
-        var aPos = getNodePos(aEl);
-        if (!aPos) continue;
-        var ax = aPos.x, ay = aPos.y, aw = aPos.w, ah = aPos.h;
-
-        for (var j = i + 1; j < allNodes.length; j++) {
-          var b = allNodes[j];
-          var aParent = parentOf[a.id];
-          var bParent = parentOf[b.id];
-          if (aParent !== bParent) continue;
-
-          var bEl = document.querySelector('.node[data-id="' + b.id + '"]');
-          if (!bEl) continue;
-          var bPos = getNodePos(bEl);
-          if (!bPos) continue;
-          var bx = bPos.x, by = bPos.y, bw = bPos.w, bh = bPos.h;
-
-          var overlapX = Math.min(ax + aw, bx + bw) - Math.max(ax, bx);
-          var overlapY = Math.min(ay + ah, by + bh) - Math.max(ay, by);
-          if (overlapX <= 0 || overlapY <= 0) continue;
-
-          var pushX = 0, pushY = 0;
-          if (overlapX < overlapY) {
-            pushX = (overlapX + gap) / 2;
-            if (ax < bx) pushX = -pushX;
-          } else {
-            pushY = (overlapY + gap) / 2;
-            if (ay < by) pushY = -pushY;
-          }
-
-          moveNodeBy(a.id, pushX / 2, pushY / 2);
-          moveNodeBy(b.id, -pushX / 2, -pushY / 2);
-          ax += pushX / 2;
-          ay += pushY / 2;
-          moved = true;
-        }
-      }
-    }
-
-    Object.keys(nodeById).forEach(function(nid) {
-      updateConnectedEdges(nid);
-    });
-  }
-
   // 按偏移量移动节点（支持所有形状）+ 后代跟随 + 更新相关边
   function moveNodeBy(nodeId, dx, dy) {
     if (dx === 0 && dy === 0) return;
-    var nodeEl = document.querySelector('.node[data-id="' + nodeId + '"]');
+    var nodeEl = nodeElById[nodeId];
     if (!nodeEl) return;
     var pos = getNodePos(nodeEl);
     if (!pos) return;
@@ -3051,7 +3822,7 @@ ${DATAFLOW_SOURCE}
     // 后代跟随移动（保持父子相对位置）
     var descendants = getAllDescendants(nodeId);
     descendants.forEach(function(did) {
-      var childEl = document.querySelector('.node[data-id="' + did + '"]');
+      var childEl = nodeElById[did];
       if (!childEl) return;
       _applyNodeDelta(childEl, dx, dy);
       var childNode = nodeById[did];
@@ -3209,6 +3980,7 @@ ${DATAFLOW_SOURCE}
 
           // 更新索引
           edgeById[newEdgeId] = newEdge;
+          edgeElById[newEdgeId] = edgeGroup;
           if (!edgesByFrom[newEdge.from]) edgesByFrom[newEdge.from] = [];
           edgesByFrom[newEdge.from].push(newEdge);
           if (!edgesByTo[newEdge.to]) edgesByTo[newEdge.to] = [];
@@ -3229,8 +4001,27 @@ ${DATAFLOW_SOURCE}
 
   // ==== 节点事件绑定 ====
   function setupNodes() {
+    // SVG 层级修复：边 path 有 pointer-events:stroke，若边在节点之上会盖住节点中心，
+    // 导致"点节点却拖到边、连线全乱"。把所有节点重新 append 到 svg 末尾使其置顶，
+    // 节点可点、边不挡节点。子节点（如外层容器）保持相对顺序，先置顶最深的叶子。
+    const svgEl = document.getElementById('canvas');
+    if (svgEl) {
+      // 按在 DOM 中的深度排序，最深的节点最后 append（最上）
+      const nodeEls = Array.prototype.slice.call(svgEl.querySelectorAll('.node'));
+      nodeEls.sort(function(a, b) {
+        var da = 0, db = 0, pa = a, pb = b;
+        while (pa) { da++; pa = pa.parentNode; }
+        while (pb) { db++; pb = pb.parentNode; }
+        return da - db;
+      });
+      nodeEls.forEach(function(n) { svgEl.appendChild(n); });
+    }
     document.querySelectorAll('.node').forEach(nodeEl => {
       const id = nodeEl.getAttribute('data-id');
+      // 关键：主渲染路径（html_renderer SSR）不经过 renderFromDSL，
+      // 若这里不填充 nodeElById，拖拽时 handleDrag 取 nodeElById[state.dragging]
+      // 会得到 undefined 直接 return，表现为"节点拖不动"。
+      nodeElById[id] = nodeEl;
 
       nodeEl.addEventListener('mouseenter', e => {
         showTooltip(e, id);
@@ -3260,6 +4051,13 @@ ${DATAFLOW_SOURCE}
         } else {
           selectNode(id);
         }
+      });
+
+      // 双击节点 → 打开该节点留言面板（人机协作：人留言 → LLM 代改）
+      nodeEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        openAnnoPanel(id);
       });
 
       // 拖拽
@@ -3533,6 +4331,10 @@ ${DATAFLOW_SOURCE}
   function setupEdges() {
     document.querySelectorAll('.edge').forEach(edgeEl => {
       const id = edgeEl.getAttribute('data-id');
+      // 关键：主渲染路径（html_renderer SSR）不经过 renderFromDSL，
+      // 必须在此填充 edgeElById，否则 updateConnectedEdges 里 edgeElById[e.id] 为 undefined，
+      // 拖动节点时边不会跟随（表现为"边像背景图留在原地"）。
+      edgeElById[id] = edgeEl;
       edgeEl.addEventListener('mouseenter', e => {
         showTooltip(e, id);
       });
@@ -3900,6 +4702,7 @@ ${DATAFLOW_SOURCE}
     drillIntoHost: drillIntoHost,
     drillOutOfHost: drillOutOfHost,
     flyToNode: flyToNode,
+    openAnnoPanel: openAnnoPanel,
   };
 
   // 讲解导览外部控制：父页（/tour.html）通过 postMessage 让本画布定位高亮某节点。
@@ -4284,6 +5087,7 @@ ${DATAFLOW_SOURCE}
 
       dsl.geometry.edges = (dsl.geometry.edges || []).filter(e => e.id !== id);
       delete edgeById[id];
+      delete edgeElById[id];
       if (edgesByFrom[edge.from]) {
         edgesByFrom[edge.from] = edgesByFrom[edge.from].filter(e => e.id !== id);
         if (edgesByFrom[edge.from].length === 0) delete edgesByFrom[edge.from];
@@ -4304,11 +5108,13 @@ ${DATAFLOW_SOURCE}
         const el = document.querySelector('.edge[data-id="' + e.id + '"]');
         if (el) el.remove();
         delete edgeById[e.id];
+        delete edgeElById[e.id];
       });
 
       dsl.geometry.nodes = (dsl.geometry.nodes || []).filter(n => n.id !== id);
       dsl.geometry.edges = (dsl.geometry.edges || []).filter(e => e.from !== id && e.to !== id);
       delete nodeById[id];
+      delete nodeElById[id];
       delete edgesByFrom[id];
       delete edgesByTo[id];
 
@@ -4363,6 +5169,7 @@ ${DATAFLOW_SOURCE}
       g.appendChild(text);
 
       svg.appendChild(g);
+      nodeElById[newId] = g;
 
       g.addEventListener('mouseenter', e => showTooltip(e, newId));
       g.addEventListener('mousemove', moveTooltip);
@@ -4513,271 +5320,6 @@ ${DATAFLOW_SOURCE}
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') clearSelection();
     });
-  }
-
-  // ==== 动画播放器 ====
-  const animState = {
-    animations: dsl.animations || [],
-    currentAnimIndex: -1,
-    currentStageIndex: -1,
-    isPlaying: false,
-    speed: 1,
-    timer: null,
-  };
-
-  function initAnimationPlayer() {
-    if (animState.animations.length === 0) return;
-
-    const panel = document.getElementById('anim-panel');
-    if (panel) panel.classList.remove('hidden');
-
-    const select = document.getElementById('anim-select');
-    if (select) {
-      select.innerHTML = '';
-      animState.animations.forEach((anim, i) => {
-        const opt = document.createElement('option');
-        opt.value = i;
-        opt.textContent = anim.name || anim.id;
-        select.appendChild(opt);
-      });
-      select.addEventListener('change', (e) => {
-        loadAnimation(parseInt(e.target.value));
-      });
-    }
-
-    const playBtn = document.getElementById('anim-play');
-    const prevBtn = document.getElementById('anim-prev');
-    const nextBtn = document.getElementById('anim-next');
-    const speedInput = document.getElementById('anim-speed');
-    const progressBar = document.getElementById('anim-progress-bar');
-
-    if (playBtn) playBtn.addEventListener('click', togglePlay);
-    if (prevBtn) prevBtn.addEventListener('click', stepBackward);
-    if (nextBtn) nextBtn.addEventListener('click', stepForward);
-    if (speedInput) {
-      speedInput.addEventListener('input', (e) => {
-        animState.speed = parseFloat(e.target.value);
-        const label = document.getElementById('anim-speed-label');
-        if (label) label.textContent = animState.speed + '\u00d7';
-      });
-    }
-    if (progressBar) {
-      progressBar.addEventListener('click', (e) => {
-        const anim = animState.animations[animState.currentAnimIndex];
-        if (!anim || anim.stages.length === 0) return;
-        const rect = progressBar.getBoundingClientRect();
-        const ratio = (e.clientX - rect.left) / rect.width;
-        const stageIdx = Math.min(anim.stages.length - 1, Math.max(0, Math.floor(ratio * anim.stages.length)));
-        goToStage(stageIdx);
-      });
-    }
-
-    // 记录节点初始位置，用于动画位移
-    document.querySelectorAll('.node').forEach(el => {
-      const rect = el.querySelector('rect');
-      if (rect) {
-        el.dataset.baseX = rect.getAttribute('x') || '0';
-        el.dataset.baseY = rect.getAttribute('y') || '0';
-      }
-    });
-
-    loadAnimation(0);
-  }
-
-  function loadAnimation(index) {
-    if (index < 0 || index >= animState.animations.length) return;
-    animState.currentAnimIndex = index;
-    animState.currentStageIndex = -1;
-    animState.isPlaying = false;
-    resetAllAnimations();
-
-    document.querySelectorAll('.node').forEach(el => el.classList.add('anim-transition'));
-    updateAnimUI();
-  }
-
-  function resetAllAnimations() {
-    document.querySelectorAll('.node').forEach(el => {
-      el.classList.remove('anim-hidden', 'anim-highlight', 'anim-pulse', 'anim-threshold', 'anim-transition');
-      el.style.opacity = '';
-      el.style.transform = '';
-    });
-  }
-
-  function applyElementState(nodeEl, s) {
-    if (!nodeEl) return;
-
-    // visible
-    if (s.visible === false) {
-      nodeEl.classList.add('anim-hidden');
-    } else if (s.visible === true) {
-      nodeEl.classList.remove('anim-hidden');
-    }
-
-    // highlight
-    if (s.highlight === true) {
-      nodeEl.classList.add('anim-highlight');
-    } else if (s.highlight === false) {
-      nodeEl.classList.remove('anim-highlight');
-    }
-
-    // opacity
-    if (s.opacity !== undefined) {
-      nodeEl.style.opacity = s.opacity;
-    }
-
-    // label
-    if (s.label !== undefined) {
-      const text = nodeEl.querySelector('text');
-      if (text) text.textContent = s.label;
-    }
-
-    // status
-    if (s.status !== undefined) {
-      nodeEl.classList.remove('status-draft', 'status-in-progress', 'status-done', 'status-todo', 'status-doing', 'status-blocked');
-      if (s.status) nodeEl.classList.add('status-' + s.status.replace(/_/g, '-'));
-    }
-
-    // position (absolute coordinates → translate offset)
-    if (s.x !== undefined || s.y !== undefined) {
-      const baseX = parseFloat(nodeEl.dataset.baseX || '0');
-      const baseY = parseFloat(nodeEl.dataset.baseY || '0');
-      const newX = s.x !== undefined ? s.x : baseX;
-      const newY = s.y !== undefined ? s.y : baseY;
-      nodeEl.style.transform = 'translate(' + (newX - baseX) + 'px, ' + (newY - baseY) + 'px)';
-    }
-
-    // size (optional: update rect width/height)
-    if (s.width !== undefined || s.height !== undefined) {
-      const rect = nodeEl.querySelector('rect');
-      if (rect) {
-        if (s.width !== undefined) rect.setAttribute('width', s.width);
-        if (s.height !== undefined) rect.setAttribute('height', s.height);
-      }
-    }
-
-    // style overrides (bg only for now)
-    if (s.style) {
-      const shapeEl = nodeEl.querySelector('rect, circle, polygon');
-      if (shapeEl && s.style.bg) shapeEl.setAttribute('fill', s.style.bg);
-    }
-  }
-
-  function applyStage(stageIndex) {
-    const anim = animState.animations[animState.currentAnimIndex];
-    if (!anim) return;
-    const stage = anim.stages[stageIndex];
-    if (!stage) return;
-
-    stage.elements.forEach(s => {
-      const nodeEl = document.querySelector('.node[data-id="' + s.id + '"]');
-      if (!nodeEl) return;
-      applyElementState(nodeEl, s);
-    });
-
-    // threshold / pulse effect
-    if (stage.name && (/阈值|PulseEvict|触发|threshold|evict/i).test(stage.name)) {
-      stage.elements.forEach(s => {
-        const nodeEl = document.querySelector('.node[data-id="' + s.id + '"]');
-        if (nodeEl) {
-          nodeEl.classList.remove('anim-threshold');
-          void nodeEl.offsetWidth;
-          nodeEl.classList.add('anim-threshold');
-        }
-      });
-    }
-  }
-
-  function goToStage(index) {
-    const anim = animState.animations[animState.currentAnimIndex];
-    if (!anim || index < 0 || index >= anim.stages.length) return;
-
-    if (index < animState.currentStageIndex) {
-      resetAllAnimations();
-      document.querySelectorAll('.node').forEach(el => el.classList.add('anim-transition'));
-      for (let i = 0; i <= index; i++) {
-        applyStage(i);
-      }
-    } else {
-      applyStage(index);
-    }
-
-    animState.currentStageIndex = index;
-    updateAnimUI();
-  }
-
-  function stepForward() {
-    const anim = animState.animations[animState.currentAnimIndex];
-    if (!anim) return;
-    if (animState.currentStageIndex < anim.stages.length - 1) {
-      goToStage(animState.currentStageIndex + 1);
-    } else {
-      pause();
-    }
-  }
-
-  function stepBackward() {
-    if (animState.currentStageIndex > 0) {
-      goToStage(animState.currentStageIndex - 1);
-    }
-  }
-
-  function togglePlay() {
-    if (animState.isPlaying) {
-      pause();
-    } else {
-      play();
-    }
-  }
-
-  function play() {
-    animState.isPlaying = true;
-    const btn = document.getElementById('anim-play');
-    if (btn) btn.textContent = '\u23f8';
-
-    const anim = animState.animations[animState.currentAnimIndex];
-    if (!anim) return;
-
-    if (animState.currentStageIndex >= anim.stages.length - 1) {
-      resetAllAnimations();
-      document.querySelectorAll('.node').forEach(el => el.classList.add('anim-transition'));
-      animState.currentStageIndex = -1;
-    }
-
-    function tick() {
-      if (!animState.isPlaying) return;
-      stepForward();
-      const stage = anim.stages[animState.currentStageIndex];
-      const duration = (stage && stage.duration) ? stage.duration : 600;
-      animState.timer = setTimeout(tick, duration / animState.speed);
-    }
-    tick();
-  }
-
-  function pause() {
-    animState.isPlaying = false;
-    if (animState.timer) {
-      clearTimeout(animState.timer);
-      animState.timer = null;
-    }
-    const btn = document.getElementById('anim-play');
-    if (btn) btn.textContent = '\u25b6';
-  }
-
-  function updateAnimUI() {
-    const anim = animState.animations[animState.currentAnimIndex];
-    const stage = anim ? anim.stages[animState.currentStageIndex] : null;
-
-    const info = document.getElementById('anim-stage-info');
-    if (info) info.textContent = (animState.currentStageIndex + 1) + ' / ' + (anim ? anim.stages.length : 0);
-
-    const nameEl = document.getElementById('anim-stage-name');
-    if (nameEl) nameEl.textContent = stage ? stage.name : '-';
-
-    const fill = document.getElementById('anim-progress-fill');
-    if (fill) {
-      const progress = anim && anim.stages.length > 0 ? ((animState.currentStageIndex + 1) / anim.stages.length * 100) : 0;
-      fill.style.width = progress + '%';
-    }
   }
 
   // ==== 仿真器 ====
@@ -5207,6 +5749,9 @@ ${DATAFLOW_SOURCE}
   setupNodes();
   setupEdges();
   setupSimEdges();
+  loadLanguageConcepts();
+  loadDict();
+  setupDictPanel();
 
   // 应用边控制点偏移：对所有节点触发一次边更新
   Object.keys(nodeById).forEach(function(nid) {
@@ -5230,6 +5775,8 @@ ${DATAFLOW_SOURCE}
   setupRerender();
   setupKeyboard();
   setupAnnotationTriggers();
+  setupAnnoWall();
+  setupAnnoBadgeClick();
   setupNodeEditor();
   setupSimulation();
 
@@ -5284,7 +5831,6 @@ ${DATAFLOW_SOURCE}
     }
   }
 
-  initAnimationPlayer();
-})();
+  })();
 `;
 }
