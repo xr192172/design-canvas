@@ -47,6 +47,8 @@ export interface TraceReasoningInput {
   title?: string;
   /** 产出 DSL 的 feature 名 */
   feature?: string;
+  /** 可选：trace 落盘路径（跑完把原始 TraceRecord[] 写到该文件，供 L4 证据回溯复算） */
+  traceFile?: string;
 }
 
 export interface TraceRecord {
@@ -346,6 +348,24 @@ export async function traceReasoning(input: TraceReasoningInput): Promise<TraceR
   };
 
   const totalTokens = steps.reduce((s, x) => s + x.tokens, 0);
+
+  // 可选落盘原始 trace，供 L4 证据回溯复算（<feature>.trace.json 约定）
+  if (input.traceFile) {
+    const absTrace = path.isAbsolute(input.traceFile)
+      ? input.traceFile
+      : path.join(root, input.traceFile);
+    fs.mkdirSync(path.dirname(absTrace), { recursive: true });
+    fs.writeFileSync(
+      absTrace,
+      JSON.stringify(
+        { feature, generated_at: new Date().toISOString(), records: tracer.records },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+  }
+
   return {
     dsl,
     trace: tracer.records,

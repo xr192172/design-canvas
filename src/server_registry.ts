@@ -19,7 +19,6 @@ import { renderDsl } from './tools/render_dsl.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { queryFeature } from './tools/query_feature.js';
 import { updateFeature } from './tools/update_feature.js';
-import { getDSLByView } from './storage.js';
 import { scaffold } from './tools/scaffold.js';
 import { checkStatus } from './tools/status_tools.js';
 import { backfillScaffold } from './tools/backfill.js';
@@ -32,6 +31,10 @@ import { submitApproval, reviewAnnotation } from './tools/approval.js';
 import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
 import { diffViews } from './tools/diff_views.js';
 import { validateReason } from './tools/reason_validator.js';
+import type { ReasonEvidenceRef } from './tools/reason_validator.js';
+import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
+import { getDSLByView, getLiveDir } from './storage.js';
+import path from 'node:path';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -82,6 +85,7 @@ const editDslHandler = wrap(async (a) => {
   }
   // 活文档：变更原因四层校验（L1-L4），不通过拒绝写入
   const reason = (a.reason as string | undefined) ?? '';
+  const evidence = (a.evidence as ReasonEvidenceRef[] | undefined) ?? [];
   const dsl = getDSLByView(a.feature as string, 'design');
   const entityIds: string[] = [];
   if (dsl) {
@@ -92,9 +96,19 @@ const editDslHandler = wrap(async (a) => {
       if (f.path) entityIds.push(f.path);
     }
   }
+  // L4 证据回溯：从真实 trace 库（<feature>.trace.json）加载记录并复算校验；
+  // 无 trace 文件 → 无法回溯 → evidence 一律打回（宁缺毋滥，杜绝编造证据进库）
+  const traceFile = path.join(getLiveDir(), `${a.feature as string}.trace.json`);
+  const records = loadTraceRecords(traceFile);
+  const traceResolver = records.length > 0 ? buildTraceResolver(records) : undefined;
   const v = validateReason({
     reason,
-    resolver: { entityIds },
+    evidence,
+    resolver: {
+      entityIds,
+      exists: traceResolver?.exists,
+      traceRefs: traceResolver?.traceRefs,
+    },
   });
   if (!v.ok) {
     throw new Error(`变更原因校验未通过（L${v.layer}）：${v.error}`);
@@ -252,6 +266,19 @@ const TOOL_DEFS: ToolDef[] = [
           }),
         )
         .describe('操作列表，按顺序执行，任一失败全部回滚'),
+      evidence: z
+        .array(
+          z.object({
+            type: z
+              .enum(['trace', 'diff', 'node', 'edge', 'metric'])
+              .describe("证据类型，当前 L4 支持 'trace'（真实执行记录）"),
+            ref: z
+              .string()
+              .describe("trace 证据的 ref：函数名，或 '<函数名>@token>N'（声明该函数实际 token 超 N，程序复算验证）"),
+          }),
+        )
+        .optional()
+        .describe('证据链（L4 回溯）：可选。传入后程序会到真实 trace 库（<feature>.trace.json）复算验证，查不到或不符则打回'),
     },
     handler: editDslHandler,
   },
