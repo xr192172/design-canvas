@@ -31,6 +31,7 @@ import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
 import { submitApproval, reviewAnnotation } from './tools/approval.js';
 import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
 import { diffViews } from './tools/diff_views.js';
+import { validateReason } from './tools/reason_validator.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -78,6 +79,25 @@ const editDslHandler = wrap(async (a) => {
       '实际视图（view=live）是代码快照，只读，请勿手改。要改请用 view=design（设计视图）；' +
         '要重建实际视图请用 explore_code action=import / watch。',
     );
+  }
+  // 活文档：变更原因四层校验（L1-L4），不通过拒绝写入
+  const reason = (a.reason as string | undefined) ?? '';
+  const dsl = getDSLByView(a.feature as string, 'design');
+  const entityIds: string[] = [];
+  if (dsl) {
+    for (const n of dsl.geometry?.nodes ?? []) entityIds.push(n.id);
+    for (const e of dsl.geometry?.edges ?? []) entityIds.push(e.id);
+    for (const f of dsl.semantic?.files ?? []) {
+      if (f.id) entityIds.push(f.id);
+      if (f.path) entityIds.push(f.path);
+    }
+  }
+  const v = validateReason({
+    reason,
+    resolver: { entityIds },
+  });
+  if (!v.ok) {
+    throw new Error(`变更原因校验未通过（L${v.layer}）：${v.error}`);
   }
   return updateFeature(a as never);
 });
@@ -212,6 +232,12 @@ const TOOL_DEFS: ToolDef[] = [
     inputSchema: {
       feature: z.string().describe('feature 名'),
       view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认）；live=实际代码快照，只读，拒绝写入'),
+      reason: z
+        .string()
+        .describe(
+          '变更原因（活文档必填，经四层校验：非空/非套话/绑定具体实体/证据可回溯）。' +
+            '请用一句话说明这次变更为什么发生，并引用具体实体（节点/文件 id、路径、数字指标）。',
+        ),
       operations: z
         .array(
           z.object({

@@ -88,6 +88,7 @@ describe('视图分层 - edit_dsl view=live 写护栏', () => {
     createFeature({ feature: 'vf_we2' });
     const r = await handlerOf('edit_dsl')({
       feature: 'vf_we2',
+      reason: '新增节点 n1 记录用户服务入口，超时阈值设 3s',
       operations: [{ op: 'add', type: 'node', id: 'n1', data: { label: 'X' } }],
     });
     expect(r.isError).toBeFalsy();
