@@ -8,7 +8,27 @@ import type { DiagramStatus } from './geometry.js';
 export interface ExpectedApi {
   /** 函数签名，如 "User.Login() (token string, err error)" */
   signature: string;
+  /** 函数起始行号（import_project 扫描时填充，LLM 拿到后直接 read 定位） */
+  line?: number;
+  /** 函数结束行号（含闭合括号，为 LLM 提供完整函数范围） */
+  end_line?: number;
   notes?: string;
+  /** notes 英文版（i18n：API 说明切换英文时用） */
+  notes_en?: string;
+}
+
+/** 符号条目：常量/类型/变量/类/接口/结构体声明（非函数方法类，用于行号定位） */
+export interface Symbol {
+  /** 符号名，如 "MaxRetries"、"UserService" */
+  name: string;
+  /** 符号类型 */
+  kind: 'const' | 'type' | 'var' | 'struct' | 'interface' | 'class' | 'function' | 'method';
+  /** 起始行号 */
+  line: number;
+  /** 结束行号（含闭合括号，为 LLM 提供完整函数/类型范围） */
+  end_line?: number;
+  /** 签名（声明文本），如 "interface UserService"、"MAX_RETRIES = 3" */
+  signature?: string;
 }
 
 /** 语义层文件 */
@@ -19,6 +39,8 @@ export interface SemanticFile {
   path: string;
   /** 职责描述 */
   responsibility: string;
+  /** 职责描述英文版（i18n） */
+  responsibility_en?: string;
   expected_apis?: ExpectedApi[];
   /** 预期依赖路径列表 */
   expected_deps?: string[];
@@ -28,6 +50,8 @@ export interface SemanticFile {
   status?: DiagramStatus;
   /** 从实际代码中解析出的已实现 API（代码回填时自动填充） */
   actual_apis?: ExpectedApi[];
+  /** 符号表：常量/类型/变量/类/接口/结构体声明（非函数方法类），含行号，供 LLM 定位代码 */
+  symbols?: Symbol[];
   /** 文件行数（import_project 扫描时填充，供单文件化预警/星图 tooltip 从 DSL 读取） */
   lines?: number;
   /** 架构层 id（序号5：architecture-analyzer 按路径启发式推断，如 api/service/data/ui） */

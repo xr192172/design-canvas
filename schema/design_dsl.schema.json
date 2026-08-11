@@ -44,7 +44,7 @@
     },
     "theme": {
       "type": "string",
-      "enum": ["blue", "sakura", "forest", "ocean", "star"],
+      "enum": ["dynamic", "blue", "sakura", "forest", "ocean", "star"],
       "description": "主题 ID"
     },
     "animations_v2": {
@@ -52,6 +52,9 @@
     },
     "simulation": {
       "$ref": "#/definitions/Simulation"
+    },
+    "reasoning": {
+      "$ref": "#/definitions/ReasoningSystem"
     }
   },
   "definitions": {
@@ -197,10 +200,15 @@
     },
     "Annotation": {
       "type": "object",
-      "required": ["id", "target_id", "text"],
+      "required": ["id", "text"],
+      "anyOf": [
+        { "required": ["target_id"] },
+        { "required": ["node_id"] }
+      ],
       "properties": {
         "id": { "type": "string" },
         "target_id": { "type": "string", "description": "指向 node.id 或 edge.id" },
+        "node_id": { "type": "string", "description": "直接指明所属节点 ID（兼容字段）" },
         "text": { "type": "string" },
         "author": { "type": "string", "enum": ["human", "llm"] },
         "created": { "type": "string", "format": "date-time" }
@@ -400,6 +408,69 @@
         "type": { "type": "string" },
         "label": { "type": "string" },
         "fields": { "type": "object", "description": "JSON Schema 格式的字段结构" }
+      },
+      "additionalProperties": true
+    },
+    "ReasoningStep": {
+      "type": "object",
+      "required": ["id", "node", "kind", "tokens", "reasoning"],
+      "properties": {
+        "id": { "type": "string", "description": "步骤 ID（唯一，供 folds.folded 引用）" },
+        "node": { "type": "string", "description": "步骤所在节点 id（引用 geometry.nodes[].id）" },
+        "kind": { "type": "string", "enum": ["think", "tool", "respond", "fold"], "description": "步骤类型" },
+        "tokens": { "type": "number", "minimum": 0, "description": "该步占用/消耗 token 数" },
+        "input": { "type": "string", "description": "该步输入上下文描述" },
+        "reasoning": { "type": "string", "description": "LLM 推理内容（回放时浮层显示）" },
+        "output": { "type": "string", "description": "该步输出" },
+        "api": { "type": "string", "description": "该步绑定的函数名（L4 浮层 ƒ api）" }
+      },
+      "additionalProperties": true
+    },
+    "ReasoningFold": {
+      "type": "object",
+      "required": ["at_step", "node", "kind", "summary", "folded"],
+      "properties": {
+        "at_step": { "type": "integer", "minimum": 1, "description": "在哪一步之后触发（steps 索引，从 1 起）" },
+        "node": { "type": "string", "description": "折叠目标节点 id" },
+        "kind": { "type": "string", "enum": ["summarize", "evict"], "description": "折叠方式" },
+        "summary": { "type": "string", "description": "折叠后生成的摘要文本" },
+        "folded": { "type": "array", "items": { "type": "string" }, "description": "被折叠的步骤 id 列表" }
+      },
+      "additionalProperties": true
+    },
+    "ReasoningBudget": {
+      "type": "object",
+      "required": ["max_tokens"],
+      "properties": {
+        "max_tokens": { "type": "number", "minimum": 1, "description": "上下文窗口 token 上限" },
+        "fold_at": { "type": "number", "minimum": 0, "maximum": 1, "description": "触发折叠的阈值比例（默认 0.8）" }
+      },
+      "additionalProperties": true
+    },
+    "ReasoningEntry": {
+      "type": "object",
+      "required": ["label", "node"],
+      "properties": {
+        "label": { "type": "string", "description": "入口标签" },
+        "node": { "type": "string", "description": "入口节点 id" }
+      },
+      "additionalProperties": true
+    },
+    "ReasoningSystem": {
+      "type": "object",
+      "required": ["version", "entry", "steps"],
+      "properties": {
+        "version": { "type": "integer" },
+        "entry": { "$ref": "#/definitions/ReasoningEntry" },
+        "budget": { "$ref": "#/definitions/ReasoningBudget" },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ReasoningStep" }
+        },
+        "folds": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ReasoningFold" }
+        }
       },
       "additionalProperties": true
     }

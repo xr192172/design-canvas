@@ -219,11 +219,13 @@ function exportScore(name: string, file: string): number {
 
 /**
  * 锚点打分：分数 = 入度 + 语义命名 + 导出（入度归一化到 [0,1]）。
- * 但【锚点资格】用强信号判定，避免"入度归一化后所有被调函数都成弱锚点"导致
- * 功能被切碎——这违背"功能多大就整块聚一起"的愿景：
+ * 【锚点资格】用强信号判定，且必须排除"纯工具/属性访问"型 hub 函数：
  *   - 语义命名命中（xxxService/Handler/Repo…）
- *   - 导出/入口（Go 大写 / Python 非下划线顶层）
- *   - 入度等于最高档（真实"功能门面"，被最多人调）
+ *   - 真实导出（Go 大写 / Python 非下划线顶层）
+ *   - 入度等于最高档且同时有语义命名（真实"功能门面"）
+ * 关键：TS/JS 的默认 0.3 导出分只参与打分排序、【不授予锚点资格】。
+ * 否则所有 TS 函数都成锚点，入度最高的工具函数（如 getDbFile）会被误判为
+ * "功能门面"，经标签传播吸收成横跨半数的巨型 hub 社区——必须避免。
  * 返回按分数降序，anchor=true 表示有锚点资格。
  */
 export function scoreAnchors(
@@ -234,10 +236,15 @@ export function scoreAnchors(
   const scored = funcs.map((f, i) => {
     const inNorm = graph.inDegree[i] / maxIn;
     const score = inNorm + roleScore(f.name) + exportScore(f.name, f.file);
-    const anchor =
-      roleScore(f.name) > 0 ||
-      exportScore(f.name, f.file) > 0 ||
-      (graph.inDegree[i] === maxIn && maxIn >= 3);
+    // 排除"不像功能门面"的符号：getter/setter（getEngine 虽命中 Engine 后缀，
+    // 但只是工厂）、带点的属性访问/内嵌 helper（exploreCode.req、
+    // validateValueSchema.typeName）——它们不是社区之锚。
+    const isGetter = /^(get|set)\w*$/i.test(f.name);
+    const isQualifiedProp = f.name.includes('.');
+    const semantic = roleScore(f.name) > 0 && !isGetter && !isQualifiedProp;
+    const genuineExport = exportScore(f.name, f.file) >= 1; // Go 大写 / Python 顶层
+    const topIn = graph.inDegree[i] === maxIn && maxIn >= 3 && semantic;
+    const anchor = (semantic || genuineExport) && !isQualifiedProp || topIn;
     return { idx: i, score, anchor };
   });
   return scored.sort((a, b) => b.score - a.score);
@@ -346,10 +353,74 @@ export function labelPropagation(
   return groups;
 }
 
+/**
+ * 递归拆分超大社区：当标签传播把整个连通组件卷成一个巨型社区（如 renderer+
+ * tools+db+dsl 全联通）时，在社区内部子街上重新做锚点+标签传播，把不同业务
+ * 区域拆开，直到每个子社区文件数 ≤ maxFiles 或无法再拆。
+ * 子社区内给锚点等权（1.0），让标签传播按"就近"做 Voronoi 式分割，而非让
+ * 单个高分锚点再次淹没全图。depth 限制递归深度防退化。
+ */
+function splitOversizedGroups(
+  funcs: FuncNode[],
+  graph: CallGraph,
+  groups: Map<number, number[]>,
+  maxFiles: number,
+  depth = 0,
+): Map<number, number[]> {
+  const out = new Map<number, number[]>();
+  for (const [lbl, members] of groups) {
+    const fileSet = new Set(members.map((i) => funcs[i].file));
+    if (fileSet.size <= maxFiles || members.length <= 1 || depth >= 3) {
+      out.set(lbl, members);
+      continue;
+    }
+    // 子图：仅保留本社区成员之间的边
+    const local = new Map<number, number>(); // global idx -> local idx
+    members.forEach((g, l) => local.set(g, l));
+    const subFuncs = members.map((g) => funcs[g]);
+    const subAdj = new Map<number, number[]>();
+    const subInDeg = new Array(subFuncs.length).fill(0);
+    for (const g of members) {
+      const l = local.get(g)!;
+      const nbrs = (graph.adj.get(g) ?? [])
+        .filter((n) => local.has(n))
+        .map((n) => local.get(n)!);
+      subAdj.set(l, nbrs);
+      for (const nb of nbrs) subInDeg[nb]++;
+    }
+    const subGraph: CallGraph = { adj: subAdj, inDegree: subInDeg };
+
+    // 子社区锚点：语义锚点 + 入度靠前的非工具节点，锚点等权以便分区
+    const scored = scoreAnchors(subFuncs, subGraph);
+    let anchors = scored
+      .filter((s) => s.anchor)
+      .map((s) => ({ idx: s.idx, score: 1.0 }));
+    if (anchors.length < 2) {
+      const extra = scored
+        .filter((s) => !/^(get|set)\w*$/i.test(subFuncs[s.idx].name) && !subFuncs[s.idx].name.includes('.'))
+        .slice(0, 4)
+        .map((s) => ({ idx: s.idx, score: 1.0 }));
+      anchors = [...anchors, ...extra];
+    }
+    if (anchors.length < 2) {
+      out.set(lbl, members);
+      continue; // 无法再拆
+    }
+    const subGroups = labelPropagation(subFuncs, subGraph, anchors, 12, []);
+    const remapped = new Map<number, number[]>();
+    for (const sm of subGroups.values()) {
+      const gm = sm.map((l) => members[l]);
+      remapped.set(gm[0], gm);
+    }
+    const sub = splitOversizedGroups(funcs, graph, remapped, maxFiles, depth + 1);
+    for (const [k, v] of sub) out.set(k, v);
+  }
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 汇总产出
 // ─────────────────────────────────────────────────────────────
-
 /** 估算符号占用的行数（区间并集，粗略） */
 function estimateLines(members: number[], funcs: FuncNode[]): number {
   const ranges = members
@@ -561,9 +632,13 @@ export function analyzeMonolith(input: AnalyzeMonolithInput): AnalyzeMonolithRes
 
     const groups = labelPropagation(funcs, graph, allAnchors, maxIter, ownerClusters);
 
+    // 递归拆分仍过大的社区（全联通巨型组件会被卷成单个 60 文件 blob）
+    const MAX_COMM_FILES = 20;
+    const finalGroups = splitOversizedGroups(funcs, graph, groups, MAX_COMM_FILES);
+
     // 组装社区
     const communities: MonolithCommunity[] = [];
-    const groupArr = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+    const groupArr = [...finalGroups.entries()].sort((a, b) => b[1].length - a[1].length);
     for (const [lbl, members] of groupArr) {
       const files = [...new Set(members.map((i) => funcs[i].file))].sort();
       communities.push({

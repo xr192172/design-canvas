@@ -4,6 +4,7 @@
  * 在 MCP 长进程内启动对目标项目目录的常驻监听，文件变更/新增/删除时：
  *   1. 增量同步到 cache.db（watch_project 核心，内部按 content_hash 增量）
  *   2. 可选 rebuild：按 feature 重建"实际 DSL"到 live/（saveLiveFeature，不覆盖设计 DSL）
+ *   3. 可选 diff：rebuild 后自动对比设计视图 vs live 视图，生成 diff 告警
  *
  * 工具是"一次性请求"，但 watcher 是常驻后台任务。因此按 project_dir 维护注册表：
  *   - action=start（默认）/ status / stop 三态，便于 LLM 启动后查询、停止
@@ -16,6 +17,7 @@
 import path from 'node:path';
 import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
+import { diffViews, type DiffViewsResult } from './diff_views.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -119,11 +121,15 @@ interface ActiveWatch {
   project_dir: string;
   feature?: string;
   rebuild: boolean;
+  diff_on_change: boolean;
   started_at: string;
   last_change_at?: string;
   last_rebuild_at?: string;
+  last_diff_at?: string;
   last_summary?: WatchBatchSummary;
   last_reconcile?: ReconcileSummary;
+  /** rebuild 后自动 diff 的结果（仅 diff_on_change=true 时有） */
+  last_diff?: DiffViewsResult;
   error?: string;
   handle?: WatchHandle;
   throttle?: RebuildThrottler;
@@ -155,6 +161,12 @@ export interface WatchProjectToolInput {
   rebuild_window_ms?: number;
   /** 定期 reconcile 兜底间隔（ms）。>0 时周期性全量扫描补齐 fs.watch 漏事件；默认 0=关闭 */
   reconcile_interval_ms?: number;
+  /**
+   * rebuild 后是否自动 diff 对比设计视图 vs live 视图（需要已存在设计 DSL）。
+   * 默认 false。开启后每次 rebuild 都会自动调用 diff_views 生成对比结果，
+   * 可通过 status 查询 last_diff 查看。
+   */
+  diff_on_change?: boolean;
 }
 
 export interface WatchProjectToolResult {
@@ -164,11 +176,17 @@ export interface WatchProjectToolResult {
   running: boolean;
   feature?: string;
   rebuild: boolean;
+  diff_on_change: boolean;
   started_at?: string;
   last_change_at?: string;
   last_rebuild_at?: string;
+  last_diff_at?: string;
   last_summary?: WatchBatchSummary;
   last_reconcile?: ReconcileSummary;
+  /** rebuild 后自动 diff 对比结果摘要（仅首次 diff_on_change=true 且完成 diff 后） */
+  diff_alert?: string;
+  /** diff 有无变更（true = 有变更，false = 无变更或尚未 diff） */
+  has_diff_changes?: boolean;
   message: string;
   error?: string;
 }
@@ -193,6 +211,18 @@ async function doRebuild(entry: ActiveWatch): Promise<void> {
     await importProject({ project_dir: entry.project_dir, feature: entry.feature, cache_db: db, live_only: true, live_dir: entry.project_dir });
     entry.last_rebuild_at = new Date().toISOString();
     entry.error = undefined; // 上次失败已修复
+
+    // rebuild 后若有 diff_on_change 标记，自动对比设计视图 vs live 视图
+    if (entry.diff_on_change) {
+      try {
+        const diffResult = diffViews({ feature: entry.feature, live_dir: entry.project_dir });
+        entry.last_diff = diffResult;
+        entry.last_diff_at = new Date().toISOString();
+      } catch (diffErr) {
+        // diff 失败不阻塞 watch，仅记录
+        entry.error = 'diff 失败: ' + (diffErr as Error).message;
+      }
+    }
   } catch (e) {
     entry.error = (e as Error).message;
   }
@@ -202,6 +232,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   const key = keyOf(input.project_dir);
   const feature = input.feature?.trim() || undefined;
   const rebuild = input.rebuild_on_change ?? Boolean(feature);
+  const diffOnChange = input.diff_on_change ?? false;
   const debounceMs = input.debounce_ms ?? 150;
 
   const existing = active.get(key);
@@ -209,6 +240,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     return {
       action: 'start', project_dir: path.resolve(input.project_dir),
       watching: true, running: true, feature: existing.feature, rebuild: existing.rebuild,
+      diff_on_change: existing.diff_on_change,
       started_at: existing.started_at, last_change_at: existing.last_change_at,
       last_summary: existing.last_summary,
       message: '已在监听（幂等复用既有句柄）' + (existing.error ? '；上次 rebuild 出错: ' + existing.error : ''),
@@ -220,6 +252,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     project_dir: path.resolve(input.project_dir),
     feature,
     rebuild,
+    diff_on_change: diffOnChange,
     started_at: new Date().toISOString(),
   };
 
@@ -246,7 +279,8 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   } catch (e) {
     return {
       action: 'start', project_dir: entry.project_dir, watching: false, running: false,
-      feature, rebuild, message: '启动监听失败: ' + (e as Error).message, error: (e as Error).message,
+      feature, rebuild, diff_on_change: diffOnChange,
+      message: '启动监听失败: ' + (e as Error).message, error: (e as Error).message,
     };
   }
 
@@ -254,8 +288,8 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   active.set(key, entry);
   return {
     action: 'start', project_dir: entry.project_dir, watching: true, running: true,
-    feature, rebuild, started_at: entry.started_at,
-    message: `已开始监听 ${path.resolve(input.project_dir)}` + (rebuild ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）'),
+    feature, rebuild, diff_on_change: diffOnChange, started_at: entry.started_at,
+    message: `已开始监听 ${path.resolve(input.project_dir)}` + (rebuild ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）') + (diffOnChange ? '，变更后自动 diff 对比' : ''),
   };
 }
 
@@ -265,17 +299,37 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
   if (!entry || !entry.handle) {
     return {
       action: 'status', project_dir: path.resolve(projectDir), watching: false, running: false,
-      rebuild: false,
+      rebuild: false, diff_on_change: false,
       message: '该项目未在监听中。', 
     };
   }
   const st = entry.handle.status();
+
+  // 构建 diff_alert 摘要
+  let diffAlert: string | undefined;
+  let hasDiffChanges = false;
+  if (entry.last_diff) {
+    const s = entry.last_diff.data.summary;
+    const changedFiles = s.added_files + s.removed_files + s.modified_files;
+    if (changedFiles > 0) {
+      hasDiffChanges = true;
+      diffAlert = `设计视图 vs 实际代码有 ${changedFiles} 个文件差异（+${s.added_files} -${s.removed_files} ~${s.modified_files}），` +
+        `符号: ${s.design_symbols}→${s.live_symbols}，API: ${s.design_apis}→${s.live_apis}`;
+    } else {
+      diffAlert = '设计视图与实际代码一致，无差异';
+    }
+  }
+
   return {
     action: 'status', project_dir: entry.project_dir, watching: st.watching, running: st.watching,
-    feature: entry.feature, rebuild: entry.rebuild, started_at: entry.started_at,
-    last_change_at: entry.last_change_at, last_rebuild_at: entry.last_rebuild_at,
+    feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
+    started_at: entry.started_at, last_change_at: entry.last_change_at,
+    last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
-    message: entry.error ? '监听运行中，但最近一次 rebuild 报错: ' + entry.error : '监听运行中',
+    diff_alert: diffAlert, has_diff_changes: hasDiffChanges,
+    message: diffAlert
+      ? `监听运行中，${diffAlert}` + (entry.error ? '；最近报错: ' + entry.error : '')
+      : '监听运行中' + (entry.error ? '，但最近一次 rebuild 报错: ' + entry.error : ''),
     error: entry.error,
   };
 }
@@ -286,7 +340,7 @@ async function stopWatch(projectDir: string): Promise<WatchProjectToolResult> {
   if (!entry || !entry.handle) {
     return {
       action: 'stop', project_dir: path.resolve(projectDir), watching: false, running: false,
-      rebuild: false,
+      rebuild: false, diff_on_change: false,
       message: '该项目本就不在监听中。',
     };
   }
@@ -298,9 +352,16 @@ async function stopWatch(projectDir: string): Promise<WatchProjectToolResult> {
   active.delete(key);
   return {
     action: 'stop', project_dir: entry.project_dir, watching: false, running: false,
-    feature: entry.feature, rebuild: entry.rebuild, started_at: entry.started_at,
-    last_change_at: entry.last_change_at, last_rebuild_at: entry.last_rebuild_at,
+    feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
+    started_at: entry.started_at, last_change_at: entry.last_change_at,
+    last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
+    diff_alert: entry.last_diff
+      ? `设计 vs 实际差异: +${entry.last_diff.data.summary.added_files} -${entry.last_diff.data.summary.removed_files} ~${entry.last_diff.data.summary.modified_files} 文件`
+      : undefined,
+    has_diff_changes: entry.last_diff
+      ? (entry.last_diff.data.summary.added_files + entry.last_diff.data.summary.removed_files + entry.last_diff.data.summary.modified_files) > 0
+      : false,
     message: '已停止监听。',
   };
 }

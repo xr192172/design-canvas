@@ -86,9 +86,12 @@ describe('arch_layer 架构分层', () => {
   it('persist=false 仅分析不落盘', async () => {
     const feature = `arch_nopersist_${Date.now()}`;
     await makeProject(feature);
+    // importProject 导入时已按设计回填 layers（供图例/着色），存档本就含 layers。
+    // persist=false 应保证不新增任何写盘：磁盘 DSL 与调用前完全一致。
+    const before = getDSL(feature)!;
     const r = archLayer({ feature, persist: false });
     expect(r.persisted).toBe(false);
-    expect(getDSL(feature)!.layers).toBeUndefined();
+    expect(getDSL(feature)).toEqual(before);
   });
 
   it('feature 不存在 → 抛错', () => {

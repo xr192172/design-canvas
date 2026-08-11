@@ -103,7 +103,7 @@ export interface GeneratedNarrations {
 }
 
 /** 从 LLM 返回文本中稳健提取 JSON 对象（兼容 code-fence / 前导杂话）。 */
-function extractJsonObject(text: string): Record<string, unknown> | null {
+export function extractJsonObject(text: string): Record<string, unknown> | null {
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const candidate = fence ? fence[1] : text;
   // 从第一个 '{' 到最后一个 '}' 截取

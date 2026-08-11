@@ -435,8 +435,30 @@ async function pruneGoImports(content: string, filePath: string): Promise<string
 
   if (specs.length === 0) return content;
 
-  // 文件体 = 去掉所有 import_declaration
-  const body = removeLineRanges(content, mergeRanges(decls.map((d) => [d.start, d.end])));
+  // 用 tree-sitter 精确收集 body 中 selector_expression / qualified_type 的**根操作数**标识符
+  // （如 ws.UpgradeWS / ws.WSConn.Send → 根操作数 ws；context.Context / sync.Mutex → 根操作数
+  //  context / sync）。排除 import 声明与注释，避免正则误匹配注释/字符串里的 `pkg.`（例：
+  //  注释 `this.ws.send('')` 会让 ws 被误判为已用）。Go 类型引用（qualified_type）同样计入，
+  //  否则 `context.Context`/`sync.Mutex` 这类类型使用会被误判为未用而裁掉整个 import 块。
+  const selectorOperands = new Set<string>();
+  const resolveBase = (n: { type?: string; text: string; childForFieldName(f: string): unknown | null; child(i: number): unknown }): string => {
+    let cur = n as { type?: string; text: string; childForFieldName(f: string): unknown | null; child(i: number): unknown } | null;
+    while (cur && (cur.type === 'selector_expression' || cur.type === 'qualified_type')) {
+      cur = (cur.childForFieldName('operand') || cur.child(0)) as { type?: string; text: string; childForFieldName(f: string): unknown | null; child(i: number): unknown } | null;
+    }
+    return cur ? cur.text.trim() : '';
+  };
+  const walkUsage = (node: unknown): void => {
+    const n = node as { type: string; text: string; childCount: number; child(i: number): unknown; childForFieldName(f: string): unknown | null };
+    if (n.type === 'import_declaration' || n.type === 'comment') return;
+    if (n.type === 'selector_expression' || n.type === 'qualified_type') {
+      const base = resolveBase(n);
+      if (base) selectorOperands.add(base);
+      return; // 该 selector/type 子树已计入根操作数，无需再下钻
+    }
+    for (let i = 0; i < n.childCount; i++) walkUsage(n.child(i));
+  };
+  walkUsage(parsed.root as unknown);
 
   // 判断每个 spec 是否使用
   const used = new Map<string, boolean>();
@@ -449,7 +471,7 @@ async function pruneGoImports(content: string, filePath: string): Promise<string
       used.set(s.pkg, true); // 域风格路径（含 . / -）保守保留
       continue;
     }
-    used.set(s.pkg, new RegExp(`\\b${escapeRe(s.pkg)}\\.`).test(body));
+    used.set(s.pkg, selectorOperands.has(s.pkg));
   }
 
   // 单行独占的 spec 才可整行删除（多 spec 同行保守保留）
@@ -852,9 +874,9 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
     if (verifyCompile) {
       compileResult = await runCompile(lang, projectRoot, targetRel, newRel);
       if (!compileResult.ok) {
-        // 编译失败：回滚两个文件到拆分前，保证项目不被拆坏
+        // 编译失败：回滚原文件到拆分前，并删除新文件（不能只清空——空 .go 文件本身非法会破坏整个包）
         writeFileSync(targetAbs, content, 'utf8');
-        if (existsSync(newAbs)) writeFileSync(newAbs, '', 'utf8');
+        if (existsSync(newAbs)) rmSync(newAbs);
         rolledBack = true;
       }
     }
@@ -867,7 +889,7 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
     testResult = await runTest(lang, projectRoot, targetRel, newRel);
     if (!testResult.ok) {
       writeFileSync(targetAbs, content, 'utf8');
-      if (existsSync(newAbs)) writeFileSync(newAbs, '', 'utf8');
+      if (existsSync(newAbs)) rmSync(newAbs);
       rolledBack = true;
     }
   }

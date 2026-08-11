@@ -191,6 +191,14 @@ function traverseAndExtract(
     if (name) {
       const kind = nodeTypeToKind(node.type, parent);
       const signature = buildSignature(node, lang.field_map, lang);
+      // Go 方法：receiver 类型即"所属类型"。只填 parent（供社区按类型聚合），
+      // 不改 qualified_name（保留 "Method" 短名，避免破坏既有调用边解析契约）。
+      let symbolParent = parent;
+      if (lang.name === 'go' && !symbolParent) {
+        const receiver = fieldText(node, lang.field_map.receiver || '');
+        const receiverMatch = stripParens(receiver).match(/(?:\*\s*)?(\w+)$/);
+        if (receiverMatch) symbolParent = receiverMatch[1];
+      }
       const qn = parent ? `${parent}.${name}` : name;
       symbols.push({
         name,
@@ -199,7 +207,7 @@ function traverseAndExtract(
         end_line: node.endPosition.row + 1,
         qualified_name: qn,
         signature,
-        parent,
+        parent: symbolParent,
       });
 
       // 进入 body 继续提取（找方法/嵌套类）

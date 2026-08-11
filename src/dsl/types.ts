@@ -13,6 +13,7 @@ import type { Semantic } from './semantic.js';
 import type { Annotation } from './annotation.js';
 import type { Animation, AnimationSystem } from './animation.js';
 import type { Simulation } from './simulation.js';
+import type { ReasoningSystem } from './reasoning.js';
 
 export type {
   DiagramStatus,
@@ -35,6 +36,7 @@ export type {
   CodeTemplate,
   ScaffoldConfig,
   Semantic,
+  Symbol,
 } from './semantic.js';
 
 export type {
@@ -70,6 +72,16 @@ export type {
   SimulationTrace,
 } from './simulation.js';
 
+export type {
+  ReasoningStepKind,
+  ReasoningFoldKind,
+  ReasoningStep,
+  ReasoningFold,
+  ReasoningBudget,
+  ReasoningEntry,
+  ReasoningSystem,
+} from './reasoning.js';
+
 /** 主题配置 */
 export interface ThemeConfig {
   /** 主题 ID */
@@ -95,7 +107,7 @@ export interface ThemeConfig {
 }
 
 /** 主题 ID */
-export type ThemeId = 'blue' | 'sakura' | 'forest' | 'ocean' | 'star';
+export type ThemeId = 'dynamic' | 'blue' | 'sakura' | 'forest' | 'ocean' | 'star';
 
 /** 架构分层定义（序号5/7：architecture-analyzer + Layer Visualization） */
 export interface ArchLayer {
@@ -103,12 +115,52 @@ export interface ArchLayer {
   id: string;
   /** 层名（中文，如 "API 层"） */
   name: string;
+  /** 层名英文版（i18n：切换英文时取值，缺失回退 name） */
+  name_en?: string;
   /** 层职责一句话描述 */
   description: string;
+  /** 层职责一句话描述英文版（i18n） */
+  description_en?: string;
   /** 该层统一着色（深色主题协调的填充色） */
   color: string;
   /** 该层包含的文件节点数 */
   count: number;
+}
+
+/** 功能树下钻：一个社区（analyze_monolith 的功能社区） */
+export interface FeatureCommunity {
+  /** analyze_monolith 社区 id */
+  id: number;
+  /** 社区名（功能锚点名/高频词） */
+  name: string;
+  /** 社区名英文版（i18n） */
+  name_en?: string;
+  /** 社区横跨的文件（相对路径） */
+  files: string[];
+  /** 估算行数 */
+  est_lines: number;
+  /** 社区内符号数 */
+  symbol_count: number;
+}
+
+/** 功能树下钻：一个功能（几大功能之一，社区二次归并） */
+export interface FeatureNode {
+  /** 功能 id（kebab-case，如 renderer） */
+  id: string;
+  /** 功能名（LLM 生成中文名，未配置时用目录/锚点兜底） */
+  name: string;
+  /** 功能名英文版（i18n） */
+  name_en?: string;
+  /** 该功能下的社区 */
+  communities: FeatureCommunity[];
+}
+
+/** 功能树：项目 → 功能 → 社区 → 文件 的逐级下钻数据 */
+export interface FeatureTree {
+  /** 功能层 */
+  features: FeatureNode[];
+  /** 文件 → 主导归属映射（key 为 SemanticFile.id，即 geometry.node.id） */
+  file_map: Record<string, { feature_id: string; community_id: number }>;
 }
 
 /** 顶层 DSL 文档 */
@@ -137,6 +189,10 @@ export interface DesignDSL {
   animations_v2?: AnimationSystem;
   /** 仿真器定义（事件驱动状态机，替代动画时间轴） */
   simulation?: Simulation;
+  /** Agent 推理演示（脚本式回放：输入 → 逐层推理 → token 超量折叠上下文） */
+  reasoning?: ReasoningSystem;
   /** 架构分层结果（序号5/7）：每层定义 + 文件归属，供图层着色与图例 */
   layers?: ArchLayer[];
+  /** 功能树（项目 → 功能 → 社区 → 文件）：逐级下钻导航数据 */
+  feature_tree?: FeatureTree;
 }

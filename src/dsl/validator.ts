@@ -93,6 +93,60 @@ function validateSemanticAnchoring(dsl: DesignDSL): string[] {
   return errors;
 }
 
+/** 校验 reasoning（Agent 推理演示）的引用完整性 */
+function validateReasoningIntegrity(dsl: DesignDSL): string[] {
+  const errors: string[] = [];
+  const reasoning = dsl.reasoning;
+  if (!reasoning) return errors;
+
+  const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+
+  // entry.node 必须在 nodes 中存在
+  if (reasoning.entry && !nodeIds.has(reasoning.entry.node)) {
+    errors.push(
+      `[reasoning_entry_broken] reasoning.entry.node "${reasoning.entry.node}" 在 geometry.nodes 中找不到`,
+    );
+  }
+
+  // steps.id 唯一 + step.node 必须在 nodes 中存在
+  const stepIds = new Set<string>();
+  for (const step of reasoning.steps ?? []) {
+    if (stepIds.has(step.id)) {
+      errors.push(`[reasoning_dup_step] reasoning.steps.id "${step.id}" 重复出现`);
+    }
+    stepIds.add(step.id);
+    if (!nodeIds.has(step.node)) {
+      errors.push(
+        `[reasoning_step_node_broken] reasoning.steps "${step.id}".node "${step.node}" 在 geometry.nodes 中找不到`,
+      );
+    }
+  }
+
+  // folds.at_step 在合法范围 + folds.node 存在 + folds.folded 引用存在的 step
+  const stepCount = reasoning.steps?.length ?? 0;
+  for (const fold of reasoning.folds ?? []) {
+    if (fold.at_step < 1 || fold.at_step > stepCount) {
+      errors.push(
+        `[reasoning_fold_range] reasoning.folds.at_step "${fold.at_step}" 超出步骤范围 1..${stepCount}`,
+      );
+    }
+    if (!nodeIds.has(fold.node)) {
+      errors.push(
+        `[reasoning_fold_node_broken] reasoning.folds.at_step "${fold.at_step}".node "${fold.node}" 在 geometry.nodes 中找不到`,
+      );
+    }
+    for (const sid of fold.folded) {
+      if (!stepIds.has(sid)) {
+        errors.push(
+          `[reasoning_fold_step_broken] reasoning.folds.at_step "${fold.at_step}".folded "${sid}" 在 steps 中找不到`,
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
 /**
  * 校验 DSL 对象
  *
@@ -111,6 +165,11 @@ export function validateDSL(dsl: unknown): ValidationResult {
   const semanticErrors = validateSemanticAnchoring(dsl as DesignDSL);
   if (semanticErrors.length > 0) {
     return { valid: false, errors: semanticErrors };
+  }
+  // 再跑 reasoning 引用完整性校验
+  const reasoningErrors = validateReasoningIntegrity(dsl as DesignDSL);
+  if (reasoningErrors.length > 0) {
+    return { valid: false, errors: reasoningErrors };
   }
   return { valid: true, errors: [] };
 }

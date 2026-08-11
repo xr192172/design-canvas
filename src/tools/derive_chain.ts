@@ -317,7 +317,7 @@ interface CallEdge {
  * 替代原文本正则（name( 出现即连边）——同名不同 receiver 的方法不再误连。
  * graph key/value 均为 qualified_name（class 方法如 Svc.Start）。
  */
-function buildCallGraph(
+export function buildCallGraph(
   symbols: ParsedSymbol[],
   calls: ParsedCall[],
 ): Map<string, CallEdge[]> {
@@ -340,7 +340,7 @@ function buildCallGraph(
 }
 
 /** 入口推导：入度 0 → 链最长优先 → 导出（Go 大写 / Python 无下划线前缀）→ 行号最早 */
-function pickEntry(symbols: ParsedSymbol[], graph: Map<string, CallEdge[]>): ParsedSymbol {
+export function pickEntry(symbols: ParsedSymbol[], graph: Map<string, CallEdge[]>): ParsedSymbol {
   const called = new Set<string>();
   for (const edges of graph.values()) for (const e of edges) called.add(e.callee);
   const candidates = symbols.filter((s) => !called.has(s.qualified_name));
@@ -355,7 +355,7 @@ function pickEntry(symbols: ParsedSymbol[], graph: Map<string, CallEdge[]>): Par
 }
 
 /** DFS pre-order 调用链（邻居按 body 内调用出现位置排序） */
-function walkChain(
+export function walkChain(
   entry: ParsedSymbol,
   symbols: ParsedSymbol[],
   graph: Map<string, CallEdge[]>,

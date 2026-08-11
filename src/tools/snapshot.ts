@@ -64,7 +64,7 @@ export function saveSnapshot(input: SaveSnapshotInput): SaveSnapshotResult {
   const dsl = getDSL(feature);
   if (!dsl) throw new Error(`feature "${feature}" 不存在`);
 
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
   const dir = getSnapshotsDir(feature);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -218,7 +218,7 @@ export function rollbackSnapshot(input: RollbackSnapshotInput): RollbackSnapshot
   // 回滚前先保存当前状态为"回滚前"快照
   const currentDsl = getDSL(feature);
   if (currentDsl) {
-    const rollbackTimestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const rollbackTimestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
     const rollbackLabel = '回滚前自动备份';
     const rollbackFile = path.join(dir, snapshotFileName(rollbackLabel, rollbackTimestamp));
     const rollbackSnapshot = {

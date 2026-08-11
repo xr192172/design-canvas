@@ -188,8 +188,10 @@ function buildOutput(p, existingText) {
   if (present(raw)) {
     try {
       parsed = JSON.parse(raw);
-    } catch {
-      parsed = null; // 损坏的 JSON 按空重建（原文件已备份）
+    } catch (e) {
+      // 损坏的 JSON 不静默覆盖——保留原文件，让用户手动修复
+      console.error(`  ✗ ${p.label.padEnd(22)} 配置文件 JSON 解析失败，跳过写入（请手动修复 ${p.configPath}）`);
+      return null;
     }
   }
   const patched = jsonPatch(parsed, p.keyPath, p.serverKey, serverValue);
@@ -245,6 +247,7 @@ for (const p of targets) {
   }
 
   const out = buildOutput(p, st.text);
+  if (!out) continue; // JSON 解析失败，buildOutput 已报错
   if (DRY) {
     console.log(`  · ${p.label.padEnd(22)} [dry-run] 将写入 ${p.configPath}`);
     continue;

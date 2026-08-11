@@ -13,7 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { importProject } from '../../src/tools/import_project';
-import { getDSL } from '../../src/storage';
+import { getDSL, getLiveFeature } from '../../src/storage';
+import { diffViews } from '../../src/tools/diff_views';
 
 let fixtureRoot: string;
 
@@ -175,5 +176,119 @@ describe('import_project', () => {
     expect(result.files_parsed).toBe(3);
     expect(result.skipped.length).toBeGreaterThan(0);
     expect(result.skipped[0]).toContain('max_files');
+  });
+
+  it('design_mode：仅生成顶级目录节点，无文件节点、无悬空边', async () => {
+    await importProject({
+      project_dir: fixtureRoot,
+      feature: 'design_mode_demo',
+      title: '设计模式',
+      design_mode: true,
+    });
+
+    const dsl = getDSL('design_mode_demo')!;
+    expect(dsl).not.toBeNull();
+
+    const dirNodes = dsl.geometry.nodes.filter((n) => n.type === 'module');
+    const fileNodes = dsl.geometry.nodes.filter((n) => n.type === 'file');
+    // 仅 4 个顶级目录（src/pkg/pylib/submod），无文件节点
+    expect(fileNodes.length).toBe(0);
+    expect(dirNodes.length).toBe(4);
+    const dirIds = new Set(dirNodes.map((n) => n.id));
+    expect(dirIds).toContain('dir_src');
+    expect(dirIds).toContain('dir_pkg');
+    expect(dirIds).toContain('dir_pylib');
+    expect(dirIds).toContain('dir_submod');
+    // 不含深层目录节点（不应出现 dir_src_util 等）
+    expect(dirIds.has('dir_src_util')).toBe(false);
+
+    // 无悬空边：每条边的 from/to 都必须落在已存在节点上
+    const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+    for (const e of dsl.geometry.edges) {
+      expect(nodeIds.has(e.from), `边 ${e.id} 的 from=${e.from} 悬空`).toBe(true);
+      expect(nodeIds.has(e.to), `边 ${e.id} 的 to=${e.to} 悬空`).toBe(true);
+    }
+
+    // 语义层为目录级聚合（path 带末尾斜杠）
+    const srcFile = dsl.semantic.files.find((f) => f.path === 'src/');
+    expect(srcFile).toBeDefined();
+    expect(srcFile!.expected_apis!.length).toBeGreaterThan(0);
+  });
+
+  it('full chain：design 与 live 视图落在同一 dataHome，diff_views 能同时找到两者', async () => {
+    // design_mode 导入（写设计视图 → dataHome）
+    await importProject({
+      project_dir: fixtureRoot,
+      feature: 'chain_demo',
+      title: '全链路',
+      design_mode: true,
+    });
+    // live_only 导入（不传 live_dir，默认与设计视图同根 → dataHome）
+    await importProject({
+      project_dir: fixtureRoot,
+      feature: 'chain_demo',
+      title: '全链路 live',
+      live_only: true,
+    });
+
+    // 两视图都应可读（同一根目录）
+    const design = getDSL('chain_demo');
+    const live = getLiveFeature('chain_demo');
+    expect(design).not.toBeNull();
+    expect(live).not.toBeNull();
+
+    // diff_views 无 live_dir 也能同时命中 design 与 live（dog food 路径修正）
+    const diff = diffViews({ feature: 'chain_demo' });
+    expect(diff.data.design_exists).toBe(true);
+    expect(diff.data.live_exists).toBe(true);
+    // design=目录级聚合，live=文件级 → 语义差异理应有大量 added
+    expect(diff.data.summary.removed_files).toBeGreaterThan(0);
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // gen_roles + design_mode：LLM 生成的标题键与 lookup 键必须一致
+  // 回归测试：之前设计模式下 semanticFiles 路径带末尾 '/'，传给 LLM 的
+  // path 字段是 'src/'，而 LLM 按"path 必须来自给定清单"会原样回传 'src/'。
+  // 但 lookup 用的是 searchRel（去掉末尾 '/' 的 'src'），永远查不到。
+  // 修复：传给 LLM 的 path 字段提前去掉 '/'，与 searchRel 对齐。
+  // ─────────────────────────────────────────────────────────────
+  it('gen_roles + design_mode：LLM 返回的标题能正确写回 dir 节点', async () => {
+    const roleMod = await import('../../src/tools/role_title');
+    const orig = roleMod.generateFileRoleTitles;
+    // 模拟真实 LLM：原样回传输入的 path 作为 key（这是 LLM 提示"path 必须来自给定清单"的标准行为）
+    Object.defineProperty(roleMod, 'generateFileRoleTitles', {
+      value: async (files: Array<{ path: string }>) => {
+        const out: Record<string, string> = {};
+        for (const f of files) out[f.path] = `中文职责:${f.path}`;
+        return out;
+      },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      await importProject({
+        project_dir: fixtureRoot,
+        feature: 'roles_demo',
+        title: '职责演示',
+        design_mode: true,
+        gen_roles: true,
+      });
+      const dsl = getDSL('roles_demo')!;
+      expect(dsl).not.toBeNull();
+      const dirNodes = dsl.geometry.nodes.filter((n) => n.type === 'module');
+      // 至少有一个 dir 节点拿到了标题
+      const titled = dirNodes.filter((n) => typeof n.title === 'string' && n.title.length > 0);
+      expect(titled.length).toBeGreaterThan(0);
+      // 验证 src 节点确实拿到了标题（lookup 必须能命中）
+      const srcNode = dirNodes.find((n) => n.id === 'dir_src');
+      expect(srcNode).toBeDefined();
+      expect(srcNode!.title).toMatch(/中文职责:src\/?$/);
+    } finally {
+      Object.defineProperty(roleMod, 'generateFileRoleTitles', {
+        value: orig,
+        configurable: true,
+        writable: true,
+      });
+    }
   });
 });

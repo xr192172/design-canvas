@@ -7,7 +7,6 @@
  * 产出：
  *   - geometry.nodes：目录容器节点（type=module）+ 文件节点（type=file，status=done）
  *   - geometry.edges：contains（目录父子/文件归属）+ imports（跨文件依赖）
- *   - semantic.files：每文件 expected_apis/actual_apis = tree-sitter 解析出的符号签名
  *
  * 布局：递归分组布局——目录容器紧凑包裹子节点，组内按依赖拓扑分列，
  * 避免自由依赖布局导致容器互相遮罩。
@@ -21,7 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi } from '../dsl/types.js';
+import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi, Symbol } from '../dsl/types.js';
 import { saveDSL, saveLiveFeature } from '../storage.js';
 import { detectArchLayers } from './layer_detect.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
@@ -29,6 +28,7 @@ import type { ParsedImport } from './ts_kernel/index.js';
 import { countLines, assessLines } from './monolith.js';
 import type { Database } from '../db/db.js';
 import { syncProject, getFileParse, pruneDeletedFiles } from '../db/symbols.js';
+import { generateFileRoleTitles } from './role_title.js';
 
 export interface ImportProjectInput {
   /** 目标项目根目录（绝对路径或相对 cwd） */
@@ -62,6 +62,17 @@ export interface ImportProjectInput {
    * watch_project 监听任意项目时传 project_dir，使实际 DSL 与该项目 cache.db 同目录归位。
    */
   live_dir?: string;
+  /**
+   * 可选：是否用 LLM 为每个文件节点生成中文职责主标题（node.title）。
+   * 默认 false（不引入 LLM 依赖与延迟）；自分析/讲解场景开启。未配置 LLM 时静默跳过。
+   */
+  gen_roles?: boolean;
+  /**
+   * 可选：设计模式 — 聚合文件到目录层级，只输出高层模块节点，不输出每个文件。
+   * 用于从现有代码快速生成设计意图 DSL（草图供人后续调整）。默认 false=保留每个文件。
+   * true 时：同一目录下的所有文件聚合为一个模块容器节点，符号和 API 汇总到语义层。
+   */
+  design_mode?: boolean;
 }
 
 export interface ImportProjectResult {
@@ -282,7 +293,7 @@ function buildIndex(files: FileEntry[]): {
  * 把一条 import 解析为项目内部文件列表（0..n）
  * - relative：按导入者目录解析，补扩展名 / index
  * - Go package：module 前缀剥离 → 包目录下全部文件
- * - Python dotted：点转斜杠，先试项目根、再试导入者目录
+ * - Python 点分模块 → 点转斜杠，先试项目根再试导入者目录
  */
 function resolveImport(
   imp: ParsedImport,
@@ -434,10 +445,9 @@ export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>):
   // barycenter 列内排序：邻居在上层/下层的平均 y 作为排序键，迭代 3 轮收敛
   const inNeighbors = new Map<string, string[]>();
   const outNeighbors = new Map<string, string[]>();
-  for (const id of ids) { inNeighbors.set(id, []); outNeighbors.set(id, []); }
   for (const [f, t] of deps) {
-    if (inNeighbors.has(t)) inNeighbors.get(t)!.push(f);
-    if (outNeighbors.has(f)) outNeighbors.get(f)!.push(t);
+    if (inNeighbors.has(f)) inNeighbors.get(f)!.push(t);
+    if (outNeighbors.has(t)) outNeighbors.get(t)!.push(f);
   }
   // 初始 y：按列内 rank 索引占位（供 barycenter 计算）
   for (const r of ranks) {
@@ -463,10 +473,10 @@ export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>):
           const bv = by.length ? by.reduce((s, v) => s + v, 0) / by.length : Number.MAX_VALUE;
           return av - bv;
         });
+        // 重新赋 y
+        let yCursor = 0;
+        for (const it of col) { it.y = yCursor; yCursor += it.h + ROW_GAP; }
       }
-      // 重新赋 y
-      let yCursor = 0;
-      for (const it of col) { it.y = yCursor; yCursor += it.h + ROW_GAP; }
     }
   }
 
@@ -493,6 +503,35 @@ export function layoutGroup(items: LayoutItem[], deps: Array<[string, string]>):
 // ─────────────────────────────────────────────────────────────
 // 主流程
 // ─────────────────────────────────────────────────────────────
+
+/** ParsedSymbol.kind 到 Symbol.kind 的映射（仅非函数类） */
+function parsedKindToSymbolKind(kind: string): Symbol['kind'] {
+  switch (kind) {
+    case 'class': return 'class';
+    case 'interface': return 'interface';
+    case 'type': return 'type';
+    default: return 'type';
+  }
+}
+
+/** 汇总目录下所有符号和 API */
+function aggregateDirSymbols(
+  dir: string,
+  files: FileEntry[],
+  parsed: Map<string, { symbols: ExpectedApi[]; nonFuncSymbols: Symbol[]; imports: ParsedImport[] }>,
+): { apis: ExpectedApi[]; nonFuncSymbols: Symbol[] } {
+  const apis: ExpectedApi[] = [];
+  const nonFuncSymbols: Symbol[] = [];
+  for (const f of files) {
+    const p = parsed.get(f.rel);
+    if (p) {
+      // 每个目录最多保留 50 API，避免过大
+      apis.push(...p.symbols.slice(0, 50 - apis.length));
+      nonFuncSymbols.push(...p.nonFuncSymbols);
+    }
+  }
+  return { apis, nonFuncSymbols };
+}
 
 export async function importProject(input: ImportProjectInput): Promise<ImportProjectResult> {
   const { feature, max_files = 200, include_tests = false } = input;
@@ -523,23 +562,42 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const goModules = readGoModules(root);
 
   // 2. 解析符号 + import（顺带统计行数，零成本复用已读内容做单文件监控）
-  const parsed = new Map<string, { symbols: ExpectedApi[]; imports: ParsedImport[] }>();
+  const parsed = new Map<string, { symbols: ExpectedApi[]; nonFuncSymbols: Symbol[]; imports: ParsedImport[] }>();
   const lineCounts = new Map<string, number>();
   let symbolsFound = 0;
   let cacheStats: { hits: number; reparsed: number; failed: number } | undefined;
 
-  /** 两条路径共用的收录逻辑：50 上限截断 + 计数 + 登记 */
-  const ingest = (rel: string, syms: Array<{ signature: string; start_line: number }>, imps: ParsedImport[]): void => {
-    // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
-    const apis: ExpectedApi[] = syms.slice(0, 50).map((s) => ({
-      signature: s.signature,
-      notes: `line ${s.start_line}`,
-    }));
-    if (syms.length > 50) {
-      skipped.push(`${rel}: 符号数 ${syms.length} 超上限，仅收录前 50`);
+  /** 两条路径共用的收录逻辑：50 上限截断 + 分离非函数符号 + 计数 + 登记 */
+  const ingest = (rel: string, syms: Array<{ kind: string; name: string; signature: string | null; start_line: number; end_line: number }>, imps: ParsedImport[]): void => {
+    const funcApis: ExpectedApi[] = [];
+    const nonFuncSymbols: Symbol[] = [];
+    for (const s of syms) {
+      if (s.kind === 'function' || s.kind === 'method') {
+        // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
+        if (funcApis.length < 50) {
+          funcApis.push({
+            signature: s.signature ?? s.name,
+            line: s.start_line,
+            end_line: s.end_line,
+            notes: `L${s.start_line}-${s.end_line}`,
+          });
+        }
+      } else {
+        // 非函数符号（class/interface/type）——无数量限制，数量通常远少于函数
+        nonFuncSymbols.push({
+          name: s.name,
+          kind: parsedKindToSymbolKind(s.kind),
+          line: s.start_line,
+          end_line: s.end_line,
+          signature: s.signature ?? undefined,
+        });
+      }
     }
-    symbolsFound += apis.length;
-    parsed.set(rel, { symbols: apis, imports: imps });
+    if (syms.length > 50) {
+      skipped.push(`${rel}: 符号数 ${syms.length} 超上限，仅收录前 50 个 API`);
+    }
+    symbolsFound += funcApis.length;
+    parsed.set(rel, { symbols: funcApis, nonFuncSymbols, imports: imps });
   };
 
   if (input.cache_db) {
@@ -564,17 +622,13 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
         // 缓存侧不写 files 行，下次运行自动重试
         cacheStats.failed++;
         skipped.push(`解析失败: ${f.rel}（${r?.error || '缓存读取异常'}），该文件的依赖边与 API 缺失`);
-        parsed.set(f.rel, { symbols: [], imports: [] });
+        parsed.set(f.rel, { symbols: [], nonFuncSymbols: [], imports: [] });
         continue;
       }
       if (r.status === 'skipped') cacheStats.hits++;
       else cacheStats.reparsed++;
       lineCounts.set(f.rel, cached.line_count);
-      ingest(
-        f.rel,
-        cached.symbols.map((s) => ({ signature: s.signature ?? s.name, start_line: s.start_line })),
-        cached.imports,
-      );
+      ingest(f.rel, cached.symbols, cached.imports);
     }
   } else {
     for (const f of files) {
@@ -651,95 +705,140 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '_');
   const fileNodeId = (rel: string): string => `file_${sanitize(rel)}`;
   const dirNodeId = (rel: string): string => `dir_${sanitize(rel)}`;
+  /** 设计模式下：返回文件所属的顶级目录节点 ID（root 的直接子目录） */
+  const topDirNodeId = (rel: string): string => {
+    const slash = rel.indexOf('/');
+    if (slash === -1) return dirNodeId(''); // 根目录文件，聚合到根
+    return dirNodeId(rel.slice(0, slash));
+  };
 
   // 6. 布局（后序：先内层目录，尺寸向上传递）
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   const semanticFiles: SemanticFile[] = [];
 
-  const fileLayout = new Map<string, LayoutItem>();
-  for (const f of files) {
-    fileLayout.set(f.rel, { id: fileNodeId(f.rel), w: FILE_W, h: FILE_H, x: 0, y: 0 });
-  }
+  /** 收集子树下所有文件（递归） */
+  const collectSubtreeFiles = (d: DirNode): FileEntry[] => {
+    const result = [...d.files];
+    for (const sub of d.subdirs.values()) {
+      result.push(...collectSubtreeFiles(sub));
+    }
+    return result;
+  };
 
   /** 布局一个目录，返回其容器尺寸（根目录不生成容器节点） */
   const layoutDir = (dir: DirNode): { w: number; h: number } => {
     const items: LayoutItem[] = [];
     const localDeps: Array<[string, string]> = [];
 
-    // 子目录先布局（递归），获得尺寸后作为 item
-    // 排序：入口目录（含 main/index/server/app 文件）优先，其余按子树大小降序
-    const subdirOrder = (a: DirNode, b: DirNode): number => {
-      const aIsEntry = a.files.some((f) => /main|index|server|app\./i.test(f.rel));
-      const bIsEntry = b.files.some((f) => /main|index|server|app\./i.test(f.rel));
-      if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
-      return b.subtreeSize - a.subtreeSize;
-    };
-    const subdirItems = new Map<string, LayoutItem>();
-    for (const sub of [...dir.subdirs.values()].sort(subdirOrder)) {
-      const size = layoutDir(sub);
-      const item: LayoutItem = { id: dirNodeId(sub.rel), w: size.w, h: size.h, x: 0, y: 0 };
-      subdirItems.set(sub.rel, item);
-      items.push(item);
-    }
-    // 文件节点（排序：含 main/index/server/app 的入口文件优先，其余按行数降序——大文件先占位）
-    const fileOrder = (a: FileEntry, b: FileEntry): number => {
-      const aIsEntry = /main|index|server|app\./i.test(a.rel);
-      const bIsEntry = /main|index|server|app\./i.test(b.rel);
-      if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
-      return (lineCounts.get(b.rel) ?? 0) - (lineCounts.get(a.rel) ?? 0);
-    };
-    for (const f of [...dir.files].sort(fileOrder)) {
-      items.push(fileLayout.get(f.rel)!);
-    }
-    // 局部依赖：两端都在本目录直接子级（文件→文件；涉及子目录内部的聚合到子目录容器）
-    const ownerOf = (rel: string): string => {
-      // 文件 rel 属于本组哪个直接子项：自身（本目录文件）或某个子目录容器
-      if (dir.files.some((f) => f.rel === rel)) return fileNodeId(rel);
-      for (const sub of dir.subdirs.keys()) {
-        if (rel.startsWith(sub + '/')) return dirNodeId(sub);
+    // 设计模式：聚合子文件到当前目录节点，不生成单个文件节点
+    if (input.design_mode && dir.rel !== '') {
+      // 在 design_mode 下，整个目录只生成一个模块节点，不需要展开子文件
+      items.push({ id: dirNodeId(dir.rel), w: FILE_W * Math.min(dir.subtreeSize, 3), h: FILE_H, x: 0, y: 0 });
+    } else {
+      // 子目录先布局（递归），获得尺寸后作为 item
+      const subdirOrder = (a: DirNode, b: DirNode): number => {
+        const aIsEntry = a.files.some((f) => /main|index|server|app\./i.test(f.rel));
+        const bIsEntry = b.files.some((f) => /main|index|server|app\./i.test(f.rel));
+        if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
+        return b.subtreeSize - a.subtreeSize;
+      };
+      for (const sub of [...dir.subdirs.values()].sort(subdirOrder)) {
+        const size = layoutDir(sub);
+        items.push({ id: dirNodeId(sub.rel), w: size.w, h: size.h, x: 0, y: 0 });
       }
-      return '';
-    };
-    for (const [fromRel, toRel] of fileDeps) {
-      const a = ownerOf(fromRel);
-      const b = ownerOf(toRel);
-      if (a && b && a !== b) localDeps.push([a, b]);
-    }
-    const content = layoutGroup(items, localDeps);
-
-    // 写回子项局部坐标（相对本目录内容原点，最终在 accumulate 阶段统一平移）
-    for (const item of items) {
-      if (item.id.startsWith('file_')) {
-        const rel = files.find((f) => fileNodeId(f.rel) === item.id)!.rel;
-        fileLayout.get(rel)!.x = item.x;
-        fileLayout.get(rel)!.y = item.y;
-      } else {
-        const subRel = [...dirByRel.values()].find((d) => d.rel !== '' && dirNodeId(d.rel) === item.id)!.rel;
-        // 仅记录子目录容器在本组内的位置（不递归平移，避免与 accumulate 双重累加）
-        dirOffset.set(subRel, { x: item.x, y: item.y });
+      // 文件节点（排序：入口文件优先，其余按行数降序）
+      const fileOrder = (a: FileEntry, b: FileEntry): number => {
+        const aIsEntry = /main|index|server|app\./i.test(a.rel);
+        const bIsEntry = /main|index|server|app\./i.test(b.rel);
+        if (aIsEntry !== bIsEntry) return aIsEntry ? -1 : 1;
+        return (lineCounts.get(b.rel) ?? 0) - (lineCounts.get(a.rel) ?? 0);
+      };
+      if (!input.design_mode) {
+        for (const f of [...dir.files].sort(fileOrder)) {
+          items.push(fileLayout.get(f.rel)!);
+        }
       }
+      // 局部依赖：两端都在本目录直接子级
+      const ownerOf = (rel: string): string => {
+        if (dir.files.some((f) => f.rel === rel)) return fileNodeId(rel);
+        for (const sub of dir.subdirs.keys()) {
+          if (rel.startsWith(sub + '/')) return dirNodeId(sub);
+        }
+        return '';
+      };
+      for (const [fromRel, toRel] of fileDeps) {
+        const a = ownerOf(fromRel);
+        const b = ownerOf(toRel);
+        if (a && b && a !== b) localDeps.push([a, b]);
+      }
+      const content = layoutGroup(items, localDeps);
+
+      // 写回子项局部坐标
+      for (const item of items) {
+        if (item.id.startsWith('file_')) {
+          const rel = files.find((f) => fileNodeId(f.rel) === item.id)!.rel;
+          fileLayout.get(rel)!.x = item.x;
+          fileLayout.get(rel)!.y = item.y;
+        } else {
+          const subRel = [...dirByRel.values()].find((d) => d.rel !== '' && dirNodeId(d.rel) === item.id)!.rel;
+          dirOffset.set(subRel, { x: item.x, y: item.y });
+        }
+      }
+
+      const containerW = content.w + PAD * 2;
+      const containerH = content.h + PAD * 2 + TITLE_H;
+      if (dir.rel !== '') {
+        nodes.push({
+          id: dirNodeId(dir.rel),
+          label: `📁 ${dir.name}`,
+          x: 0,
+          y: 0,
+          width: containerW,
+          height: containerH,
+          type: 'module',
+          style: { ...DIR_STYLE, borderRadius: 8 },
+        });
+      }
+      dirContentOffset.set(dir.rel, { dx: PAD, dy: PAD + TITLE_H, w: containerW, h: containerH });
+      return { w: containerW, h: containerH };
     }
 
-    const containerW = content.w + PAD * 2;
-    const containerH = content.h + PAD * 2 + TITLE_H;
-    // 容器节点（根目录除外）
-    if (dir.rel !== '') {
-      nodes.push({
-        id: dirNodeId(dir.rel),
-        label: `📁 ${dir.name}`,
-        x: 0, // 占位，最终平移阶段统一赋值
-        y: 0,
-        width: containerW,
-        height: containerH,
-        type: 'module',
-        style: { ...DIR_STYLE, borderRadius: 8 },
-      });
-    }
-    // 记录容器内容偏移（子项需要额外加上 PAD / PAD+TITLE_H）
+    // ── 设计模式非根目录：单个模块节点，聚合符号到语义层 ──
+    const subtreeFiles = collectSubtreeFiles(dir);
+    const { apis, nonFuncSymbols } = aggregateDirSymbols(dir.rel, subtreeFiles, parsed);
+    semanticFiles.push({
+      id: dirNodeId(dir.rel),
+      path: dir.rel + '/',
+      responsibility: `${dir.rel} — 聚合 ${apis.length + nonFuncSymbols.length} 个符号`,
+      status: 'done',
+      expected_apis: apis.length > 0 ? apis : undefined,
+      symbols: nonFuncSymbols.length > 0 ? nonFuncSymbols : undefined,
+      lines: subtreeFiles.reduce((sum, f) => sum + (lineCounts.get(f.rel) ?? 0), 0),
+    });
+    const itemW = FILE_W * Math.min(dir.subtreeSize, 3);
+    const containerW = itemW + PAD * 2;
+    const containerH = FILE_H + PAD * 2 + TITLE_H;
+    nodes.push({
+      id: dirNodeId(dir.rel),
+      label: `📁 ${dir.name}`,
+      x: 0,
+      y: 0,
+      width: containerW,
+      height: containerH,
+      type: 'module',
+      style: { ...DIR_STYLE, borderRadius: 8 },
+    });
     dirContentOffset.set(dir.rel, { dx: PAD, dy: PAD + TITLE_H, w: containerW, h: containerH });
     return { w: containerW, h: containerH };
   };
+
+  const fileLayout = new Map<string, LayoutItem>();
+  if (!input.design_mode) {
+    for (const f of files) {
+      fileLayout.set(f.rel, { id: fileNodeId(f.rel), w: FILE_W, h: FILE_H, x: 0, y: 0 });
+    }
+  }
 
   const dirContentOffset = new Map<string, { dx: number; dy: number; w: number; h: number }>();
   const dirOffset = new Map<string, { x: number; y: number }>();
@@ -747,14 +846,11 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   // 根级布局：把根目录当作一个组（不生成根容器）
   const rootSize = layoutDir(rootDir);
 
-  // 7. 汇总坐标：自根向下累加。文件局部坐标相对于所属目录内容原点，
-  //    目录偏移（dirOffset）只在此处应用一次。
-  //    节点最终坐标 = 局部坐标 + Σ 祖先（容器位置 + 内容偏移）
+  // 7. 汇总坐标：自根向下累加
   const accumulate = (dirRel: string, baseX: number, baseY: number): void => {
     const d = dirByRel.get(dirRel)!;
     const selfOff = dirOffset.get(dirRel) || { x: 0, y: 0 };
     const content = dirContentOffset.get(dirRel)!;
-    // 容器左上角（根目录无容器，base 即内容原点）
     const containerX = baseX + selfOff.x;
     const containerY = baseY + selfOff.y;
     const contentX = dirRel === '' ? containerX : containerX + content.dx;
@@ -764,53 +860,65 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       node.x = containerX;
       node.y = containerY;
     }
-    for (const f of d.files) {
-      const item = fileLayout.get(f.rel)!;
-      item.x += contentX;
-      item.y += contentY;
-    }
-    for (const sub of d.subdirs.values()) {
-      accumulate(sub.rel, contentX, contentY);
+
+    if (input.design_mode && dirRel !== '') {
+      // 设计模式非根目录：不处理子文件，也不递归子目录（已聚合到当前目录节点）
+    } else {
+      if (!input.design_mode) {
+        for (const f of d.files) {
+          const item = fileLayout.get(f.rel)!;
+          item.x += contentX;
+          item.y += contentY;
+        }
+      }
+      for (const sub of d.subdirs.values()) {
+        accumulate(sub.rel, contentX, contentY);
+      }
     }
   };
   accumulate('', MARGIN, MARGIN);
 
-  // 8. 文件节点 + 边 + 语义层
-  for (const f of files) {
-    const p = parsed.get(f.rel);
-    const apis = p?.symbols || [];
-    const item = fileLayout.get(f.rel)!;
-    const langKey = f.ext.slice(1);
-    const colors = LANG_COLORS[langKey] || DEFAULT_FILE_COLOR;
-    const apiCount = apis.length;
-    nodes.push({
-      id: fileNodeId(f.rel),
-      label: `${path.posix.basename(f.rel)} · ${apiCount} APIs`,
-      x: Math.round(item.x),
-      y: Math.round(item.y),
-      width: FILE_W,
-      height: FILE_H,
-      type: 'file',
-      status: 'done',
-      description: f.rel,
-      style: { ...colors, borderRadius: 4 },
-    });
-    // 目录归属边
-    if (f.dir && f.dir !== '.') {
-      edges.push({ id: `contains_${sanitize(f.dir)}_${sanitize(f.rel)}`, from: dirNodeId(f.dir), to: fileNodeId(f.rel), label: 'contains' });
+  // 8. 文件节点 + 边 + 语义层（设计模式：每个目录聚合所有子文件符号）
+  if (!input.design_mode) {
+    for (const f of files) {
+      const p = parsed.get(f.rel);
+      const apis = p?.symbols || [];
+      const syms = p?.nonFuncSymbols || [];
+      const item = fileLayout.get(f.rel)!;
+      const langKey = f.ext.slice(1);
+      const colors = LANG_COLORS[langKey] || DEFAULT_FILE_COLOR;
+      const apiCount = apis.length;
+      nodes.push({
+        id: fileNodeId(f.rel),
+        label: `${path.posix.basename(f.rel)} · ${apiCount} APIs`,
+        x: Math.round(item.x),
+        y: Math.round(item.y),
+        width: FILE_W,
+        height: FILE_H,
+        type: 'file',
+        status: 'done',
+        description: f.rel,
+        style: { ...colors, borderRadius: 4 },
+      });
+      // 目录归属边
+      if (f.dir && f.dir !== '.') {
+        edges.push({ id: `contains_${sanitize(f.dir)}_${sanitize(f.rel)}`, from: dirNodeId(f.dir), to: fileNodeId(f.rel), label: 'contains' });
+      }
+      // 嵌套目录 contains 边
+      semanticFiles.push({
+        id: fileNodeId(f.rel),
+        path: f.rel,
+        responsibility: `${f.dir === '.' ? '根目录' : f.dir} — ${apiCount} 个 API（导入自 ${(p?.imports.length || 0)} 个模块）`,
+        status: 'done',
+        expected_apis: apis,
+        actual_apis: apis,
+        symbols: syms.length > 0 ? syms : undefined,
+        lines: lineCounts.get(f.rel) ?? 0,
+      });
     }
-    // 嵌套目录 contains 边
-    semanticFiles.push({
-      id: fileNodeId(f.rel),
-      path: f.rel,
-      responsibility: `${f.dir === '.' ? '根目录' : f.dir} — ${apiCount} 个 API（导入自 ${(p?.imports.length || 0)} 个模块）`,
-      status: 'done',
-      expected_apis: apis,
-      actual_apis: apis,
-      lines: lineCounts.get(f.rel) ?? 0,
-    });
   }
   for (const d of [...dirByRel.values()].sort((a, b) => a.rel.localeCompare(b.rel))) {
+    if (input.design_mode) continue; // 设计模式只保留顶级目录节点，无父子 contains 边
     if (d.rel === '') continue;
     const parentRel = path.posix.dirname(d.rel);
     const parentId = parentRel === '.' || parentRel === '' ? null : dirNodeId(parentRel);
@@ -818,10 +926,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       edges.push({ id: `contains_${sanitize(parentRel)}_${sanitize(d.rel)}`, from: parentId, to: dirNodeId(d.rel), label: 'contains' });
     }
   }
-  // 依赖边渲染：与布局排序同构的分层聚合——
-  // 同目录文件间保留文件级短边（信息精确）；
-  // 跨目录依赖聚合到"最近公共祖先层的两个直接子项"之间（文件或目录容器），
-  // 同一对节点合并为一条 label ×N。边只存在于同层兄弟之间，结构性消除跨容器穿越。
+
+  // 聚合依赖边
   const normDir = (d: string): string => (d === '.' ? '' : d);
   const ancestorsOf = (dir: string): string[] => {
     const out: string[] = [];
@@ -844,30 +950,45 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   const aggEdges = new Map<string, { from: string; to: string; n: number }>();
   const directEdges: Array<[string, string]> = [];
   for (const [fromRel, toRel] of fileDeps) {
-    const fromAnc = ancestorsOf(path.posix.dirname(fromRel));
-    const toAncSet = new Set(ancestorsOf(path.posix.dirname(toRel)));
-    const lca = fromAnc.find((d) => toAncSet.has(d));
-    if (lca === undefined) continue;
-    const a = ownerAtLca(fromRel, lca);
-    const b = ownerAtLca(toRel, lca);
-    if (a === b) continue;
-    if (a.startsWith('file_') && b.startsWith('file_')) {
-      directEdges.push([fromRel, toRel]);
-    } else {
-      const key = `${a}|${b}`;
+    if (input.design_mode) {
+      // 设计模式：只聚合到顶级目录（root 的直接子目录），忽略根目录散文件依赖（无 '/' 的 rel）
+      if (!fromRel.includes('/') || !toRel.includes('/')) continue;
+      const fromTop = topDirNodeId(fromRel);
+      const toTop = topDirNodeId(toRel);
+      if (fromTop === toTop) continue; // 同一目录内，跳过（内部依赖）
+      const key = `${fromTop}|${toTop}`;
       const cur = aggEdges.get(key);
       if (cur) cur.n++;
-      else aggEdges.set(key, { from: a, to: b, n: 1 });
+      else aggEdges.set(key, { from: fromTop, to: toTop, n: 1 });
+    } else {
+      const fromAnc = ancestorsOf(path.posix.dirname(fromRel));
+      const toAncSet = new Set(ancestorsOf(path.posix.dirname(toRel)));
+      const lca = fromAnc.find((d) => toAncSet.has(d));
+      if (lca === undefined) continue;
+      const a = ownerAtLca(fromRel, lca);
+      const b = ownerAtLca(toRel, lca);
+      if (a === b) continue;
+      if (a.startsWith('file_') && b.startsWith('file_')) {
+        directEdges.push([fromRel, toRel]);
+      } else {
+        const key = `${a}|${b}`;
+        const cur = aggEdges.get(key);
+        if (cur) cur.n++;
+        else aggEdges.set(key, { from: a, to: b, n: 1 });
+      }
     }
   }
-  for (const [fromRel, toRel] of directEdges) {
-    edges.push({
-      id: `dep_${sanitize(fromRel)}_${sanitize(toRel)}`,
-      from: fileNodeId(fromRel),
-      to: fileNodeId(toRel),
-      label: 'imports',
-      type: 'dashed',
-    });
+
+  if (!input.design_mode) {
+    for (const [fromRel, toRel] of directEdges) {
+      edges.push({
+        id: `dep_${sanitize(fromRel)}_${sanitize(toRel)}`,
+        from: fileNodeId(fromRel),
+        to: fileNodeId(toRel),
+        label: 'imports',
+        type: 'dashed',
+      });
+    }
   }
   const aggSorted = [...aggEdges.values()].sort((x, y) => x.from.localeCompare(y.from) || x.to.localeCompare(y.to));
   for (const { from, to, n } of aggSorted) {
@@ -880,6 +1001,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       style: n > 3 ? { strokeWidth: 2 } : undefined,
     });
   }
+
   const renderedDepEdges = directEdges.length + aggSorted.length;
 
   // 9. 组装 DSL
@@ -890,7 +1012,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     type: 'feature_diagram',
     feature,
     version: '1.0.0',
-    title: input.title || `${feature}（import_project 生成）`,
+    title: input.title || `${feature}（import_project 生成${input.design_mode ? ' - 设计模式' : ''}）`,
     status: 'done',
     geometry: {
       // 坐标已在本工具内全部算好（递归分组布局），渲染端按显式 x/y 摆放
@@ -907,6 +1029,48 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   // 回填 node.arch_layer + semantic.files[].layer，并生成 dsl.layers 供图例/着色。
   const layered = detectArchLayers(dsl);
 
+  // 可选职责标题：用 LLM 为文件节点生成中文职责主标题（node.title），文件名保留为 label 副标题。
+  // 未配置 LLM 时 generateFileRoleTitles 返回空，此处静默跳过，不影响导入。
+  let roleNote: string | null = null;
+  if (input.gen_roles) {
+    const roleFiles = input.design_mode
+      ? semanticFiles
+          .filter(sf => sf.path)
+          .map(sf => {
+            // 去掉 design_mode 路径末尾的 '/'，与后续 lookup searchRel 对齐，
+            // 否则 LLM 按提示要求原样回传 'src/'，但 lookup 用 'src' 找，永远查不到。
+            const p = sf.path!.endsWith('/') ? sf.path!.slice(0, -1) : sf.path!;
+            return {
+              path: p,
+              dir: sf.path === '' ? '根' : p,
+              apis: (sf.expected_apis ?? []).map(s => s.signature),
+            };
+          })
+      : files.map((f) => ({
+          path: f.rel,
+          dir: f.dir === '.' ? '根' : f.dir,
+          apis: (parsed.get(f.rel)?.symbols ?? []).map((s) => s.signature),
+        }));
+    const titles = await generateFileRoleTitles(roleFiles);
+    if (Object.keys(titles).length > 0) {
+      for (const n of nodes) {
+        if (n.type !== 'file' && n.type !== 'module') continue;
+        // design_mode：语义路径是 dirRel/，去掉末尾斜杠找标题
+        const rel = n.description || (n.id.startsWith('dir_') ? n.id.replace(/^dir_/, '').replace(/_/g, '/') : '');
+        const searchRel = rel.endsWith('/') ? rel.slice(0, -1) : rel;
+        const t = titles[searchRel];
+        if (t) {
+          n.title = t;
+          const sf = semanticFiles.find((f) => f.id === n.id);
+          if (sf) sf.responsibility = `${t}（${sf.responsibility}）`;
+        }
+      }
+      roleNote = `职责标题 ${Object.keys(titles).length} 个（LLM 生成）`;
+    } else {
+      roleNote = '职责标题未生成（未配置 LLM 或调用失败，仅显示文件名）';
+    }
+  }
+
   if (input.live_only) {
     saveLiveFeature(layered, input.live_dir); // 只写实际 DSL（live/），不覆盖设计 DSL
   } else {
@@ -920,9 +1084,9 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     .filter((x) => assessLines(x.lines) !== 'ok')
     .sort((a, b) => b.lines - a.lines);
   const message = [
-    `已导入项目 → feature "${feature}"`,
+    `已导入项目 → feature "${feature}"${input.design_mode ? '（设计模式：聚合文件到目录层级）' : ''}`,
     `项目根: ${root}`,
-    `文件: ${files.length} 个（符号 ${symbolsFound} 个，依赖 ${fileDeps.length} 条→渲染 ${renderedDepEdges} 条（跨目录已聚合），目录容器 ${dirCount} 个）`,
+    `文件: ${files.length} 个 → ${nodes.length} 节点（符号 ${symbolsFound} 个，依赖 ${fileDeps.length} 条→渲染 ${renderedDepEdges} 条，目录容器 ${dirCount} 个）`,
     cacheStats ? `缓存: 命中 ${cacheStats.hits} / 重解析 ${cacheStats.reparsed} / 失败 ${cacheStats.failed}` : null,
     goModules.length > 0 ? `Go modules: ${goModules.map((g) => g.module).join(', ')}` : null,
     oversized.length > 0
@@ -931,6 +1095,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
           .join('\n  - ')}\n  → 运行 check_monolith 获取功能内聚拆分建议`
       : null,
     skipped.length > 0 ? `跳过/截断:\n  - ${skipped.join('\n  - ')}` : null,
+    roleNote ? `职责标题: ${roleNote}` : null,
     `下一步: render_dsl 渲染预览，或 get_dsl 查看/修改。`,
   ].filter(Boolean).join('\n');
 
@@ -945,3 +1110,5 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     cache: cacheStats,
   };
 }
+
+export { parsedKindToSymbolKind };

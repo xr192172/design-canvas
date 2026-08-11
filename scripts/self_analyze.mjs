@@ -13,6 +13,7 @@ const { importProject } = await import('../dist/src/tools/import_project.js');
 const { checkMonolith } = await import('../dist/src/tools/monolith.js');
 const { deriveDetailChain } = await import('../dist/src/tools/derive_chain.js');
 const { deriveAlgorithm } = await import('../dist/src/tools/derive_algorithm.js');
+const { deriveFeatureTree } = await import('../dist/src/tools/derive_feature_tree.js');
 const { renderHTML } = await import('../dist/src/renderer/html_renderer.js');
 const { detectArchLayers } = await import('../dist/src/tools/layer_detect.js');
 const { openDb } = await import('../dist/src/db/db.js');
@@ -52,6 +53,7 @@ const imp = await importProject({
   feature: FEATURE,
   title: 'design-canvas 自我分析星图',
   cache_db: cacheDb,
+  gen_roles: true, // 用 LLM 为文件节点生成中文职责主标题（未配置 LLM 时静默降级为文件名）
 });
 cacheDb.close();
 console.log(imp.message);
@@ -61,6 +63,104 @@ console.log(imp.message);
   const dsl = getDSL(FEATURE);
   dsl.theme = 'star';
   saveDSL(dsl);
+}
+
+// ── 1.5 功能树：项目 → 功能 → 社区 → 文件（基于 cache.db 调用边社区） ──
+console.log('\n═══ 1.5/6 derive_feature_tree：功能树（逐级下钻） ═══');
+const tree = await deriveFeatureTree({
+  // cache.db 在项目根 .design-canvas/ 下；社区文件路径以 import_project 的 project_dir(SRC) 为基准，
+  // 故这里传项目根 './' 让 analyzeMonolith 定位缓存，路径基准与 SemanticFile.path 一致
+  project_dir: '.',
+  feature: FEATURE,
+  gen_names: true, // 用 LLM 为功能生成中文名（未配置 LLM 时静默降级为目录名）
+});
+console.log(tree.message);
+if (tree.features.length > 0) {
+  for (const f of tree.features) {
+    console.log(`  ▸ ${f.name}（${f.communities.length} 社区 · ${f.file_count} 文件）`);
+    for (const c of f.communities.slice(0, 5)) {
+      console.log(`      · [${c.id}] ${c.name} · ${c.files.length} 文件 · ~${c.est_lines} 行`);
+    }
+    if (f.communities.length > 5) console.log(`      · … 等 ${f.communities.length - 5} 个社区`);
+  }
+}
+
+// ── 1.6 跨文件数据流：从 cache.db 调用边生成 animations_v2.flows ──
+// 仿真系统在功能树「文件层」的体现：数据沿真实文件调用边流动。
+//  - L0 粒子：沿文件对之间的 dep 边流动
+//  - L2 标注：flow.value.label / handler 展示「ƒ 调用函数」
+//  - L3 异常：扫描调用函数体 throw/panic → handler.errors（红路径）
+// 幂等：只重建 crossflow_ 前缀 flows，保留其它手写 flows。
+console.log('\n═══ 1.6/6 derive_cross_flow：跨文件数据流（L0粒子·L2标注·L3异常） ═══');
+{
+  const cacheDb = openDb(path.resolve('.design-canvas', 'cache.db'));
+  // 跨文件调用边：source=<路径>#<调用函数>，target=<目标路径>#<被调函数>，metadata={cross:true}
+  const crossRows = cacheDb
+    .prepare("SELECT source, target FROM edges WHERE kind='call' AND metadata LIKE '%cross%true%'")
+    .all() || [];
+  cacheDb.close();
+
+  // 按文件对聚合（避免一函数一流导致定时器爆炸），记录代表调用函数
+  const pairMap = new Map();
+  for (const r of crossRows) {
+    const fromRel = r.source.slice(0, r.source.lastIndexOf('#'));
+    const callerQn = r.source.slice(r.source.lastIndexOf('#') + 1);
+    const targetRel = r.target.slice(0, r.target.lastIndexOf('#'));
+    if (!fromRel || !targetRel) continue;
+    const key = `${fromRel}#${targetRel}`;
+    let p = pairMap.get(key);
+    if (!p) { p = { from: fromRel, to: targetRel, callers: new Set() }; pairMap.set(key, p); }
+    if (p.callers.size < 3) p.callers.add(callerQn);
+  }
+  // 按调用函数数降序取前 N 对，控制定时器数量防主线程过载
+  const MAX_PAIRS = 40;
+  const pairs = [...pairMap.values()]
+    .sort((a, b) => b.callers.size - a.callers.size)
+    .slice(0, MAX_PAIRS);
+
+  // L3 异常采集：扫描调用函数体 throw/panic → handler.errors（TS/JS）
+  const collectTsErrors = (filePath, qn, toNode) => {
+    const errors = [];
+    let content;
+    try { content = fs.readFileSync(filePath, 'utf-8'); } catch { return errors; }
+    const name = (qn.split('.').pop() || qn).replace(/[^\w]/g, '');
+    const re = new RegExp('(?:function\\s+' + name + '|(?:export\\s+)?(?:async\\s+)?' + name + '\\s*\\()');
+    const m = re.exec(content);
+    const slice = m ? content.slice(m.index, Math.min(content.length, m.index + 4000)) : content;
+    const add = (type, condition, severity, effect, log) => {
+      if (!errors.some((e) => e.type === type)) errors.push({ type, condition, severity, to: toNode, value: { type, label: type }, effect, log });
+    };
+    if (/panic\s*\(/.test(slice)) add('panic', 'result.panic === true', 'unexpected', 'node_flash_red', '疑似 bug：panic 未捕获');
+    const throws = slice.match(/throw\s+new\s+(\w+)/g) || [];
+    for (const t of throws) {
+      const ty = t.split(/\s+/).pop();
+      if (ty) add(ty, `result.error?.constructor?.name === '${ty}'`, 'expected', 'particle_red', `${ty} 抛出`);
+    }
+    return errors;
+  };
+
+  const dsl = getDSL(FEATURE);
+  const kept = (dsl.animations_v2?.flows ?? []).filter((f) => !f.id.startsWith('crossflow_'));
+  const newFlows = [];
+  for (const p of pairs) {
+    const fromId = fileNodeId(p.from);
+    const toId = fileNodeId(p.to);
+    const callerName = [...p.callers][0] || '?';
+    const errors = collectTsErrors(path.join(SRC, p.from), callerName, toId);
+    newFlows.push({
+      id: `crossflow_${sanitize(p.from)}_${sanitize(p.to)}`,
+      trigger: { type: 'periodic', interval: 4000 },
+      from: fromId,
+      to: toId,
+      handler: { file_id: fromId, api: callerName, ...(errors.length ? { errors } : {}) },
+      value: { type: callerName, label: `→ ${callerName}` },
+    });
+  }
+  dsl.animations_v2 = { version: 1, flows: [...kept, ...newFlows], runtime: dsl.animations_v2?.runtime };
+  saveDSL(dsl);
+  console.log(`  跨文件调用边 ${crossRows.length} 条 → ${pairs.length} 个文件对流（上限 ${MAX_PAIRS}），已写入 animations_v2.flows`);
+  const withErr = newFlows.filter((f) => f.handler?.errors?.length).length;
+  console.log(`  L2 标注 flows：${newFlows.length} · L3 异常 flows：${withErr}`);
 }
 
 // ── 2. check_monolith：巨石文件扫描 ─────────────────────────────

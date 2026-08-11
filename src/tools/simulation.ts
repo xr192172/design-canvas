@@ -44,6 +44,18 @@ export interface RunSimulationResult {
 
 /** 批量运行事件，返回最终状态和触发日志 */
 export function runSimulation(input: RunSimulationInput): RunSimulationResult {
+  const dsl = getDSL(input.feature);
+  if (!dsl) throw new Error(`feature "${input.feature}" 不存在`);
+  if (!dsl.simulation) {
+    return {
+      message: `feature "${input.feature}" 未定义 simulation，无法运行仿真`,
+      feature: input.feature,
+      finalState: {},
+      trace: [],
+      nodeUpdates: [],
+    };
+  }
+
   const engine = getEngine(input.feature);
 
   if (input.reset_before_run) {
@@ -97,6 +109,17 @@ export interface GetSimulationStateResult {
 
 /** 读取当前仿真器状态 */
 export function getSimulationState(input: GetSimulationStateInput): GetSimulationStateResult {
+  const dsl = getDSL(input.feature);
+  if (!dsl) throw new Error(`feature "${input.feature}" 不存在`);
+  if (!dsl.simulation) {
+    return {
+      message: `feature "${input.feature}" 未定义 simulation，尚无仿真状态`,
+      feature: input.feature,
+      state: {},
+      traceCount: 0,
+    };
+  }
+
   const engine = getEngine(input.feature);
   const state = engine.getState();
   const trace = engine.getTrace();
@@ -152,6 +175,18 @@ export interface ResetSimulationResult {
 
 /** 重置仿真器到初始状态 */
 export function resetSimulation(input: ResetSimulationInput): ResetSimulationResult {
+  const dsl = getDSL(input.feature);
+  if (!dsl) throw new Error(`feature "${input.feature}" 不存在`);
+
+  // 未定义 simulation 时幂等成功，避免无仿真配置的 feature 重置报错
+  if (!dsl.simulation) {
+    return {
+      message: `feature "${input.feature}" 未定义 simulation，无需重置`,
+      feature: input.feature,
+      state: {},
+    };
+  }
+
   const engine = getEngine(input.feature);
   engine.reset();
   const state = engine.getState();

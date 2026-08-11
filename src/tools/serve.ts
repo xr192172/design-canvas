@@ -26,6 +26,9 @@ import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
 import { guidedTour } from './guided_tour.js';
 import { semanticSearch } from './semantic_search.js';
+import { languageConcepts } from './language_concepts.js';
+import { buildDictionaryView, getGlobalDictFile, getProjectDictFile, loadGlobalDict, loadProjectDict, saveGlobalEntry, saveProjectEntry, splitHighlights, validateProjectRoot, type DictEntry } from './dictionary.js';
+import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
@@ -538,9 +541,14 @@ async function handleApiScaffold(req: http.IncomingMessage, res: http.ServerResp
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
+    let safeOutputDir: string | undefined;
+    if (params.output_dir) {
+      // 显式传了 output_dir：必须落在允许的项目根范围内（防止写入系统目录）
+      safeOutputDir = validateProjectRoot(params.output_dir, '/api/scaffold output_dir');
+    }
     const result = scaffold({
       feature: params.feature || 'conveyor',
-      output_dir: params.output_dir,
+      output_dir: safeOutputDir,
       overwrite: params.overwrite,
       ui_framework: params.ui_framework,
     });
@@ -549,7 +557,9 @@ async function handleApiScaffold(req: http.IncomingMessage, res: http.ServerResp
       ...result,
     });
   } catch (e) {
-    sendError(res, 500, (e as Error).message);
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
   }
 }
 
@@ -574,16 +584,19 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
+    const safeDir = validateProjectRoot(params.project_dir || process.cwd(), '/api/diff-impact project_dir');
     const result = diffImpact({
       feature: params.feature || 'conveyor',
-      project_dir: params.project_dir || process.cwd(),
+      project_dir: safeDir,
       changed: Array.isArray(params.changed) ? params.changed : [],
       direction: params.direction,
       max_depth: params.max_depth,
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
-    sendError(res, 500, (e as Error).message);
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
   }
 }
 
@@ -592,15 +605,18 @@ async function handleApiSemanticSearch(req: http.IncomingMessage, res: http.Serv
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
+    const safeDir = validateProjectRoot(params.project_dir || process.cwd(), '/api/semantic-search project_dir');
     const result = await semanticSearch({
-      project_dir: params.project_dir || process.cwd(),
+      project_dir: safeDir,
       query: params.query || '',
       limit: params.limit,
       min_score: params.min_score,
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
-    sendError(res, 500, (e as Error).message);
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
   }
 }
 
@@ -619,6 +635,24 @@ async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerRes
   }
 }
 
+/** POST /api/language-concepts：语言级编程模式识别（序号10） */
+async function handleApiLanguageConcepts(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const safeDir = validateProjectRoot(params.project_dir || process.cwd(), '/api/language-concepts project_dir');
+    const result = languageConcepts({
+      project_dir: safeDir,
+      concepts: params.concepts,
+      files: params.files,
+      limit: params.limit ?? 200,
+    });
+    sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') ? 403 : 500, (e as Error).message);
+  }
+}
+
 /** POST /api/guided-tour：Guided Tours 学习路径生成（序号6） */
 async function handleApiGuidedTour(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
@@ -631,6 +665,98 @@ async function handleApiGuidedTour(req: http.IncomingMessage, res: http.ServerRe
       max_steps: params.max_steps,
     });
     sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 词典 API（路线图序号12：伪维基）
+// ─────────────────────────────────────────────────────────────
+
+/** POST /api/dict/query：查词典（含全局+项目合并、互链、高亮拆分） */
+async function handleApiDictQuery(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const safeRoot = validateProjectRoot(params.project_dir || process.cwd(), '/api/dict/query project_dir');
+    const view = buildDictionaryView(safeRoot);
+    const term = params.term;
+    let entry: DictEntry | null = null;
+    if (term) entry = view.entries.find((e) => e.term === term) ?? null;
+    sendJson(res, 200, {
+      success: true,
+      entries: view.entries,
+      links: view.links,
+      aliasesIndex: view.aliasesIndex,
+      entry,
+      global_file: getGlobalDictFile(),
+      project_file: getProjectDictFile(safeRoot),
+    });
+  } catch (e) {
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
+  }
+}
+
+/** POST /api/dict/highlight：对给定文本做高亮拆分（返回命中词条片段） */
+async function handleApiDictHighlight(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const safeRoot = validateProjectRoot(params.project_dir || process.cwd(), '/api/dict/highlight project_dir');
+    const view = buildDictionaryView(safeRoot);
+    const text = params.text ?? '';
+    const pieces = splitHighlights(text, view);
+    sendJson(res, 200, { success: true, pieces });
+  } catch (e) {
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
+  }
+}
+
+/** POST /api/dict/ingest：LLM 分类 + 生成三档 + 注入词典（伪维基动态学习）
+ *  传 dry_run=true 时仅预览（分类+生成，不落库），供前端审批弹窗预览后再确认收录。 */
+async function handleApiDictIngest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const source = (params.term ?? '').trim();
+    if (!source) {
+      sendJson(res, 400, { success: false, message: '缺少 term 参数' });
+      return;
+    }
+    const safeRoot = validateProjectRoot(params.project_dir || process.cwd(), '/api/dict/ingest project_dir');
+    const projectHint = params.project_hint ?? '';
+    const dryRun = params.dry_run === true;
+    const result = await ingestTerm(source, safeRoot, projectHint, { save: !dryRun });
+    sendJson(res, 200, { success: true, ...result, dry_run: dryRun });
+  } catch (e) {
+    const code =
+      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
+    sendError(res, code, (e as Error).message);
+  }
+}
+
+/** POST /api/dict/generate：仅生成不落库（预览用，前端可选） */
+async function handleApiDictGenerate(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const term = (params.term ?? '').trim();
+    if (!term) {
+      sendJson(res, 400, { success: false, message: '缺少 term 参数' });
+      return;
+    }
+    const cfg = loadExplainConfig();
+    if (!cfg) {
+      sendJson(res, 200, { success: false, message: '未配置 LLM，无法生成' });
+      return;
+    }
+    const gen = await generateDictEntry(term, cfg);
+    sendJson(res, 200, { success: true, ...gen });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1318,27 +1444,51 @@ export async function startServer(port?: number): Promise<void> {
     notifyDslChange(feature, source);
   });
 
+  // 安全：默认仅绑定本机回环，避免局域网/公网暴露；如需跨机访问，显式设 DC_BIND=0.0.0.0
+  const bindHost = process.env.DC_BIND || '127.0.0.1';
+  // CORS：仅允许 localhost 系列源（含 IPv4/IPv6/hostname），阻止第三方网页通过浏览器跨域调用写入 API
+  const safeOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?$/;
+  const isSafeOrigin = (origin: string | undefined): boolean => {
+    if (!origin) return true; // 非浏览器直接请求（curl/self）放行
+    return safeOriginPattern.test(origin);
+  };
+
   const server = http.createServer((req, res) => {
     const url = req.url || '/';
     const method = req.method || 'GET';
+    const origin = req.headers.origin as string | undefined;
 
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (isSafeOrigin(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin ?? '*');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
     if (method === 'OPTIONS') {
-      res.writeHead(200);
+      res.writeHead(isSafeOrigin(origin) ? 200 : 403);
       res.end();
+      return;
+    }
+    // 写入类 API 严格校验 Origin，防止 CSRF/CORS 组合攻击
+    const isWriteApi =
+      method === 'POST' &&
+      (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
+        url.startsWith('/api/registry') && method === 'POST' ||
+        url.startsWith('/api/layout') || url.startsWith('/api/scaffold'));
+    if (isWriteApi && !isSafeOrigin(origin)) {
+      sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
     }
 
     if (url.startsWith('/api/events') && method === 'GET') {
       // SSE 端点：保持连接，推送 DSL 变更事件
+      const sseOrigin = isSafeOrigin(origin) ? (origin ?? '*') : 'null';
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': sseOrigin,
       });
       res.write('event: connected\ndata: {"message":"SSE connected"}\n\n');
       sseClients.add(res);
@@ -1431,8 +1581,30 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/language-concepts') && method === 'POST') {
+      handleApiLanguageConcepts(req, res);
+      return;
+    }
+
     if (url.startsWith('/api/git-diff') && method === 'GET') {
       handleApiGitDiff(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/dict/query') && method === 'POST') {
+      handleApiDictQuery(req, res);
+      return;
+    }
+    if (url.startsWith('/api/dict/highlight') && method === 'POST') {
+      handleApiDictHighlight(req, res);
+      return;
+    }
+    if (url.startsWith('/api/dict/ingest') && method === 'POST') {
+      handleApiDictIngest(req, res);
+      return;
+    }
+    if (url.startsWith('/api/dict/generate') && method === 'POST') {
+      handleApiDictGenerate(req, res);
       return;
     }
 
@@ -1480,8 +1652,9 @@ export async function startServer(port?: number): Promise<void> {
   });
 
   return new Promise((resolve) => {
-    server.listen(listenPort, () => {
-      console.log(`design-canvas serve running at http://localhost:${listenPort}`);
+    server.listen(listenPort, bindHost, () => {
+      const bound = bindHost === '0.0.0.0' ? `（已绑定 0.0.0.0，局域网可访问）` : `（仅本机 ${bindHost}）`;
+      console.log(`design-canvas serve running at http://localhost:${listenPort} ${bound}`);
       console.log(`  - 静态文件: ${PUBLIC_DIR}`);
       console.log(`  - API: POST /api/save, GET /api/load, GET /api/features`);
       console.log(`  - 布局 API: POST /api/layout/dag, POST /api/layout/force, POST /api/layout/grid`);
@@ -1490,6 +1663,7 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 变更影响分析 API: POST /api/diff-impact`);
       console.log(`  - 架构分层分析 API: POST /api/arch-layer`);
       console.log(`  - 导览路径 API: POST /api/guided-tour`);
+      console.log(`  - 语言概念 API: POST /api/language-concepts`);
       console.log(`  - git 改动清单 API: GET /api/git-diff`);
       console.log(`  - 产物注册表 API: GET/POST /api/registry`);
       console.log(`  - SSE 实时推送: GET /api/events`);

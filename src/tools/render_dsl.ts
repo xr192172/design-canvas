@@ -8,6 +8,10 @@
  *   3. 调渲染器生成 HTML
  *   4. 写 HTML 到 output_path（默认 output/<feature>.html）
  *   5. 返回路径信息
+ *
+ * 大小限制：
+ *   - dsl_json 超过 100KB 时给出警告，建议改用 feature 参数从存储读取
+ *   - 分步构建流程：create_feature → 多次 edit_dsl → render_dsl(feature=xxx)
  */
 
 import fs from 'node:fs';
@@ -20,6 +24,8 @@ import { artifactFromDsl, registerArtifact } from './registry.js';
 export interface RenderDslInput {
   dsl_json: string;
   output_path?: string;
+  /** 是否持久化 DSL 到设计层（默认 true）。live 视图渲染应传 false，避免把代码快照写进设计存档 */
+  persist?: boolean;
 }
 
 export interface RenderDslResult {
@@ -42,12 +48,37 @@ function ensureOutputDir(filePath: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+/** 从 JSON 字符串中提取 feature 名（兜底，失败返回 'unknown'） */
+function extractFeatureFromJson(json: string): string {
+  try {
+    const parsed = JSON.parse(json);
+    if (typeof parsed.feature === 'string' && parsed.feature) return parsed.feature;
+  } catch { /* ignore */ }
+  return 'unknown';
+}
+
+/** DSL JSON 大小阈值（100KB），超过时给出警告建议改用 feature 参数 */
+const DSL_JSON_SIZE_THRESHOLD = 100 * 1024;
+
 /**
  * 执行 render_dsl
  * @throws Error 当 DSL 校验失败时
  */
 export function renderDsl(input: RenderDslInput): RenderDslResult {
-  const { dsl_json, output_path } = input;
+  const { dsl_json, output_path, persist = true } = input;
+
+  // 0. dsl_json 大小检测：超大 DSL 建议改用 feature 参数从存储读取，避免传参溢出
+  if (dsl_json && dsl_json.length > DSL_JSON_SIZE_THRESHOLD) {
+    const sizeKB = Math.round(dsl_json.length / 1024);
+    const featureHint = extractFeatureFromJson(dsl_json);
+    console.warn(
+      `[render_dsl] DSL JSON 过大（${sizeKB}KB），直接传 dsl_json 可能导致参数溢出。\n` +
+      `建议改用 feature 参数从存储读取：render_dsl({ feature: "${featureHint}", format: "html" })\n` +
+      `如果还没有保存，请先用 manage_feature(action=create) 创建空 DSL，\n` +
+      `然后多次调用 edit_dsl 逐步添加节点/边/文件（每次少量），最后用 render_dsl(feature=xxx) 渲染。`,
+    );
+    // 不抛错，让渲染继续执行（但大 JSON 可能已溢出，由调用方决定是否重试）
+  }
 
   // 1. 校验
   const result = validateDSLJson(dsl_json);
@@ -56,8 +87,9 @@ export function renderDsl(input: RenderDslInput): RenderDslResult {
   }
   const dsl = result.dsl;
 
-  // 2. 持久化 DSL
-  const dslFile = saveDSL(dsl);
+  // 2. 持久化 DSL（live 视图渲染跳过，避免污染设计层）
+  let dslFile = '';
+  if (persist) dslFile = saveDSL(dsl);
 
   // 3. 渲染 HTML
   const html = renderHTML(dsl);
@@ -79,7 +111,7 @@ export function renderDsl(input: RenderDslInput): RenderDslResult {
   const message = [
     `已渲染：${htmlFile}`,
     `（浏览器打开 ${fileUrl} 查看）`,
-    `DSL 已保存：${dslFile}`,
+    dslFile ? `DSL 已保存：${dslFile}` : '（live 视图渲染，未写回设计层）',
   ].join('\n');
 
   return { dslFile, htmlFile, message };

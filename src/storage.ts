@@ -155,6 +155,18 @@ export function getDSL(feature: string): DesignDSL | null {
   return JSON.parse(content) as DesignDSL;
 }
 
+/** 视图层级：design=设计视图（活态文件+存档），live=实际视图（代码快照，只读） */
+export type DSLView = 'design' | 'live';
+
+/**
+ * 按视图统一读取 DSL 入口（收敛 Step 2.5 视图分层护栏）
+ * - design：走 getDSL（活态文件 + feature 存档），即现状默认路径
+ * - live：走 getLiveFeature（实际代码快照，只读），用于对比"设计 vs 代码现状"
+ */
+export function getDSLByView(feature: string, view: DSLView = 'design'): DesignDSL | null {
+  return view === 'live' ? getLiveFeature(feature) : getDSL(feature);
+}
+
 /** 列出所有已保存的 feature，按 feature 名升序 */
 export function listFeatures(): DesignDSL[] {
   const dir = getFeaturesDir();
@@ -176,6 +188,30 @@ export function listFeatures(): DesignDSL[] {
 export function deleteDSL(feature: string): void {
   const file = getFeatureFile(feature);
   if (fs.existsSync(file)) fs.unlinkSync(file);
+}
+
+/**
+ * 完整删除 feature（manage_feature action=delete 用）：
+ * 1. 删 feature 存档文件
+ * 2. 删该 feature 的实际代码快照（live/<f>.dsl.json）
+ * 3. 若活态文件（design-canvas.json）当前对应此 feature，一并删除，避免残留陈旧活态视图
+ */
+export function deleteFeature(feature: string): void {
+  const file = getFeatureFile(feature);
+  if (fs.existsSync(file)) fs.unlinkSync(file);
+
+  const liveFile = getLiveFeatureFile(feature);
+  if (fs.existsSync(liveFile)) fs.unlinkSync(liveFile);
+
+  const liveDsl = getLiveDslFile();
+  if (fs.existsSync(liveDsl)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(liveDsl, 'utf-8'));
+      if (data.feature === feature) fs.unlinkSync(liveDsl);
+    } catch {
+      // 活态文件损坏则忽略，不阻塞删除主流程
+    }
+  }
 }
 
 /** 清空所有 feature（用于测试清理） */

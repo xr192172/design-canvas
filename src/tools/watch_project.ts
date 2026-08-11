@@ -272,6 +272,8 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
       const summary = await flushBatch(db, root, rels);
       if (onChange) onChange(summary);
     } catch (e) {
+      // flushBatch 失败时将未处理的路径归还 pending，避免静默丢失文件变更事件
+      for (const r of rels) pending.add(r);
       if (onError) onError(e as Error);
     }
   };
@@ -309,6 +311,7 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
   };
 
   let watcher: fs.FSWatcher | null = null;
+  const subWatchers: fs.FSWatcher[] = [];
   try {
     watcher = fs.watch(root, { recursive: true }, (_event, filename) => enqueue(filename));
   } catch {
@@ -317,7 +320,7 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
     for (const dir of walkDirs(root)) {
       try {
         const w = fs.watch(dir, (_event, filename) => enqueue(filename));
-        w.on('close', () => { /* 子目录 watcher 关闭时忽略 */ });
+        subWatchers.push(w);
       } catch {
         /* 忽略不可监听目录 */
       }
@@ -337,6 +340,8 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
       reconcileTimer = null;
       if (watcher) watcher.close();
       watcher = null;
+      for (const w of subWatchers) w.close();
+      subWatchers.length = 0;
     },
     status(): { watching: boolean; project_root: string } {
       return { watching: !closed, project_root: root };

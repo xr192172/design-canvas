@@ -468,6 +468,7 @@ export interface CachedSymbol {
   name: string;
   qualified_name: string;
   start_line: number;
+  end_line: number;
   signature: string | null;
 }
 
@@ -497,7 +498,7 @@ export function getFileParse(db: Database, relPath: string): CachedFileParse | n
   if (!fileNode) return null;
   const symbols = db
     .prepare(
-      `SELECT kind, name, qualified_name, start_line, signature
+      `SELECT kind, name, qualified_name, start_line, end_line, signature
        FROM nodes WHERE file_path = ? AND kind != 'file'
        ORDER BY start_line, id`,
     )

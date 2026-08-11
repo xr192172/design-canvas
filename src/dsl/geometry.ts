@@ -121,6 +121,10 @@ export interface Node {
   type?: string;
   /** 节点描述/备注 */
   description?: string;
+  /** 人话主标题：LLM 生成的职责摘要（如"配置加载与校验"），渲染端优先展示，label 兜底 */
+  title?: string;
+  /** title 英文版（i18n：切换英文时用，缺失回退 title） */
+  title_en?: string;
   /** 职责分层：main=主干（默认显示）；error/detail=深层（默认折叠，角标展开）。缺省 main */
   layer?: NodeLayer;
   /** 深层节点的宿主主干节点 ID（角标挂载点）；缺省时仅跟随全局层开关 */

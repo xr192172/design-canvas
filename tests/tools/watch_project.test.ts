@@ -14,7 +14,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { importProject } from '../../src/tools/import_project';
 import { openDb } from '../../src/db/db';
 import { getIndexStats } from '../../src/db/symbols';
-import { handleWatchEvent, flushBatch, shouldSyncRel, reconcileProject } from '../../src/tools/watch_project';
+import { handleWatchEvent, flushBatch, shouldSyncRel, reconcileProject, watchProject } from '../../src/tools/watch_project';
 
 const roots: string[] = [];
 
@@ -185,6 +185,17 @@ describe('reconcileProject 兜底', () => {
     // scanned 只含可同步源码（本项目仅 src/auth.ts）
     expect(summary.scanned).toBe(1);
     expect(summary.changed).toBe(0);
+    db.close();
+  });
+});
+
+describe('watchProject stop 清理', () => {
+  it('stop 后 status 不再 watching', async () => {
+    const { root, db } = await makeProject('stop1');
+    const handle = watchProject({ project_root: root, db, debounce_ms: 50 });
+    expect(handle.status().watching).toBe(true);
+    handle.stop();
+    expect(handle.status().watching).toBe(false);
     db.close();
   });
 });

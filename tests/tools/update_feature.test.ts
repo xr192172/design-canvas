@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createFeature } from '../../src/tools/feature_ops';
 import { updateFeature } from '../../src/tools/update_feature';
+import { listSnapshots } from '../../src/tools/snapshot';
 import { clearAllFeatures, getDSL } from '../../src/storage';
 
 describe('update_feature - 节点操作', () => {
@@ -269,5 +270,186 @@ describe('update_feature - 原子性', () => {
     expect(() =>
       updateFeature({ feature: 'uf_empty', operations: [] }),
     ).toThrow(/不能为空/);
+  });
+});
+
+describe('update_feature - 标注与审批', () => {
+  beforeEach(() => clearAllFeatures());
+  afterEach(() => clearAllFeatures());
+
+  it('annotation.add + annotation.resolve 全流程', () => {
+    createFeature({ feature: 'uf_anno' });
+    updateFeature({
+      feature: 'uf_anno',
+      operations: [
+        { op: 'add', type: 'annotation', data: { text: '这里需要处理边界', node_id: 'n1', severity: 'warning', type: 'issue' } },
+      ],
+    });
+    let annos = getDSL('uf_anno')!.annotations!;
+    expect(annos).toHaveLength(1);
+    expect(annos[0].text).toBe('这里需要处理边界');
+    expect(annos[0].resolved).toBe(false);
+    const id = annos[0].id;
+
+    updateFeature({
+      feature: 'uf_anno',
+      operations: [{ op: 'resolve', type: 'annotation', data: { annotation_id: id, resolution_note: '已修复' } }],
+    });
+    annos = getDSL('uf_anno')!.annotations!;
+    expect(annos[0].resolved).toBe(true);
+    expect(annos[0].resolution_note).toBe('已修复');
+  });
+
+  it('annotation.add 缺 data.text 报错', () => {
+    createFeature({ feature: 'uf_anno_bad' });
+    expect(() =>
+      updateFeature({
+        feature: 'uf_anno_bad',
+        operations: [{ op: 'add', type: 'annotation', data: {} }],
+      }),
+    ).toThrow(/data\.text/);
+  });
+
+  it('approval.submit + approval.review 全流程', () => {
+    createFeature({ feature: 'uf_approval' });
+    updateFeature({
+      feature: 'uf_approval',
+      operations: [
+        { op: 'add', type: 'annotation', data: { text: '待审批', type: 'suggestion' } },
+      ],
+    });
+    const id = getDSL('uf_approval')!.annotations![0].id;
+
+    updateFeature({
+      feature: 'uf_approval',
+      operations: [{ op: 'submit', type: 'approval', data: { annotation_id: id, assignee: 'alice' } }],
+    });
+    expect(getDSL('uf_approval')!.annotations![0].approval_status).toBe('pending_review');
+
+    updateFeature({
+      feature: 'uf_approval',
+      operations: [{ op: 'review', type: 'approval', data: { annotation_id: id, decision: 'approve', reviewer: 'bob' } }],
+    });
+    expect(getDSL('uf_approval')!.annotations![0].approval_status).toBe('approved');
+  });
+
+  it('approval.review 缺 data.reviewer 报错', () => {
+    createFeature({ feature: 'uf_approval_bad' });
+    updateFeature({
+      feature: 'uf_approval_bad',
+      operations: [{ op: 'add', type: 'annotation', data: { text: 'x' } }],
+    });
+    const id = getDSL('uf_approval_bad')!.annotations![0].id;
+    expect(() =>
+      updateFeature({
+        feature: 'uf_approval_bad',
+        operations: [{ op: 'review', type: 'approval', data: { annotation_id: id, decision: 'approve' } }],
+      }),
+    ).toThrow(/data\.reviewer/);
+  });
+});
+
+describe('update_feature - 快照', () => {
+  beforeEach(() => clearAllFeatures());
+  afterEach(() => clearAllFeatures());
+
+  it('snapshot.save + rollback + delete 全流程', () => {
+    createFeature({ feature: 'uf_snap' });
+    updateFeature({
+      feature: 'uf_snap',
+      operations: [{ op: 'add', type: 'node', id: 'n1', data: { label: '初始', x: 10, y: 10 } }],
+    });
+
+    // save 快照（v1）
+    updateFeature({
+      feature: 'uf_snap',
+      operations: [{ op: 'save', type: 'snapshot', data: { label: 'v1 评审' } }],
+    });
+    let snaps = listSnapshots({ feature: 'uf_snap' }).snapshots;
+    expect(snaps.length).toBeGreaterThan(0);
+    const snapId = snaps[0].id;
+
+    // 修改节点
+    updateFeature({
+      feature: 'uf_snap',
+      operations: [{ op: 'update', type: 'node', id: 'n1', data: { label: '改后', x: 999, y: 999 } }],
+    });
+    expect(getDSL('uf_snap')!.geometry.nodes[0].label).toBe('改后');
+
+    // rollback 到 v1
+    updateFeature({
+      feature: 'uf_snap',
+      operations: [{ op: 'rollback', type: 'snapshot', data: { snapshot_id: snapId } }],
+    });
+    expect(getDSL('uf_snap')!.geometry.nodes[0].label).toBe('初始');
+    expect(getDSL('uf_snap')!.geometry.nodes[0].x).toBe(10);
+
+    // delete 快照
+    updateFeature({
+      feature: 'uf_snap',
+      operations: [{ op: 'delete', type: 'snapshot', data: { snapshot_id: snapId } }],
+    });
+    snaps = listSnapshots({ feature: 'uf_snap' }).snapshots;
+    expect(snaps.find((s) => s.id === snapId)).toBeUndefined();
+  });
+
+  it('snapshot.save 缺 data.label 报错', () => {
+    createFeature({ feature: 'uf_snap_bad' });
+    expect(() =>
+      updateFeature({
+        feature: 'uf_snap_bad',
+        operations: [{ op: 'save', type: 'snapshot', data: {} }],
+      }),
+    ).toThrow(/data\.label/);
+  });
+});
+
+describe('update_feature - 布局与仿真', () => {
+  beforeEach(() => clearAllFeatures());
+  afterEach(() => clearAllFeatures());
+
+  it.each(['dag', 'force', 'grid'] as const)('layout.apply algo=%s 重排节点坐标', (algo) => {
+    const feature = `uf_layout_${algo}`;
+    createFeature({ feature });
+    updateFeature({
+      feature,
+      operations: [
+        { op: 'add', type: 'node', id: 'a', data: { label: 'A', x: 7, y: 13 } },
+        { op: 'add', type: 'node', id: 'b', data: { label: 'B', x: 91, y: 55 } },
+        { op: 'add', type: 'node', id: 'c', data: { label: 'C', x: 34, y: 29 } },
+        { op: 'add', type: 'edge', id: 'e1', data: { from: 'a', to: 'b' } },
+        { op: 'add', type: 'edge', id: 'e2', data: { from: 'b', to: 'c' } },
+      ],
+    });
+    const before = getDSL(feature)!.geometry.nodes.map((n) => ({ x: n.x, y: n.y }));
+
+    updateFeature({
+      feature,
+      operations: [{ op: 'apply', type: 'layout', data: { algo } }],
+    });
+    const after = getDSL(feature)!.geometry.nodes.map((n) => ({ x: n.x, y: n.y }));
+    expect(after).not.toEqual(before);
+  });
+
+  it('layout.apply 未知算法报错', () => {
+    createFeature({ feature: 'uf_layout_bad' });
+    expect(() =>
+      updateFeature({
+        feature: 'uf_layout_bad',
+        operations: [{ op: 'apply', type: 'layout', data: { algo: 'bogus' } }],
+      }),
+    ).toThrow(/未知算法/);
+  });
+
+  it('simulation.reset 重置仿真状态不抛错', () => {
+    createFeature({ feature: 'uf_sim' });
+    let result: ReturnType<typeof updateFeature>;
+    expect(() => {
+      result = updateFeature({
+        feature: 'uf_sim',
+        operations: [{ op: 'reset', type: 'simulation' }],
+      });
+    }).not.toThrow();
+    expect(result!.message).toContain('1 个操作');
   });
 });
