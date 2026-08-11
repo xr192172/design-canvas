@@ -140,6 +140,32 @@
 - ~~动画逻辑与渲染耦合~~ → 独立 animation_engine.ts 模块，由 html_renderer.ts 注入
 - ~~缺乏动画声明层~~ → animations_v2 字段已支持，conveyor.json 已有 5 个 L2 flow 验证（含 card_sync）
 
+### 2.5 本批新增（2026-08-11）
+
+> 本批按四阶段提交，见 `git log` 最近 4 个 commit。主方向：**先 B（dynamic-ui 视觉引擎）后 A（设计模式草图→手动调整→回流）**。
+
+#### 2.5.1 视觉引擎方向（B1：dynamic 主题）
+- `styles.ts` / `scripts.ts` / `html_renderer.ts` 新增 **dynamic 浅色紫调主题**并设为默认，替代低可读性动效图，用于生成可读架构图。
+- 方向 B（视觉引擎）是方向 A（手动调整工作流）的基础，A 依赖 B，故开发顺序**先 B 后 A**。
+- 交接说明见 [visual-style-handover.md](./visual-style-handover.md)。
+
+#### 2.5.2 字典 / 语言概念工具
+- 新增 `dict_gen` / `dictionary` / `language_concepts` 工具 + `i18n` 文案体系（路线图序号 10 Language Concepts 落地）。
+- 渲染器接入词典渲染，scripts.ts 体积因词典代码增长。
+
+#### 2.5.3 动画流推导 / 功能互移动态
+- 新增 `derive_anim_flow` / `derive_feature_tree` / `role_title`（动画流推导 + 功能树下钻 + 角色文案持久化）。
+
+#### 2.5.4 reasoning 函数级仿真（trace 采集 → DSL → 交互查看器）
+- 新增 `reasoning.ts` DSL（`entry` / `steps` / `budget` / `folds`）+ `derive_reasoning` 生成器（分轮聚合 / 调用树重建 / **真实折叠点**标记）。
+- 新增 `trace_reasoning` 通用运行时插桩记录器（自动发现 / 包装函数，真实执行生成推理痕迹 DSL）。
+- **go-trace/** 独立模块：抽取自包含的编译期插桩工具链（`tracecap` + `trace-implant`，仅 stdlib），修复 named-return / defer 闭包捕获问题。`context-trace` 驱动强耦合 agent-shell 上下文引擎，留在 go-lab 实验环境，无法独立抽取。
+- 链路：真实执行 → trace JSON → `gen_trace_reasoning_demo.mjs` → ReasoningSystem DSL → `reasoning_viewer.html` 交互查看。
+
+#### 2.5.5 活文档：变更原因捕获
+- 方向：项目成为活文档，源头记录所有变更及变更原因。
+- 方案见 [plans/2026-08-11-live-doc-change-reason.md](./plans/2026-08-11-live-doc-change-reason.md)：Annotation 扩展 `kind` / `reason` / `evidence` + **四层校验**（非空 → 信息量 → 实体绑定 → 证据回溯）防止 LLM 偷懒。
+
 ## 3. 当前实现 vs 设计文档对照
 
 ### 3.1 已对齐
@@ -236,15 +262,15 @@
 | 批次 | 序号 | 项 | 来源 | 依赖 | 状态 |
 |------|------|-----|------|------|------|
 | **基础设施** | 1 | SQLite 存储 + 文件 hash 增量 backfill | CodeGraph | 无 | 🚧 v1 已落地（src/db/，见 7.3） |
-| | 2 | MCP 工具收敛到 ~8 个（JSON Patch 模式） | CodeGraph | 无 | ⏳ |
+| | 2 | MCP 工具收敛到 ~8 个（JSON Patch 模式） | CodeGraph | 无 | ✅ 已落地（2026-08-11，见 2.1「二次收敛」） |
 | | 3 | 调用边级别提取（symbol + call_edge + dependency 表） | CodeGraph | 1 | ✅ 同文件（AST 级，self src/ 509 条）+ 跨文件（import 限定，155 条）调用边已落地；内置/外部/失败三态标记；已接入渲染（derive_detail_chain AST 级调用图 + 虚线跳边 + 跨文件标注）+ 数据流追踪（L5a 静态推演：注入数据沿链推演，每步进/出值浮层 + 分流高亮 + CFG 判定展示 if/loop 条件原文与走向） |
 | **代码理解** | 4 | Diff Impact Analysis（变更影响范围追溯） | Understand Anything | 3 | ✅ 已落地（2026-08-06，见 7.5） |
 | | 5 | architecture-analyzer 角色（推断架构层 + 职责回填） | Understand Anything | 3 | ⏳ |
 | | 6 | Guided Tours（拓扑排序学习路径 + 动画播放列表） | Understand Anything | DSL edges | ⏳ |
 | **可视化** | 7 | Layer Visualization（按 type 分层着色 + legend） | Understand Anything | 5 | ⏳ |
 | | 8 | Fuzzy & Semantic Search（语义搜索"哪部分处理认证"） | Understand Anything | 无 | ✅ |
-| | 9 | Persona-Adaptive UI（角色自适应详细度） | Understand Anything | 无 | ⏳ |
-| | 10 | Language Concepts（12 种编程模式上下文解释） | Understand Anything | 3 | ⏳ |
+| | 9 | Persona-Adaptive UI（角色自适应详细度） | Understand Anything | 无 | ✅ 部分落地（2026-08-11，role_title + 讲解角色文案持久化，见 2.5.3） |
+| | 10 | Language Concepts（12 种编程模式上下文解释） | Understand Anything | 3 | ✅ 已落地（2026-08-11，dict_gen/dictionary/language_concepts，见 2.5.2） |
 | **自动同步** | 11 | 文件监听自动同步（FSEvents/inotify） | CodeGraph | 1, 3 | ✅ 已落地（2026-08-06，见 7.6） |
 | | 12 | 多平台插件分发（Claude Code/Cursor/VS Code/Codex） | 两者 | MCP 已就绪 | ⏳ |
 | **独有能力** | 13 | 动画系统阶段 E（conveyor 迁移） | 自有 | 无 | ✅（2026-08-07） |
