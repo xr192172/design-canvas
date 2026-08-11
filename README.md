@@ -59,95 +59,45 @@ node scripts/install_mcp.mjs --dry-run# 预览将写入的内容（不落盘）
 node scripts/install_mcp.mjs --target claude  # 只写指定平台
 ```
 
-## MCP 工具一览（29 个）
+## MCP 工具一览（8 主工具 + 别名）
 
-> 工具分 **高频**（LLM 常用，推荐优先暴露）和 **按需**（浏览器/人审/版本管理场景）两组。
-> 所有写操作已收敛为单个 `update_feature` 工具（批量 + 原子回滚）；所有读操作收敛为 `query_feature`（9 合一）。
+> 为降低 LLM 的工具选择成本，工具已从 37 个收敛为 **8 个主工具**（参数化分发）。旧工具名**全部保留为别名**，指向对应主工具，存量会话/脚本/文档零破坏。
 > 完整工具演化与偏离记录见 [docs/evolution.md](./docs/evolution.md)。
 
-### 核心 ★
+### 主工具 ★
 
 | 工具 | 用途 |
 |------|------|
-| `render_dsl(dsl_json, output_path?)` | DSL → 自包含 HTML 文件，返回路径 |
-| `query_feature(query, ...params)` | **统一读入口**：`dsl`（读 DSL）/ `features`（列表）/ `annotations`（标注，可 node_id/severity/unresolved_only 过滤）/ `approvals` / `approval_history` / `snapshots` / `templates` / `simulation_state` / `diff`（对比两 feature） |
+| `get_dsl` | **统一只读入口**：`query`(dsl/features/annotations/approvals/approval_history/snapshots/templates/simulation_state/diff) + `view`(design/live) + 各过滤参数 |
+| `edit_dsl` | **统一写入口**：`operations[]` 批量执行节点/边/文件/API 增删改、平移(move)、语义绑定(binding)、状态更新，以及标注/审批/快照/自动布局/仿真重置。按序执行，任一失败全部回滚（原子性）。`view=live` 拒绝写入（代码快照只读） |
+| `manage_feature` | **生命周期入口**：`action`(create/clone/template/list/delete) |
+| `render_dsl` | **渲染入口**：`format`(html 默认/svg/markdown) + `view`(design/live) + `output_path` |
+| `scaffold` | 从 DSL semantic 层生成代码骨架（go/ts/py/js/vue/tsx + INVARIANTS.md）+ 状态推断 |
+| `backfill_scaffold` | 解析实现代码的 API 签名回填 DSL actual_apis，输出差异报告 |
+| `consistency_check` | 对比 expected_apis vs 实际代码，输出一致性报告 + 跨文件不变式（只读） |
+| `explore_code` | **代码理解入口**：`action`(import/semantic_search/diff_impact/arch_layer/guided_tour/check_monolith/analyze_monolith/derive_split/derive_detail_chain/derive_anim_flow/derive_algorithm/inject_replay/run_simulation/reset_simulation/watch) + `args` |
 
-### 增量编辑 ★
+### `view` 参数（design | live，默认 design）
 
-| 工具 | 用途 |
-|------|------|
-| `create_feature(feature, title?)` | 创建空 feature |
-| `update_feature(feature, operations[])` | **统一写入口**：节点/边/文件/API 增删改、节点平移(move)、语义绑定(binding)、状态更新(status)。批量按序执行，任一失败全部回滚 |
-| `clone_feature(source, target, title?)` | 克隆 feature |
+三个可能落数据的工具（`get_dsl` / `edit_dsl` / `render_dsl`）统一显式声明视图，杜绝"改到哪一层"的歧义：
 
-`update_feature` 操作格式：`{op, type, id, data?}`
-- `op`: `add` / `update` / `delete` / `move`（move 仅节点，`data:{dx,dy}` 相对平移）
-- `type`: `node` / `edge` / `file` / `api`（id=所属 file_id）/ `binding`（节点绑文件）/ `status`（状态联动）
-- 示例：`{op:"add",type:"node",id:"n1",data:{label:"服务",x:100,y:100,shape:"rounded"}}`
+- **design**（默认）= 设计视图：活态 DSL（`design-canvas.json`）+ feature 存档，LLM 刻意设计的主战场。对应浏览器「🎭 设计」。
+- **live** = 实际视图：代码快照（`live/<f>.dsl.json`），只读，只能由 `explore_code action=import/watch` 重建。对应浏览器「⚡ 实际」。
+- **判别口诀**：要改的那一版 = `design`；要看的代码现状 = `live`；listen 自动更新 = `watch`（explore_code）。
 
-### 代码生成 ★
+### 别名（旧工具名 → 主工具）
 
-| 工具 | 用途 |
-|------|------|
-| `scaffold(feature, output_dir?, overwrite?, ui_framework?)` | 从 semantic 层生成代码骨架（go/ts/py/js/vue/tsx + INVARIANTS.md） |
-| `backfill_scaffold(feature, scaffold_dir?)` | 解析实现代码的 API 签名回填 DSL actual_apis，输出差异报告 |
-| `check_status(feature, scaffold_dir?)` | 扫描 TODO 残留量自动推断状态 |
-| `consistency_check(feature, code_dir?)` | 对比 expected_apis vs 实际代码，输出一致性报告（只读） |
+| 旧名 | 新归属 |
+|---|---|
+| `query_feature` | → `get_dsl` |
+| `update_feature` | → `edit_dsl` |
+| `create_feature` / `clone_feature` / `create_from_template` | → `manage_feature` |
+| `export_svg` / `export_markdown` | → `render_dsl` |
+| `check_status` | → `scaffold` |
+| `import_project` / `semantic_search` / `diff_impact` / `arch_layer` / `guided_tour` / `check_monolith` / `analyze_monolith` / `derive_split` / `derive_detail_chain` / `derive_anim_flow` / `derive_algorithm` / `inject_replay` / `run_simulation` / `reset_simulation` / `watch_project` | → `explore_code` |
+| `add_annotation` / `resolve_annotation` / `dag_layout` / `force_layout` / `grid_align` / `submit_approval` / `review_annotation` / `save_snapshot` / `rollback_snapshot` / `delete_snapshot` | → `edit_dsl`（写动作） |
 
-### 工程导入（★ 代码理解）
-
-| 工具 | 用途 |
-|------|------|
-| `import_project(project_dir, ...)` | 导入真实工程生成 feature 图（多模块 go.mod 解析 + 依赖边 LCA 分层聚合，SQLite 增量缓存可选） |
-| `check_monolith(file_path, ...)` | 单文件监控：超阈值自动 Louvain 社区发现，给拆分建议（仅建议不改代码） |
-| `derive_detail_chain(feature, file, ...)` | 变形链推导：AST 级调用图生成 detail 层节点/边（主链 + 虚线跳边 + 截断分支节点）+ 数据形状卡 + 跨文件调用标注 |
-| `derive_algorithm(feature, file, ...)` | 算法控制流推导：函数内部结构解析挂载 detail 层 |
-| `inject_replay(feature, ...)` | 注入回放：进料口 JSON/预设异常场景注入，静态推演暴露问题 |
-| `diff_impact(feature, project_dir, changed[], ...)` | 变更影响分析：沿调用边追溯"这次改动波及谁"，聚合到文件级（direction: callers/callees/both） |
-
-### 自动布局（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `dag_layout(feature, direction?, ...)` | 拓扑排序布局（适合 DAG，含 contains 边时自动拒绝平铺） |
-| `force_layout(feature, repulsion?, ...)` | 力导向布局（复杂网络） |
-| `grid_align(feature, grid_size?)` | 网格对齐 |
-
-### 仿真器 ★
-
-| 工具 | 用途 |
-|------|------|
-| `run_simulation(feature, events[], reset_before_run?)` | 批量传入事件验证级联触发 |
-| `reset_simulation(feature)` | 重置到初始状态 |
-
-### 人审流程（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `add_annotation(feature, text, ...)` | LLM 主动添加标注 |
-| `resolve_annotation(feature, annotation_id, note?)` | 标记标注已解决 |
-| `submit_approval` / `review_annotation` | 提交审批 / 审批决策 |
-
-### 版本快照（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `save_snapshot(feature, label, description?)` | 保存版本快照 |
-| `rollback_snapshot(feature, snapshot_id)` | 回滚（自动备份当前状态） |
-| `delete_snapshot(feature, snapshot_id)` | 删除快照 |
-
-### 模板库（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `create_from_template(template_id, feature, title?)` | 从模板创建 feature（crud_service / event_driven / microservice / pipeline） |
-
-### 导出（按需）
-
-| 工具 | 用途 |
-|------|------|
-| `export_svg(feature, output_path?)` | 导出 SVG 矢量图 |
-| `export_markdown(feature, output_path?)` | 导出 Markdown 设计文档 |
+> 新会话建议直接用 8 主工具；旧工具名仍可用以兼容历史调用。
 
 ## HTTP API（serve.ts）
 

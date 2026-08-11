@@ -48,6 +48,38 @@ npm-debug.log*
 # 参考库（借鉴用，不属于本项目代码）
 vendor/
 
+# agent-shell 插桩实验副本（完整 agent-shell 源码副本，非本项目代码；trace 核心已抽到 go-trace/）
+go-lab/
+
 # codegraph 根目录残留（重复拷贝，已移至 vendor/codegraph；剩余 .git/pack 被 IDE 占用，释放后可删）
 codegraph/
+
+# ───── 诊断 / 一次性脚本 / 截图（不入仓库） ─────
+# 性能诊断脚本
+scripts/perf_*.py
+scripts/dbg_*.py
+scripts/inspect_*.py
+# 调试用 mjs
+scripts/_dbg_*.mjs
+scripts/_diag*.mjs
+scripts/_verify_*.mjs
+scripts/_repro_*.mjs
+scripts/_hit*.mjs
+scripts/_inspect_*.mjs
+scripts/_diag_*.png
+scripts/_drag_*.png
+scripts/_hit*.png
+scripts/_inspect_*.png
+# 截图目录
+shots/
+# 一次性冒烟 / 拖拽诊断脚本 / 单张现场截图
+scripts/*_smoke.mjs
+scripts/test_drag_*.py
+scripts/_star_full.png
+# 根目录一次性调试脚本
+_dbg_*.mjs
+_tmp_*.ts
+test_*.mjs
+test_*.ts
+test_*.txt
 

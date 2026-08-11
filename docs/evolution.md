@@ -49,6 +49,26 @@
 - **增量编辑模式**：原设计要求 LLM 每次输出完整 DSL JSON，迭代成本高。增量工具让 LLM 逐步完善设计
 - **写操作收敛为 `update_feature`**：16 个写工具参数模式高度重复（feature + id + 字段），LLM 选择成本高、工具列表冗长。合并后统一为 `{op, type, id, data}` 操作格式，支持批量提交与原子回滚（任一失败恢复操作前快照），原子操作实现仍复用 `node_ops` / `edge_ops` / `file_ops` / `api_ops` / `status_tools` 模块
 
+#### 二次收敛（37 → 8 主工具 + 33 别名，2026-08-07）
+
+> 对应路线图 6.2 序号 2（MCP 工具收敛到 ~8 个）。完整方案见 [plans/2026-08-07-mcp-tool-convergence.md](./plans/2026-08-07-mcp-tool-convergence.md)。
+
+| 主工具 | 聚合的旧工具 |
+|---|---|
+| `get_dsl` | `query_feature` |
+| `edit_dsl` | `update_feature` + `add_annotation` / `resolve_annotation` / `dag_layout` / `force_layout` / `grid_align` / `submit_approval` / `review_annotation` / `save_snapshot` / `rollback_snapshot` / `delete_snapshot` |
+| `manage_feature` | `create_feature` / `clone_feature` / `create_from_template` |
+| `render_dsl` | `render_dsl` / `export_svg` / `export_markdown` |
+| `scaffold` | `scaffold` / `check_status` |
+| `backfill_scaffold` | `backfill_scaffold` |
+| `consistency_check` | `consistency_check` |
+| `explore_code` | `import_project` / `semantic_search` / `diff_impact` / `arch_layer` / `guided_tour` / `check_monolith` / `analyze_monolith` / `derive_split` / `derive_detail_chain` / `derive_anim_flow` / `derive_algorithm` / `inject_replay` / `run_simulation` / `reset_simulation` / `watch_project` |
+
+关键决策：
+- **收敛 = 新增主工具 + 旧名保留为别名**，不删名。`server_registry.ts` 定义 `TOOL_DEFS`（8 主工具）+ `ALIASES`（33 旧名→主工具 + 参数适配器）+ `LEGACY_HANDLERS`（尚未并入 edit_dsl 的写工具，先保兼容）。全项目 100+ 文件命中旧工具名，删名会连锁破坏存量会话/脚本/文档。
+- **`view` 参数（design/live）**：`get_dsl` / `edit_dsl` / `render_dsl` 统一显式声明视图，`edit_dsl view=live` 拒绝写入（写护栏），解决"设计视图 vs 实际视图"混淆。
+- **别名入参 schema 用 `z.record` 透传**：不能传空 schema `{}`，否则 SDK 转成 `z.object({})` 会 strip 未知键，导致别名接收不到参数（踩坑记录）。
+
 ### 2.2 架构决策变更
 
 #### codebase-memory-mcp 集成 → 内置 TreeSitterKernel
