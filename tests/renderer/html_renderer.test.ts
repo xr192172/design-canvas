@@ -293,8 +293,9 @@ describe('renderHTML - 职责分层', () => {
     const html = renderHTML(makeLayeredDSL());
     expect(html).toContain('id="layer-error-toggle"');
     expect(html).toContain('id="layer-detail-toggle"');
-    expect(html).toContain('🛡 异常 1');
-    expect(html).toContain('🧩 细节 1');
+    // 计数在按钮内独立 chip-count span（非连写文本），逐按钮匹配
+    expect(html).toMatch(/<button id="layer-error-toggle"[^>]*>[\s\S]*?🛡 异常[\s\S]*?<span class="chip-count">1<\/span>/);
+    expect(html).toMatch(/<button id="layer-detail-toggle"[^>]*>[\s\S]*?🧩 细节[\s\S]*?<span class="chip-count">1<\/span>/);
 
     // 注意：scripts 内联代码里也有同名字符串，必须匹配 HTML 按钮形式
     const plain = renderHTML(makeMinimalDSL());
@@ -344,7 +345,22 @@ describe('renderHTML - 职责分层', () => {
     expect(html).toContain('body[data-theme="star"] .edge path');
     // 主题切换器按钮 + JS 主题数组
     expect(html).toContain('id="theme-star"');
-    expect(html).toContain("'blue', 'sakura', 'forest', 'ocean', 'star'");
+    expect(html).toContain("'dynamic', 'blue', 'sakura', 'forest', 'ocean', 'star'");
+  });
+
+  it('dynamic 主题：浅色紫调为设计层默认输出', () => {
+    const dsl = makeMinimalDSL();
+    // 未显式指定主题时默认 dynamic
+    const html = renderHTML(dsl);
+    expect(html).toContain('<body data-theme="dynamic">');
+    expect(html).toContain('[data-theme="dynamic"]');
+    expect(html).toContain('--theme-primary: #7c3aed');
+    expect(html).toContain('--theme-background: #f8fafc');
+    expect(html).toContain('--theme-node-text: #1e293b');
+    // 浅色覆盖规则存在
+    expect(html).toContain('body[data-theme="dynamic"] .node.selected text');
+    // 切换器含 dynamic 按钮
+    expect(html).toContain('id="theme-dynamic"');
   });
 
   it('F2 推导：handler.errors.to 节点自动 error 层 + host=flow.from', () => {

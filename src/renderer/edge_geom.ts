@@ -648,16 +648,8 @@ export function computeEdgePath(opts: EdgePathOpts): EdgePathResult {
     note(ep, a);
   }
 
-  // 最终兜底：A* waypoint 路由（窄通道穿行，贝塞尔族表达不了的折线/S 路径）
-  // pad 分档扩大（绕行空间不足时放大边界框重试），每档先粗网格后细网格；
-  // 成功即返回（offset 退避在此种罕见情形下忽略）
-  for (const pad of [150, 400, 1000]) {
-    for (const cell of [20, 10]) {
-      const routed = waypointRoute(base, obstacles, cell, pad);
-      if (routed) return routed;
-    }
-  }
-
-  // 尽力而为：返回碰撞最少的组合
+  // 第一刀（2026-08-07）：不再用 A* waypoint 兜底。
+  // 原 A* 折线/S 路径是「连线乱」的折角根源，且与 resolveOverlaps 推挤互相放大。
+  // 改为始终返回碰撞最少的平滑贝塞尔，宁可轻微穿越节点，也不满屏折角。
   return buildPath(best!.ep, best!.choice, offset);
 }

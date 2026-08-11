@@ -1036,6 +1036,19 @@ ${ANIM_CORE_SOURCE}
     }
   }
 
+  // 读取当前 DOM 中"实际可见"的边 id 集合（功能树/折叠视图下只沿正在看的边流动）
+  function getVisibleEdgeIds() {
+    var visible = [];
+    var edges = document.querySelectorAll('.edge');
+    for (var i = 0; i < edges.length; i++) {
+      if (edges[i].style.display !== 'none') {
+        var id = edges[i].getAttribute('data-id');
+        if (id) visible.push(id);
+      }
+    }
+    return visible;
+  }
+
   function spawnDefaultParticle(flow, payloadData) {
     // ---- 职责分层激活门控：深层 flow 跟随层展开状态 ----
     if (!flowDomVisible(flow)) return;
@@ -1459,17 +1472,39 @@ ${ANIM_CORE_SOURCE}
       explicitPaths[e.config.from + '->' + e.config.to] = true;
     });
 
+    // ---- 默认氛围层（L0）预算收紧 ----
+    // 性能修复：此前为每条普通边生成一个默认粒子流定时器（几百条边 → 几百个 setInterval
+    // 同时向主线程灌粒子），这是"整页无响应"的根因。氛围层只是背景粒子，不必每条边都跑：
+    // 1) 静态节点/设计视图下只养一个"采样子集"的默认流，保持氛围同时不拖垮主线程；
+    // 2) 定时器启动错峰（stagger），避免所有流同时发射造成瞬间峰值。
+    var MAX_DEFAULT_FLOWS = 12; // 氛围层同时运行的默认流上限（显式 flows 不受限）
+    var visibleEdgeIds = getVisibleEdgeIds();
+    var defaultCandidates = [];
     for (var j = 0; j < DEFAULT_FLOWS.length; j++) {
       var df = DEFAULT_FLOWS[j];
       var key = df.from + '->' + df.to;
-      if (!explicitPaths[key]) {
-        periodicFlows.push(df);
+      if (explicitPaths[key]) continue;
+      // 只保留当前 DOM 可见的边：功能树/折叠视图下粒子沿"正在看的"边流动，
+      // 否则启动时采到的多是隐藏端点之间的边，粒子白跑看不见
+      if (df.edgeId && visibleEdgeIds.indexOf(df.edgeId) === -1) continue;
+      defaultCandidates.push(df);
+    }
+    // 均匀采样：保持边在图上的空间分布，而不是只取前几条
+    if (defaultCandidates.length > MAX_DEFAULT_FLOWS) {
+      var sampled = [];
+      var stride = defaultCandidates.length / MAX_DEFAULT_FLOWS;
+      for (var k = 0; k < MAX_DEFAULT_FLOWS; k++) {
+        sampled.push(defaultCandidates[Math.min(defaultCandidates.length - 1, Math.floor(k * stride))]);
       }
+      defaultCandidates = sampled;
     }
 
-    // 启动 periodic 流
-    periodicFlows.forEach(function(flow) {
-      startFlowTimer(flow);
+    // 启动 periodic 流（错峰 start，避免同时发射峰值）
+    periodicFlows.forEach(function(flow, idx) {
+      startFlowTimer(flow, idx * 700);
+    });
+    defaultCandidates.forEach(function(flow, idx) {
+      startFlowTimer(flow, 400 + idx * 700);
     });
 
     // 注册 event 触发流
@@ -1547,15 +1582,35 @@ ${ANIM_CORE_SOURCE}
     console.log('[animV2] event triggers registered:', Object.keys(listeners));
   }
 
-  function startFlowTimer(flow) {
-    // 立即跑一次
-    spawnDefaultParticle(flow);
+  function startFlowTimer(flow, delay) {
+    // 错峰启动：delay>0 时先排队再首次发射，避免所有流同时发射造成瞬间峰值
+    var firstRun = function() {
+      spawnDefaultParticle(flow);
+    };
+    if (delay > 0) {
+      setTimeout(firstRun, delay);
+    } else {
+      firstRun();
+    }
 
-    // 周期触发
+    var originalInterval = flow.interval || 4000;
+    var skipCounter = 0;
+    // 周期触发：速度感知发射跳过——慢速时减少发射频率避免粒子堆积
     state.flowTimers[flow.id] = setInterval(function() {
       if (state.paused && !state.stepMode) return;
+      // speedMul=0.1 → 每10次发射1次；speedMul=0.25 → 每4次发射1次；
+      // speedMul>=0.5 → 每次发射。变化即时生效（每次回调读当前 state.speedMul）
+      var mul = state.speedMul || 1;
+      if (mul < 0.5) {
+        var skip = Math.round(1 / mul) - 1;
+        if (skip > 0) {
+          skipCounter++;
+          if (skipCounter <= skip) return;
+          skipCounter = 0;
+        }
+      }
       spawnDefaultParticle(flow);
-    }, flow.interval);
+    }, originalInterval);
   }
 
   // ---- L1 默认行为：状态变化高亮 ----
@@ -1699,15 +1754,58 @@ ${ANIM_CORE_SOURCE}
     bind('anim-resume', resume);
     bind('anim-reset', reset);
 
-    // 速度滑块：0.25x - 2x，实时作用于全局倍率
+    // 速度滑块：0.1x - 3x，实时作用于全局倍率
     var speedInput = document.getElementById('anim-speed');
     var speedVal = document.getElementById('anim-speed-val');
     if (speedInput) {
       speedInput.addEventListener('input', function() {
-        state.speedMul = parseFloat(speedInput.value) || 1;
-        if (speedVal) speedVal.textContent = speedInput.value + 'x';
+        setSpeed(parseFloat(speedInput.value) || 1);
       });
     }
+
+    // 速度预设按钮
+    document.querySelectorAll('.speed-preset').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var s = parseFloat(btn.getAttribute('data-speed')) || 1;
+        setSpeed(s);
+        if (speedInput) speedInput.value = String(s);
+        if (speedVal) speedVal.textContent = s + 'x';
+        document.querySelectorAll('.speed-preset').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        // 退出慢动作高亮态
+        var slowmo = document.getElementById('anim-slowmo');
+        if (slowmo) slowmo.classList.remove('active');
+      });
+    });
+
+    // 慢动作按钮：切换 0.25x ⇄ 1x
+    var slowmoBtn = document.getElementById('anim-slowmo');
+    if (slowmoBtn) {
+      slowmoBtn.addEventListener('click', function() {
+        var isSlow = state.speedMul < 0.5;
+        if (isSlow) {
+          setSpeed(1);
+          if (speedInput) speedInput.value = '1';
+          if (speedVal) speedVal.textContent = '1x';
+          slowmoBtn.classList.remove('active');
+        } else {
+          setSpeed(0.25);
+          if (speedInput) speedInput.value = '0.25';
+          if (speedVal) speedVal.textContent = '0.25x';
+          slowmoBtn.classList.add('active');
+        }
+        // 同步预设按钮高亮
+        document.querySelectorAll('.speed-preset').forEach(function(b) {
+          b.classList.toggle('active', Math.abs(parseFloat(b.getAttribute('data-speed')) - state.speedMul) < 0.01);
+        });
+      });
+    }
+  }
+
+  function setSpeed(s) {
+    state.speedMul = Math.max(0.1, Math.min(3, s));
+    var speedVal = document.getElementById('anim-speed-val');
+    if (speedVal) speedVal.textContent = state.speedMul.toFixed(2).replace(/\.?0+$/, '') + 'x';
   }
 
   // ---- 单流聚焦：hover 边时，非该流粒子降噪（opacity 0.12），移开恢复 ----
@@ -2205,6 +2303,43 @@ ${ANIM_CORE_SOURCE}
     ba.addEventListener('click', enterAnimView);
   }
 
+  // ---- 动态重同步：功能树展开/收起后，让新增可见的边自动出粒子 ----
+  // 默认氛围流（default_flow_）只在启动时采样一次可见边；下钻到社区/文件层后
+  // 新出现的文件调用边没有正在运行的流。这里按当前可见边增量启停：
+  //   - 已隐藏的默认流 → 停掉定时器（释放预算）
+  //   - 新可见的默认流   → 错峰启动（受自适应上限约束）
+  // 显式 flows（crossfile_*）不受此限——它们本身是 periodic 定时器，发射时按
+  // flowDomVisible 门控，展开后自动恢复，无需在此处理。
+  function resyncFlows() {
+    if (!state.started) return;
+    var visibleEdgeIds = getVisibleEdgeIds();
+    var visibleMap = {};
+    for (var i = 0; i < visibleEdgeIds.length; i++) visibleMap[visibleEdgeIds[i]] = true;
+
+    // 停掉已隐藏边的默认流
+    for (var fid in state.flowTimers) {
+      if (fid.indexOf('default_flow_') !== 0) continue;
+      var eid = fid.slice('default_flow_'.length);
+      if (!visibleMap[eid]) {
+        clearInterval(state.flowTimers[fid]);
+        delete state.flowTimers[fid];
+      }
+    }
+
+    // 启动新可见边的默认流（自适应上限：可见边越多放开得越多，错峰防峰值）
+    var activeCount = 0;
+    for (var k in state.flowTimers) { if (k.indexOf('default_flow_') === 0) activeCount++; }
+    var MAX = visibleEdgeIds.length > 24 ? 48 : 12;
+    for (var j = 0; j < DEFAULT_FLOWS.length; j++) {
+      var df = DEFAULT_FLOWS[j];
+      if (!df.edgeId || !visibleMap[df.edgeId]) continue;
+      if (state.flowTimers[df.id]) continue;
+      if (activeCount >= MAX) break;
+      startFlowTimer(df, 300 + activeCount * 250);
+      activeCount++;
+    }
+  }
+
   // ---- 启动 ----
   function start() {
     if (state.started) return;
@@ -2234,7 +2369,10 @@ ${ANIM_CORE_SOURCE}
     resume: resume,
     step: step,
     reset: reset,
+    setSpeed: setSpeed,
     spawnParticle: spawnDefaultParticle,
+    // 功能树下钻展开/收起后重同步可见边，让新增文件调用边自动出粒子
+    resyncFlows: resyncFlows,
     // D3 变更影响联动：把当前已发射的、落在 .impacted 边上（或端点受影响）的粒子重绘成红色
     repaintImpacted: repaintImpactedParticles,
     // D3 注入回放：__animV2__.replayFlow('flow_id', {error:{code:'X'}}, valueCtx?)

@@ -9,13 +9,14 @@
  * - 底部导出按钮：序列化 window.__DSL__ → 下载 <feature>.json
  */
 
-import type { DesignDSL, Node, Edge, SemanticFile } from '../dsl/types.js';
+import type { DesignDSL, Node, Edge, SemanticFile, Annotation } from '../dsl/types.js';
 import { buildStyles } from './styles.js';
 import { buildScript } from './scripts.js';
 import { buildAnimationScript } from './animation_engine.js';
 import { computeEdgePath } from './edge_geom.js';
 import type { GRect } from './edge_geom.js';
 import { schemaToHuman } from './shape_card.js';
+import { contentAttrs } from './i18n.js';
 
 /** 障碍矩形（edge_geom.GRect 的本地别名，保持调用处可读性） */
 type RectBox = GRect;
@@ -66,10 +67,13 @@ function computeCanvasSize(dsl: DesignDSL): { width: number; height: number } {
 
   let maxX = 0;
   let maxY = 0;
+  // 功能树归类模式：初始只按「项目+功能」定画布，社区/文件默认折叠不撑大首屏
+  const ftMode = !!dsl.feature_tree;
   for (const n of dsl.geometry.nodes) {
     // 深层节点默认隐藏（层角标展开才可见），不参与初始画布尺寸，
     // 否则隐藏节点把画布撑出大片空白（展开后由前端 updateCanvasViewBox 按需扩展）
     if ((n.layer ?? 'main') !== 'main') continue;
+    if (ftMode && n.id !== '__project__' && !n.id.startsWith('ft:')) continue;
     const b = nodeBox(n);
     maxX = Math.max(maxX, b.x + b.w);
     maxY = Math.max(maxY, b.y + b.h);
@@ -134,7 +138,7 @@ function renderContentBlocks(blocks: import('../dsl/types.js').ContentBlock[]): 
     .join('');
 }
 
-function renderNode(n: Node, parentIds?: Set<string>): string {
+function renderNode(n: Node, parentIds?: Set<string>, annotations?: Annotation[]): string {
   const b = nodeBox(n);
   const style = n.style ?? {};
   // tone 语义色优先于显式 bg；均无时走主题变量
@@ -152,7 +156,7 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
   const rx = style.borderRadius ?? 8;
   const shape = style.shape ?? 'rounded';
 
-  const textColor = style.color ?? '#ffffff';
+  const textColor = style.color ?? 'var(--theme-node-text, #ffffff)';
   const label = n.label ?? n.id;
 
   // 是否为父节点（含子组件）：平铺布局下文字上移到顶部，避免与子节点重叠
@@ -231,13 +235,30 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
     const textX = b.x + b.w / 2;
     // 平铺布局：父节点文字上移到顶部（y+18），子节点保持居中；形状卡节点标签同样置顶
     const textY = isParent || hasShapes ? b.y + 18 : b.y + b.h / 2;
+    // 人话主标题（title）存在时，渲染两行：主标题在上（title），副标题在下（label 文件名）
+    const hasTitle = !!n.title && n.title !== label;
+    const mainText = hasTitle ? n.title! : label;
+    const subText = hasTitle ? label : '';
     // 根据节点宽度和标签长度估算合适的字体大小
-    const labelLen = label.length;
-    const maxByWidth = Math.floor((b.w - 16) / Math.max(labelLen * 0.6, 1));
-    const maxByHeight = Math.floor((b.h - 8) / 1.4);
-    const fontSize = Math.max(11, Math.min(18, maxByWidth, maxByHeight));
+    const mainLen = mainText.length;
+    const maxByWidth = Math.floor((b.w - 16) / Math.max(mainLen * 0.6, 1));
+    const maxByHeight = Math.floor((b.h - (hasTitle ? 26 : 8)) / 1.4);
+    const fontSize = Math.max(11, Math.min(hasTitle ? 15 : 18, maxByWidth, maxByHeight));
     const dy = isParent || hasShapes ? '0' : '0.35em';
-    contentSvg = `<text x="${textX}" y="${textY}" text-anchor="middle" dy="${dy}" fill="${esc(textColor)}" style="font-size:${fontSize}px" ${isParent ? 'class="label-top"' : ''}>${esc(label)}</text>`;
+    let labelSvg = '';
+    if (hasTitle) {
+      const mainY = isParent || hasShapes ? b.y + 18 : b.y + b.h / 2 - 6;
+      labelSvg = `<text x="${textX}" y="${mainY}" text-anchor="middle" dy="${dy}" fill="${esc(textColor)}" style="font-size:${fontSize}px;font-weight:600" ${isParent ? 'class="label-top"' : ''}>${esc(mainText)}</text>`;
+      // 副标题：文件名小字（截断过长路径）
+      const fileLen = subText.length;
+      const subFs = Math.max(9, Math.min(12, Math.floor((b.w - 16) / Math.max(fileLen * 0.55, 1))));
+      const subY = isParent || hasShapes ? b.y + 18 + 18 : b.y + b.h / 2 + 14;
+      const shownSub = fileLen > Math.floor((b.w - 16) / (subFs * 0.55)) ? subText.slice(0, Math.max(4, Math.floor((b.w - 16) / (subFs * 0.55)) - 1)) + '…' : subText;
+      labelSvg += `<text x="${textX}" y="${subY}" text-anchor="middle" dy="0.35em" fill="${esc(textColor)}" opacity="0.72" style="font-size:${subFs}px">${esc(shownSub)}</text>`;
+    } else {
+      labelSvg = `<text x="${textX}" y="${textY}" text-anchor="middle" dy="${dy}" fill="${esc(textColor)}" style="font-size:${fontSize}px" ${isParent ? 'class="label-top"' : ''}>${esc(label)}</text>`;
+    }
+    contentSvg = labelSvg;
     // D1 数据形状卡：进/出料口人话形状（纯展示，pointer-events=none 不抢拖拽）
     if (hasShapes) {
       const rowsHtml = shapeRows
@@ -250,10 +271,33 @@ function renderNode(n: Node, parentIds?: Set<string>): string {
     }
   }
 
-  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}" data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${archAttr}${layerAttr}${hostAttr}${hiddenAttr}>
+  // 图上留言角标：未解决标注才显示，按最高严重度着色，解决后消失
+  // 位置：节点右上角（状态圆点左侧），避免与状态点重叠
+  let annoBadge = '';
+  if (annotations && annotations.length > 0) {
+    const unresolved = annotations.filter((a) => !a.resolved);
+    if (unresolved.length > 0) {
+      const sevRank = { critical: 3, warning: 2, info: 1 } as Record<string, number>;
+      let worst = 'info';
+      for (const a of unresolved) {
+        const r = sevRank[a.severity ?? 'info'] ?? 1;
+        if (r > (sevRank[worst] ?? 1)) worst = a.severity ?? 'info';
+      }
+      const badgeColor = worst === 'critical' ? '#F44336' : worst === 'warning' ? '#FF9800' : '#2196F3';
+      const bx = b.x + b.w - 14;
+      const by = b.y + 8;
+      annoBadge = `<g class="anno-badge" data-anno-count="${unresolved.length}" data-node-id="${esc(n.id)}" transform="translate(${bx},${by})">
+        <circle r="9" fill="${badgeColor}" stroke="#ffffff" stroke-width="1"/>
+        <text text-anchor="middle" dy="0.35em" fill="#ffffff" font-size="11" font-weight="bold">${unresolved.length}</text>
+      </g>`;
+    }
+  }
+
+  return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}"${n.title ? ` data-title="${esc(n.title)}"` : ''} data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${archAttr}${layerAttr}${hostAttr}${hiddenAttr}>
       ${shapeSvg}
       ${contentSvg}
       <circle cx="${dotX}" cy="${dotY}" r="4" fill="${dotColor}" stroke="#ffffff" stroke-width="0.5"/>
+      ${annoBadge}
     </g>`;
 }
 
@@ -388,18 +432,18 @@ function renderCard(file: SemanticFile): string {
   const apiHtml = [];
 
   if (matchedApis.length > 0) {
-    apiHtml.push(`<div class="api-section"><span class="api-status status-done">✓</span> 已实现 (${matchedApis.length})</div>`);
-    apiHtml.push(...matchedApis.map((a) => `<div class="api api-done">${esc(a.signature)}${a.notes ? ` <span class="notes">// ${esc(a.notes)}</span>` : ''}</div>`));
+    apiHtml.push(`<div class="api-section" data-i18n="api_done" data-i18n-args='{"n":${matchedApis.length}}'>✓ 已实现 (${matchedApis.length})</div>`);
+    apiHtml.push(...matchedApis.map((a) => `<div class="api api-done">${esc(a.signature)}${a.notes ? ` <span class="notes">// <span${contentAttrs(a.notes, a.notes_en)}>${esc(a.notes)}</span></span>` : ''}</div>`));
   }
 
   if (missingApis.length > 0) {
-    apiHtml.push(`<div class="api-section"><span class="api-status status-missing">✗</span> 未实现 (${missingApis.length})</div>`);
-    apiHtml.push(...missingApis.map((a) => `<div class="api api-missing">${esc(a.signature)}${a.notes ? ` <span class="notes">// ${esc(a.notes)}</span>` : ''}</div>`));
+    apiHtml.push(`<div class="api-section" data-i18n="api_missing" data-i18n-args='{"n":${missingApis.length}}'>✗ 未实现 (${missingApis.length})</div>`);
+    apiHtml.push(...missingApis.map((a) => `<div class="api api-missing">${esc(a.signature)}${a.notes ? ` <span class="notes">// <span${contentAttrs(a.notes, a.notes_en)}>${esc(a.notes)}</span></span>` : ''}</div>`));
   }
 
   if (extraApis.length > 0) {
-    apiHtml.push(`<div class="api-section"><span class="api-status status-extra">+</span> 代码新增 (${extraApis.length})</div>`);
-    apiHtml.push(...extraApis.map((a) => `<div class="api api-extra">${esc(a.signature)}${a.notes ? ` <span class="notes">// ${esc(a.notes)}</span>` : ''}</div>`));
+    apiHtml.push(`<div class="api-section" data-i18n="api_extra" data-i18n-args='{"n":${extraApis.length}}'>+ 代码新增 (${extraApis.length})</div>`);
+    apiHtml.push(...extraApis.map((a) => `<div class="api api-extra">${esc(a.signature)}${a.notes ? ` <span class="notes">// <span${contentAttrs(a.notes, a.notes_en)}>${esc(a.notes)}</span></span>` : ''}</div>`));
   }
 
   const apis = apiHtml.join('');
@@ -409,7 +453,7 @@ function renderCard(file: SemanticFile): string {
 
   return `      <article class="card" data-id="${esc(file.id)}">
         <div class="path">${esc(file.path)}</div>
-        <div class="responsibility">${esc(file.responsibility)}</div>
+        <div class="responsibility"${contentAttrs(file.responsibility, file.responsibility_en)}>${esc(file.responsibility)}</div>
         ${apis ? `<div class="apis">${apis}</div>` : ''}
         ${deps ? `<div class="deps">deps: ${deps}</div>` : ''}
       </article>`;
@@ -500,7 +544,192 @@ function deriveLayers(dsl: DesignDSL): DesignDSL {
   return { ...dsl, geometry: { ...dsl.geometry, nodes } };
 }
 
-/** 报告导读摘要：renderHTML 第二参数传入，生成打开即见的导读面板 */
+/**
+ * 功能树归类下钻（项目 → 功能 → 社区 → 文件）
+ *
+ * 当 DSL 携带 feature_tree 时，把"一滩平铺的文件星图"重排成层级归类形态：
+ *   - 中心项目根节点（__project__）
+ *   - 外圈"功能"聚合节点（ft:<feature.id>）
+ *   - 每个功能扇出它的"社区"聚合节点（ct:<feature.id>:<community.id>）
+ *   - 每个社区扇出它的"文件"节点（原 geometry 节点，按社区重定位）
+ * 用 contains 边表达归属（不渲染线，仅驱动现有折叠/展开，实现逐级下钻），
+ * 同时按文件级调用边聚合出"功能↔功能""社区↔社区"的线段。
+ * 输入 DSL 只读，返回加工副本（存储文件不动，浏览器端 window.__DSL__ 单源消费）。
+ */
+function bakeFeatureTreeView(dsl: DesignDSL): DesignDSL {
+  const ft = dsl.feature_tree;
+  if (!ft || !ft.features || ft.features.length === 0) return dsl;
+
+  const fileMap = ft.file_map ?? {};
+  const origNodes = dsl.geometry?.nodes ?? [];
+  const origEdges = dsl.geometry?.edges ?? [];
+  const byId = new Map(origNodes.map((n) => [n.id, n]));
+
+  // 文件 → 功能 / 社区 聚合 id
+  const featOf = new Map<string, string>();
+  const commOf = new Map<string, string>();
+  for (const [nid, m] of Object.entries(fileMap)) {
+    if (!byId.has(nid)) continue;
+    featOf.set(nid, 'ft:' + m.feature_id);
+    commOf.set(nid, 'ct:' + m.feature_id + ':' + m.community_id);
+  }
+
+  // 复制文件节点（不污染存储对象），稍后按社区扇出重定位
+  const fileById = new Map(origNodes.map((n) => [n.id, { ...n }]));
+  const nodes: Node[] = [];
+  const edges: Edge[] = origEdges.map((e) => ({ ...e }));
+  const featurePos: Array<{ id: string; x: number; y: number }> = [];
+
+  // 社区 → 原始文件质心 / 成员：用于"保形聚类"（等比缩放相对质心的偏移，保留原图内部拓扑，
+  // 而非均匀圆环——让下钻到社区时呈现的是真实文件簇，而不是一张合成新图）
+  const commCentroid = new Map<string, { x: number; y: number; n: number }>();
+  const commMembers = new Map<string, string[]>();
+  for (const [nid, cAgg] of commOf) {
+    const fnode = byId.get(nid);
+    if (!fnode) continue;
+    const arr = commMembers.get(cAgg) ?? [];
+    arr.push(nid);
+    commMembers.set(cAgg, arr);
+    const c = commCentroid.get(cAgg) ?? { x: 0, y: 0, n: 0 };
+    c.x += fnode.x ?? 0;
+    c.y += fnode.y ?? 0;
+    c.n++;
+    commCentroid.set(cAgg, c);
+  }
+  for (const c of commCentroid.values()) if (c.n > 0) { c.x /= c.n; c.y /= c.n; }
+
+  const projectId = '__project__';
+  nodes.push({
+    id: projectId,
+    label: dsl.title || dsl.feature || '项目',
+    type: 'project',
+    x: 0,
+    y: 0,
+    width: 230,
+    height: 96,
+    style: { bg: '#24407a', color: '#ffffff', border: '2px solid #7aa2ff', borderRadius: 16 },
+  });
+
+  const Feat = ft.features;
+  const N = Feat.length;
+  const R1 = N > 1 ? 400 : 320;
+
+  Feat.forEach((f, fi) => {
+    const angle = (fi / N) * 2 * Math.PI - Math.PI / 2;
+    const fx = Math.round(R1 * Math.cos(angle));
+    const fy = Math.round(R1 * Math.sin(angle));
+    const fid = 'ft:' + f.id;
+    featurePos.push({ id: fid, x: fx, y: fy });
+    nodes.push({
+      id: fid,
+      label: f.name || f.id,
+      type: 'feature',
+      x: fx,
+      y: fy,
+      width: 210,
+      height: 80,
+      style: { bg: '#1c3a63', color: '#eaf2ff', border: '1px solid #4f8df7', borderRadius: 14 },
+    });
+    edges.push({ id: 'pc-' + fid, from: projectId, to: fid, label: 'contains' });
+
+    const comms = f.communities ?? [];
+    const m = comms.length;
+    const R2 = 260;
+    comms.forEach((c, ci) => {
+      const spread = m > 1 ? Math.min(1.0, 1.7 / m) : 0;
+      const cAngle = angle + (ci - (m - 1) / 2) * spread;
+      const cx = Math.round(fx + R2 * Math.cos(cAngle));
+      const cy = Math.round(fy + R2 * Math.sin(cAngle));
+      const cid = 'ct:' + f.id + ':' + c.id;
+      nodes.push({
+        id: cid,
+        label: c.name || '社区' + c.id,
+        type: 'community',
+        x: cx,
+        y: cy,
+        width: 176,
+        height: 68,
+        style: { bg: '#122a4a', color: '#c9d8f2', border: '1px solid #2f5a9e', borderRadius: 12 },
+      });
+      edges.push({ id: 'fc-' + cid, from: fid, to: cid, label: 'contains' });
+
+      const cFiles = commMembers.get(cid) ?? [];
+      const fn = cFiles.length;
+      // 保形聚类半径：随文件数增长，避免大社区拥挤重叠
+      const R3 = Math.min(360, 120 + fn * 14);
+      // 用"原始相对质心的偏移 × 等比缩放"排布，保留该社区在原星图里的真实拓扑/形状
+      const centroid = commCentroid.get(cid);
+      const offs: Array<{ nid: string; dx: number; dy: number }> = [];
+      let maxOff = 0;
+      cFiles.forEach((nid) => {
+        const fnode = fileById.get(nid);
+        if (!fnode) return;
+        const dx = (fnode.x ?? 0) - (centroid ? centroid.x : cx);
+        const dy = (fnode.y ?? 0) - (centroid ? centroid.y : cy);
+        offs.push({ nid, dx, dy });
+        maxOff = Math.max(maxOff, Math.hypot(dx, dy));
+      });
+      const s = maxOff > 0 ? R3 / maxOff : 1;
+      offs.forEach((o) => {
+        const fnode = fileById.get(o.nid);
+        if (!fnode) return;
+        fnode.x = Math.round(cx + o.dx * s);
+        fnode.y = Math.round(cy + o.dy * s);
+        edges.push({ id: 'cfile-' + o.nid, from: cid, to: o.nid, label: 'contains' });
+      });
+    });
+  });
+
+  // 未归入任何社区的文件：右下角兜底平铺
+  let unassignedIdx = 0;
+  for (const n of origNodes) {
+    if (commOf.has(n.id)) continue;
+    const fnode = fileById.get(n.id);
+    if (!fnode) continue;
+    fnode.x = 600 + (unassignedIdx % 4) * 140;
+    fnode.y = 520 + Math.floor(unassignedIdx / 4) * 90;
+    unassignedIdx++;
+  }
+
+  nodes.push(...Array.from(fileById.values()));
+
+  // 聚合线段：功能↔功能 / 社区↔社区（由文件级调用边聚合）
+  const addAggr = (aggOf: Map<string, string>, prefix: string) => {
+    const seen = new Set<string>();
+    for (const e of origEdges) {
+      const a = aggOf.get(e.from);
+      const b = aggOf.get(e.to);
+      if (!a || !b || a === b) continue;
+      const key = [a, b].sort().join('\u2945');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ id: prefix + key, from: a, to: b, type: 'curve', arrow: 'forward', style: { stroke: '#6fb1ff', strokeWidth: 1.5 } });
+    }
+  };
+  addAggr(featOf, 'aggr-feat-');
+  addAggr(commOf, 'aggr-comm-');
+
+  // 整体平移：让「所有节点」（含社区/文件，它们位于功能节点之外的更大半径处，
+  // 坐标可能为负）都落在非负坐标内，避免展开后节点落到 viewBox(0,0,…) 之外。
+  // 若只按功能节点平移，社区/文件节点可能为负，展开时在画布外、相机钻入空区域。
+  let minX = 0;
+  let minY = 0;
+  const offsetScope = nodes.filter((n) => n.id !== projectId);
+  for (const n of offsetScope) {
+    minX = Math.min(minX, n.x ?? 0);
+    minY = Math.min(minY, n.y ?? 0);
+  }
+  const ox = -minX + 60;
+  const oy = -minY + 60;
+  for (const n of nodes) {
+    n.x = (n.x ?? 0) + ox;
+    n.y = (n.y ?? 0) + oy;
+  }
+
+  return { ...dsl, geometry: { ...dsl.geometry, nodes, edges } };
+}
+
+// 报告导读摘要：renderHTML 第二参数传入，生成打开即见的导读面板
 export interface ReportSummary {
   /** 面板大标题（默认 dsl.title ?? dsl.feature） */
   heading?: string;
@@ -533,37 +762,86 @@ function buildReportPanel(dsl: DesignDSL, report: ReportSummary): string {
     : '';
   const hotspotsHtml = hotspots.length > 0
     ? `<ul class="report-hotspots">${hotspots.map((h) => `<li class="report-hotspot sev-${h.severity === 'crit' ? 'crit' : 'warn'}"${h.node_id ? ` data-fly="${esc(h.node_id)}"` : ''}><span class="report-hotspot-dot"></span><span class="report-hotspot-label">${esc(h.label)}</span><span class="report-hotspot-detail">${esc(h.detail ?? '')}</span></li>`).join('')}</ul>`
-    : '<div class="report-empty">✅ 全部文件在阈值内，无巨石</div>';
+    : '<div class="report-empty" data-i18n="report_empty">✅ 全部文件在阈值内，无巨石</div>';
   const tourHtml = tour.length > 0
-    ? `<div class="report-section-title">🧭 推荐探索路径<span class="report-hint">带 ✈ 的步骤可点击定位</span></div><ol class="report-tour">${tour.map((t) => `<li class="report-tour-item"${t.node_id ? ` data-fly="${esc(t.node_id)}"` : ''}>${esc(t.text)}</li>`).join('')}</ol>`
+    ? `<div class="report-section-title">🧭 <span data-i18n="report_tour_title">推荐探索路径</span><span class="report-hint" data-i18n="report_hint_tour">带 ✈ 的步骤可点击定位</span></div><ol class="report-tour">${tour.map((t) => `<li class="report-tour-item"${t.node_id ? ` data-fly="${esc(t.node_id)}"` : ''}>${esc(t.text)}</li>`).join('')}</ol>`
     : '';
-  return `      <div id="report-overlay" class="report-overlay">
+  return `      <div id="report-overlay" class="report-overlay hidden">
         <div class="report-card">
           <button id="report-close" class="report-close" type="button" title="关闭，开始探索">✕</button>
           <div class="report-kicker">SELF-ANALYSIS REPORT</div>
           <h2 class="report-heading">${esc(heading)}</h2>
           ${report.subline ? `<div class="report-subline">${esc(report.subline)}</div>` : ''}
           ${metricsHtml}
-          <div class="report-section-title">⚠ 巨石文件 TOP<span class="report-hint">点击条目直达节点</span></div>
+          <div class="report-section-title">⚠ <span data-i18n="report_monolith_top">巨石文件 TOP</span><span class="report-hint" data-i18n="report_hint_fly">点击条目直达节点</span></div>
           ${hotspotsHtml}
           ${tourHtml}
-          <div class="report-section-title">📖 图例与操作</div>
+          <div class="report-section-title" data-i18n="report_legend_title">📖 图例与操作</div>
           <div class="report-legend">
             <div class="report-legend-row">
-              <span class="lg-item"><span class="lg-swatch lg-file"></span>文件（颜色=语言）</span>
-              <span class="lg-item"><span class="lg-swatch lg-dir"></span>目录容器</span>
-              <span class="lg-item"><span class="lg-shape">◆</span>分支</span>
-              <span class="lg-item"><span class="lg-shape">⬡</span>循环</span>
-              <span class="lg-item"><span class="lg-shape">●</span>入口/返回</span>
+              <span class="lg-item"><span class="lg-swatch lg-file"></span><span data-i18n="report_legend_file">文件（颜色=语言）</span></span>
+              <span class="lg-item"><span class="lg-swatch lg-dir"></span><span data-i18n="report_legend_dir">目录容器</span></span>
+              <span class="lg-item"><span class="lg-shape">◆</span><span data-i18n="report_legend_branch">分支</span></span>
+              <span class="lg-item"><span class="lg-shape">⬡</span><span data-i18n="report_legend_loop">循环</span></span>
+              <span class="lg-item"><span class="lg-shape">●</span><span data-i18n="report_legend_entry">入口/返回</span></span>
             </div>
             <div class="report-legend-row lg-ops">
-              <span>单击节点=选中看详情</span><span>左上 ▸ 角标=展开内部</span><span>滚轮=缩放</span><span>拖拽空白=平移</span>
+              <span data-i18n="report_ops_click">单击节点=选中看详情</span><span data-i18n="report_ops_expand">左上 ▸ 角标=展开内部</span><span data-i18n="report_ops_zoom">滚轮=缩放</span><span data-i18n="report_ops_pan">拖拽空白=平移</span>
             </div>
           </div>
-          <button id="report-start" class="report-start" type="button"${tour.length > 0 && tour[0].node_id ? ` data-fly="${esc(tour[0].node_id)}"` : ''}>${tour.length > 0 && tour[0].node_id ? '开始探索：直达第一站 →' : '开始探索 →'}</button>
+          <button id="report-start" class="report-start" type="button"${tour.length > 0 && tour[0].node_id ? ` data-fly="${esc(tour[0].node_id)}"` : ''} data-i18n="${tour.length > 0 && tour[0].node_id ? 'report_start_first' : 'report_start'}">${tour.length > 0 && tour[0].node_id ? '开始探索：直达第一站 →' : '开始探索 →'}</button>
         </div>
       </div>
 `;
+}
+
+/** 功能卡片首屏：基于 feature_tree 生成"产品功能概览"卡片层。
+ *  点击卡片 → 钻入对应功能（展开其社区/文件）；返回按钮 → 回到卡片层。
+ *  覆盖层悬于画布之上，不替换星图；仅 feature_tree 模式注入。
+ */
+function buildFeatureCards(dsl: DesignDSL): string {
+  const ft = dsl.feature_tree;
+  if (!ft || !ft.features || ft.features.length === 0) return '';
+  const icons = ['📦', '📚', '🎨', '🧩', '🔌', '👁', '⚙️', '🧠', '🔬', '🛠'];
+  const cards = ft.features.map((f, i) => {
+    const comms = f.communities ?? [];
+    const fileCount = comms.reduce((s, c) => s + (c.files?.length ?? 0), 0);
+    const lineCount = comms.reduce((s, c) => s + (c.est_lines ?? 0), 0);
+    const icon = icons[i % icons.length];
+    const stats =
+      `<span class="feature-card-stat" data-i18n="feature_card_comm" data-i18n-args='{"n":${comms.length}}'>${comms.length} 社区</span>` +
+      `<span class="feature-card-stat" data-i18n="feature_card_file" data-i18n-args='{"n":${fileCount}}'>${fileCount} 文件</span>` +
+      (lineCount > 0 ? `<span class="feature-card-stat" data-i18n="feature_card_lines" data-i18n-args='{"n":${lineCount}}'>~${lineCount} 行</span>` : '');
+    return `      <button type="button" class="feature-card" data-fid="ft:${esc(f.id)}">
+        <span class="feature-card-icon">${icon}</span>
+        <span class="feature-card-name"${contentAttrs(f.name, f.name_en)}>${esc(f.name || f.id)}</span>
+        <span class="feature-card-stats">${stats}</span>
+      </button>`;
+  }).join('\n');
+  const totalFiles = ft.features.reduce((s, f) => s + (f.communities ?? []).reduce((x, c) => x + (c.files?.length ?? 0), 0), 0);
+  const totalComms = ft.features.reduce((s, f) => s + (f.communities ?? []).length, 0);
+  return `    <div id="feature-cards" class="feature-cards">
+      <div class="lang-switcher lang-switcher--float" title="切换语言 / Language">
+        <button type="button" data-lang-btn="zh" title="中文">中</button>
+        <button type="button" data-lang-btn="en" title="English">EN</button>
+      </div>
+      <div class="feature-cards-inner">
+        <div class="feature-cards-head">
+          <div class="feature-cards-kicker" data-i18n="features_kicker">PRODUCT FEATURES</div>
+          <h2 class="feature-cards-title" data-i18n="features_title">产品功能概览</h2>
+          <div class="feature-cards-sub" data-i18n="features_sub">点击功能卡片，钻入其社区与文件；点击右上角进入星图</div>
+          <div class="feature-cards-metrics">
+            <span class="feature-cards-metric" data-i18n="feature_count" data-i18n-args='{"n":${ft.features.length}}'>${ft.features.length} 功能</span>
+            <span class="feature-cards-metric" data-i18n="community_count" data-i18n-args='{"n":${totalComms}}'>${totalComms} 社区</span>
+            <span class="feature-cards-metric" data-i18n="file_count_cap" data-i18n-args='{"n":${totalFiles}}'>${totalFiles} 文件</span>
+          </div>
+        </div>
+        <div class="feature-cards-grid">
+${cards}
+        </div>
+        <button id="feature-cards-close" class="feature-cards-close" type="button" data-i18n="features_enter">进入星图 →</button>
+      </div>
+    </div>`;
 }
 
 /** 主渲染入口：DSL → 完整 HTML 字符串 */
@@ -571,6 +849,8 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
   // 职责分层自动推导（F2）：L4.5 handler.errors 声明的流向节点 → error 层（host=flow.from）
   // 烘焙进注入副本，存储文件不动；显式 layer 优先不覆盖
   dsl = deriveLayers(dsl);
+  // 功能树归类下钻：DSL 携带 feature_tree 时把平铺星图重排为 项目→功能→社区→文件（烘焙副本）
+  dsl = bakeFeatureTreeView(dsl);
   const canvas = computeCanvasSize(dsl);
   const nodeMap = new Map<string, Node>();
   for (const n of dsl.geometry.nodes) nodeMap.set(n.id, n);
@@ -627,7 +907,16 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
     return obs;
   };
 
-  const nodesXml = dsl.geometry.nodes.map((n) => renderNode(n, parentIds)).join('\n');
+  // 按节点聚合未解决标注（图上角标 + 留言墙共用）
+  const annoByNode = new Map<string, Annotation[]>();
+  for (const a of (dsl.annotations ?? [])) {
+    const nid = a.node_id ?? a.target_id;
+    if (!nid) continue;
+    if (!annoByNode.has(nid)) annoByNode.set(nid, []);
+    annoByNode.get(nid)!.push(a);
+  }
+
+  const nodesXml = dsl.geometry.nodes.map((n) => renderNode(n, parentIds, annoByNode.get(n.id))).join('\n');
 
   // 边重叠退避：统计每对 (from→to) 的边数，为同对边分配索引
   const edgeGroupCount = new Map<string, number>();
@@ -646,7 +935,32 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
   }).join('\n');
   const simEdgesXml = renderSimEdges(dsl, nodeMap, obstaclesFor);
   const swimlanesXml = renderSwimlanes(dsl);
-  const cardsXml = (dsl.semantic?.files ?? []).map(renderCard).join('\n');
+  // 语义卡片按目录模块（path 首段）分组折叠，与功能聚类对应
+  const files = dsl.semantic?.files ?? [];
+  const cardGroups = new Map<string, SemanticFile[]>();
+  for (const f of files) {
+    const dir = f.path.split('/')[0] || '(根目录)';
+    if (!cardGroups.has(dir)) cardGroups.set(dir, []);
+    cardGroups.get(dir)!.push(f);
+  }
+  const cardsXml = [...cardGroups.entries()]
+    .map(([dir, groupFiles]) => {
+      const items = groupFiles
+        .map((f) => {
+          const lines = f.lines ? `<span class="card-lines">${f.lines} 行</span>` : '';
+          const layer = f.layer ? `<span class="card-layer">${esc(f.layer)}</span>` : '';
+          return `      <summary class="card-group-item" data-id="${esc(f.id)}">
+        ${layer}${lines}<span class="path-lg">${esc(f.path)}</span>
+      </summary>
+      <div class="card-group-body">${renderCard(f)}</div>`;
+        })
+        .join('\n');
+      return `      <details class="card-group" data-dir="${esc(dir)}">
+        <summary class="card-group-head"><span class="dir-name">${esc(dir)}/</span><span class="dir-count">${groupFiles.length}</span></summary>
+${items}
+      </details>`;
+    })
+    .join('\n');
   const invariantsXml = (dsl.semantic?.multi_file_invariants ?? [])
     .map((inv) => `<li>${esc(inv)}</li>`)
     .join('');
@@ -655,7 +969,7 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
   const invariantCount = dsl.semantic?.multi_file_invariants?.length ?? 0;
   const status = dsl.status ?? 'draft';
   const title = dsl.title ?? '';
-  const theme = dsl.theme ?? 'blue';
+  const theme = dsl.theme ?? 'dynamic';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -667,54 +981,55 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
 </head>
 <body data-theme="${esc(theme)}">
   <header>
-    ${options?.nav?.home_href ? `<a href="${esc(options.nav.home_href)}" class="home-link" title="返回主页">🏠 ${esc(options.nav.home_label ?? '主页')}</a>` : ''}
+    ${options?.nav?.home_href ? `<a href="${esc(options.nav.home_href)}" class="home-link" data-i18n-title="home" title="返回主页">🏠 ${esc(options.nav.home_label ?? '主页')}</a>` : ''}
     <h1>${esc(dsl.feature)}</h1>
     ${title ? `<span class="title">${esc(title)}</span>` : ''}
     <div class="meta">
       <span class="badge status-${esc(status)}">${esc(status)}</span>
-      <span class="badge">${fileCount} 文件</span>
-      <span class="badge">${invariantCount} 不变式</span>
+      <span class="badge" data-i18n="files_count" data-i18n-args='{"n":${fileCount}}'>${fileCount} 文件</span>
+      <span class="badge" data-i18n="invariants_count" data-i18n-args='{"n":${invariantCount}}'>${invariantCount} 不变式</span>
       ${dsl.version ? `<span class="badge">v${esc(dsl.version)}</span>` : ''}
     </div>
   </header>
   <main>
+    <div class="starfield" aria-hidden="true"></div>
     <div class="canvas-wrap">
       <div class="canvas-toolbar">
-        <input type="text" id="node-search" class="search-input" placeholder="🔍 搜索节点 (label / id)..." autocomplete="off">
-        ${options?.report ? `<button id="report-open" class="report-open-btn" type="button" title="查看分析摘要">📋 摘要</button>` : ''}
+        <input type="text" id="node-search" class="search-input" data-i18n-ph="search_placeholder" placeholder="🔍 搜索节点 (label / id)..." autocomplete="off">
+        ${options?.report ? `<button id="report-open" class="report-open-btn" type="button" data-i18n="report_open" title="查看分析摘要">📋 摘要</button>` : ''}
         ${(() => {
           // 数据源切换：设计=人编辑的布局与实现状态（静态）/ 实际=代码实时同步快照（动态，serve 模式）
           const hasAnimView = (dsl.animations_v2?.flows?.length ?? 0) > 0;
           return `<div class="view-switcher" id="dsl-source-switcher" title="切换数据源：设计=人编辑的布局/标注/实现状态（静态）；实际=按代码实时同步的真实现状（只读，serve 模式）">
-            <button id="src-design" type="button" title="设计视图：人编辑的布局、标注、实现进度。默认视图。">🎭 设计</button>
-            <button id="src-actual" type="button" title="实际视图：按代码实时同步的真实现状（LLM 了解项目用）。需 serve 模式 + 实际 DSL 已生成。">⚡ 实际</button>
+            <button id="src-design" type="button" data-i18n="design_view" title="设计视图：人编辑的布局、标注、实现进度。默认视图。">🎭 设计</button>
+            <button id="src-actual" type="button" data-i18n="actual_view" title="实际视图：按代码实时同步的真实现状（LLM 了解项目用）。需 serve 模式 + 实际 DSL 已生成。">⚡ 实际</button>
           </div>` + (hasAnimView ? `<div class="view-switcher" title="切换视图：节点=静态结构 / 动画=交互式数据步进">
-            <button id="view-nodes" class="active" type="button">🗂 节点</button>
-            <button id="view-anim" type="button">🎬 动画</button>
+            <button id="view-nodes" class="active" type="button" data-i18n="nodes_view">🗂 节点</button>
+            <button id="view-anim" type="button" data-i18n="anim_view">🎬 动画</button>
           </div>` : '');
         })()}
-        ${options?.compact_toolbar ? `<button id="advanced-toggle" class="advanced-toggle" type="button" title="更多工具（撤销/重做、重新布局）">⋯ 工具</button>` : ''}
+        ${options?.compact_toolbar ? `<button id="advanced-toggle" class="advanced-toggle" type="button" data-i18n="tools_more" title="更多工具（撤销/重做、重新布局）">⋯ 工具</button>` : ''}
         ${(() => {
           // 职责分层：统计深层节点，有才显示对应层开关
           const errCount = dsl.geometry.nodes.filter((n) => n.layer === 'error').length;
           const detCount = dsl.geometry.nodes.filter((n) => n.layer === 'detail').length;
           const errBtn = errCount > 0
-            ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})">🛡 异常 ${errCount}</button>`
+            ? `<button id="layer-error-toggle" type="button" title="异常层：显示/隐藏全部异常处理节点 (${errCount})"><span data-i18n="layer_error">🛡 异常</span> <span class="chip-count">${errCount}</span></button>`
             : '';
           const detBtn = detCount > 0
-            ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})">🧩 细节 ${detCount}</button>`
+            ? `<button id="layer-detail-toggle" type="button" title="细节层：显示/隐藏全部实现细节节点 (${detCount})"><span data-i18n="layer_detail">🧩 细节</span> <span class="chip-count">${detCount}</span></button>`
             : '';
           const dataflowBtn = detCount > 0
-            ? `<button id="dataflow-toggle" type="button" title="数据流推演：选中 detail 层函数节点后点击，注入数据沿调用链追踪处理与分流" disabled>▶ 数据流</button>`
+            ? `<button id="dataflow-toggle" type="button" data-i18n="dataflow" title="数据流推演：选中 detail 层函数节点后点击，注入数据沿调用链追踪处理与分流" disabled>▶ 数据流</button>`
             : '';
           const diffImpactBtn = dsl.geometry.nodes.length > 0
-            ? `<button id="diff-impact-toggle" type="button" title="变更影响分析：填入已改文件清单，沿调用边追溯波及范围并在图上标红(需要 serve 模式+符号缓存)">🖍 影响</button>`
+            ? `<button id="diff-impact-toggle" type="button" data-i18n="diff_impact" title="变更影响分析：填入已改文件清单，沿调用边追溯波及范围并在图上标红(需要 serve 模式+符号缓存)">🖍 影响</button>`
             : '';
           const layerVizBtn = (dsl.layers?.length ?? 0) > 0
-            ? `<button id="layer-viz-toggle" type="button" title="架构分层着色：按目录/文件名推断文件所属架构层并统一着色，点击切换 语言色/层色">🎨 图层</button>`
+            ? `<button id="layer-viz-toggle" type="button" data-i18n="layer_viz" title="架构分层着色：按目录/文件名推断文件所属架构层并统一着色，点击切换 语言色/层色">🎨 图层</button>`
             : '';
           const tourBtn = dsl.geometry.nodes.length > 0
-            ? `<button id="guided-tour-start" type="button" title="导览：按依赖拓扑序自动生成学习路径，逐个高亮节点（需要 serve 模式）">▶ 导览</button>`
+            ? `<button id="guided-tour-start" type="button" data-i18n="guided_tour" title="导览：按依赖拓扑序自动生成学习路径，逐个高亮节点（需要 serve 模式）">▶ 导览</button>`
             : '';
           return `<div class="layer-controls">${errBtn}${detBtn}</div>${dataflowBtn}${diffImpactBtn}${layerVizBtn}${tourBtn}`;
         })()}
@@ -726,29 +1041,30 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           const stDoing = dsl.geometry.nodes.filter((n) => (n.status ?? 'draft') === 'in_progress').length;
           const stDone = dsl.geometry.nodes.filter((n) => (n.status ?? 'draft') === 'done').length;
           return `<div class="filter-bar" title="按类目筛选画布：状态（可多选，取消选择恢复全部）/ 孤岛（无连线节点）/ 聚焦（只看选中节点 ±1 跳）">
-            <span class="toolbar-label">筛选</span>
-            <button type="button" class="filter-chip" data-filter-status="draft" title="只显示待实现节点">⬜ 待实现<span class="chip-count">${stDraft}</span></button>
-            <button type="button" class="filter-chip" data-filter-status="in_progress" title="只显示实现中的节点">🟠 实现中<span class="chip-count">${stDoing}</span></button>
-            <button type="button" class="filter-chip" data-filter-status="done" title="只显示已完成节点">✅ 已完成<span class="chip-count">${stDone}</span></button>
-            <button type="button" class="filter-chip" id="filter-islands" title="隐藏没有连线的孤立节点">🗑 孤岛<span class="chip-count"></span></button>
-            <button type="button" class="filter-chip filter-focus" id="filter-focus" disabled title="选中节点后点击：只看它 ±1 跳的上下游；再点退出">🎯 聚焦</button>
+            <span class="toolbar-label" data-i18n="filter">筛选</span>
+            <button type="button" class="filter-chip" data-filter-status="draft" title="只显示待实现节点"><span data-i18n="filter_draft">⬜ 待实现</span><span class="chip-count">${stDraft}</span></button>
+            <button type="button" class="filter-chip" data-filter-status="in_progress" title="只显示实现中的节点"><span data-i18n="filter_doing">🟠 实现中</span><span class="chip-count">${stDoing}</span></button>
+            <button type="button" class="filter-chip" data-filter-status="done" title="只显示已完成节点"><span data-i18n="filter_done">✅ 已完成</span><span class="chip-count">${stDone}</span></button>
+            <button type="button" class="filter-chip" id="filter-islands" title="隐藏没有连线的孤立节点"><span data-i18n="filter_islands">🗑 孤岛</span><span class="chip-count"></span></button>
+            <button type="button" class="filter-chip filter-focus" id="filter-focus" disabled title="选中节点后点击：只看它 ±1 跳的上下游；再点退出"><span data-i18n="filter_focus">🎯 聚焦</span></button>
           </div>`;
         })()}
         <div id="toolbar-advanced" class="${options?.compact_toolbar ? 'toolbar-advanced toolbar-advanced--row hidden' : 'toolbar-advanced'}">
         <div class="history-controls">
-          <button id="btn-undo" type="button" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
-          <button id="btn-redo" type="button" title="重做 (Ctrl+Y)" disabled>↷ 重做</button>
+          <button id="btn-undo" type="button" data-i18n="undo" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
+          <button id="btn-redo" type="button" data-i18n="redo" title="重做 (Ctrl+Y)" disabled>↷ 重做</button>
         </div>
         <span id="history-indicator" class="history-indicator" title="历史记录"></span>
         <div class="layout-controls">
-          <button id="layout-dag" type="button" title="拓扑排序布局">🗺️ 拓扑</button>
-          <button id="layout-force" type="button" title="力导向布局">⚡ 力导</button>
-          <button id="layout-grid" type="button" title="网格对齐">📐 网格</button>
+          <button id="layout-dag" type="button" data-i18n="layout_topology" title="拓扑排序布局">🗺️ 拓扑</button>
+          <button id="layout-force" type="button" data-i18n="layout_force" title="力导向布局">⚡ 力导</button>
+          <button id="layout-grid" type="button" data-i18n="layout_grid" title="网格对齐">📐 网格</button>
         </div>
         </div><!-- /toolbar-advanced -->
-        <button id="dict-open" type="button" title="伪维基词典：收录通用概念/项目专有词，LLM 生成三档解释并与已收录词互链">📖 伪维基</button>
+        <button id="dict-open" type="button" data-i18n="dict_open" title="伪维基词典：收录通用概念/项目专有词，LLM 生成三档解释并与已收录词互链">📖 伪维基</button>
         <div class="theme-switcher" title="切换主题">
-          <span class="toolbar-label">主题</span>
+          <span class="toolbar-label" data-i18n="theme">主题</span>
+          <button id="theme-dynamic" class="theme-dynamic ${theme === 'dynamic' ? 'active' : ''}" title="示意（浅色紫调）"></button>
           <button id="theme-blue" class="theme-blue ${theme === 'blue' ? 'active' : ''}" title="蓝色"></button>
           <button id="theme-sakura" class="theme-sakura ${theme === 'sakura' ? 'active' : ''}" title="樱花"></button>
           <button id="theme-forest" class="theme-forest ${theme === 'forest' ? 'active' : ''}" title="森林"></button>
@@ -759,30 +1075,35 @@ export function renderHTML(dsl: DesignDSL, options?: RenderOptions): string {
           <button id="zoom-out" type="button" title="缩小">−</button>
           <span id="zoom-level" class="zoom-level">100%</span>
           <button id="zoom-in" type="button" title="放大">+</button>
-          <button id="zoom-fit" type="button" title="适应画布">⤢ 适应</button>
-          <button id="zoom-reset" type="button" title="重置">⟲ 重置</button>
+          <button id="zoom-fit" type="button" data-i18n="zoom_fit" title="适应画布">⤢ 适应</button>
+          <button id="zoom-reset" type="button" data-i18n="zoom_reset" title="重置">⟲ 重置</button>
         </div>
+        <div class="lang-switcher" title="切换语言 / Language">
+          <button id="lang-zh" type="button" data-lang-btn="zh" title="中文">中</button>
+          <button id="lang-en" type="button" data-lang-btn="en" title="English">EN</button>
+        </div>
+        ${dsl.feature_tree ? `<button id="feature-cards-open" class="feature-cards-open" type="button" data-i18n="feature_overview" title="返回功能概览卡片（下钻后回到首屏）">🏷 功能概览</button>` : ''}
       </div>
       ${(dsl.layers?.length ?? 0) > 0 ? `<style id="layer-viz-css">
 ${dsl.layers!.map((l) => `#canvas.layer-viz .node[data-arch-layer="${l.id}"] > [data-shape]{fill:${l.color};stroke:${l.color};}`).join('\n')}
 </style>
       <div id="layer-legend" class="layer-legend hidden" title="架构分层图例（🎨 图层开关显示）">
-        <div class="layer-legend-title">🎨 架构分层</div>
-${dsl.layers!.map((l) => `<div class="layer-legend-row"><span class="layer-legend-swatch" style="background:${l.color}"></span><span class="layer-legend-name">${esc(l.name)}</span><span class="layer-legend-desc">${esc(l.description)}</span><span class="layer-legend-count">${l.count}</span></div>`).join('\n')}
+        <div class="layer-legend-title" data-i18n="layer_viz_title">🎨 架构分层</div>
+${dsl.layers!.map((l) => `<div class="layer-legend-row"><span class="layer-legend-swatch" style="background:${l.color}"></span><span class="layer-legend-name"${contentAttrs(l.name, l.name_en)}>${esc(l.name)}</span><span class="layer-legend-desc"${contentAttrs(l.description, l.description_en)}>${esc(l.description)}</span><span class="layer-legend-count">${l.count}</span></div>`).join('\n')}
       </div>` : ''}
       ${options?.report ? buildReportPanel(dsl, options.report) : ''}
       <div id="context-menu" class="context-menu hidden">
-        <div class="context-menu-item" data-action="edit-label">✏️ 编辑标签</div>
-        <div class="context-menu-item" data-action="add-annotation">💬 添加标注</div>
-        <div class="context-menu-item" data-action="submit-approval">📤 提交审批</div>
+        <div class="context-menu-item" data-action="edit-label" data-i18n="edit_label">✏️ 编辑标签</div>
+        <div class="context-menu-item" data-action="add-annotation" data-i18n="add_annotation">💬 添加标注</div>
+        <div class="context-menu-item" data-action="submit-approval" data-i18n="submit_approval">📤 提交审批</div>
         <div class="context-sep"></div>
-        <div class="context-menu-item danger" data-action="delete">🗑️ 删除节点</div>
+        <div class="context-menu-item danger" data-action="delete" data-i18n="delete_node">🗑️ 删除节点</div>
       </div>
       <div id="selection-box" class="selection-box hidden"></div>
       <div id="multi-select-bar" class="multi-select-bar hidden">
-        <span id="select-count">已选 0 个节点</span>
-        <button id="select-delete" type="button">批量删除</button>
-        <button id="select-clear" type="button">取消选择</button>
+        <span id="select-count" data-i18n="selected_count" data-i18n-args='{"n":0}'>已选 0 个节点</span>
+        <button id="select-delete" type="button" data-i18n="batch_delete">批量删除</button>
+        <button id="select-clear" type="button" data-i18n="clear_selection">取消选择</button>
       </div>
       <svg id="canvas" viewBox="0 0 ${canvas.width} ${canvas.height}" xmlns="http://www.w3.org/2000/svg">
         <defs>
@@ -804,16 +1125,55 @@ ${nodesXml}
 ${edgesXml}
 ${simEdgesXml}
       </svg>
+      ${buildFeatureCards(dsl)}
     </div>
     <aside class="sidebar">
+      <!-- 动画控制面板：始终可见，与仿真器解耦 -->
+      <div class="sim-panel anim-panel">
+        <h2 data-i18n="anim_engine">🎬 动画引擎</h2>
+        <div class="sim-triggers anim-controls" title="动画引擎控制">
+          <button id="anim-pause" class="sim-btn" data-i18n="pause">⏸ 暂停</button>
+          <button id="anim-step" class="sim-btn" data-i18n="step">⏭ 步进</button>
+          <button id="anim-resume" class="sim-btn" data-i18n="resume">▶ 继续</button>
+          <button id="anim-reset" class="sim-btn sim-btn-secondary" data-i18n="reset_anim">↺ 重置动画</button>
+        </div>
+        <div class="anim-speed" title="动画速度（0.1x 慢动作 - 3x 快进）">
+          <span class="anim-speed-label" data-i18n="speed">速度</span>
+          <input type="range" id="anim-speed" min="0.1" max="3" step="0.1" value="1">
+          <span id="anim-speed-val" class="anim-speed-val">1x</span>
+          <div class="anim-speed-presets">
+            <button type="button" class="speed-preset" data-speed="0.1">0.1x</button>
+            <button type="button" class="speed-preset" data-speed="0.25">0.25x</button>
+            <button type="button" class="speed-preset" data-speed="0.5">0.5x</button>
+            <button type="button" class="speed-preset active" data-speed="1">1x</button>
+            <button type="button" class="speed-preset" data-speed="2">2x</button>
+          </div>
+          <button id="anim-slowmo" type="button" class="anim-slowmo-btn" data-i18n="slowmo" title="慢动作模式：速度设为 0.25x，便于观察粒子流动细节">🐢 慢动作</button>
+        </div>
+        <details class="anim-legend">
+          <summary data-i18n="legend">图例</summary>
+          <div class="anim-legend-body">
+            <div><i class="lg-dot lg-explicit"></i><span data-i18n="legend_explicit">显式数据流（带标签）</span></div>
+            <div><i class="lg-dot lg-default"></i><span data-i18n="legend_default">L0 氛围流（无标签）</span></div>
+            <div><i class="lg-flash lg-yellow"></i><span data-i18n="legend_call">黄闪：函数调用（ƒ）</span></div>
+            <div><i class="lg-flash lg-green"></i><span data-i18n="legend_branch">彩闪：分支命中（按分支着色）</span></div>
+            <div><i class="lg-flash lg-gray"></i><span data-i18n="legend_branch_miss">灰闪：分支全未命中</span></div>
+            <div><i class="lg-flash lg-red"></i><span data-i18n="legend_error">红闪：异常（长闪=未声明）</span></div>
+          </div>
+        </details>
+        <div class="sim-trace-wrap anim-log-wrap">
+          <h3 data-i18n="error_log">异常日志（L4.5）</h3>
+          <div id="anim-log" class="sim-trace"></div>
+        </div>
+      </div>
 ${
   dsl.simulation
     ? `      <div class="sim-panel">
-        <h2>🔬 仿真器</h2>
+        <h2 data-i18n="simulator">🔬 仿真器</h2>
         <div class="sim-options">
           <label class="sim-toggle">
             <input type="checkbox" id="sim-show-edges" checked>
-            <span>显示事件流连线</span>
+            <span data-i18n="sim_show_edges">显示事件流连线</span>
           </label>
         </div>
         <div class="sim-state" id="sim-state-container">
@@ -828,84 +1188,58 @@ ${dsl.simulation.initial_state.map(s => `          <div class="sim-state-row" da
           </div>`).join('\n')}
         </div>
         <div class="sim-input-wrap">
-          <input type="text" id="sim-input" class="sim-input" placeholder="用户输入..." autocomplete="off">
-          <button id="sim-send" class="sim-btn sim-btn-primary">发送</button>
+          <input type="text" id="sim-input" class="sim-input" data-i18n-ph="sim_placeholder" placeholder="用户输入..." autocomplete="off">
+          <button id="sim-send" class="sim-btn sim-btn-primary" data-i18n="sim_send">发送</button>
         </div>
         <div class="sim-triggers">
           <button id="sim-turn-done" class="sim-btn">TurnDone</button>
           <button id="sim-advance" class="sim-btn">Advance</button>
-          <button id="sim-reset" class="sim-btn sim-btn-secondary">重置</button>
+          <button id="sim-reset" class="sim-btn sim-btn-secondary" data-i18n="sim_reset">重置</button>
         </div>
-        <div class="sim-triggers anim-controls" title="动画引擎控制">
-          <button id="anim-pause" class="sim-btn">⏸ 暂停</button>
-          <button id="anim-step" class="sim-btn">⏭ 步进</button>
-          <button id="anim-resume" class="sim-btn">▶ 继续</button>
-          <button id="anim-reset" class="sim-btn sim-btn-secondary">↺ 重置动画</button>
-        </div>
-        <div class="anim-speed" title="动画速度（0.25x - 2x）">
-          <span class="anim-speed-label">速度</span>
-          <input type="range" id="anim-speed" min="0.25" max="2" step="0.25" value="1">
-          <span id="anim-speed-val" class="anim-speed-val">1x</span>
-        </div>
-        <details class="anim-legend">
-          <summary>图例</summary>
-          <div class="anim-legend-body">
-            <div><i class="lg-dot lg-explicit"></i>显式数据流（带标签）</div>
-            <div><i class="lg-dot lg-default"></i>L0 氛围流（无标签）</div>
-            <div><i class="lg-flash lg-yellow"></i>黄闪：函数调用（ƒ）</div>
-            <div><i class="lg-flash lg-green"></i>彩闪：分支命中（按分支着色）</div>
-            <div><i class="lg-flash lg-gray"></i>灰闪：分支全未命中</div>
-            <div><i class="lg-flash lg-red"></i>红闪：异常（长闪=未声明）</div>
-          </div>
-        </details>
         <div class="sim-trace-wrap">
-          <h3>触发日志</h3>
+          <h3 data-i18n="sim_trace_log">触发日志</h3>
           <div id="sim-trace" class="sim-trace"></div>
-        </div>
-        <div class="sim-trace-wrap anim-log-wrap">
-          <h3>异常日志（L4.5）</h3>
-          <div id="anim-log" class="sim-trace"></div>
         </div>
       </div>`
     : ''
 }
-      <h2>Semantic 语义层</h2>
-${cardsXml || '      <div class="empty">无语义层信息</div>'}
+      <div class="anno-wall" id="anno-wall" data-has-annotations="${(dsl.annotations ?? []).length > 0}"></div>
+      <h2 data-i18n="semantic_layer">Semantic 语义层</h2>
+${cardsXml || '      <div class="empty" data-i18n="no_semantic">无语义层信息</div>'}
 ${
   invariantsXml
     ? `      <div class="invariants">
-        <h3>不变式 (${invariantCount})</h3>
+        <h3 data-i18n="invariants_title" data-i18n-args='{"n":${invariantCount}}'>不变式 (${invariantCount})</h3>
         <ul>${invariantsXml}</ul>
       </div>`
     : ''
 }
     </aside>
-  </main>
   <footer>
-    <span class="info">design-canvas · id=${esc(dsl.id)} · 双击节点编辑属性 · 右键节点开始连线</span>
+    <span class="info">design-canvas · id=${esc(dsl.id)} · <span data-i18n="footer_ops">双击节点编辑属性 · 右键节点开始连线</span></span>
     <div>
-      <button id="rerender" type="button">重新渲染</button>
-      <button id="export-json" type="button">📥 导出 design-canvas.json</button>
-      <button id="import-json" type="button">📤 导入 DSL</button>
+      <button id="rerender" type="button" data-i18n="rerender">重新渲染</button>
+      <button id="export-json" type="button" data-i18n="export_json">📥 导出 design-canvas.json</button>
+      <button id="import-json" type="button" data-i18n="import_json">📤 导入 DSL</button>
     </div>
   </footer>
   <div id="tooltip"></div>
   <div id="prop-editor" class="prop-editor hidden">
     <div class="editor-header">
-      <h3>节点属性</h3>
+      <h3 data-i18n="node_props">节点属性</h3>
       <button id="editor-close" class="editor-close">×</button>
     </div>
     <div class="editor-body">
       <div class="form-group">
-        <label>ID</label>
+        <label data-i18n="node_id">ID</label>
         <input type="text" id="editor-id" readonly>
       </div>
       <div class="form-group">
-        <label>名称 (label)</label>
+        <label data-i18n="label_name">名称 (label)</label>
         <input type="text" id="editor-label">
       </div>
       <div class="form-group">
-        <label>类型 (type)</label>
+        <label data-i18n="label_type">类型 (type)</label>
         <select id="editor-type">
           <option value="service">service</option>
           <option value="module">module</option>
@@ -917,7 +1251,7 @@ ${
         </select>
       </div>
       <div class="form-group">
-        <label>状态 (status)</label>
+        <label data-i18n="label_status">状态 (status)</label>
         <select id="editor-status">
           <option value="todo">todo</option>
           <option value="doing">doing</option>
@@ -926,11 +1260,11 @@ ${
         </select>
       </div>
       <div class="form-group">
-        <label>描述 (description)</label>
+        <label data-i18n="label_desc">描述 (description)</label>
         <textarea id="editor-description" rows="3"></textarea>
       </div>
       <div class="form-group">
-        <label>形状 (shape)</label>
+        <label data-i18n="label_shape">形状 (shape)</label>
         <select id="editor-shape">
           <option value="rounded">rounded</option>
           <option value="rect">rect</option>
@@ -940,35 +1274,35 @@ ${
         </select>
       </div>
       <div class="form-group">
-        <label>背景色 (bg)</label>
+        <label data-i18n="label_bg">背景色 (bg)</label>
         <div class="color-row">
           <input type="color" id="editor-bg-color" value="#152141">
           <input type="text" id="editor-bg-text" placeholder="#152141">
         </div>
       </div>
       <div class="form-group">
-        <label>圆角 (borderRadius)</label>
+        <label data-i18n="label_radius">圆角 (borderRadius)</label>
         <input type="number" id="editor-radius" min="0" max="100" value="8">
       </div>
       <div class="form-group">
-        <label>内容类型 (content.type)</label>
+        <label data-i18n="label_content_type">内容类型 (content.type)</label>
         <select id="editor-content-type">
           <option value="text">text (纯文字)</option>
           <option value="rich">rich (富文本块)</option>
         </select>
       </div>
       <div class="form-group">
-        <label>内容块 JSON (content.blocks)</label>
+        <label data-i18n="label_content_blocks">内容块 JSON (content.blocks)</label>
         <textarea id="editor-content-blocks" rows="6" placeholder='[{"type":"text","value":"标题","style":{"fontSize":18,"bold":true}},{"type":"color_block","bg":"#0f3460","children":[{"type":"text","value":"内容"}]}]'></textarea>
       </div>
       <div class="form-group hidden" id="editor-replay-row">
-        <label>注入回放（D3）</label>
-        <button type="button" id="editor-replay-open" class="btn-secondary replay-open-btn">🧪 打开进料口面板（<span id="editor-replay-count">0</span> 条 flow）</button>
+        <label data-i18n="replay_open_label">注入回放（D3）</label>
+        <button type="button" id="editor-replay-open" class="btn-secondary replay-open-btn" data-i18n="replay_open_btn" data-i18n-args='{"n":0}'>🧪 打开进料口面板（<span id="editor-replay-count">0</span> 条 flow）</button>
       </div>
     </div>
     <div class="editor-footer">
-      <button id="editor-cancel" class="btn-secondary">取消</button>
-      <button id="editor-save" class="btn-primary">保存</button>
+      <button id="editor-cancel" class="btn-secondary" data-i18n="editor_cancel">取消</button>
+      <button id="editor-save" class="btn-primary" data-i18n="editor_save">保存</button>
     </div>
   </div>
   <div id="editor-mask" class="editor-mask hidden"></div>

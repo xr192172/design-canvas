@@ -35,9 +35,9 @@ describe('filter bar 渲染', () => {
     expect(html).toContain('data-filter-status="draft"');
     expect(html).toContain('data-filter-status="in_progress"');
     expect(html).toContain('data-filter-status="done"');
-    expect(html).toContain('>⬜ 待实现<span class="chip-count">2</span>');
-    expect(html).toContain('>🟠 实现中<span class="chip-count">1</span>');
-    expect(html).toContain('>✅ 已完成<span class="chip-count">1</span>');
+    expect(html).toContain('>⬜ 待实现</span><span class="chip-count">2</span>');
+    expect(html).toContain('>🟠 实现中</span><span class="chip-count">1</span>');
+    expect(html).toContain('>✅ 已完成</span><span class="chip-count">1</span>');
   });
 
   it('生成孤岛/聚焦按钮，聚焦初始禁用', () => {

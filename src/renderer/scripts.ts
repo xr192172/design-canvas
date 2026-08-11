@@ -1,5 +1,6 @@
 import { EDGE_GEOM_SOURCE } from './edge_geom_bundle.gen.js';
 import { DATAFLOW_SOURCE } from './dataflow_core_bundle.gen.js';
+import { I18N_SOURCE } from './i18n_bundle.gen.js';
 
 export function buildScript(dsl: unknown): string {
   const dslJson = JSON.stringify(dsl).replace(/</g, '\\u003c');
@@ -14,6 +15,9 @@ ${EDGE_GEOM_SOURCE}
 
   // ---- 数据流追踪核心（构建期从 dataflow_core.ts 内联，单源双消费，勿手改）----
 ${DATAFLOW_SOURCE}
+
+  // ---- 界面多语言字典 + 翻译函数（构建期从 i18n.ts 内联，单源双消费，勿手改）----
+${I18N_SOURCE}
 
   const tooltip = document.getElementById('tooltip');
   const dsl = window.__DSL__;
@@ -1565,9 +1569,9 @@ ${DATAFLOW_SOURCE}
       });
       // 边可见性交由全局规则统一计算（层可见 ∧ 两端点 DOM 可见），避免跨容器边悬空
       applyLayerVisibility();
-      // 功能树下钻：展开后把「宿主 + 可见后代」一起取景钻入，避免新节点落在图外
-      // （社区/文件按原星图坐标排布，可能远离宿主，必须把相机框到它们）
-      drillAfterExpand(nodeId);
+      // 原地平滑展开：只记录相机检查点（供折叠回退），不缩放不跳变，
+      // 子节点在各自原星图位置用 node-enter 淡入生长，画面保持稳定。
+      cameraAnim.checkpoints[nodeId + ':collapse'] = { scale: canvasState.scale, panX: canvasState.panX, panY: canvasState.panY };
     } else {
       // 折叠
       state.collapsed.add(nodeId);
@@ -1627,6 +1631,77 @@ ${DATAFLOW_SOURCE}
       cur = parentOf[cur];
     }
     return false;
+  }
+
+  // ==== 功能卡片首屏：产品功能概览 → 点击卡片直接钻入对应功能 ====
+  // 折叠所有功能/社区回首屏态：只留 项目根 + 各功能（同级 initCollapsedState 的 feature_tree 分支）
+  function resetToTopLevel() {
+    (dsl.geometry?.nodes || []).forEach(n => {
+      if (n.id === '__project__' || n.id.indexOf('ft:') === 0) return;
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      if (el) el.style.display = 'none';
+    });
+    (dsl.geometry?.nodes || []).forEach(n => {
+      if (n.id.indexOf('ft:') !== 0 && n.id.indexOf('ct:') !== 0) return;
+      if (!childrenOf[n.id]) return;
+      state.collapsed.add(n.id);
+      const el = document.querySelector('.node[data-id="' + n.id + '"]');
+      if (el) el.classList.add('collapsed');
+    });
+    // 清空下钻退路检查点，避免残留旧相机态
+    Object.keys(cameraAnim.checkpoints).forEach(k => delete cameraAnim.checkpoints[k]);
+    applyLayerVisibility();
+  }
+
+  // 点击功能卡片：折叠全部 → 仅展开目标功能（显示其社区）→ 相机钻入
+  function drillIntoFeature(fid) {
+    resetToTopLevel();
+    if (!nodeById[fid]) return;
+    state.collapsed.delete(fid);
+    const fEl = document.querySelector('.node[data-id="' + fid + '"]');
+    if (fEl) fEl.classList.remove('collapsed');
+    (childrenOf[fid] || []).forEach(cid => {
+      const cEl = document.querySelector('.node[data-id="' + cid + '"]');
+      if (cEl) {
+        cEl.style.display = '';
+        cEl.classList.add('node-enter');
+        setTimeout(() => cEl.classList.remove('node-enter'), 300);
+      }
+    });
+    applyLayerVisibility();
+    drillAfterExpand(fid);
+  }
+
+  // 返回概览：折叠全部分功能 → 相机收束 → 显示功能卡片层
+  function showFeatureCards() {
+    resetToTopLevel();
+    const cards = document.getElementById('feature-cards');
+    if (cards) cards.classList.remove('hidden');
+    if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.6, true);
+  }
+
+  // 关闭卡片层（进入星图）：保持首屏折叠态，相机收束
+  function closeFeatureCards() {
+    const cards = document.getElementById('feature-cards');
+    if (cards) cards.classList.add('hidden');
+    if (canvasState.fitVisibleContent) canvasState.fitVisibleContent(1.6, true);
+  }
+
+  function setupFeatureCards() {
+    const cards = document.getElementById('feature-cards');
+    if (!cards) return;
+    cards.querySelectorAll('.feature-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const fid = card.getAttribute('data-fid');
+        if (!fid) return;
+        cards.classList.add('hidden');
+        drillIntoFeature(fid);
+      });
+    });
+    const close = document.getElementById('feature-cards-close');
+    if (close) close.addEventListener('click', closeFeatureCards);
+    const open = document.getElementById('feature-cards-open');
+    if (open) open.addEventListener('click', showFeatureCards);
   }
 
   // 更新 SVG viewBox（折叠后可能高度变化）
@@ -4811,7 +4886,7 @@ ${DATAFLOW_SOURCE}
 
   // ==== 主题切换 ====
   function setupThemeSwitcher() {
-    const themes = ['blue', 'sakura', 'forest', 'ocean', 'star'];
+    const themes = ['dynamic', 'blue', 'sakura', 'forest', 'ocean', 'star'];
     themes.forEach(theme => {
       const btn = document.getElementById('theme-' + theme);
       if (btn) {
@@ -4827,6 +4902,25 @@ ${DATAFLOW_SOURCE}
         });
       }
     });
+  }
+
+  // ==== 多语言切换 ====
+  function setupLanguage() {
+    let lang = detectLang();
+    const apply = () => applyStaticI18n(document, lang);
+    // 首帧渲染完成后应用一次（HTML 静态标注为中文，需按 lingo 覆盖）
+    requestAnimationFrame(apply);
+    // 语言按钮：切换语言 → 存偏好 → 重译界面（绑定所有 [data-lang-btn]，含首屏悬浮与工具栏两处）
+    const switchTo = (next) => {
+      lang = next;
+      try { localStorage.setItem('dc-lang', next); } catch { /* ignore */ }
+      applyStaticI18n(document, next);
+    };
+    document.querySelectorAll('[data-lang-btn]').forEach((btn) => {
+      btn.addEventListener('click', () => switchTo(btn.getAttribute('data-lang-btn')));
+    });
+    // 暴露给 rerender 等外部逻辑复用
+    window.__dcLang = { get: () => lang, apply };
   }
 
   // ==== 节点搜索 ====
@@ -5767,9 +5861,11 @@ ${DATAFLOW_SOURCE}
   setupReportPanel();
   setupToolbarAdvanced();
   setupThemeSwitcher();
+  setupLanguage();
   setupNodeSearch();
   setupFilters();
   setupViewSwitcher();
+  setupFeatureCards();
   setupKeyboardShortcuts();
   setupExport();
   setupRerender();

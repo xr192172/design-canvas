@@ -21,6 +21,7 @@ const MODULES = [
   ['anim_core.ts', 'anim_core_bundle.gen.ts', 'ANIM_CORE_SOURCE'],
   ['edge_geom.ts', 'edge_geom_bundle.gen.ts', 'EDGE_GEOM_SOURCE'],
   ['dataflow_core.ts', 'dataflow_core_bundle.gen.ts', 'DATAFLOW_SOURCE'],
+  ['i18n.ts', 'i18n_bundle.gen.ts', 'I18N_SOURCE'],
 ];
 
 for (const [srcName, outName, constName] of MODULES) {
