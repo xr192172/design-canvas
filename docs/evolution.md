@@ -165,6 +165,12 @@
 #### 2.5.5 活文档：变更原因捕获
 - 方向：项目成为活文档，源头记录所有变更及变更原因。
 - 方案见 [plans/2026-08-11-live-doc-change-reason.md](./plans/2026-08-11-live-doc-change-reason.md)：Annotation 扩展 `kind` / `reason` / `evidence` + **四层校验**（非空 → 信息量 → 实体绑定 → 证据回溯）防止 LLM 偷懒。
+- **L4 证据回溯升级为「真实可复算」**：新增 `trace_evidence` 复算引擎 + `trace_reasoning.traceFile` 落盘 + `edit_dsl.evidence` 参数。
+  - 落盘约定：`<dataHome>/.design-canvas/live/<feature>.trace.json`（与 live DSL 同目录），由 `trace_reasoning` 的 `traceFile` 参数写出原始 `TraceRecord[]`。
+  - 证据 ref 约定（`type='trace'`）：
+    - `<qualified_name>` —— 仅存在性：该函数必须真实被执行并记录过。
+    - `<qualified_name>@token>N` —— 存在性 + 复算声明：程序读取该函数真实采集的 token，未超过声称阈值 N 则打回。
+  - `edit_dsl` 提交证据链时，到真实 trace 库加载记录并注入 `exists` 复算校验器；查不到或不符 → L4 打回；无 trace 文件 → 带 evidence 一律打回（宁缺毋滥，杜绝编造证据进库）。
 
 ## 3. 当前实现 vs 设计文档对照
 

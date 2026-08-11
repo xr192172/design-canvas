@@ -170,8 +170,9 @@ export function validateReason(input: ValidateReasonInput): ReasonValidationResu
 
   // ── L4 证据回溯 ──
   if (evidence.length > 0) {
+    const exists = resolver.exists as (ev: ReasonEvidenceRef) => boolean;
     for (const ev of evidence) {
-      if (!resolver.exists(ev)) {
+      if (!exists(ev)) {
         return {
           ok: false,
           layer: 4,
