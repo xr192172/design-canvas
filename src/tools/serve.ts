@@ -35,6 +35,9 @@ import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
+import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
+import { getMindMapFile } from './derive_mind_map.js';
+import { runMindmapAgent } from './mindmap_agent.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
@@ -608,6 +611,73 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
     const code =
       (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
     sendError(res, code, (e as Error).message);
+  }
+}
+
+/** POST /api/mind-map：生成 L3 思维导图（feature → 功能 → 社区 → 文件），返回查看器 HTML */
+async function handleApiMindMap(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const feature = (params.feature || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const result = await deriveMindMap({
+      feature,
+      gen_descriptions: params.gen_descriptions === true,
+      max_files_per_community: typeof params.max_files_per_community === 'number' ? params.max_files_per_community : 20,
+    });
+    sendJson(res, 200, { success: true, ...result, mind_map: result.mind_map });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/mind-map?feature=&html=1：读取已生成的思维导图 JSON；html=1 返回查看器页面 */
+function handleApiMindMapGet(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const file = getMindMapFile(feature);
+    if (!fs.existsSync(file)) {
+      sendError(res, 404, '思维导图未生成，请先 POST /api/mind-map 或调用 derive_mind_map');
+      return;
+    }
+    const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (url.searchParams.get('html') === '1') {
+      const html = renderMindMapHtml(mindMap, mindMap.feature || feature);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+    sendJson(res, 200, { success: true, mind_map: mindMap });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/mmd/chat：L3 思维导图只读问答 Agent（SSE 流式进度） */
+async function handleApiMmdChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const feature = (params.feature || '').trim();
+    const message = (params.message || '').trim();
+    if (!feature || !message) {
+      sendError(res, 400, '缺少 feature/message 参数');
+      return;
+    }
+    const history = Array.isArray(params.history) ? params.history : [];
+    const result = await runMindmapAgent({ feature, message, history });
+    sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
   }
 }
 
@@ -1607,6 +1677,19 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/diff-views') && method === 'POST') {
       handleApiDiffViews(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/mind-map') && method === 'POST') {
+      handleApiMindMap(req, res);
+      return;
+    }
+    if (url.startsWith('/api/mind-map') && method === 'GET') {
+      handleApiMindMapGet(req, res);
+      return;
+    }
+    if (url.startsWith('/api/mmd/chat') && method === 'POST') {
+      handleApiMmdChat(req, res);
       return;
     }
 

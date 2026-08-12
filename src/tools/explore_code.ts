@@ -24,6 +24,7 @@ import { injectReplay } from './inject_replay.js';
 import { runSimulation, resetSimulation } from './simulation.js';
 import { watchProjectTool } from './watch_project_tool.js';
 import { buildCallGraph } from './derive_chain.js';
+import { deriveMindMap } from './derive_mind_map.js';
 
 export const EXPLORE_ACTIONS = [
   'search',
@@ -35,6 +36,7 @@ export const EXPLORE_ACTIONS = [
   'derive_chain',
   'derive_anim_flow',
   'derive_algorithm',
+  'derive_mind_map',
   'inject_replay',
   'run_simulation',
   'reset_simulation',
@@ -125,6 +127,15 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
     }
     case 'derive_algorithm': {
       const r = { project_dir: requireStr(args, 'project_dir') };
+      return toResult(r, true);
+    }
+    case 'derive_mind_map': {
+      const r = await deriveMindMap({
+        feature: requireStr(args, 'feature'),
+        gen_descriptions: bool(args, 'gen_descriptions'),
+        max_files_per_community: num(args, 'max_files_per_community'),
+        output_path: str(args, 'output_path'),
+      });
       return toResult(r, true);
     }
     case 'inject_replay': {
