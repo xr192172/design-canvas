@@ -1429,6 +1429,19 @@ function handleStaticFile(req: http.IncomingMessage, res: http.ServerResponse): 
     filePath = fs.existsSync(path.join(PUBLIC_DIR, 'index.html')) ? '/index.html' : '/conveyor.html';
   }
 
+  // 活态 DSL 别名：浏览器设计视图 fetch 相对路径 design-canvas.json，
+  // 静态目录（output/）不含它 → 映射到数据根目录的活态 DSL 文件，避免 404。
+  if (filePath === '/design-canvas.json') {
+    if (fs.existsSync(LIVE_FILE)) {
+      const content = fs.readFileSync(LIVE_FILE);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(content);
+      return;
+    }
+    sendError(res, 404, 'design-canvas.json 不存在，请先使用 render_dsl 或 import_project 创建');
+    return;
+  }
+
   const fullPath = path.join(PUBLIC_DIR, filePath);
 
   const relPath = path.relative(PUBLIC_DIR, fullPath);
