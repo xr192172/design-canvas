@@ -1541,6 +1541,120 @@ ${I18N_SOURCE}
     actBtn.addEventListener('click', () => setDcView('actual'));
   }
 
+  // ==== 双视图 diff（最后一英里）：设计 vs 实际 图级高亮 ====
+  // fetch /api/diff-views → 节点按 file_id 高亮（红=设计有实际无 / 绿=实际新增 / 黄=签名变），
+  // 依赖边按 data-from/data-to 高亮（红=结构塌方 / 绿=新增依赖）
+  function setupDiffHighlight() {
+    if (window.location.protocol === 'file:') return;
+    const feature = (window.__DSL__ && window.__DSL__.feature) || '';
+    if (!feature) return;
+    fetch('/api/diff-views', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feature: feature }),
+    })
+      .then(function(r) { if (!r.ok) throw new Error('diff-views ' + r.status); return r.json(); })
+      .then(function(data) {
+        if (!data || !data.success || !data.data) return;
+        var added = 0, removed = 0, modified = 0;
+        var files = data.data.files;
+        if (Array.isArray(files)) {
+          files.forEach(function(f) {
+            if (!f || !f.file_id) return;
+            var el = document.querySelector('.node[data-id="' + f.file_id + '"]');
+            if (!el) return;
+            if (f.change === 'added') { el.classList.add('dc-diff-added'); added++; }
+            else if (f.change === 'removed') { el.classList.add('dc-diff-removed'); removed++; }
+            else if (f.change === 'modified') { el.classList.add('dc-diff-modified'); modified++; }
+          });
+        }
+        // 边级高亮：结构塌方（红）/ 新增依赖（绿）
+        var eAdded = 0, eRemoved = 0;
+        var edges = data.data.edges;
+        if (Array.isArray(edges) && edges.length > 0) {
+          var diffNS = 'http://www.w3.org/2000/svg';
+          var diffSvg = document.getElementById('canvas');
+          var edgeElByKey = {};
+          (dsl.geometry?.edges || []).forEach(function(e) {
+            if (!e || !e.id || !e.from || !e.to) return;
+            var el = document.querySelector('.edge[data-id="' + e.id + '"]');
+            if (el) edgeElByKey[e.from + '\u0000' + e.to] = el;
+          });
+          var addedSeq = 0;
+          edges.forEach(function(d) {
+            if (!d || typeof d.from !== 'string' || typeof d.to !== 'string') return;
+            var el = edgeElByKey[d.from + '\u0000' + d.to];
+            if (d.change === 'added') {
+              if (el) { el.classList.add('dc-diff-edge-added'); eAdded++; }
+              else if (diffSvg) {
+                // 新增依赖（live 有 / 设计无）：设计画布不存在这条边 → 补画绿色虚线
+                var fEl = nodeElById[d.from];
+                var tEl = nodeElById[d.to];
+                var fPos = fEl && getNodePos(fEl);
+                var tPos = tEl && getNodePos(tEl);
+                if (fPos && tPos) {
+                  var geom = computeEdgePath({
+                    fromBox: fPos,
+                    toBox: tPos,
+                    selfLoop: d.from === d.to,
+                    edgeType: 'curve',
+                    offset: 0,
+                    obstacles: collectObstacles(obstacleExcludeMap(d.from, d.to)),
+                    manualCtrl: null,
+                  });
+                  var g = document.createElementNS(diffNS, 'g');
+                  g.setAttribute('class', 'edge dc-diff-edge-added');
+                  g.setAttribute('data-id', 'dc-diff-added-' + (addedSeq++));
+                  var hit = document.createElementNS(diffNS, 'path');
+                  hit.setAttribute('d', geom.d);
+                  hit.setAttribute('stroke', 'transparent');
+                  hit.setAttribute('stroke-width', '15');
+                  hit.setAttribute('fill', 'none');
+                  hit.setAttribute('pointer-events', 'stroke');
+                  var vis = document.createElementNS(diffNS, 'path');
+                  vis.setAttribute('d', geom.d);
+                  vis.setAttribute('class', 'edge-themed');
+                  vis.setAttribute('stroke', '#1dc981');
+                  vis.setAttribute('stroke-width', '2.5');
+                  vis.setAttribute('fill', 'none');
+                  vis.setAttribute('stroke-dasharray', '6 4');
+                  vis.setAttribute('marker-end', 'url(#arrow)');
+                  g.appendChild(hit);
+                  g.appendChild(vis);
+                  diffSvg.appendChild(g);
+                  eAdded++;
+                }
+              }
+            } else if (d.change === 'removed') {
+              if (el) { el.classList.add('dc-diff-edge-removed'); eRemoved++; }
+            }
+          });
+        }
+        if (added + removed + modified + eAdded + eRemoved === 0) return;
+        renderDiffBar(added, removed, modified, eAdded, eRemoved);
+      })
+      .catch(function() { /* 设计/实际一侧缺失或未生成，静默忽略 */ });
+  }
+
+  function renderDiffBar(added, removed, modified, eAdded, eRemoved) {
+    var existing = document.querySelector('.dc-diff-bar');
+    if (existing) existing.remove();
+    var bar = document.createElement('div');
+    bar.className = 'dc-diff-bar';
+    bar.innerHTML =
+      '<span>设计 vs 实际 差异</span>' +
+      (removed > 0 ? '<span class="dc-chip dc-c-red">红 ' + removed + ' 个设计有/实际无</span>' : '') +
+      (added > 0 ? '<span class="dc-chip dc-c-green">绿 ' + added + ' 个实际新增</span>' : '') +
+      (modified > 0 ? '<span class="dc-chip dc-c-yellow">黄 ' + modified + ' 个签名变化</span>' : '') +
+      (eRemoved > 0 ? '<span class="dc-chip dc-c-red">✂ 红边 ' + eRemoved + ' 条断链</span>' : '') +
+      (eAdded > 0 ? '<span class="dc-chip dc-c-green">＋绿边 ' + eAdded + ' 条新增依赖</span>' : '') +
+      '<span class="dc-close" title="关闭">✕</span>';
+    bar.querySelector('.dc-close').addEventListener('click', function() {
+      bar.remove();
+    });
+    document.body.appendChild(bar);
+  }
+
   // ==== 折叠/展开 ====
   function toggleCollapse(nodeId) {
     const hasChildren = (childrenOf[nodeId] || []).length > 0;
@@ -5865,6 +5979,7 @@ ${I18N_SOURCE}
   setupNodeSearch();
   setupFilters();
   setupViewSwitcher();
+  setupDiffHighlight();
   setupFeatureCards();
   setupKeyboardShortcuts();
   setupExport();

@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "self-analyze": "npm run build && node scripts/self_analyze.mjs",
+    "self-analyze:deep": "npm run build && node scripts/deep_self_analyze.mjs",
     "hub": "node scripts/hub.mjs"
   },
   "dependencies": {

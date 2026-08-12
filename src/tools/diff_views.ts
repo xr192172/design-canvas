@@ -11,7 +11,7 @@
  * 输出结构化数据供 LLM 分析 + 可读摘要。
  */
 
-import type { DesignDSL, SemanticFile, Symbol, ExpectedApi } from '../dsl/types.js';
+import type { DesignDSL, SemanticFile, Symbol, ExpectedApi, Edge } from '../dsl/types.js';
 import { getDSL, getLiveFeature } from '../storage.js';
 
 // ──────── 输出类型 ────────
@@ -68,6 +68,16 @@ export interface ApiDiff {
   live_line?: number;
 }
 
+/** 依赖边变更（边级 diff：结构塌方可视化） */
+export interface EdgeDiff {
+  /** 源节点 id（文件） */
+  from: string;
+  /** 目标节点 id（文件） */
+  to: string;
+  /** removed=设计有/实际无（结构塌方）；added=实际新增依赖 */
+  change: 'added' | 'removed';
+}
+
 /** 对比结果 */
 export interface DiffViewsResult {
   /** 可读摘要 */
@@ -101,9 +111,15 @@ export interface DiffViewsResult {
       design_apis: number;
       /** live 侧总 API 数 */
       live_apis: number;
+      /** 新增依赖边数（仅设计无） */
+      added_edges: number;
+      /** 删除依赖边数（仅实际无，结构塌方） */
+      removed_edges: number;
     };
     /** 文件级对比详情 */
     files: FileDiff[];
+    /** 依赖边级对比（两视图共有的文件节点之间的依赖变化） */
+    edges: EdgeDiff[];
   };
 }
 
@@ -233,7 +249,23 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     }
   }
 
-  // 2. 构建摘要
+  // 2. 边级 diff（结构塌方可视化）：仅比较两视图共有的文件节点之间的依赖边，
+  //    避免「功能聚合视图 vs 文件视图」或「容器边」等 id 空间不一致造成的噪音。
+  const designFileIds = new Set(designFiles.map((f) => f.id));
+  const liveFileIds = new Set(liveFiles.map((f) => f.id));
+  const edgeDiffs = diffEdges(
+    design?.geometry?.edges ?? [],
+    live?.geometry?.edges ?? [],
+    designFileIds,
+    liveFileIds,
+  );
+  let addedEdges = 0, removedEdges = 0;
+  for (const d of edgeDiffs) {
+    if (d.change === 'added') addedEdges++;
+    else removedEdges++;
+  }
+
+  // 3. 构建摘要
   const lines: string[] = [
     `══ feature "${feature}" 双视图对比 ══`,
     '',
@@ -254,6 +286,10 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     `  ─ API 变更 ─`,
     `  设计视图: ${designApis} API`,
     `  实际视图: ${liveApis} API`,
+    '',
+    `  ─ 依赖边变更 ─`,
+    `  新增: ${addedEdges} 边`,
+    `  删除: ${removedEdges} 边（结构塌方）`,
   ];
 
   // 有变更时列出详情
@@ -292,8 +328,17 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
   }
 
   // 无变更
-  if (changedFiles.length === 0 && design && live) {
+  if (changedFiles.length === 0 && edgeDiffs.length === 0 && design && live) {
     lines.push('', '  ✓ 设计视图与实际代码快照完全一致');
+  }
+
+  // 边级变更详情（结构塌方高优先级列出）
+  if (edgeDiffs.length > 0) {
+    lines.push('', `  ─ 依赖边变更 ─`);
+    for (const d of edgeDiffs) {
+      const icon = d.change === 'added' ? '+' : '-';
+      lines.push(`    ${icon} ${d.from} → ${d.to}${d.change === 'removed' ? '（结构塌方）' : ''}`);
+    }
   }
 
   // 某侧缺失
@@ -323,8 +368,11 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
         live_symbols: liveSymbols,
         design_apis: designApis,
         live_apis: liveApis,
+        added_edges: addedEdges,
+        removed_edges: removedEdges,
       },
       files: fileDiffs,
+      edges: edgeDiffs,
     },
   };
 }
@@ -395,5 +443,40 @@ function diffApis(design: ExpectedApi[], live: ExpectedApi[]): ApiDiff[] {
     }
   }
 
+  return result;
+}
+
+/**
+ * 边级 diff：比较设计视图与 live 视图的依赖边。
+ * 只比较「两端都是两视图共有文件节点」的边，避免容器边 / 非文件节点 / 视图层级不一致造成的噪音。
+ * - 设计有 / 实际无 → removed（结构塌方）
+ * - 实际有 / 设计无 → added（新增依赖）
+ */
+function diffEdges(
+  design: Edge[],
+  live: Edge[],
+  designFileIds: Set<string>,
+  liveFileIds: Set<string>,
+): EdgeDiff[] {
+  const key = (e: Edge): string => e.from + '\u0000' + e.to;
+  const comparable = (e: Edge): boolean =>
+    designFileIds.has(e.from) && designFileIds.has(e.to) && liveFileIds.has(e.from) && liveFileIds.has(e.to);
+
+  const liveKeys = new Set<string>();
+  for (const e of live) if (comparable(e)) liveKeys.add(key(e));
+  const designKeys = new Set<string>();
+  for (const e of design) if (comparable(e)) designKeys.add(key(e));
+
+  const result: EdgeDiff[] = [];
+  for (const e of design) {
+    if (comparable(e) && !liveKeys.has(key(e))) {
+      result.push({ from: e.from, to: e.to, change: 'removed' });
+    }
+  }
+  for (const e of live) {
+    if (comparable(e) && !designKeys.has(key(e))) {
+      result.push({ from: e.from, to: e.to, change: 'added' });
+    }
+  }
   return result;
 }

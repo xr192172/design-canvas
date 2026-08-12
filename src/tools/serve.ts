@@ -23,6 +23,9 @@ import { dagLayout, forceLayout, gridAlign } from './dag_layout.js';
 import { scaffold } from './scaffold.js';
 import { checkConsistency } from './consistency.js';
 import { diffImpact } from './diff_impact.js';
+import { diffViews } from './diff_views.js';
+import { watchProject } from './watch_project.js';
+import { createRebuildThrottler } from './watch_project_tool.js';
 import { archLayer } from './arch_layer.js';
 import { guidedTour } from './guided_tour.js';
 import { semanticSearch } from './semantic_search.js';
@@ -45,6 +48,12 @@ import {
 const PORT = parseInt(process.argv[2]) || 3000;
 const PUBLIC_DIR = path.join(process.cwd(), 'output');
 const LIVE_FILE = getLiveDslFile();
+
+// 项目根：默认 process.cwd()，可用 DC_PROJECT_DIR 覆盖（如聚焦 src/ 做设计图闭环演示）
+function getServeProjectRoot(): string {
+  const override = process.env.DC_PROJECT_DIR;
+  return override ? path.resolve(process.cwd(), override) : process.cwd();
+}
 
 // SSE 客户端连接池
 const sseClients: Set<http.ServerResponse> = new Set();
@@ -175,7 +184,7 @@ async function handleApiLiveRebuild(req: http.IncomingMessage, res: http.ServerR
       sendError(res, 400, '缺少 feature 参数');
       return;
     }
-    const projectRoot = process.cwd();
+    const projectRoot = getServeProjectRoot();
     let cacheDb;
     try {
       cacheDb = getProjectCacheDb(projectRoot);
@@ -183,6 +192,8 @@ async function handleApiLiveRebuild(req: http.IncomingMessage, res: http.ServerR
       cacheDb = undefined;
     }
     const result = await importProject({ project_dir: projectRoot, feature, cache_db: cacheDb, live_only: true });
+    // 重建成功后推送 SSE：打开的画布自动刷新并重新跑 diff 高亮（source=watch，非 browser，避免循环）
+    broadcastSSE('dsl-changed', { feature, source: 'watch', timestamp: new Date().toISOString() });
     sendJson(res, 200, {
       success: true,
       message: result.message.split('\n')[0],
@@ -449,7 +460,7 @@ async function handleApiTraceExec(req: http.IncomingMessage, res: http.ServerRes
       sendError(res, 404, `节点 "${node_id}" 不存在于 feature "${feature}"`);
       return;
     }
-    const projectRoot = process.cwd();
+    const projectRoot = getServeProjectRoot();
     const { steps, infos } = collectChainInfo(dsl, node_id, projectRoot);
     if (infos.length === 0) {
       sendError(res, 400, '宿主节点下无 detail 链节点可真实执行（先 derive_detail_chain）');
@@ -600,6 +611,23 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
   }
 }
 
+/** POST /api/diff-views：设计视图 vs 实际代码快照 图级对比（最后一英里） */
+async function handleApiDiffViews(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const feature = (params.feature || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const result = diffViews({ feature, live_dir: params.live_dir });
+    sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
 /** POST /api/semantic-search：全项目符号语义搜索（序号8） */
 async function handleApiSemanticSearch(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
@@ -614,9 +642,7 @@ async function handleApiSemanticSearch(req: http.IncomingMessage, res: http.Serv
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
-    const code =
-      (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') || (e as Error).message.includes('不能为空') ? 403 : 500;
-    sendError(res, code, (e as Error).message);
+    sendError(res, (e as Error).message.includes('超出允许范围') || (e as Error).message.includes('路径穿越') ? 403 : 500, (e as Error).message);
   }
 }
 
@@ -1566,6 +1592,11 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/diff-views') && method === 'POST') {
+      handleApiDiffViews(req, res);
+      return;
+    }
+
     if (url.startsWith('/api/arch-layer') && method === 'POST') {
       handleApiArchLayer(req, res);
       return;
@@ -1668,6 +1699,36 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 产物注册表 API: GET/POST /api/registry`);
       console.log(`  - SSE 实时推送: GET /api/events`);
       console.log(`  - 访问 http://localhost:${listenPort} 打开设计画布`);
+
+      // 常驻 watch（最后一英里实时推送）：DC_AUTO_WATCH=1 + DC_WATCH_FEATURE=X 时，
+      // 监听 cwd 代码变更 → 重建实际 DSL（live/）→ SSE 推送 dsl-changed(source=watch)，
+      // 打开的画布自动刷新并重新跑 /api/diff-views 图级高亮（含边级结构塌方）。
+      if (process.env.DC_AUTO_WATCH === '1' && process.env.DC_WATCH_FEATURE) {
+        const autoFeature = process.env.DC_WATCH_FEATURE.trim();
+        try {
+          const projectRoot = getServeProjectRoot();
+          const db = getProjectCacheDb(projectRoot);
+          let throttle: ReturnType<typeof createRebuildThrottler>;
+          throttle = createRebuildThrottler({
+            windowMs: 2000,
+            run: async () => {
+              await importProject({ project_dir: projectRoot, feature: autoFeature, cache_db: db, live_only: true });
+              broadcastSSE('dsl-changed', { feature: autoFeature, source: 'watch', timestamp: new Date().toISOString() });
+            },
+          });
+          watchProject({
+            project_root: projectRoot,
+            db,
+            debounce_ms: 150,
+            onChange: () => throttle.trigger(),
+            onError: (err) => console.warn('[watch]', err.message),
+          });
+          console.log(`  - 常驻 watch 已启动: 代码变更 → 重建 ${autoFeature} → SSE 推送 diff 高亮`);
+        } catch (e) {
+          console.warn('[watch] 启动失败:', (e as Error).message);
+        }
+      }
+
       resolve();
     });
   });

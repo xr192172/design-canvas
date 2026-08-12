@@ -1882,6 +1882,68 @@ body[data-view="actual"] .filter-chip[data-filter-status] {
   stroke-width: 3 !important;
   filter: drop-shadow(0 0 6px rgba(255, 82, 82, 0.6));
 }
+/* 双视图 diff（最后一英里）：设计 vs 实际 图级高亮
+   removed=设计有/实际无（红） added=实际新增（绿） modified=签名/行数变了（黄） */
+.node.dc-diff-removed {
+  stroke: #ff5252 !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 10px rgba(255, 82, 82, 0.55));
+  opacity: 0.75;
+}
+.node.dc-diff-added {
+  stroke: #1dc981 !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 10px rgba(29, 201, 129, 0.55));
+}
+.node.dc-diff-modified {
+  stroke: #efaa17 !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 10px rgba(239, 170, 23, 0.55));
+}
+/* 边级 diff：removed=结构塌方（红，虚线标断链） added=实际新增依赖（绿） */
+.edge.dc-diff-edge-removed path,
+.edge.dc-diff-edge-removed line {
+  stroke: #ff5252 !important;
+  stroke-width: 2.5 !important;
+  stroke-dasharray: 6 4;
+  filter: drop-shadow(0 0 8px rgba(255, 82, 82, 0.6));
+}
+.edge.dc-diff-edge-added path,
+.edge.dc-diff-edge-added line {
+  stroke: #1dc981 !important;
+  stroke-width: 2.5 !important;
+  filter: drop-shadow(0 0 8px rgba(29, 201, 129, 0.6));
+}
+.dc-diff-bar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 350;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--theme-primary);
+  background: rgba(16, 22, 38, 0.95);
+  color: #e6edf7;
+  font-size: 12px;
+}
+.dc-diff-bar .dc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.dc-chip.dc-c-red { background: rgba(255, 82, 82, 0.18); color: #ff8a80; }
+.dc-chip.dc-c-green { background: rgba(29, 201, 129, 0.18); color: #5eeaa8; }
+.dc-chip.dc-c-yellow { background: rgba(239, 170, 23, 0.18); color: #ffd45e; }
+.dc-chip.dc-c-gray { background: rgba(255, 255, 255, 0.1); color: #9fb0cc; }
+.dc-diff-bar .dc-close { cursor: pointer; color: #9fb0cc; font-size: 14px; line-height: 1; }
+.dc-diff-bar .dc-close:hover { color: #e6edf7; }
 .diff-input-panel {
   position: fixed;
   left: 50%;

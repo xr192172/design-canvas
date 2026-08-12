@@ -26,6 +26,8 @@ import type { FeatureTree, FeatureNode, FeatureCommunity } from '../dsl/types.js
 export interface FeatureTreeInput {
   /** 项目根（定位 <root>/.design-canvas/cache.db） */
   project_dir: string;
+  /** 可选：注入已打开的 cache.db 连接（复用调用方同一实例，避免路径漂移）；缺省按 project_dir 推导 */
+  db?: import('../db/db.js').Database;
   /** 可选：写入哪个 feature 的 DSL（缺省不落盘，仅返回） */
   feature?: string;
   /** 是否用 LLM 归并社区成功能并起中文名（默认 false，未配置 LLM 时静默降级为目录归并） */
@@ -133,7 +135,7 @@ function groupByDir(
 export async function deriveFeatureTree(
   input: FeatureTreeInput,
 ): Promise<FeatureTreeResult> {
-  const mono = analyzeMonolith({ project_dir: input.project_dir });
+  const mono = analyzeMonolith({ project_dir: input.project_dir, db: input.db });
   if (mono.communities.length === 0) {
     return {
       feature: input.feature,

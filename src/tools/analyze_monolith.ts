@@ -55,6 +55,8 @@ export interface MonolithFileView {
 export interface AnalyzeMonolithInput {
   /** 项目根（定位 <root>/.design-canvas/cache.db） */
   project_dir: string;
+  /** 可选：注入已打开的 cache.db 连接（复用调用方同一实例，避免路径漂移）；缺省按 project_dir 推导 */
+  db?: Database;
   /** warning 阈值（默认 300 行） */
   warn_lines?: number;
   /** critical 阈值（默认 600 行） */
@@ -560,8 +562,10 @@ export function analyzeMonolith(input: AnalyzeMonolithInput): AnalyzeMonolithRes
   const projectRoot = path.resolve(input.project_dir);
   const dbPath = path.join(projectRoot, '.design-canvas', 'cache.db');
   let db: Database | null = null;
+  let opened = false;
   try {
-    db = openDb(dbPath);
+    db = input.db ?? openDb(dbPath);
+    opened = input.db === undefined;
   } catch (e) {
     return {
       message: `无法打开项目缓存 ${dbPath}：${(e as Error).message}。请先对项目执行 import_project / watch_project 建立索引。`,
@@ -775,10 +779,12 @@ export function analyzeMonolith(input: AnalyzeMonolithInput): AnalyzeMonolithRes
       community_subsplit,
     };
   } finally {
-    try {
-      db.close();
-    } catch {
-      /* 已关闭 */
+    if (opened) {
+      try {
+        db.close();
+      } catch {
+        /* 已关闭 */
+      }
     }
   }
 }
