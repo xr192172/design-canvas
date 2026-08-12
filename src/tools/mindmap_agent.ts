@@ -17,60 +17,11 @@
  */
 
 import fs from 'node:fs';
-import path from 'node:path';
-import { getDSL, getDataHome } from '../storage.js';
+import { getDSL } from '../storage.js';
 import { extractJsonObject } from './explain_gen.js';
-import { getMindMapFile } from './derive_mind_map.js';
+import { loadAgentConfig } from './llm_focus.js';
+import { getMindMapFile, deriveMindMap, type DeriveMindMapResult } from './derive_mind_map.js';
 import type { MindMap, MindMapNode } from '../dsl/mindmap.js';
-
-// ─────────────────────────────────────────────────────────────
-// Agent 配置（默认后端 = AGNES，认证走 config.json 或环境变量）
-// ─────────────────────────────────────────────────────────────
-
-const DEFAULT_AGNES_BASE_URL = 'https://apihub.agnes-ai.com/v1';
-const DEFAULT_AGNES_MODEL = 'agnes-2.0-flash';
-
-interface AgentConfig {
-  apiKey: string;
-  model: string;
-  baseURL: string;
-}
-
-/**
- * 读取思维导图 Agent 的 LLM 配置。优先级：
- *   1) 环境变量 AGNES_API_KEY / AGNES_BASE_URL / AGNES_MODEL
- *   2) config.json 的 agent.mmd 段（{ "agent": { "mmd": {...} } }）
- * 无 key 返回 null（此时走规则降级回答）。
- * 说明：Agent 默认后端固定为 AGNES，与科普讲解（DeepSeek）解耦。
- */
-export function loadAgentConfig(): AgentConfig | null {
-  const envApiKey = process.env.AGNES_API_KEY?.trim();
-  if (envApiKey) {
-    return {
-      apiKey: envApiKey,
-      model: process.env.AGNES_MODEL?.trim() || DEFAULT_AGNES_MODEL,
-      baseURL: ((process.env.AGNES_BASE_URL?.trim() || DEFAULT_AGNES_BASE_URL).replace(/\/+$/, '')),
-    };
-  }
-
-  const cfgPath = path.join(getDataHome(), '.design-canvas', 'config.json');
-  if (fs.existsSync(cfgPath)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-      const mmd = raw?.agent?.mmd;
-      if (mmd && mmd.apiKey) {
-        return {
-          apiKey: mmd.apiKey,
-          model: mmd.model || DEFAULT_AGNES_MODEL,
-          baseURL: (mmd.baseURL || DEFAULT_AGNES_BASE_URL).replace(/\/+$/, ''),
-        };
-      }
-    } catch {
-      // config 损坏：忽略，无配置走规则回答
-    }
-  }
-  return null;
-}
 
 // ─────────────────────────────────────────────────────────────
 // 输入 / 输出
@@ -128,24 +79,25 @@ function flatten(n: MindMapNode, acc: MindMapNode[] = []): MindMapNode[] {
   return acc;
 }
 
-/** 工具描述（注入上下文，供 LLM 选择） */
-interface ToolDoc { name: string; args?: string; desc: string }
+/** 工具描述（注入上下文，供 LLM 选择）。write=true 表示写操作（低风险，自主执行）。 */
+interface ToolDoc { name: string; args?: string; desc: string; write?: boolean }
 const TOOL_DESCRIPTIONS: ToolDoc[] = [
   { name: 'mindmap.get', desc: '读取当前思维导图的完整 JSON，返回 {feature, mode, root}。' },
   { name: 'mindmap.search', args: '{"q":"关键词"}', desc: '按 label/description 关键词搜索导图节点，返回命中的节点（含路径与说明）。' },
   { name: 'design.get', args: '{"id":"file_xxx"}', desc: '读取 L2 设计图层某节点（按 id 或相对路径），返回其几何位置/职责/行数。用于把导图节点定位到设计图。' },
+  { name: 'mindmap.regenerate', args: '{"gen_descriptions":true}', desc: '【写操作】基于当前 L2 设计图层重新生成思维导图（覆盖旧导图）。gen_descriptions=true 时用 LLM 提炼功能/子模块描述。当用户要求"更新/重新生成导图"时调用。', write: true },
 ];
 
 function toolDoc(): string {
   return TOOL_DESCRIPTIONS
-    .map((t) => `- ${t.name}${t.args ? `(${t.args})` : ''}：${t.desc}`)
+    .map((t) => `- ${t.name}${t.args ? `(${t.args})` : ''}：${t.desc}${t.write ? '（写操作）' : ''}`)
     .join('\n');
 }
 
 /** 组装上下文：工具介绍 + L1/L2 DSL 摘要 + 导图 */
 function buildContext(ctx: MMContext): string {
   const parts: string[] = [];
-  parts.push('## 可用工具（只读）\n' + toolDoc());
+  parts.push('## 可用工具\n' + toolDoc());
   parts.push('## 当前思维导图\n' + (ctx.mindMap ? JSON.stringify(ctx.mindMap, null, 2) : ctx.mindMapErr ?? '（未生成）'));
   const dsl = ctx.dsl;
   if (dsl) {
@@ -166,10 +118,10 @@ function buildContext(ctx: MMContext): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 工具执行（只读）
+// 工具执行（只读 + 低风险写操作）
 // ─────────────────────────────────────────────────────────────
 
-function runTool(ctx: MMContext, name: string, rawArgs: string): string {
+async function runTool(ctx: MMContext, name: string, rawArgs: string): Promise<string> {
   let args: Record<string, unknown> = {};
   try {
     args = rawArgs ? JSON.parse(rawArgs) : {};
@@ -178,7 +130,7 @@ function runTool(ctx: MMContext, name: string, rawArgs: string): string {
   }
   switch (name) {
     case 'mindmap.get': {
-      if (!ctx.mindMap) return '当前未生成思维导图，请先 POST /api/mind-map 或调用 derive_mind_map。';
+      if (!ctx.mindMap) return '当前未生成思维导图，请先调用 mindmap.regenerate 或 derive_mind_map。';
       const root = ctx.mindMap.root;
       const summary = summarizeTree(root);
       return `思维导图（${ctx.mindMap.mode === 'llm' ? 'LLM 提炼' : '规则骨架'}）：\n${summary}`;
@@ -209,6 +161,15 @@ function runTool(ctx: MMContext, name: string, rawArgs: string): string {
       if (geo) return `设计图节点 ${id}：${JSON.stringify(geo)}`;
       return `未在设计图层找到节点 ${id}。`;
     }
+    case 'mindmap.regenerate': {
+      const gen = args.gen_descriptions !== false;
+      const result: DeriveMindMapResult = await deriveMindMap({
+        feature: ctx.feature,
+        gen_descriptions: gen,
+      });
+      ctx.mindMap = result.mind_map;
+      return `思维导图已重新生成（${result.mode === 'llm' ? 'LLM 提炼' : '规则骨架'}）。\nJSON：${result.jsonFile}\nHTML：${result.htmlFile}\n${result.message.split('\n').slice(0, 3).join('\n')}`;
+    }
     default:
       return `未知工具：${name}`;
   }
@@ -229,13 +190,14 @@ function summarizeTree(n: MindMapNode, depth = 0): string {
 // ─────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT =
-  '你是项目的"思维导图讲解助手"。用户会针对一张项目的思维导图提问。' +
-  '你可以调用【只读工具】去查导图节点、搜索关键词、定位到设计图层，从而给出准确、有依据的回答。' +
-  '工作方式（ReAct）：你每次输出一个 JSON 动作，执行后我会把观察结果返回给你，直到你给出最终回答。' +
+  '你是项目的"思维导图管理助手"。你负责两件事：\n' +
+  '1) 专职解释项目：用户提问时，调用只读工具（mindmap.get/search/design.get）查导图节点、搜索关键词、定位设计图层，给出准确有依据的回答。\n' +
+  '2) 更新设计：当用户要求"重新生成/更新思维导图"时，调用 mindmap.regenerate（写操作）基于最新 L2 设计图层重建导图。\n' +
+  '工作方式（ReAct）：你每次输出一个 JSON 动作，执行后我会把观察结果返回给你，直到你给出最终回答。\n' +
   '输出格式二选一：\n' +
-  '- 需要查数据：{"thought":"理由","action":"工具名","args":"{...}"}\n' +
+  '- 需要执行动作：{"thought":"理由","action":"工具名","args":"{...}"}\n' +
   '- 给出回答：{"thought":"思路","action":"final","answer":"你的回答"}\n' +
-  '要求：只基于工具观察到的真实数据回答，不编造；回答用中文，讲人话，2-5 句。';
+  '要求：只基于工具观察到的真实数据回答/操作，不编造；回答用中文，讲人话，2-5 句。';
 
 export async function runMindmapAgent(input: MindmapAgentInput): Promise<MindmapAgentMessage> {
   const { feature, message, history = [], max_steps = 6 } = input;
@@ -283,7 +245,7 @@ export async function runMindmapAgent(input: MindmapAgentInput): Promise<Mindmap
     const args = typeof parsed?.args === 'string' ? parsed.args : JSON.stringify(parsed?.args ?? {});
     let observation: string;
     try {
-      observation = runTool(ctx, action, args);
+      observation = await runTool(ctx, action, args);
     } catch (e) {
       observation = `工具执行异常：${(e as Error).message}`;
     }

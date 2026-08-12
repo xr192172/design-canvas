@@ -24,7 +24,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDSL, getStorageRoot, getDataHome } from '../storage.js';
-import { loadExplainConfig, extractJsonObject } from './explain_gen.js';
+import { extractJsonObject } from './explain_gen.js';
+import { loadAgentConfig } from './llm_focus.js';
 import type { DesignDSL, FeatureTree } from '../dsl/types.js';
 import type { MindMap, MindMapNode } from '../dsl/mindmap.js';
 
@@ -123,7 +124,7 @@ async function llmEnrichDescriptions(
   nodes: Array<{ id: string; label: string; kind: string; hint: string }>,
   projectTitle: string,
 ): Promise<Map<string, string> | null> {
-  const cfg = loadExplainConfig();
+  const cfg = loadAgentConfig();
   if (!cfg) return null;
   const list = nodes
     .map((n) => `- id=${n.id} · ${n.kind === 'feature' ? '功能' : '子模块'}「${n.label}」· ${n.hint}`)
@@ -144,6 +145,7 @@ async function llmEnrichDescriptions(
           { role: 'user', content: `项目：${projectTitle}\n条目清单：\n${list}` },
         ],
         temperature: 0.4,
+        response_format: { type: 'json_object' },
       }),
     });
     if (!res.ok) throw new Error(`LLM 调用失败 ${res.status}`);
@@ -293,7 +295,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
         if (n.children) for (const c of n.children) apply(c);
       };
       apply(root);
-      note = `已用 LLM（${loadExplainConfig()?.model ?? ''}）提炼功能/子模块描述`;
+      note = `已用 LLM（${loadAgentConfig()?.model ?? ''}）提炼功能/子模块描述`;
     } else {
       note = 'LLM 提炼不可用（未配置或调用失败），已用规则描述';
     }
@@ -442,10 +444,10 @@ export function renderMindMapHtml(mindMap: MindMap, title: string): string {
 </div>
 <button class="mmd-toggle" id="mmdToggle">💬 讲解</button>
 <div class="mmd-panel hidden" id="mmdPanel">
-  <div class="mmd-head">💬 思维导图讲解助手</div>
+  <div class="mmd-head">💬 思维导图管理助手</div>
   <div class="mmd-msgs" id="mmdMsgs"></div>
   <div class="mmd-input">
-    <input id="mmdInput" placeholder="问问这个项目…">
+    <input id="mmdInput" placeholder="问项目 / 让它重新生成导图…">
     <button id="mmdSend">发送</button>
   </div>
 </div>

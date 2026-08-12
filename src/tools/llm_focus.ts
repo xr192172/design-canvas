@@ -30,6 +30,55 @@ export function configFilePath(): string {
   return path.join(getDataHome(), '.design-canvas', 'config.json');
 }
 
+// ─────────────────────────────────────────────────────────────
+// Agent 配置（L3 思维导图 Agent / 管理 Agent 默认后端 = AGNES）
+// ─────────────────────────────────────────────────────────────
+
+export interface AgentConfig {
+  apiKey: string;
+  model: string;
+  baseURL: string;
+}
+
+const DEFAULT_AGNES_BASE_URL = 'https://apihub.agnes-ai.com/v1';
+const DEFAULT_AGNES_MODEL = 'agnes-2.0-flash';
+
+/**
+ * 读取管理 Agent 的 LLM 配置。优先级：
+ *   1) 环境变量 AGNES_API_KEY / AGNES_BASE_URL / AGNES_MODEL
+ *   2) config.json 的 agent.mmd 段（{ "agent": { "mmd": {...} } }）
+ * 无 key 返回 null（此时管理 Agent 走规则降级）。
+ * 说明：Agent 默认后端固定为 AGNES，与科普讲解（DeepSeek）解耦。
+ */
+export function loadAgentConfig(): AgentConfig | null {
+  const envApiKey = process.env.AGNES_API_KEY?.trim();
+  if (envApiKey) {
+    return {
+      apiKey: envApiKey,
+      model: process.env.AGNES_MODEL?.trim() || DEFAULT_AGNES_MODEL,
+      baseURL: (process.env.AGNES_BASE_URL?.trim() || DEFAULT_AGNES_BASE_URL).replace(/\/+$/, ''),
+    };
+  }
+
+  const cfgPath = configFilePath();
+  if (fs.existsSync(cfgPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+      const mmd = raw?.agent?.mmd;
+      if (mmd && mmd.apiKey) {
+        return {
+          apiKey: mmd.apiKey,
+          model: mmd.model || DEFAULT_AGNES_MODEL,
+          baseURL: (mmd.baseURL || DEFAULT_AGNES_BASE_URL).replace(/\/+$/, ''),
+        };
+      }
+    } catch {
+      // config 损坏：忽略，无配置走规则回答
+    }
+  }
+  return null;
+}
+
 export function loadLlmConfig(): LlmConfig | null {
   const fromEnv: Partial<LlmConfig> = {};
   if (process.env.LLM_API_KEY) fromEnv.apiKey = process.env.LLM_API_KEY;
