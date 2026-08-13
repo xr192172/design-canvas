@@ -1536,10 +1536,21 @@ function handleStaticFile(req: http.IncomingMessage, res: http.ServerResponse): 
   res.end(content);
 }
 
-function readBody(req: http.IncomingMessage): Promise<Buffer> {
+const MAX_BODY_SIZE = 5 * 1024 * 1024; // 5MB
+
+function readBody(req: http.IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on('data', (chunk) => {
+      totalSize += chunk.length;
+      if (totalSize > maxSize) {
+        reject(new Error(`请求体过大（${totalSize} 字节），最大允许 ${maxSize} 字节`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
@@ -1583,8 +1594,11 @@ export async function startServer(port?: number): Promise<void> {
     const isWriteApi =
       method === 'POST' &&
       (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
-        url.startsWith('/api/registry') && method === 'POST' ||
-        url.startsWith('/api/layout') || url.startsWith('/api/scaffold'));
+        url.startsWith('/api/registry') ||
+        url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
+        url.startsWith('/api/mmd/chat') ||
+        url.startsWith('/api/mind-map') ||
+        url.startsWith('/api/regenerate'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
