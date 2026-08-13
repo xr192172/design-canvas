@@ -24,6 +24,8 @@ import { checkStatus } from './tools/status_tools.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { checkConsistency } from './tools/consistency.js';
 import { exploreCode, EXPLORE_ACTIONS } from './tools/explore_code.js';
+import { importProject } from './tools/import_project.js';
+import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { addAnnotationByTool, resolveAnnotation } from './tools/annotation_tools.js';
 import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
@@ -446,9 +448,9 @@ const ALIASES: AliasDef[] = [
   // explore_code 家族：把旧工具名/参数映射到 action + args
   {
     name: 'import_project',
-    description: '别名 → explore_code(action=import)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'import', args: a }),
+    description: '别名 → importProject（独立工具，不再经 explore_code 分发）',
+    target: 'import_project',
+    adapter: (a) => a,
   },
   {
     name: 'semantic_search',
@@ -607,6 +609,7 @@ for (const def of TOOL_DEFS) handlerByTarget.set(def.name, def.handler);
 
 /** 遗留工具 handler（尚未吸收进 8 主工具，先保兼容，后续 Step 2 并入 edit_dsl） */
 const LEGACY_HANDLERS: Record<string, ToolDef['handler']> = {
+  import_project: wrap(async (a) => importProject(a as unknown as ImportProjectInput)),
   add_annotation: wrap(async (a) => {
     const r = addAnnotationByTool({
       feature: a.feature as string,
