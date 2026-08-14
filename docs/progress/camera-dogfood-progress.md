@@ -49,5 +49,16 @@
 - **E2E CLI 验证（临时根）**：`seed`(v1,1声明) → `propose`(2声明,pending) → `approve` → `show`(v2,2声明) → `history`(v1 seed + v2 llm-revise) → `proposals`(approved)。全链路通过。
 - Go 测试全量通过。
 
+## ✅ 阶段P4：循环+触发（观测→偏差→未声明探针自动提案，已完成并验证）
+- **闭环**：探针落盘观测（events.jsonl）→ 聚合画像（actual）→ 与权威 DSL 对比三类偏差 → 对「未声明」探针自动生成修订提案（`design:observe-<probe>`，契约描述源自观测事实）。
+- **触发**：每次 `camera-dsl loop <events.jsonl>` 即一次闭环迭代，可被外部定时/事件（watch/cron）触发持续校准。
+- **写盘权仍分离**：闭环只负责「发现并提议」，只写 proposals/，绝不触碰 dsl.json；定稿权永远在验证门审批（approve）。
+- **新增**：
+  - `internal/probe/loop.go`：`RunLoop`（读观测→聚合→对比→未声明探针自动提案）+ `sanitizeRuleSuffix`（探针名→合法 rule 后缀）。
+  - `dsl_cli.go`：新增 `loop` 子命令。
+  - `loop_test.go`：4 个用例（未声明探针产 2 提案、loop 不触碰 dsl.json、全局声明覆盖下不产提案、rule 后缀净化）。
+- **E2E CLI 验证（临时根）**：seed→propose(特定探针)→approve→loop 报告正确（未观测 save.writefile）→show 权威未变。全链路通过。
+- Go 测试全量通过。
+
 ## 下一步（待办）
-- 推进 P4 循环+触发（观测→偏差→提案→定稿的闭环触发），及 TS 跨语言契约试点。
+- 推进 TS 跨语言契约试点（把 Camera DSL 契约从 Go 扩到 TS 侧消费/判定）。

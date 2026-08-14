@@ -66,6 +66,8 @@ func RunDSLCLI(args []string, dataDir string) bool {
 		return dslApprove(args[1:], dataDir)
 	case "reject":
 		return dslReject(args[1:], dataDir)
+	case "loop":
+		return dslLoop(args[1:], dataDir)
 	case "help", "-h", "--help":
 		usageDSL()
 		return true
@@ -90,6 +92,7 @@ func usageDSL() {
   camera-dsl proposals                               列出全部修订提案
   camera-dsl approve <id> [--reviewer <名字>]        验证门审批 → 定稿为设计 DSL 新版本
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
+  camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
@@ -370,6 +373,29 @@ func dslReject(args []string, dataDir string) bool {
 		return true
 	}
 	fmt.Printf("已拒绝修订提案 %s\n", id)
+	return true
+}
+
+// dslLoop 执行一次闭环迭代：观测→偏差→对未声明探针自动生成修订提案。
+func dslLoop(args []string, dataDir string) bool {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl>")
+		return true
+	}
+	res, err := RunLoop(args[0], dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl loop: %v\n", err)
+		return true
+	}
+	fmt.Print(RenderDiffReport(res.Report))
+	if len(res.Proposals) == 0 {
+		fmt.Println("闭环：无未声明探针，无需补契约提案")
+		return true
+	}
+	fmt.Printf("闭环：为 %d 个未声明探针生成修订提案（写盘权分离，待审批）\n", len(res.Proposals))
+	for _, p := range res.Proposals {
+		fmt.Printf("  %s rule=%s probe=%s\n", p.ID, p.Decls[0].Rule, p.Decls[0].Probe)
+	}
 	return true
 }
 
