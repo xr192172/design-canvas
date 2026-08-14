@@ -11,6 +11,7 @@
     "build": "node scripts/gen_anim_core_bundle.mjs && tsc",
     "start": "node dist/src/server.js",
     "serve": "node dist/src/tools/serve.js",
+    "instrument": "node dist/src/camera/instrument_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "self-analyze": "npm run build && node scripts/self_analyze.mjs",

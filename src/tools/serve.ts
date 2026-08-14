@@ -18,6 +18,9 @@ import path from 'node:path';
 import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '../storage.js';
 import { enableCameraFromEnv } from '../camera/run_sentinel.js';
 import { judgeEvent } from '../camera/judge.js';
+import { queryCameraLog } from '../camera/log_query.js';
+import { judgeEvents, normalizeEvents, renderJudgeReport } from '../camera/judge_service.js';
+import { judgeGuardLog } from '../camera/judge_guard.js';
 import { importProject } from './import_project.js';
 import { getProjectCacheDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
@@ -155,6 +158,57 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
       return { feature: dsl.feature, title: dsl.title || dsl.feature };
     });
     sendJson(res, 200, { features });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/camera/log?file=<path>&file=<path>&all=1：按文件路径查询 Camera 异常日志。
+ * 事件文件取自 CAMERA_EVENTS_FILE；未设置时返回 424（未启用）。可与
+ * camera-dsl log --file <path> 等价使用，供 LLM/前端按文件主动拉取某条链路的日志。 */
+function handleApiCameraLog(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const eventsPath = process.env.CAMERA_EVENTS_FILE;
+    if (!eventsPath) {
+      sendError(res, 424, 'CAMERA_EVENTS_FILE 未设置，Camera 日志未启用。请在启动 serve 前设置该环境变量。');
+      return;
+    }
+    const url = new URL(req.url || '/', 'http://localhost');
+    const files = url.searchParams.getAll('file').filter((f) => f.trim() !== '');
+    const all = url.searchParams.get('all') === '1' || url.searchParams.get('all') === 'true';
+    const result = queryCameraLog(eventsPath, { files, all });
+    sendJson(res, 200, result);
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** Camera 判定下沉服务（语言无关）：POST /api/camera/judge 判定一批事件。
+ * body: { events: TSEvent[] } → 逐条判定 + 汇总。任何语言的探针都能 POST。
+ * 可选 ?text=1 返回人类可读报告（等价 Go RenderReport）。 */
+async function handleApiCameraJudge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body.toString('utf-8') || '{}');
+    } catch {
+      sendError(res, 400, '请求体需为合法 JSON：{ "events": [...] }');
+      return;
+    }
+    const raw = (parsed as { events?: unknown }).events;
+    const { events, error } = normalizeEvents(raw);
+    if (error) {
+      sendError(res, 400, error);
+      return;
+    }
+    const result = judgeEvents(events);
+    const url = new URL(req.url || '/', 'http://localhost');
+    if (url.searchParams.get('text') === '1') {
+      sendJson(res, 200, { text: renderJudgeReport(result), ...result });
+      return;
+    }
+    sendJson(res, 200, result);
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1566,6 +1620,8 @@ export async function startServer(port?: number): Promise<void> {
   // 判定器判断，命中契约偏差就 SSE 推送给画布（开发时即时观测提示）。
   // 未设置时 no-op，不改变 serve 行为。
   enableCameraFromEnv((ev) => {
+    // 长时压测守门：CAMERA_GUARD=1 时把偏差实时打印到控制台（仅打印，不中断）
+    judgeGuardLog(ev);
     const v = judgeEvent(ev);
     if (v.result === 'deviation') {
       broadcastSSE('camera-alert', {
@@ -1650,6 +1706,16 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/features') && method === 'GET') {
       handleApiFeatures(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/camera/log') && method === 'GET') {
+      handleApiCameraLog(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/camera/judge') && method === 'POST') {
+      void handleApiCameraJudge(req, res);
       return;
     }
 

@@ -68,6 +68,37 @@ func TestDSLLog_NoAnomaly(t *testing.T) {
 	}
 }
 
+func TestDSLLog_FileFilter(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	writeLines(t, eventsPath,
+		`{"probe":"a.enter","time":"2026-08-14T10:00:00Z","source":"s","fields":{"file":"src/a.ts","args":{}}}`,
+		`{"probe":"b.enter","time":"2026-08-14T10:00:01Z","source":"s","fields":{"file":"src/b.ts","args":{}}}`,
+		`{"probe":"aSink.writefile","time":"2026-08-14T10:00:02Z","source":"s","fields":{"file":"src/a.ts","op":"writefile","err":"EACCES","path":"x.json"}}`,
+	)
+
+	// 只过滤 src/a.ts：应包含 a.enter、a 的异常，不含 b.enter
+	out := captureCLI(func() bool { return dslLog([]string{eventsPath, "--file", "src/a.ts"}) })
+	if !strings.Contains(out, "2 事件 · 1 异常") {
+		t.Fatalf("过滤头缺失: %s", out)
+	}
+	if !strings.Contains(out, "src/a.ts") {
+		t.Fatalf("过滤结果应含目标文件: %s", out)
+	}
+	if strings.Contains(out, "src/b.ts") {
+		t.Fatalf("过滤结果不应含其他文件: %s", out)
+	}
+
+	// 支持文件名片段（b）与多次 --file
+	out = captureCLI(func() bool { return dslLog([]string{eventsPath, "--file", "b.ts"}) })
+	if !strings.Contains(out, "src/b.ts") {
+		t.Fatalf("文件名片段过滤失效: %s", out)
+	}
+	if strings.Contains(out, "src/a.ts") {
+		t.Fatalf("片段过滤不应含其他文件: %s", out)
+	}
+}
+
 // captureCLI 捕获 dslLog 的 stdout 输出。
 func captureCLI(fn func() bool) string {
 	old := os.Stdout

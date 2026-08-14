@@ -126,3 +126,20 @@
 - **E2E 验证（真实事件文件）**：4 事件（2 正常 + 1 EISDIR 异常 + 1 enter）→ `camera-dsl log` 默认只列出 1 条 EISDIR 偏差（`rule=design:silent-error-discard`，`reason=non-benign error silently discarded (op=writefile): "EISDIR..."`，含 path 字段）；`--all` 全列但异常打标。正常事件被筛选层正确过滤。
 - **说明（文件维度待补）**：当前日志含「数据流」（probe 名，如 saveSink.writefile）和「类型」（rule），但未含完整文件路径——probe 名的 mod 前缀即文件 basename（saveSink 来自 save_sink.ts）。若需精确文件路径，需让 TS 探针 emit 时带 file 字段（待后续增强）。
 - 测试：新增 `dsl_log_test.go` 3 用例，go 全量测试通过。
+
+## ✅ 日志按文件过滤 + 可调用端点（已完成并验证）
+- **定位（2026-08-14）**：用户明确日志工具不应一次性全量丢出，而要「LLM 想看哪个文件/链路，就送那个文件路径过来，只把相关日志给它」。据此：
+  - `camera-dsl log` 新增 `--file <path>`（可多次）参数，按事件 `Fields["file"]` 精确/后缀/包含匹配过滤；指定文件时连同该文件正常流动一并列出（异常打标记），未指定时默认只列偏差，`--all` 才全量。
+  - TS 插桩探针（instrument.ts）补全 `file` 字段：此前 enter/exit/catch 已带，return 出口与 IO 写盘探针补齐，四类探针事件均带「源文件相对项目根路径」。
+  - `renderLogLine` 概要行显示 `<文件路径>`，便于按文件筛读。
+- **新增可调用入口**：serve 增加 `GET /api/camera/log?file=<path>&file=<path>&all=1`，复用 TS `queryCameraLog`（读 events.jsonl → 按文件过滤 → judgeEvent 判定），事件文件取自 `CAMERA_EVENTS_FILE`，未设置返回 424。LLM/前端可按文件主动拉取某条链路异常，与 CLI `--file` 语义等价。
+  - 新增 `src/camera/log_query.ts`（queryCameraLog）与 `tests/camera/log_query.test.ts` 5 用例。
+- **语义说明**：手动 saveDSL 探针的 `file` 是「写入目标路径」，插桩探针的 `file` 是「源文件相对路径」，两者语义不同但均被后缀匹配兼容。
+- **E2E 真实 HTTP 验证**：起 serve（CAMERA_EVENTS_FILE 指向临时事件文件）→ `GET /api/camera/log?file=src/a.ts` 正确返回该文件 2 事件（偏差打标记）；未指定 file 只列 1 条偏差；`?file=b.ts` 只返回 b 文件。TS 全量编译通过 + camera 测试通过。
+
+## ✅ 扩插桩到 import_project 写盘数据流（已完成并验证）
+- **目标**：让 Camera 观测覆盖更广的真实运行路径。此前仅 serve /api/save（saveDSL 手动探针）被观测；**import_project 扫描写盘（saveLiveFeature）完全无探针**，LLM 跑 import_project 时 Camera 看不到。
+- **改动**：[storage.ts](src/storage.ts) `saveLiveFeature` 补探针——写盘成功采集 `save.writefile`（err=null），失败捕获 err 消息后仍向上抛（与 saveDSL 同 pattern）。import_project / watch_project / /api/live/rebuild 的 live DSL 写盘现均被观测。
+- **db 项目级缓存（暂不做）**：SQLite 写经 better-sqlite3 内部 prepare/run，插桩点在 import_project 符号同步层，价值低且侵入大，此处不展开。
+- **测试**：`tests/camera/dogfood.test.ts` 新增 saveLiveFeature 写盘探针用例（采集 1 条 save.writefile，含 file 目标路径），camera 6 用例通过。
+- **E2E 真实 import_project**：临时项目真实跑 import_project → 采集 2 条 `save.writefile`（feature 文件 + live 文件，err=null，含 file 字段）→ `queryCameraLog(files=mini)` 正确按文件过滤返回。TS 编译通过。

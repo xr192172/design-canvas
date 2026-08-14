@@ -95,7 +95,7 @@ func usageDSL() {
   camera-dsl approve <id> [--reviewer <名字>]        验证门审批 → 定稿为设计 DSL 新版本
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
   camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
-  camera-dsl log <events.jsonl> [--all]             异常日志：逐条列出偏差（默认只列异常，--all 显示全部）
+  camera-dsl log <events.jsonl> [--file <path>]... [--all]  日志：按文件路径过滤（可多次），默认只列异常，--all 显示全部
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
@@ -402,14 +402,31 @@ func dslLoop(args []string, dataDir string) bool {
 	return true
 }
 
-// dslLog 输出异常日志：逐条判定事件，默认只列偏差（设计不符 / 静默吞错），
-// --all 时连正常流动数据也列出（供 LLM 查看某个数据流具体怎么实现）。
+// dslLog 输出异常日志：逐条判定事件。支持按文件路径过滤（--file，可多次），
+// 让 LLM 只取某个文件/链路相关的日志，避免一次性全量丢出。
+//
+// 过滤语义：
+//   - 默认：只列偏差（设计不符 / 静默吞错）
+//   - --file <path>：只列与这些路径相关的事件（按事件 Fields["file"] 精确或
+//     后缀匹配，支持传相对路径/绝对路径/文件名片段），并连正常流动一并列出
+//     （供 LLM 查看该文件数据流具体怎么实现），异常打标记
+//   - --all：全部事件，异常打标记（不做文件过滤时慎用，会全量输出）
 func dslLog(args []string) bool {
 	eventsPath := ""
 	all := false
+	var fileFilter []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--all" {
 			all = true
+			continue
+		}
+		if args[i] == "--file" && i+1 < len(args) {
+			fileFilter = append(fileFilter, args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--file=") {
+			fileFilter = append(fileFilter, strings.TrimPrefix(args[i], "--file="))
 			continue
 		}
 		if strings.HasPrefix(args[i], "-") {
@@ -420,7 +437,7 @@ func dslLog(args []string) bool {
 		}
 	}
 	if eventsPath == "" {
-		fmt.Fprintln(os.Stderr, "用法: camera-dsl log <events.jsonl> [--all]")
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl log <events.jsonl> [--file <path>]... [--all]")
 		return true
 	}
 	f, err := os.Open(eventsPath)
@@ -438,6 +455,24 @@ func dslLog(args []string) bool {
 		return true
 	}
 
+	// 按文件路径过滤：命中任一 --file 的事件保留
+	norm := func(s string) string { return strings.ReplaceAll(s, "\\", "/") }
+	var filtered []Verdict
+	if len(fileFilter) > 0 {
+		for _, v := range verdicts {
+			evFile, _ := v.Event.Fields["file"].(string)
+			evFile = norm(evFile)
+			for _, ff := range fileFilter {
+				ff = norm(ff)
+				if evFile == ff || strings.HasSuffix(evFile, ff) || strings.Contains(evFile, ff) {
+					filtered = append(filtered, v)
+					break
+				}
+			}
+		}
+		verdicts = filtered
+	}
+
 	var anomalies []Verdict
 	for _, v := range verdicts {
 		if v.Result == "deviation" {
@@ -445,7 +480,21 @@ func dslLog(args []string) bool {
 		}
 	}
 
-	fmt.Printf("Camera 运行日志：%d 事件 · %d 异常\n", len(verdicts), len(anomalies))
+	scope := ""
+	if len(fileFilter) > 0 {
+		scope = fmt.Sprintf(" · 按文件过滤 %d 条", len(fileFilter))
+	}
+	fmt.Printf("Camera 运行日志：%d 事件 · %d 异常%s\n", len(verdicts), len(anomalies), scope)
+
+	// 指定了文件：把该文件相关的正常流动也列出来（供 LLM 看数据流），异常打标记。
+	if len(fileFilter) > 0 {
+		fmt.Println()
+		for _, v := range verdicts {
+			renderLogLine(v, v.Result == "deviation")
+		}
+		return true
+	}
+
 	if !all {
 		// 默认只列异常，正常流动数据不显示（除非 LLM 想看实现细节）
 		if len(anomalies) == 0 {
@@ -481,6 +530,11 @@ func renderLogLine(v Verdict, emphasize bool) {
 			data, _ := json.Marshal(ev.Fields)
 			fmt.Printf("      fields: %s\n", data)
 		}
+		return
+	}
+	// 概要行也带上文件路径，便于按文件快速筛读
+	if evFile, ok := ev.Fields["file"].(string); ok && evFile != "" {
+		fmt.Printf("  · %s  [%s]  %s  <%s>\n", ts, rule, ev.Probe, evFile)
 		return
 	}
 	fmt.Printf("  · %s  [%s]  %s\n", ts, rule, ev.Probe)

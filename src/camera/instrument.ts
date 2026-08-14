@@ -80,12 +80,74 @@ export interface InstrumentOptions {
   probeImport?: string;
   /** 项目根，用于计算 probe import 相对路径（默认从 src/camera/probe.ts 向上推断） */
   projectRoot?: string;
+  /** 备份根：写盘前把原文件备份到 <backupRoot>/.design-canvas/camera-backup/<rel>，
+   *  供 --uninstrument 还原。默认等于 projectRoot（被插桩项目根）。 */
+  backupRoot?: string;
   /** 是否实际写盘；false 只做 dry-run 报告（默认 true） */
   write?: boolean;
 }
 
 /** 探针调用标记：已插桩文件里若含此标记则跳过（幂等） */
 const PROBE_MARKER = 'camera:instrumented';
+
+/** 备份目录名（相对被插桩项目根，位于 .design-canvas 下，collectTsFiles 会跳过） */
+const BACKUP_DIR = '.design-canvas/camera-backup';
+
+/** 备份文件名：把原文件相对项目根（backupRoot）的路径映射为备份目录下的镜像路径 */
+function backupPathFor(backupRoot: string, file: string): string {
+  const rel = path.relative(backupRoot, file).replaceAll('\\', '/');
+  return path.join(backupRoot, BACKUP_DIR, rel);
+}
+
+/** 原文件写盘前，若尚无备份则把当前内容备份到 .design-canvas/camera-backup */
+function backupOriginal(backupRoot: string, file: string, content: string): void {
+  const dest = backupPathFor(backupRoot, file);
+  if (fs.existsSync(dest)) return; // 已备份过则保留最早的原版
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, content, 'utf-8');
+}
+
+/** 从备份镜像 path 还原: 把备份文件拷回原位置 */
+function restoreOne(backupRoot: string, backupFile: string): string | null {
+  const rel = path.relative(path.join(backupRoot, BACKUP_DIR), backupFile);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const target = path.join(backupRoot, rel);
+  fs.writeFileSync(target, fs.readFileSync(backupFile, 'utf-8'), 'utf-8');
+  return target;
+}
+
+/** 列出备份目录下所有已备份文件（递归） */
+function listBackups(backupRoot: string): string[] {
+  const dir = path.join(backupRoot, BACKUP_DIR);
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  const walk = (d: string) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile()) out.push(full);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/**
+ * 还原被插桩项目的所有文件：从 .design-canvas/camera-backup 拷回原版，然后删除备份目录。
+ * 返回已还原的文件绝对路径列表。
+ */
+export function restoreInstrumented(root: string): string[] {
+  const backups = listBackups(root);
+  const restored: string[] = [];
+  for (const b of backups) {
+    const t = restoreOne(root, b);
+    if (t) restored.push(t);
+  }
+  if (backups.length > 0) {
+    fs.rmSync(path.join(root, BACKUP_DIR), { recursive: true, force: true });
+  }
+  return restored;
+}
 
 /** 函数类节点类型 → 插桩函数出入口 */
 const FN_TYPES = new Set([
@@ -260,6 +322,23 @@ function isSimpleExpr(n: InstrNode): boolean {
 }
 
 /**
+ * 判断 return 是否处于「无大括号控制语句的单语句体」中（如 `if (x) return null;`）。
+ * 此时 return 是其父控制语句的 consequent，且父节点没有 statement_block 包裹。
+ * 这种位置不能做值捕获替换（会破坏语法），只能降级为返回标记。
+ */
+function isBracelessGuardReturn(parent: InstrNode | undefined): boolean {
+  if (!parent) return false;
+  const guardTypes = new Set(['if_statement', 'for_statement', 'for_in_statement', 'while_statement', 'do_statement', 'labeled_statement']);
+  if (!guardTypes.has(parent.type)) return false;
+  // 若父控制语句有 statement_block 子节点（即花括号体），说明 return 在块内，安全。
+  for (let i = 0; i < parent.childCount; i++) {
+    const c = parent.child(i);
+    if (c && c.type === 'statement_block') return false;
+  }
+  return true;
+}
+
+/**
  * 对单个 TS 文件插桩。返回注入的探针点（dry-run 不写盘）。
  * level 分级：enter/exit=core，catch=event，io=event。
  */
@@ -284,16 +363,19 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
   }
   const root = asInstr(parsed.root);
 
+  const projectRoot = opts.projectRoot ?? inferProjectRoot(file);
+  // 探针注入时附带的文件相对路径（相对项目根，正斜杠），供日志按文件过滤
+  const fileRel = path.relative(projectRoot, file).replaceAll('\\', '/');
+
   // 收集插入点（从后往前构造，偏移由大到小）
   const insertions: { index: number; removeTo?: number; site: InstrumentedSite }[] = [];
-  collectSites(root, file, content, insertions);
+  collectSites(root, file, content, insertions, fileRel);
 
   if (insertions.length === 0) return result;
 
   // 按 index 从大到小排序，从后往前注入避免偏移漂移
   insertions.sort((a, b) => b.index - a.index);
 
-  const projectRoot = opts.projectRoot ?? inferProjectRoot(file);
   const probeImport = opts.probeImport ?? relativeProbeImport(file, projectRoot);
   const importStmt = buildImportStmt(probeImport);
 
@@ -306,6 +388,9 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
 
   result.sites = insertions.map((i) => i.site);
   if (applyWrite) {
+    // 写盘前先备份原文件（幂等：已备份则保留最早原版），供 --uninstrument 一键还原
+    const backupRoot = opts.backupRoot ?? projectRoot;
+    backupOriginal(backupRoot, file, content);
     fs.writeFileSync(file, out, 'utf-8');
   }
   return result;
@@ -320,8 +405,9 @@ function collectSites(
   file: string,
   content: string,
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
+  fileRel: string,
 ): void {
-  const walk = (n: InstrNode): void => {
+  const walk = (n: InstrNode, parent?: InstrNode): void => {
     // ── 函数入口/出口（core）──
     if (FN_TYPES.has(n.type) && isBlockBody(n)) {
       const body = n.childForFieldName!('body')!;
@@ -336,7 +422,7 @@ function collectSites(
       if (content[entryIdx] === '{') entryIdx++;
       while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
       const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
-      const enterProbe = `captureProbe(${JSON.stringify(probeName + '.enter')}, { args: ${argsObj}, level: 'core' });\n`;
+      const enterProbe = `captureProbe(${JSON.stringify(probeName + '.enter')}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj}, level: 'core' });\n`;
       insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: enterProbe } });
 
       // 出口：若函数体无 return，则在末尾补末尾出口探针（有 return 的由 return 分支负责）
@@ -345,14 +431,14 @@ function collectSites(
       if (returns.length === 0) {
         // 在函数体最后一个 `}` 之前插入出口探针（保持函数体语法完整）
         const tailIdx = body.endIndex - 1; // 指向 '}'
-        const exitProbe = `;captureProbe(${JSON.stringify(probeName + '.exit')}, { ret: undefined, level: 'core' });`;
+        const exitProbe = `;captureProbe(${JSON.stringify(probeName + '.exit')}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
         insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: exitProbe } });
       }
     }
 
     // ── return 出口（core）──
     if (n.type === 'return_statement') {
-      handleReturn(n, root, file, content, insertions);
+      handleReturn(n, root, file, content, insertions, fileRel, parent);
     }
 
     // catch 块（event）：在 catch 体开头注入
@@ -366,7 +452,7 @@ function collectSites(
         while (idx < text.length && /\s/.test(text[idx])) idx++;
         const fn = detectEnclosingFunction(root, open);
         const probeName = `${path.basename(file).replace('.ts', '')}.${fn}.catch`;
-        const injected = `captureProbe(${JSON.stringify(probeName)}, { op: 'catch', err: (e as Error)?.message ?? '', level: 'event' });\n`;
+        const injected = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: 'catch', err: (e as Error)?.message ?? '', level: 'event' });\n`;
         insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'catch', level: 'event', injected } });
       }
     }
@@ -379,14 +465,14 @@ function collectSites(
         const idx = n.endIndex;
         const fnName = detectEnclosingFunction(root, n.startIndex);
         const probeName = `${path.basename(file).replace('.ts', '')}.${fnName}.${IO_CALLS[callee]}`;
-        const injected = `;captureProbe(${JSON.stringify(probeName)}, { op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
+        const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
         insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
       }
     }
 
     for (let i = 0; i < n.childCount; i++) {
       const c = n.child(i);
-      if (c) walk(c);
+      if (c) walk(c, n);
     }
   };
   walk(root);
@@ -399,21 +485,31 @@ function handleReturn(
   file: string,
   content: string,
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
+  fileRel: string,
+  parent?: InstrNode,
 ): void {
   const fn = detectEnclosingFunction(root, n.startIndex);
   const mod = path.basename(file).replace('.ts', '');
   const probeName = `${mod}.${fn}.exit`;
   const expr = returnExpr(n);
 
+  // 无大括号控制语句的单语句 return（如 `if (x) return null;`）：
+  // 若做值捕获替换会破坏语法（`if (x) const T=null;` 非法），降级为仅返回标记。
+  if (isBracelessGuardReturn(parent)) {
+    const marker = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
+    insertions.push({ index: n.startIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
+    return;
+  }
+
   if (expr && isSimpleExpr(expr)) {
     const lineSuffix = n.startPosition.row + 1;
     const tempVar = `__cam_ret${lineSuffix}`;
     // 替换整个 return 语句：`return <expr>;` → `const T=<expr>; probe; return T;`
-    const replacement = `const ${tempVar} = ${expr.text};captureProbe(${JSON.stringify(probeName)}, { ret: ${tempVar}, level: 'core' });return ${tempVar};`;
+    const replacement = `const ${tempVar} = ${expr.text};captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: ${tempVar}, level: 'core' });return ${tempVar};`;
     insertions.push({ index: n.startIndex, removeTo: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: replacement } });
   } else {
     // 复杂表达式或裸 return：仅记录返回路径（不捕获值，避免双求值/冲突）
-    const marker = `captureProbe(${JSON.stringify(probeName)}, { ret: undefined, level: 'core' });`;
+    const marker = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
     insertions.push({ index: n.startIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
   }
 }
@@ -421,9 +517,11 @@ function handleReturn(
 /** 对项目下所有 .ts 文件插桩。返回每个文件的插桩结果。 */
 export async function instrumentProject(root: string, opts: InstrumentOptions = {}): Promise<InstrumentFileResult[]> {
   const files = collectTsFiles(root);
+  // 备份根固定为被插桩项目根 root（与 projectRoot 无关：projectRoot 用于 probe import）
+  const perFileOpts: InstrumentOptions = { ...opts, backupRoot: root };
   const results: InstrumentFileResult[] = [];
   for (const f of files) {
-    results.push(await instrumentFile(f, opts));
+    results.push(await instrumentFile(f, perFileOpts));
   }
   return results;
 }

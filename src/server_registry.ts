@@ -36,6 +36,13 @@ import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
 import { getDSLByView, getLiveDir } from './storage.js';
+import { queryCameraLog } from './camera/log_query.js';
+import { normalizeEvents, judgeEvents, renderJudgeReport } from './camera/judge_service.js';
+import {
+  instrumentProject,
+  collectTsFiles,
+  restoreInstrumented,
+} from './camera/instrument.js';
 import path from 'node:path';
 
 // ─────────────────────────────────────────────────────────────
@@ -191,6 +198,94 @@ const diffViewsHandler = wrap(async (a) => {
     live_dir: a.live_dir as string | undefined,
   });
   return { message: r.message, data: r.data };
+});
+
+// ─────────────────────────────────────────────────────────────
+// Camera 观测工具 handler（设计→开发→测试闭环的「测试」端）
+// 与 design 主工具并列同一套 MCP。底层复用 camera/* 纯函数，不重写逻辑。
+// ─────────────────────────────────────────────────────────────
+
+/** camera_log：按文件/全量查询 Camera 运行日志（复用 queryCameraLog） */
+const cameraLogHandler = wrap(async (a) => {
+  const eventsFile = a.events_file as string | undefined;
+  if (!eventsFile) {
+    throw new Error('camera_log 需要 events_file 参数：传 Camera 事件文件路径（events.jsonl）。');
+  }
+  const files = Array.isArray(a.files) ? (a.files as string[]).filter(Boolean) : [];
+  const all = a.all === true || a.all === 'true' || a.all === '1';
+  const r = queryCameraLog(eventsFile, { files, all });
+  const lines = [
+    `Camera 日志 [${r.eventsPath}]`,
+    `  事件 ${r.total} · 偏差 ${r.anomalyCount} · 跳过 ${r.skipped} · 返回 ${r.entries.length} 条`,
+    ...(r.entries.length === 0 ? ['  （无匹配事件）'] : []),
+  ];
+  for (const e of r.entries) {
+    const mark = e.result === 'deviation' ? '✗' : '✓';
+    lines.push(`  ${mark} [${e.result}] ${e.probe}${e.file ? ` (${e.file})` : ''} rule=${e.rule}`);
+    lines.push(`      ${e.reason}`);
+  }
+  // 附完整结构化数据供 LLM 继续分析
+  lines.push('---DATA---');
+  lines.push(JSON.stringify(r.entries));
+  return { message: lines.join('\n'), data: r.entries };
+});
+
+/** camera_judge：对一批事件执行偏差判定（复用 normalizeEvents + judgeEvents） */
+const cameraJudgeHandler = wrap(async (a) => {
+  const events = a.events;
+  if (!Array.isArray(events) || events.length === 0) {
+    throw new Error('camera_judge 需要 events 参数：传要判定的事件数组（符合 TSEvent 形状）。');
+  }
+  const { events: norm, error } = normalizeEvents(events);
+  if (error) throw new Error(error);
+  const report = judgeEvents(norm);
+  const text = a.text === true || a.text === '1' ? renderJudgeReport(report) : JSON.stringify(report);
+  return { message: text, data: report };
+});
+
+/** camera_instrument：对目标项目全自动插桩 / 还原（复用 instrumentProject/restoreInstrumented） */
+const cameraInstrumentHandler = wrap(async (a) => {
+  const target = a.target as string | undefined;
+  if (!target) {
+    throw new Error('camera_instrument 需要 target 参数：传要插桩的项目目录。');
+  }
+  const unintrument = a.action === 'uninstrument' || a.action === 'restore';
+  const dryRun = a.dry_run === true || a.dry_run === 'true' || a.dry_run === '1';
+  const projectRoot = a.project_root as string | undefined;
+
+  if (unintrument) {
+    const restored = restoreInstrumented(target);
+    if (restored.length === 0) {
+      return { message: 'Camera 还原：未找到备份，无需还原（可能从未插桩，或备份已删）。', data: [] };
+    }
+    return {
+      message: `Camera 还原：已还原 ${restored.length} 个文件并删除备份目录。\n${restored.map((f) => `  ↺ ${f}`).join('\n')}`,
+      data: restored,
+    };
+  }
+
+  const files = collectTsFiles(target);
+  const results = await instrumentProject(target, { projectRoot, write: !dryRun });
+  let totalSites = 0;
+  let instrumented = 0;
+  let skipped = 0;
+  let errors = 0;
+  const lines = [`Camera 插桩 [${dryRun ? 'DRY-RUN' : 'WRITE'}] → ${target}`, `  扫描 ${files.length} 个 .ts 文件`];
+  for (const r of results) {
+    if (r.error) {
+      errors++;
+      lines.push(`  ✗ ${r.file}  ${r.error}`);
+    } else if (r.sites.length > 0) {
+      instrumented++;
+      totalSites += r.sites.length;
+      lines.push(`  + ${r.file}  ${dryRun ? '将注入' : '注入'} ${r.sites.length} 探针点`);
+    } else {
+      skipped++;
+    }
+  }
+  lines.push(`  完成：${instrumented} 新插桩 / ${skipped} 已含探针跳过 / ${errors} 失败，共 ${totalSites} 探针点`);
+  if (dryRun) lines.push('  DRY-RUN 未写盘。传 dry_run=false 实际改写源码（git 可兜底，幂等）。');
+  return { message: lines.join('\n'), data: results };
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -379,6 +474,61 @@ const TOOL_DEFS: ToolDef[] = [
       live_dir: z.string().optional().describe('live 视图的 baseDir（可选，默认 dataHome），与 import_project 的 live_dir 一致'),
     },
     handler: diffViewsHandler,
+  },
+  {
+    name: 'camera_log',
+    title: 'Query Camera runtime logs by file',
+    description:
+      '查询 Camera 运行时日志（events.jsonl）。可传 files 按文件路径过滤（精确/后缀/包含匹配），' +
+      '只返回命中路径的事件；不传 files 时默认只返回偏差，all=true 才全量。' +
+      '适用于：LLM 按需拉取某文件/某条链路的数据流与异常，而非全量丢出。',
+    inputSchema: {
+      events_file: z
+        .string()
+        .describe('Camera 事件文件路径（events.jsonl）。由插桩/哨兵运行时产生，如 <dataHome>/.design-canvas/camera/events.jsonl'),
+      files: z
+        .array(z.string())
+        .optional()
+        .describe('按文件路径过滤（可多个）。传相对路径/文件名片段均可，精确或后缀/包含匹配'),
+      all: z
+        .boolean()
+        .optional()
+        .describe('不传 files 时：true=列出全部事件；false=只列偏差（默认）'),
+    },
+    handler: cameraLogHandler,
+  },
+  {
+    name: 'camera_judge',
+    title: 'Judge a batch of Camera events',
+    description:
+      '对一批 Camera 事件执行偏差判定（语言无关）。传 events 数组（符合 TSEvent 形状：probe/fields[err/op/benign]）。' +
+      '返回逐条判定 + 汇总（total/ok/deviation）。text=true 返回人类可读报告，否则返回 JSON。' +
+      '适用于：探针语言任意，统一收敛到这一处判定，不随语言复刻规则。',
+    inputSchema: {
+      events: z
+        .array(z.record(z.string(), z.unknown()))
+        .describe('要判定的事件数组（TSEvent 形状：probe 必填，fields 含 err/op/benign）'),
+      text: z.boolean().optional().describe('true=返回人类可读报告；false=返回 JSON（默认 JSON）'),
+    },
+    handler: cameraJudgeHandler,
+  },
+  {
+    name: 'camera_instrument',
+    title: 'Auto-instrument or restore a TS project',
+    description:
+      '对目标项目全自动 AST 插桩（函数出入口/return/catch/IO 写盘），幂等（已含探针文件跳过）。' +
+      'action=uninstrument|restore 一键还原（从自动备份拷回原文件并删备份目录）。' +
+      'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。',
+    inputSchema: {
+      action: z
+        .enum(['instrument', 'uninstrument', 'restore'])
+        .optional()
+        .describe('instrument=插桩（默认）；uninstrument/restore=还原'),
+      target: z.string().describe('要插桩/还原的目标项目目录'),
+      dry_run: z.boolean().optional().describe('true=只预览探针点不写盘（默认 false）'),
+      project_root: z.string().optional().describe('design-canvas 根（探针实现 src/camera/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
+    },
+    handler: cameraInstrumentHandler,
   },
 ];
 
