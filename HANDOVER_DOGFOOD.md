@@ -3,7 +3,7 @@
 > 交接日期：2026-08-14
 > 交接对象：新开 TRAE 窗口的 AI Agent / 开发者
 > 交接背景：原会话绑死在 `d:\project_develop\ai-base` 工作区，无法加载 design-canvas 的**项目级 MCP**，故用本文档做上下文交接。
-> 使用方式：新窗口请以 `d:\project_develop\design-canvas`（稳定版）或 `d:\project_develop\design-canvas-dev`（开发版）**作为工作区打开**，先读本文件根目录的 `HANDOVER_DOGFOOD.md`（即本文档），按 §9 验证清单跑通环境，再按 §10 跑通工具闭环。**核心开发任务是 §12 Camera 系统（插桩 + DSL 真相源 + 代码异味嗅探）**；产品化方向见 §13。
+> 使用方式：新窗口请以 `d:\project_develop\design-canvas`（**开发版/dev**）作为工作区打开做开发；`d:\project_develop\design-canvas-dev` 是 master 稳定版只读查看。先读本文件根目录的 `HANDOVER_DOGFOOD.md`（即本文档），按 §9 验证清单跑通环境，再按 §10 跑通工具闭环。**核心开发任务是 §12 Camera 系统（插桩 + DSL 真相源 + 代码异味嗅探）**；产品化方向见 §13。
 
 ---
 
@@ -28,14 +28,16 @@ design-canvas 是一个 **MCP server**：让 LLM 把"脑子里的图"输出为**
 
 | 角色 | 分支 | 目录 | 用途 |
 |---|---|---|---|
-| 稳定运行版 | `master` | `d:\project_develop\design-canvas` | 对外可用版本，随时可跑、可对外发布 |
-| 开发版 | `dev` | `d:\project_develop\design-canvas-dev` | 在 dev 上开发，验证通过后合并回 master |
+| 开发版 | `dev` | `d:\project_develop\design-canvas` | **开发都在这里做**（可直接编辑/提交/验证），开发→提交→验证全在 dev |
+| 稳定运行版 | `master` | `d:\project_develop\design-canvas-dev` | 对外可用版本，只放已验收、可运行的代码，禁止在此做未提交的开发 |
+
+> **2026-08-14 已对调**：因文件操作白名单只含 `design-canvas`，故把可编辑的工作树定为 dev 开发版、`design-canvas-dev` 定为 master 稳定版。分支映射以本表为准（旧版本文档写反了）。
 
 常用命令：
 ```bash
 git worktree list                                            # 查看当前 worktree
-# 在 dev 目录内：git add/commit → 然后回 master 目录执行合并
-git -C d:\project_develop\design-canvas merge dev            # dev 合回 master
+# 在 dev 目录（design-canvas）内：git add/commit → 然后回 master 目录执行合并
+git -C d:\project_develop\design-canvas-dev merge dev        # dev 合回 master（注意：master 在 design-canvas-dev）
 ```
 **注意**：两个目录各自独立 `npm install` / `npm run build`（`dist/` 被 gitignore 不入库，换目录 / 新 clone 后必须重建才能起 MCP）。
 
