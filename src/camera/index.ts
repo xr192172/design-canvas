@@ -13,6 +13,7 @@
  */
 
 export { TSProbeCapture, loadTSEvents } from './probe.js';
+export { setGlobalProbeSink, captureProbe } from './probe.js';
 export type { TSEvent, ExtraFields } from './probe.js';
 export { TSComparator, silentErrorDiscardTS, renderTSDiffReport } from './contract.js';
 export type {
@@ -24,3 +25,4 @@ export type {
   TSProbeObs,
   RulePredicate,
 } from './contract.js';
+export { enableCameraFromEnv } from './run_sentinel.js';

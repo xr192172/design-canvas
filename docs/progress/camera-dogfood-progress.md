@@ -71,7 +71,16 @@
 - **跨语言 E2E 验证**：TS 探针埋点产出 4 事件 → Go `camera-dsl loop` 判定：2 违反（save.writefile ENOENT、cleanup.remove permission denied）+ 2 良性正确放行。TS 哨兵与 Go 装配层判定语义一致。
 - TS 全量 609 测试 + Go 全量测试通过。
 
+## ✅ Camera 狗食插桩（给自己插桩，已完成并验证）
+- **原则落地**：狗食的最好方式是监控自己——Camera 探针埋进 design-canvas 自身真实运行路径（saveDSL 写盘），运行中自动采集数据流事件，实现"运行中自动发现某环节数据流/逻辑错误"，面向自动化测试，无需可视化。
+- **零侵入插桩**：新增全局探针接口（对齐 Go `SetGlobalSink` 语义）——`setGlobalProbeSink`/`captureProbe`，默认 no-op，未配置 sink 时探针不改变宿主行为、不创建文件、不反向抛错。任意宿主路径可无条件调用。
+- **埋点落点**：`storage.ts#saveDSL` 两处 `writeFileSync`（feature 文件 + live 文件）插桩，写盘成功采集 `save.writefile`（err=null），失败捕获 err 消息后仍向上抛。
+- **运行哨兵**：`src/camera/run_sentinel.ts` 提供 `enableCameraFromEnv()`，从 env（`CAMERA_EVENTS_FILE`）一键启用全局 sink，未设置时 no-op。
+- **新增文件**：`src/camera/probe.ts`（+全局接口）、`src/camera/run_sentinel.ts`、`tests/camera/dogfood.test.ts`（4 用例：默认 no-op、配置后采集 2 事件、无 sink no-op、写盘失败捕获）、`scripts/camera_run_dogfood.mjs`（演示）。
+- **端到端狗食验证**：`CAMERA_EVENTS_FILE` 启用哨兵 → 真实运行 saveDSL 写盘 → 采集 2 条 `save.writefile` 事件 → Go `camera-dsl loop` 判定「2 事件，0 违反，0 未声明，完全一致」。证明自项目运行数据流被 Camera 全程观测且判定正确。
+- TS 全量 613 测试 + Go 全量测试通过。
+
 ## 下一步（待办）
-- 判定端口下沉为独立服务（`/api/camera/judge`），探针语言与判定彻底解耦。
-- 事件聚合体积告警/抽样策略（海量事件降级为统计）。
-- 与 design-canvas MCP 工具链整合（import_project 自动埋点 + render_dsl 可视化偏差全景）。
+- 把插桩扩到更多真实数据流（serve /api/save、import_project 扫描写盘、db 项目级缓存），并铺开为可配置的自动测试哨兵。
+- 设计 DSL 契约补全后，让 loop 对真实运行 event 产出违反/未声明偏差，接进 CI（有偏差即失败）。
+- 判定端口下沉独立服务（/api/camera/judge），探针语言与判定彻底解耦。

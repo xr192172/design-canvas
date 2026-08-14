@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DesignDSL } from './dsl/types.js';
+import { captureProbe } from './camera/probe.js';
 
 /**
  * 数据主目录：所有持久化路径的根
@@ -110,7 +111,13 @@ export function onDslChange(cb: DslChangeCallback): void {
 export function saveDSL(dsl: DesignDSL, source: string = 'mcp'): string {
   ensureFeaturesDir();
   const file = getFeatureFile(dsl.feature);
-  fs.writeFileSync(file, JSON.stringify(dsl, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(file, JSON.stringify(dsl, null, 2), 'utf-8');
+    captureProbe('save.writefile', { op: 'writefile', file, err: null });
+  } catch (e) {
+    captureProbe('save.writefile', { op: 'writefile', file, err: (e as Error).message });
+    throw e;
+  }
 
   // 同步到活态文件（带时间戳，方便 diff）
   const liveFile = getLiveDslFile();
@@ -122,7 +129,13 @@ export function saveDSL(dsl: DesignDSL, source: string = 'mcp'): string {
       feature: dsl.feature,
     },
   };
-  fs.writeFileSync(liveFile, JSON.stringify(liveData, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(liveFile, JSON.stringify(liveData, null, 2), 'utf-8');
+    captureProbe('save.writefile', { op: 'writefile', file: liveFile, err: null });
+  } catch (e) {
+    captureProbe('save.writefile', { op: 'writefile', file: liveFile, err: (e as Error).message });
+    throw e;
+  }
 
   // 触发 SSE 通知（用传入的 source，避免浏览器保存被误判为 mcp 触发 reload）
   if (dslChangeCallback) {

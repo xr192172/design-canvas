@@ -12,6 +12,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+// ─────────────────────────────────────────────────────────────
+// 全局零侵入探针接口（对齐 Go 侧 SetGlobalSink / Capture 语义）
+// 默认关闭：未配置 sink 时 captureProbe 是 no-op，插桩不改变宿主行为。
+// 狗食插桩路径：<dataHome>/.design-canvas/camera/events.jsonl
+// ─────────────────────────────────────────────────────────────
+
+let globalSink: TSProbeCapture | null = null;
+
+/**
+ * 配置全局探针 sink（null 关闭）。返回前一个 sink，便于测试隔离/恢复。
+ * 与 Go 侧 SetGlobalSink 语义一致：probe 只依赖这个开关，未配置则 no-op。
+ */
+export function setGlobalProbeSink(s: TSProbeCapture | null): TSProbeCapture | null {
+  const prev = globalSink;
+  globalSink = s;
+  return prev;
+}
+
+/**
+ * 零侵入捕获：向全局 sink 追加一条事件（若已配置）。未配置时静默 no-op，
+ * 因此可在任意宿主代码路径无条件调用，不引入 try/catch 污染。
+ */
+export function captureProbe(probe: string, fields: Record<string, unknown>, source = 'static-rule'): void {
+  if (!globalSink) return;
+  try {
+    globalSink.emit(probe, fields, source);
+  } catch {
+    /* 探针绝不允许反过来让业务路径抛错 */
+  }
+}
+
 /** TS 侧 Event，与 schema definitions.Event 逐字段对齐。 */
 export interface TSEvent {
   probe: string;
