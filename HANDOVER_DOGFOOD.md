@@ -3,7 +3,7 @@
 > 交接日期：2026-08-14
 > 交接对象：新开 TRAE 窗口的 AI Agent / 开发者
 > 交接背景：原会话绑死在 `d:\project_develop\ai-base` 工作区，无法加载 design-canvas 的**项目级 MCP**，故用本文档做上下文交接。
-> 使用方式：新窗口请以 `d:\project_develop\design-canvas`（**开发版/dev**）作为工作区打开做开发；`d:\project_develop\design-canvas-dev` 是 master 稳定版只读查看。先读本文件根目录的 `HANDOVER_DOGFOOD.md`（即本文档），按 §9 验证清单跑通环境，再按 §10 跑通工具闭环。**核心开发任务是 §12 Camera 系统（插桩 + DSL 真相源 + 代码异味嗅探）**；产品化方向见 §13。
+> 使用方式：新窗口请以 `d:\project_develop\design-canvas` **作为工作区打开**，先读本文件根目录的 `HANDOVER_DOGFOOD.md`（即本文档），按 §9 验证清单跑通环境，再按 §10 跑通工具闭环。**核心开发任务是 §12 Camera 系统（插桩 + DSL 真相源 + 代码异味嗅探）**；产品化方向见 §13。
 
 ---
 
@@ -20,26 +20,25 @@ design-canvas 是一个 **MCP server**：让 LLM 把"脑子里的图"输出为**
 
 ---
 
-## 2. 开发模式：狗食开发 + git worktree 双工作树
+## 2. 开发模式：狗食开发 + 单工作树（dev 主分支）
 
 **狗食开发（dogfooding）** = 用 Design Canvas 自己的 MCP 工具，来做 Design Canvas 的真实开发任务（建 feature、写 DSL、渲染、一致性检查等），以验证工具本身好不好用、并驱动工具迭代。**你接下来的所有开发，都要尽可能先想"这个任务能不能用 design-canvas 自己的工具完成"，能走工具就走工具**，而不是直接改代码跳过验证。
 
-版本隔离采用 **git worktree 双工作树**（同一仓库，两个检出目录）：
+**单工作树管理**（2026-08-14 定案）：早期用 git worktree 双工作树隔离 dev/master，但因第二个目录 `d:\project_develop\design-canvas-dev` 不在文件操作白名单、无法编辑，双工作树反而阻塞开发。已移除 worktree，**全部工作都在当前目录 `d:\project_develop\design-canvas` 完成**：
 
 | 角色 | 分支 | 目录 | 用途 |
 |---|---|---|---|
-| 开发版 | `dev` | `d:\project_develop\design-canvas` | **开发都在这里做**（可直接编辑/提交/验证），开发→提交→验证全在 dev |
-| 稳定运行版 | `master` | `d:\project_develop\design-canvas-dev` | 对外可用版本，只放已验收、可运行的代码，禁止在此做未提交的开发 |
-
-> **2026-08-14 已对调**：因文件操作白名单只含 `design-canvas`，故把可编辑的工作树定为 dev 开发版、`design-canvas-dev` 定为 master 稳定版。分支映射以本表为准（旧版本文档写反了）。
+| 开发主分支 | `dev` | `d:\project_develop\design-canvas` | **所有开发、提交、验证都在这里** |
+| 稳定分支（保留） | `master` | 不检出（仅 git 内保留） | 需发布时手动 `git merge dev` 到 master 分支（不新建 worktree） |
 
 常用命令：
 ```bash
-git worktree list                                            # 查看当前 worktree
-# 在 dev 目录（design-canvas）内：git add/commit → 然后回 master 目录执行合并
-git -C d:\project_develop\design-canvas-dev merge dev        # dev 合回 master（注意：master 在 design-canvas-dev）
+git worktree list                          # 应只剩 design-canvas 一个 worktree
+git branch -vv                             # dev 为当前分支
+# 需发布时（可选，在 dev 目录内执行）：
+git checkout master && git merge dev && git checkout dev
 ```
-**注意**：两个目录各自独立 `npm install` / `npm run build`（`dist/` 被 gitignore 不入库，换目录 / 新 clone 后必须重建才能起 MCP）。
+**注意**：`dist/` 被 gitignore 不入库，换目录 / 新 clone 后必须 `npm install` + `npm run build` 重建才能起 MCP。
 
 ---
 
@@ -251,6 +250,11 @@ TRAE 侧：
 
 对"被测代码"做**动态插桩**（不止覆盖率秒表，还有数据流摄像头），把运行中观察到的真实行为与「设计意图 DSL 契约」比对，识别**代码异味 / 行为偏差**。LLM 只依据「事件快照 + DSL 契约声明」判定——**DSL 是唯一真相源**，不是项目文档。
 
+**核心机制（别漏，这是本项目的关键需求）**：
+- **采集层 = 全量插桩**：对被测代码做**全函数、全数据**插桩——不挑点、不预筛，所有函数的入参 / 返回值 / err 与所有数据流变化都捕获成事件。采集是"高噪声、全覆盖"的。
+- **筛选层 = 设计 DSL**：海量事件本身没意义，**设计 DSL 才是筛选器**——DSL 契约声明"哪些行为是设计意图、哪些是良性"，Comparator / 规则 / LLM 据此从全量事件里**筛出与契约冲突的偏差**（unobserved / violated / undesigned），把高噪声压缩成低噪声信号。
+- 反向关系：**全量插桩保证"不漏"，DSL 筛选保证"不噪"**，两者缺一不可。DSL 不是"埋点清单"，而是"筛选器"——埋点只管全量收，筛选只由 DSL 定。
+
 三层观察（自上而下）：
 - **秒表（stopwatch）**：覆盖率级——哪段代码被执行过
 - **摄像头（camera）**：数据流级——运行中真实传入 / 返回 / error 值
@@ -277,6 +281,8 @@ TRAE 侧：
 - **P4 循环打通 + 触发**：观测→聚合→对比→提案→验证→定稿 的演化闭环跑通；接入真实触发点（如 NREM 梦游判定路径 / agent 运行事件流），让摄像头在真实运行中自动嗅探。
 
 完成标准：`{projectRoot}/.agent/camera/` 下 `dsl.json` + `dsl.history.jsonl` + `actual.dsl.json` + `revisions/` 四件套闭环可运行，偏差报告经 LLM 复核与 DSL 契约语义一致。
+
+**机制差距（重要，别按错方向继续）**：当前探针（`probe.go` / `global.go`）是**关键点手动 `emit`**——只在代码里显式调 `Capture` 的点才埋点，属于"选点埋点"的基础层。而 §12.1 的核心机制是**全量自动插桩 + DSL 筛选**。后续应演进为自动全量埋点（如按 AST 自动注入 / build tag 包裹，对所有函数与数据流自动捕获），让采集层真正"全量"，再由 DSL 筛选压缩。**在实现自动全量插桩前，手动 emit 只是过渡手段，不是最终形态**。
 
 ### 12.4 关键约束（硬约束，别破坏）
 
