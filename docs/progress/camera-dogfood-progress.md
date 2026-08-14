@@ -22,10 +22,11 @@
 - 相对路径 `output/xxx.html` 会落到 `C:\Users\Admin\output`（server cwd），非项目目录。
 - 规避：必须传绝对路径 `d:/project_develop/design-canvas/output/xxx.html`。
 
-### 3. 设计↔实际对比的路径基底不一致（待决策）
-- 设计 DSL 文件路径用仓库相对 `go-camera/internal/probe/probe.go`；
-- 实際导入用 `project_dir=go-camera`，路径为 `internal/probe/probe.go`，少了 `go-camera/` 前缀。
-- 后果：design⇄live 按路径对齐失效。需统一路径基底（设计 DSL 用与 live 导入相同的相对根）。
+### 3. 设计↔实际对比的路径基底不一致（已修复）
+- 设计 DSL 文件路径原用仓库相对 `go-camera/internal/probe/probe.go`；
+- live 导入用 `project_dir=go-camera`，路径为 `internal/probe/probe.go`，少了 `go-camera/` 前缀。
+- 后果：design⇄live 按路径对齐失效。
+- **修复（方案一：设计对齐 live）**：camera 设计 DSL（`.design-canvas/features/camera.json` + 活态 `design-canvas.json`）的 9 个 `file.path` 去掉 `go-camera/` 前缀，统一为项目相对根（与 live 导入一致）。验证：临时根导入 go-camera 后，设计 9/9 路径精确命中 live DSL。未来"每个项目解析记录"时路径即项目相对标识，项目名元数据按需再加。
 
 ### 4. live_only 导入新 feature 不进设计注册表（真实 bug，已修复）
 - `import_project(live_only=true, feature=新名)` 只在 live 存储，`get_dsl query=diff` 与 features 列表都找不到它。
@@ -38,5 +39,4 @@
 - **修复（bug #5）**：`manageFeature` 对 `args` 兜底为空对象 `args = input.args ?? {}`，缺参时改抛清晰错误。回归测试：`tests/tools/manage_feature.test.ts`。
 
 ## 下一步（待办）
-- 决策：统一设计 DSL 与 live 导入的路径基底，让 design⇄live diff 可对齐。
 - 推进 P3 修订+验证门 / P4 循环+触发，及 TS 跨语言契约试点。
