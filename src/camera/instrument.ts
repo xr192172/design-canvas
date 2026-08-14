@@ -142,9 +142,10 @@ function buildImportStmt(probeImport: string): string {
   return `import { captureProbe } from '${probeImport}';\n`;
 }
 
-/** 计算 import 相对路径：从 file 目录到 src/camera/probe.js */
+/** 计算 import 相对路径：从 file 目录到编译后的探针实现 dist/src/camera/probe.js
+ * （被插桩代码运行时解析的是编译产物，而非 TS 源） */
 function relativeProbeImport(file: string, projectRoot: string): string {
-  const cameraProbe = path.join(projectRoot, 'src', 'camera', 'probe.js');
+  const cameraProbe = path.join(projectRoot, 'dist', 'src', 'camera', 'probe.js');
   let rel = path.relative(path.dirname(file), cameraProbe).replaceAll('\\', '/');
   if (!rel.startsWith('.')) rel = './' + rel;
   return rel;

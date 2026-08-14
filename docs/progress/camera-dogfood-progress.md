@@ -84,3 +84,15 @@
 - 把插桩扩到更多真实数据流（serve /api/save、import_project 扫描写盘、db 项目级缓存），并铺开为可配置的自动测试哨兵。
 - 设计 DSL 契约补全后，让 loop 对真实运行 event 产出违反/未声明偏差，接进 CI（有偏差即失败）。
 - 判定端口下沉独立服务（/api/camera/judge），探针语言与判定彻底解耦。
+
+## ✅ 全自动插桩端到端闭环（已完成并验证）
+- **目标**：把「全量无脑插桩」落到实处——用 AST 插桩器（instrument.ts）对真实代码全自动插桩 → 运行哨兵采集 → 喂给 Go 装配层判定，跑通真实闭环，验证插桩不破坏原功能、事件可被正确判定。
+- **修复 bug（关键）— 探针 sink 跨模块实例隔离**：全自动插桩会把 `captureProbe` 注入项目任意文件，同一 `probe.js` 被不同相对路径 specifier 加载时，Node ESM 会创建**多个模块实例**（`./dist/...` 与 `../../dist/...` 是两个实例，各自持有独立模块级 `globalSink`）。后果：`enableCameraFromEnv()` 设置的 sink 无法被被插桩代码看到 → 运行 0 事件。
+  - **修复**：`src/camera/probe.ts` 的 sink 状态从模块级变量改为挂在 `globalThis`（键 `__camera_global_sink__`），所有模块实例共享同一份状态。回归测试：`tests/camera/dogfood.test.ts`「跨模块实例共享 sink」。
+- **修复（demo）**：`scripts/camera_instrument_demo.mjs` 显式传 `projectRoot`（design-canvas 根），使 `relativeProbeImport` 正确计算相对路径。
+- **修复（插桩 import 指向）**：`src/camera/instrument.ts` 的 `relativeProbeImport` 从指向 `src/camera/probe.js`（TS 源）改为指向 `dist/src/camera/probe.js`（编译产物）——被插桩代码运行时解析的是产物。
+- **E2E 验证（status_demo，临时事件文件）**：
+  - 全自动插桩 4 个文件注入 14 探针点（enter/exit/core + catch/io/event 分级标签齐全）。
+  - 运行真实 save 路径 → 采集 **6 条事件**（constructor.enter/exit、save.enter、mkdirall、writefile、save.exit，core/event 分级正确）。
+  - Go `camera-dsl loop` 判定：**6 事件，0 未观测 · 0 违反 · 0 未声明，完全一致**。
+- TS camera 测试 20 个（含新增回归）+ Go 全量测试通过。

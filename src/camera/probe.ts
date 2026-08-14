@@ -16,17 +16,32 @@ import path from 'node:path';
 // 全局零侵入探针接口（对齐 Go 侧 SetGlobalSink / Capture 语义）
 // 默认关闭：未配置 sink 时 captureProbe 是 no-op，插桩不改变宿主行为。
 // 狗食插桩路径：<dataHome>/.design-canvas/camera/events.jsonl
+//
+// 重要：sink 状态挂在 globalThis 上，而非模块级变量。因为全自动插桩会把
+// captureProbe 注入到项目的任意文件，而同一 probe.js 被不同相对路径 specifier
+// 加载时，Node ESM 会创建多个模块实例（各自持有独立模块级变量）。若 sink 存
+// 模块级，被插桩代码与哨兵就会各持一份 sink，导致 enableCameraFromEnv 设置的
+// sink 无法被被插桩代码看到。挂在 globalThis 上则所有实例共享同一份状态。
 // ─────────────────────────────────────────────────────────────
 
-let globalSink: TSProbeCapture | null = null;
+const GLOBAL_SINK_KEY = '__camera_global_sink__';
+
+// globalThis 是值而非命名空间，不能直接用作类型。用任意对象类型的索引签名访问。
+type SinkHolder = { [GLOBAL_SINK_KEY]?: TSProbeCapture | null };
+
+/** 读取全局共享的 sink（跨模块实例一致）。 */
+function getGlobalSink(): TSProbeCapture | null {
+  return (globalThis as unknown as SinkHolder)[GLOBAL_SINK_KEY] ?? null;
+}
 
 /**
  * 配置全局探针 sink（null 关闭）。返回前一个 sink，便于测试隔离/恢复。
  * 与 Go 侧 SetGlobalSink 语义一致：probe 只依赖这个开关，未配置则 no-op。
  */
 export function setGlobalProbeSink(s: TSProbeCapture | null): TSProbeCapture | null {
-  const prev = globalSink;
-  globalSink = s;
+  const holder = globalThis as unknown as SinkHolder;
+  const prev = holder[GLOBAL_SINK_KEY] ?? null;
+  holder[GLOBAL_SINK_KEY] = s;
   return prev;
 }
 
@@ -35,9 +50,10 @@ export function setGlobalProbeSink(s: TSProbeCapture | null): TSProbeCapture | n
  * 因此可在任意宿主代码路径无条件调用，不引入 try/catch 污染。
  */
 export function captureProbe(probe: string, fields: Record<string, unknown>, source = 'static-rule'): void {
-  if (!globalSink) return;
+  const sink = getGlobalSink();
+  if (!sink) return;
   try {
-    globalSink.emit(probe, fields, source);
+    sink.emit(probe, fields, source);
   } catch {
     /* 探针绝不允许反过来让业务路径抛错 */
   }

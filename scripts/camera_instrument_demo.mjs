@@ -19,7 +19,10 @@ if (!target) {
 }
 
 console.log(`=== 1) 全自动插桩 ${target} ===`);
-const results = await instrumentProject(target);
+// projectRoot 指向 design-canvas 自身（探针实现 src/camera/probe.js 所在仓库根），
+// 使 relativeProbeImport 能正确算出从被插桩文件到 probe.js 的相对路径。
+const projectRoot = process.cwd();
+const results = await instrumentProject(target, { projectRoot });
 
 let totalSites = 0;
 for (const r of results) {

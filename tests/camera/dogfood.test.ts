@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { saveDSL } from '../../src/storage.js';
 import { getDataHome } from '../../src/storage.js';
 import {
@@ -78,5 +79,29 @@ describe('Camera 狗食插桩 · 写盘失败捕获', () => {
 
     const { events } = loadTSEvents(TSProbeCapture.pathFor(cameraDir));
     expect(events.filter((e) => e.probe === 'save.writefile')).toHaveLength(2);
+  });
+});
+
+describe('Camera 狗食插桩 · 跨模块实例共享 sink（回归）', () => {
+  it('不同 specifier 加载的 probe 实例共享同一份全局 sink', async () => {
+    // 通过两个不同 specifier 加载同一 probe.js 产生两个模块实例：
+    //   A = 相对文件路径（./dist/...），B = file:// 绝对 URL。
+    // 若 sink 是模块级变量，这两个实例各有一份，设置不会跨实例生效；
+    // 挂在 globalThis 上则应共享（全自动插桩的真实场景：被插桩代码与哨兵
+    // 从不同位置 import 同一 probe 实现）。
+    const modA = await import('../../dist/src/camera/probe.js');
+    const modB = await import(pathToFileURL(path.resolve('dist/src/camera/probe.js')).href);
+
+    const eventsPath = path.join(getDataHome(), 'camera-shared');
+    const sink = new TSProbeCapture(TSProbeCapture.pathFor(eventsPath));
+    // 用实例 A 设置 sink
+    modA.setGlobalProbeSink(sink);
+
+    // 用实例 B 的 captureProbe 采集（应命中 A 设置的全局 sink）
+    modB.captureProbe('shared.test', { via: 'modB' });
+    const { events } = loadTSEvents(TSProbeCapture.pathFor(eventsPath));
+    expect(events).toHaveLength(1);
+    expect(events[0].probe).toBe('shared.test');
+    expect(events[0].fields['via']).toBe('modB');
   });
 });
