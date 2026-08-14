@@ -37,11 +37,19 @@ type LLMSender interface {
 
 // DSLDecl 是 Camera DSL 的一条声明——行为级判定的唯一真相源。
 // LLM 判定输入 = 事件快照 + 匹配的 DSLDecl，不含任何项目文档背景。
+//
+// 审计字段（2026-08-15 工程化补全，对齐定稿方案）：
+//   - origin     来源：seed | manual | llm-proposal | runtime-observe
+//   - verified_by 验证门证据（approve 时由规则回归产出）
+//   - status     声明状态：proposed | verified | locked
 type DSLDecl struct {
-	Rule       string `json:"rule"`              // 规则 id，如 design:silent-error-discard
-	Probe      string `json:"probe"`             // 探针点 id；空 = 匹配所有探针点
-	Expect     string `json:"expect"`            // 期望行为（人类可读，喂给 LLM）
+	Rule       string `json:"rule"`                 // 规则 id，如 design:silent-error-discard
+	Probe      string `json:"probe"`                // 探针点 id；空 = 匹配所有探针点
+	Expect     string `json:"expect"`               // 期望行为（人类可读，喂给 LLM）
 	Constraint string `json:"constraint,omitempty"` // 精确约束（可选，进一步限定 Expect）
+	Origin     string `json:"origin,omitempty"`     // 声明来源（审计）
+	VerifiedBy string `json:"verified_by,omitempty"` // 验证门证据（审计）
+	Status     string `json:"status,omitempty"`     // proposed | verified | locked（审计）
 }
 
 // LLMVerdict 是 LLM 行为判定的结构化结果，与规则判定 Verdict 对齐。
@@ -96,10 +104,12 @@ func (j *LLMJudge) LoadDSL(store *DesignDSLStore) error {
 // 判确定性，DSL 声明喂语义）。
 func SilentErrorDiscardDSL() DSLDecl {
 	return DSLDecl{
-		Rule:  "design:silent-error-discard",
-		Probe: "",
+		Rule:   "design:silent-error-discard",
+		Probe:  "",
 		Expect: "在本来会静默丢弃错误的位置，捕获到的 err 必须为 nil 或可证明是良性的（benign）",
 		Constraint: "op=writefile/save/mkdirall 时任何错误都不可良性（父目录缺失的 ENOENT 也算非良性，因为数据未持久化）；op=remove/cleanup 仅 os.IsNotExist 良性",
+		Origin: "seed",
+		Status: "locked", // 种子声明：v1 内建，被视为定稿锁定
 	}
 }
 

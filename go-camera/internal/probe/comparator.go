@@ -65,7 +65,19 @@ func (c *Comparator) RegisterPredicate(rule string, pred func(Event) (string, st
 
 // RegisterDefaultPredicates 注册内置契约的谓词（当前：静默错误丢弃）。
 func (c *Comparator) RegisterDefaultPredicates() *Comparator {
-	return c.RegisterPredicate("design:silent-error-discard", SilentErrorDiscard)
+	for rule, pred := range defaultRulePredicates() {
+		c.RegisterPredicate(rule, pred)
+	}
+	return c
+}
+
+// defaultRulePredicates 返回内置契约的确定性违反谓词表（rule id → 谓词）。
+// 这是"规则可判定性"的唯一注册点：Comparator（P2 对比）与验证门
+// （P3 approve 规则回归）共用，保证"判定依据"与"验证依据"同源。
+func defaultRulePredicates() map[string]func(Event) (string, string) {
+	return map[string]func(Event) (string, string){
+		"design:silent-error-discard": SilentErrorDiscard,
+	}
 }
 
 // Compare 执行对比。design 为权威设计 DSL，actual 为观测画像。

@@ -87,6 +87,71 @@ func TestRunLoop_NoUndesignedNoProposals(t *testing.T) {
 	}
 }
 
+func TestRunLoop_LowDriftSkipsEvolution(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	// 全局声明覆盖所有探针 → 无 undesigned；无违反事件 → 偏差率 0
+	dsl.Save([]DSLDecl{{Rule: "design:global", Probe: "", Expect: "全局契约"}}, "构造", "test")
+
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	writeLines(t, eventsPath, `{"probe":"p1","time":"2026-08-14T00:00:00Z","source":"s","fields":{"x":1}}`)
+
+	res, err := RunLoop(eventsPath, dir)
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if res.Triggered {
+		t.Error("无偏差的观测不应触发演进")
+	}
+	if res.SkipReason == "" {
+		t.Error("未触发时应有 SkipReason 说明")
+	}
+	if len(res.Proposals) != 0 {
+		t.Fatalf("未触发时不应产提案，got %d", len(res.Proposals))
+	}
+}
+
+func TestRunLoop_MinUndesignedThresholdHonored(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	// 只声明 save.writefile，观测出现 net.http / cache.get 两个未声明探针
+	dsl.Save([]DSLDecl{{Rule: "design:save", Probe: "save.writefile", Expect: "写文件必须处理错误"}}, "构造", "test")
+
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	writeLines(t, eventsPath,
+		`{"probe":"net.http","time":"2026-08-14T00:00:00Z","source":"s","fields":{"status":200}}`,
+		`{"probe":"cache.get","time":"2026-08-14T00:00:00Z","source":"s","fields":{"hit":false}}`,
+	)
+
+	// MinUndesigned=3 > 实际 2 → 不触发
+	res, err := RunLoop(eventsPath, dir, LoopOptions{MinUndesigned: 3})
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if res.Triggered {
+		t.Error("未声明探针数低于 MinUndesigned 不应触发")
+	}
+	if len(res.Proposals) != 0 {
+		t.Fatalf("未触发时不应产提案，got %d", len(res.Proposals))
+	}
+
+	// MinUndesigned=2（等于实际）→ 触发
+	res2, err := RunLoop(eventsPath, dir, LoopOptions{MinUndesigned: 2})
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if !res2.Triggered {
+		t.Error("未声明探针数达到 MinUndesigned 应触发")
+	}
+	if len(res2.Proposals) != 2 {
+		t.Fatalf("触发后应产 2 提案，got %d", len(res2.Proposals))
+	}
+	// 提案声明带审计来源标记
+	if res2.Proposals[0].Decls[0].Origin != "runtime-observe" {
+		t.Errorf("loop 提案声明 origin 应为 runtime-observe，got %q", res2.Proposals[0].Decls[0].Origin)
+	}
+}
+
 func TestSanitizeRuleSuffix(t *testing.T) {
 	cases := map[string]string{
 		"net.http":     "net-http",

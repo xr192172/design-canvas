@@ -155,6 +155,7 @@ Comparator:
 - [x] PR 偏差1：TS 插桩器 deep 级数据流插桩（`--enable-deep`，变量赋值/分支捕获，幂等独立标记）
 - [x] PR 偏差2：Go `internal/instrument` 用 go/ast 做 Go 源码自动插桩 + `camera-dsl instrument` CLI + 6 项测试
 - [x] PR 偏差3：Go `JudgeClient` 走 HTTP 调 TS 判定服务（`/api/camera/judge`），未配置时降级本地判定（4 项测试）
+- [x] 工程化护栏：DSLDecl 审计字段（origin/verified_by/status）+ 验证门规则回归证据（与 Comparator 同源谓词表）+ loop 低频触发阈值（`--min-deviation-rate` / `--min-undesigned`）
 
 ---
 

@@ -15,16 +15,43 @@ import (
 	"strings"
 )
 
-// LoopResult 是一次闭环迭代的产物。
-type LoopResult struct {
-	Report    DiffReport `json:"report"`
-	Proposals []Proposal `json:"proposals"` // 本次为未声明探针生成的修订提案
+// LoopOptions 是闭环迭代的触发参数（低频演进护栏）：
+// 偏差不显著（低于阈值）时本轮不演进，避免每次观测都走提案/LLM。
+type LoopOptions struct {
+	// MinDeviationRate 违反事件偏差率阈值：violated 事件数/总事件数 达到该比例
+	// 才视为显著偏差（默认 0.1 = 10%）。
+	MinDeviationRate float64
+	// MinUndesigned 未声明探针数量阈值：观测到的新探针达到该数才生成补契约提案
+	// （默认 1）。
+	MinUndesigned int
 }
 
-// RunLoop 执行一次闭环迭代：读观测 → 聚合 → 对比 → 对未声明探针自动提案。
-// dataDir 为 camera 数据目录（含设计 DSL 与 proposals/）。写盘权分离：只写
-// proposals/，绝不触碰 dsl.json。
-func RunLoop(eventsPath, dataDir string) (LoopResult, error) {
+// withDefaults 填充未设置项的默认值。
+func (o LoopOptions) withDefaults() LoopOptions {
+	if o.MinDeviationRate <= 0 {
+		o.MinDeviationRate = 0.1
+	}
+	if o.MinUndesigned <= 0 {
+		o.MinUndesigned = 1
+	}
+	return o
+}
+
+// LoopResult 是一次闭环迭代的产物。
+type LoopResult struct {
+	Report     DiffReport `json:"report"`
+	Proposals  []Proposal `json:"proposals"`               // 本次为未声明探针生成的修订提案
+	Triggered  bool       `json:"triggered"`               // 是否触发了演进（低于阈值则 false）
+	SkipReason string     `json:"skip_reason,omitempty"`   // 未触发时的原因（低频护栏）
+}
+
+// RunLoop 执行一次闭环迭代：读观测 → 聚合 → 对比 → 按触发条件对未声明探针
+// 自动提案。dataDir 为 camera 数据目录（含设计 DSL 与 proposals/）。写盘权
+// 分离：只写 proposals/，绝不触碰 dsl.json。
+//
+// 触发条件（低频演进护栏）：偏差率（violated 事件占比）≥ MinDeviationRate
+// 或未声明探针数 ≥ MinUndesigned，才生成修订提案；否则跳过演进并在报告标注。
+func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error) {
 	var res LoopResult
 
 	// 1. 读取观测事件
@@ -48,8 +75,28 @@ func RunLoop(eventsPath, dataDir string) (LoopResult, error) {
 	}
 
 	// 4. 对比出三类偏差
-	// 5. 对未声明探针生成修订提案
 	res.Report = NewComparator().RegisterDefaultPredicates().Compare(design, actual)
+
+	// 5. 触发条件判定（低频演进护栏）
+	opt := LoopOptions{}
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	opt = opt.withDefaults()
+	rate := 0.0
+	if res.Report.EventCount > 0 {
+		rate = float64(res.Report.Violated) / float64(res.Report.EventCount)
+	}
+	if res.Report.Undesigned < opt.MinUndesigned && rate < opt.MinDeviationRate {
+		res.Triggered = false
+		res.SkipReason = fmt.Sprintf(
+			"偏差低于触发阈值（violated 事件占比 %.1f%% < %.0f%% · 未声明探针 %d < %d），本轮不演进",
+			rate*100, opt.MinDeviationRate*100, res.Report.Undesigned, opt.MinUndesigned)
+		return res, nil
+	}
+	res.Triggered = true
+
+	// 6. 对未声明探针生成修订提案
 	ps := NewProposalStore(dataDir)
 	obs := probeObsByProbe(actual)
 	for _, dev := range res.Report.Deviations {
@@ -60,6 +107,8 @@ func RunLoop(eventsPath, dataDir string) (LoopResult, error) {
 			Rule:   "design:observe-" + sanitizeRuleSuffix(dev.Probe),
 			Probe:  dev.Probe,
 			Expect: expectFromObs(obs[dev.Probe]),
+			Origin: "runtime-observe",
+			Status: "proposed",
 		}
 		p, err := ps.Create([]DSLDecl{decl}, fmt.Sprintf("loop: 补全未声明探针 %s", dev.Probe), "loop")
 		if err != nil {

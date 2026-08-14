@@ -3,6 +3,7 @@ package probe
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -136,6 +137,68 @@ func TestProposalStore_ValidateEmptyDecls(t *testing.T) {
 	}
 	if _, err := ps.Create([]DSLDecl{{Rule: "r", Expect: ""}}, "缺 expect", "manual"); err == nil {
 		t.Fatal("缺 expect 的声明应被拒绝")
+	}
+}
+
+func TestVerifyRuleRegression_Coverage(t *testing.T) {
+	reg := VerifyRuleRegression([]DSLDecl{
+		{Rule: "design:silent-error-discard", Expect: "有谓词"},
+		{Rule: "design:no-op-io", Expect: "无谓词"},
+		{Rule: "design:another-unknown", Expect: "无谓词"},
+	})
+	if reg.Checked != 3 {
+		t.Fatalf("Checked=%d 期望 3", reg.Checked)
+	}
+	if reg.Covered != 1 {
+		t.Fatalf("Covered=%d 期望 1", reg.Covered)
+	}
+	if len(reg.Uncovered) != 2 || reg.Uncovered[0] != "design:another-unknown" || reg.Uncovered[1] != "design:no-op-io" {
+		t.Fatalf("Uncovered=%v 期望按字典序 [design:another-unknown design:no-op-io]", reg.Uncovered)
+	}
+}
+
+func TestApprove_RecordsVerificationEvidence(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	if _, err := dsl.SeedDefault(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ps := NewProposalStore(dir)
+	// 混合声明：一条有谓词（可规则秒判）、一条无谓词（需 LLM 复核）
+	decls := []DSLDecl{
+		{Rule: "design:silent-error-discard", Probe: "svc.write", Expect: "写盘错误必须处理"},
+		{Rule: "design:no-op-io", Probe: "fs.copy", Expect: "复制必须处理错误"},
+	}
+	p, err := ps.Create(decls, "验证门证据测试", "llm-revise")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := ps.Approve(p.ID, "reviewer-gate", dsl); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// 提案落盘了验证门证据
+	got, _ := ps.Get(p.ID)
+	if got.VerifiedBy == "" || got.Verification == "" {
+		t.Fatalf("审批后提案应有验证门证据，got %+v", got)
+	}
+	if !strings.Contains(got.VerifiedBy, "1/2") {
+		t.Fatalf("VerifiedBy 应标注 1/2 声明可判定，got %q", got.VerifiedBy)
+	}
+
+	// 定稿的 dsl.json 里声明带验证证据与状态
+	doc, err := dsl.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(doc.Decls) != 2 {
+		t.Fatalf("定稿声明数=%d 期望 2", len(doc.Decls))
+	}
+	if doc.Decls[0].VerifiedBy != "rule-regression" || doc.Decls[0].Status != "verified" {
+		t.Fatalf("有谓词声明应 verified/rule-regression，got %+v", doc.Decls[0])
+	}
+	if doc.Decls[1].VerifiedBy != "needs-llm-review" || doc.Decls[1].Status != "proposed" {
+		t.Fatalf("无谓词声明应 needs-llm-review/proposed，got %+v", doc.Decls[1])
 	}
 }
 

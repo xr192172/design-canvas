@@ -278,13 +278,14 @@ TRAE 侧：
 
 要点：契约已从 lesion-rules **解耦**——契约来源 `static-rule` → `llm-design`，规则 id → `design:silent-error-discard`，探针包零 import lesion-rules；lesion-rules 降级为 seed 清单仓库，不再做判定中心。`TaskCamera` 已注册到 `provider/router.go`，LLM 判定走 `router.ForTask(TaskCamera)`，自动记入 UsageJournal 账本。
 
-### 12.3 下一步：工程化 P2-P4（狗食阶段的真任务）
+### 12.3 工程化闭环状态（P1-P4 已落地，2026-08-15）
 
-- **P2 ActualDSLLoader + 聚合**：扫描被测代码的探针观测产物，聚合生成 `actual.dsl.json`（**观测事实画像**，可再生、非权威）；与设计 DSL（dsl.json）对比，产出偏差报告。
-- **P3 修订 + 验证门**：LLM 修订只落 `revisions/` 提案区（**提案权与写盘权分离**）；验证门 = 规则回归 + LLM 复核 + e2e，审批通过后才经 camera-dsl 定稿写入 dsl.json。**LLM 无直接写盘通道**。
-- **P4 循环打通 + 触发**：观测→聚合→对比→提案→验证→定稿 的演化闭环跑通；接入真实触发点（如 NREM 梦游判定路径 / agent 运行事件流），让摄像头在真实运行中自动嗅探。
+- **P1 DesignDSLStore**：`dsl_store.go` 版本化 dsl.json + 快照式审计 `dsl.history.jsonl` + 原子写 + seed/rollback（camera-dsl show/history/rollback/seed）。
+- **P2 ActualDSLLoader + 聚合**：`actual_loader.go`/`aggregator.go`/`comparator.go` 聚合观测生成 `actual.dsl.json`（**观测事实画像**，可再生、非权威），与设计 DSL 对比产出三类偏差报告（camera-dsl actual/diff）。
+- **P3 修订 + 验证门**：`proposal.go` 提案区（**提案权与写盘权分离**，LLM 无直接写盘通道）；**验证门 = 规则回归**（`VerifyRuleRegression`，与 Comparator 共用 `defaultRulePredicates()` 同源谓词表）——有谓词声明标记 `verified_by=rule-regression / status=verified`，无谓词标记 `needs-llm-review / status=proposed`（需 LLM 复核，不阻塞定稿但留痕）。approve 后证据写入提案与定稿快照。
+- **P4 循环打通 + 触发**：`loop.go` 闭环 观测→聚合→对比→提案；**低频触发护栏**：`--min-deviation-rate`（violated 事件占比，默认 10%）+ `--min-undesigned`（默认 1）双阈值，偏差不显著时本轮不演进（报告标注 SkipReason）。
 
-完成标准：`{projectRoot}/.agent/camera/` 下 `dsl.json` + `dsl.history.jsonl` + `actual.dsl.json` + `revisions/` 四件套闭环可运行，偏差报告经 LLM 复核与 DSL 契约语义一致。
+完成标准：`{projectRoot}/.agent/camera/` 下 `dsl.json` + `dsl.history.jsonl` + `actual.dsl.json` + `proposals/` 四件套闭环可运行，偏差报告经 LLM 复核与 DSL 契约语义一致。
 
 **机制差距（重要，别按错方向继续）**：当前探针（`probe.go` / `global.go`）是**关键点手动 `emit`**——只在代码里显式调 `Capture` 的点才埋点，属于"选点埋点"的基础层。而 §12.1 的核心机制是**全量自动插桩 + DSL 筛选**。**自动全量插桩已落地（2026-08-15，PR 偏差1/2）**：TS 侧 `src/camera/instrument.ts`（tree-sitter）与 Go 侧 `internal/instrument`（go/ast）均实现全函数插桩（enter/exit/return/catch/IO + 可选 deep 级变量赋值），带幂等标记、备份还原与 `--dry-run`/`--restore`。但**当前被测项目仍以手动 `emit` 探针为主**，把自动插桩器接入真实被测代码（`npm run instrument <dir>` / `camera-dsl instrument <dir>`）是后续把采集层真正"全量"的关键一步，再由 DSL 筛选压缩。
 
@@ -295,7 +296,9 @@ TRAE 侧：
 - 判定统一入口（跨语言）：Go 侧走 `JudgeClient`，配置 `CAMERA_JUDGE_URL` 则 POST `/api/camera/judge` 复用 TS 判定实现（判定权威），未配置降级本地 `SilentErrorDiscard`（语义与 TS 逐条对齐，保证离线可用）
 - 双层 DSL：`actual.dsl.json`（事实画像，可再生非权威）+ `dsl.json`（设计 DSL，判定唯一权威）
 - 仓库 `{projectRoot}/.agent/camera/`：版本单调递增、原子写（tmp+rename）、可回滚
-- 提案权与写盘权分离：LLM 修订只落 `revisions/` 提案区；写盘只走 camera-dsl（P3 后走验证门）
+- 提案权与写盘权分离：LLM 修订只落 `proposals/` 提案区；写盘只走 camera-dsl（验证门审批后才定稿）
+- 验证门证据留痕：DSLDecl 带 origin/verified_by/status 审计字段；approve 前跑规则回归（与 Comparator 共用 `defaultRulePredicates()` 同源谓词表），有谓词标记 verified，无谓词标记 needs-llm-review（不阻塞但留痕）
+- 低频演进护栏：loop 用 `--min-deviation-rate` / `--min-undesigned` 双阈值，偏差不显著时本轮不演进
 - camera-dsl 纯本地 CLI：在 APIKey 检查前处理、独立解析项目根、子命令剥离 `--project-root`
 
 ### 12.5 狗食怎么用它做开发（工具闭环 → 真任务）

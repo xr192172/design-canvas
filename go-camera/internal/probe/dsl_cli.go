@@ -335,7 +335,11 @@ func dslProposals(dataDir string) bool {
 		if len(reason) > 40 {
 			reason = reason[:40] + "…"
 		}
-		fmt.Printf("  %-24s %-9s %d 条声明  src=%s  %s\n", p.ID, p.Status, len(p.Decls), p.Source, reason)
+		verified := ""
+		if p.VerifiedBy != "" {
+			verified = "  已验证: " + p.VerifiedBy
+		}
+		fmt.Printf("  %-24s %-9s %d 条声明  src=%s  %s%s\n", p.ID, p.Status, len(p.Decls), p.Source, reason, verified)
 	}
 	return true
 }
@@ -360,6 +364,12 @@ func dslApprove(args []string, dataDir string) bool {
 		return true
 	}
 	fmt.Printf("已审批通过提案 %s → 设计 DSL v%d（审计链保留）\n", id, ver)
+	if p, perr := NewProposalStore(dataDir).Get(id); perr == nil && p.VerifiedBy != "" {
+		fmt.Printf("  验证门证据: %s\n", p.VerifiedBy)
+		if p.Verification != "" {
+			fmt.Printf("  验证详情: %s\n", p.Verification)
+		}
+	}
 	return true
 }
 
@@ -385,23 +395,56 @@ func dslReject(args []string, dataDir string) bool {
 	return true
 }
 
-// dslLoop 执行一次闭环迭代：观测→偏差→对未声明探针自动生成修订提案。
+// dslLoop 执行一次闭环迭代：观测→偏差→（触发条件满足时）对未声明探针自动提案。
+// 支持 --min-deviation-rate <比例> / --min-undesigned <数量> 调节触发阈值。
 func dslLoop(args []string, dataDir string) bool {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl>")
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl> [--min-deviation-rate 0.1] [--min-undesigned 1]")
 		return true
 	}
-	res, err := RunLoop(args[0], dataDir)
+	var eventsPath string
+	opt := LoopOptions{}
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--min-deviation-rate" && i+1 < len(args):
+			v, err := strconv.ParseFloat(args[i+1], 64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "camera-dsl loop: 非法偏差率阈值 %q\n", args[i+1])
+				return true
+			}
+			opt.MinDeviationRate = v
+			i++
+		case args[i] == "--min-undesigned" && i+1 < len(args):
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "camera-dsl loop: 非法未声明阈值 %q\n", args[i+1])
+				return true
+			}
+			opt.MinUndesigned = v
+			i++
+		case strings.HasPrefix(args[i], "-"):
+			continue
+		default:
+			if eventsPath == "" {
+				eventsPath = args[i]
+			}
+		}
+	}
+	res, err := RunLoop(eventsPath, dataDir, opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "camera-dsl loop: %v\n", err)
 		return true
 	}
 	fmt.Print(RenderDiffReport(res.Report))
-	if len(res.Proposals) == 0 {
-		fmt.Println("闭环：无未声明探针，无需补契约提案")
+	if !res.Triggered {
+		fmt.Printf("闭环：未触发演进（%s）\n", res.SkipReason)
 		return true
 	}
-	fmt.Printf("闭环：为 %d 个未声明探针生成修订提案（写盘权分离，待审批）\n", len(res.Proposals))
+	if len(res.Proposals) == 0 {
+		fmt.Println("闭环：偏差已触发但无未声明探针，无需补契约提案")
+		return true
+	}
+	fmt.Printf("闭环：为 %d 个未声明探针生成修订提案（写盘权分离，待验证门审批）\n", len(res.Proposals))
 	for _, p := range res.Proposals {
 		fmt.Printf("  %s rule=%s probe=%s\n", p.ID, p.Decls[0].Rule, p.Decls[0].Probe)
 	}
