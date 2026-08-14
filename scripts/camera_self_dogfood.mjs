@@ -11,7 +11,7 @@
  *
  * 用法（项目根，先构建）：
  *   npx tsc
- *   node scripts/camera_self_dogfood.mjs
+ *   node scripts/camera_self_dogfood.mjs [--enable-deep]
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -21,6 +21,9 @@ import { instrumentProject } from '../dist/src/camera/instrument.js';
 import { TSProbeCapture, setGlobalProbeSink, loadTSEvents } from '../dist/src/camera/probe.js';
 import { queryCameraLog } from '../dist/src/camera/log_query.js';
 import { normalizeEvents, judgeEvents } from '../dist/src/camera/judge_service.js';
+
+// --enable-deep 开启 deep 级插桩（放大：捕获函数内部数据流动，事件量显著增加）
+const enableDeep = process.argv.includes('--enable-deep');
 
 const SRC = path.resolve('src');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cam-self-'));
@@ -50,14 +53,15 @@ console.log(`=== 1) 已复制 src/ → ${copyDir}（临时副本，不污染工�
 // （先复制编译产物 probe.js 进副本根，插桩后的 import './_cam_probe.js' 可解析）
 const probeJs = path.join(copyDir, '_cam_probe.js');
 fs.copyFileSync(path.resolve('dist/src/camera/probe.js'), probeJs);
-const results = await instrumentProject(copyDir, { projectRoot: copyDir, probeImport: './_cam_probe.js' });
+const results = await instrumentProject(copyDir, { projectRoot: copyDir, probeImport: './_cam_probe.js', enableDeep });
 let total = 0;
 const hit = results.filter((r) => r.sites.length > 0);
 for (const r of hit) {
+  const deep = r.sites.filter((s) => s.level === 'deep').length;
   total += r.sites.length;
-  console.log(`· ${path.relative(copyDir, r.file)}  +${r.sites.length} 探针点`);
+  console.log(`· ${path.relative(copyDir, r.file)}  +${r.sites.length} 探针点${deep ? `（含 deep ×${deep}）` : ''}`);
 }
-console.log(`=== 2) 全自动插桩：${hit.length}/${results.length} 文件命中，共 ${total} 探针点 ===`);
+console.log(`=== 2) 全自动插桩${enableDeep ? '（deep 放大）' : ''}：${hit.length}/${results.length} 文件命中，共 ${total} 探针点 ===`);
 const storageHit = hit.find((r) => r.file.endsWith('storage.ts'));
 if (!storageHit) {
   console.error('✗ 预期 storage.ts 被插桩，但未命中！');

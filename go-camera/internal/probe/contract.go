@@ -135,3 +135,22 @@ func (j *Judge) JudgeLogFile(path string) ([]Verdict, error) {
 	defer fh.Close()
 	return j.JudgeLog(fh)
 }
+
+// loadEvents 从 JSONL 读取器解析全部 Event（供 JudgeClient 批量远程判定）。
+func loadEvents(r io.Reader) ([]Event, error) {
+	var events []Event
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var ev Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			return nil, fmt.Errorf("parse event line %q: %w", line, err)
+		}
+		events = append(events, ev)
+	}
+	return events, sc.Err()
+}

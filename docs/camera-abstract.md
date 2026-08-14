@@ -116,14 +116,14 @@ Comparator:
 
 ### 语言接入矩阵（规划）
 
-| 语言 | 探针实现 | 判定装配 | 状态 |
-|---|---|---|---|
-| Go | `go-camera` probe 包 | Go 装配层 | ✅ 已落地 |
-| TypeScript | `probe.ts`（ts_kernel 已有符号探测基础） | 复用 Go 装配层 or TS 哨兵 | 待做 |
-| Python | `probe.py` | 复用 Go 装配层 | 待做 |
-| Java | `probe.java` | 复用 Go 装配层 | 待做 |
+| 语言 | 自动插桩 | 探针实现 | 判定装配 | 状态 |
+|---|---|---|---|---|
+| Go | ✅ `internal/instrument`（go/ast 全量无脑插桩） | `go-camera` probe 包 | `JudgeClient` 走 HTTP 调 TS 判定服务，未配置时降级本地 | ✅ 已落地 |
+| TypeScript | ✅ `instrument.ts`（tree-sitter 全量无脑插桩，含 deep 级） | `probe.ts` | TS 判定服务（`/api/camera/judge`，判定权威） | ✅ 已落地 |
+| Python | 待做 | `probe.py` | POST `/api/camera/judge` | 待做 |
+| Java | 待做 | `probe.java` | POST `/api/camera/judge` | 待做 |
 
-> 判定端口可下沉为独立服务（`/api/camera/judge`），使探针语言与判定装配彻底解耦——后续可演进，当前单进程内复用即可。
+> **判定端口已实际下沉为独立服务**（`/api/camera/judge`，2026-08-15 PR 偏差3 落地）：各语言探针只需产出符合 `Event` schema 的事件，POST 上来即可判定，无需复刻判定规则。Go 侧 `JudgeClient` 读 `CAMERA_JUDGE_URL` 环境变量指向该服务；未设置时降级为本地 `SilentErrorDiscard` 谓词（语义与 TS 逐条对齐），保证离线/单测可用。
 
 ### 4.1 插桩覆盖策略：全量无脑插桩 + 事件分级标签（2026-08-14 补记）
 
@@ -140,6 +140,7 @@ Comparator:
 | `deep` | 函数内部关键变量赋值/分支（可选放大） | 海量场景抽样 | 高 |
 
 - 该策略同样服务于 **dogfooding（狗食）**：给 Camera 自己插桩，运行真实路径时直接发现某一环节数据或一段代码逻辑不正确。
+- **自动插桩器（2026-08-15 PR 偏差1/2 落地）**：TS 侧 `src/camera/instrument.ts`（tree-sitter）与 Go 侧 `go-camera/internal/instrument`（go/ast）均实现「全函数插桩 + deep 级放大 + 幂等标记 + 备份还原」，配合 `--dry-run` 与 `--restore` 命令，覆盖全量无脑插桩需求。
 
 ---
 
@@ -151,6 +152,9 @@ Comparator:
 - [x] 端到端：actual.dsl.json + dsl.json → comparator → DiffReport（三类偏差计数正确）
 - [x] 端到端：`camera-dsl actual` / `camera-dsl diff` / `camera-dsl loop` CLI 输出符合 Schema
 - [x] 契约语义对齐：TS 探针埋点产出的事件能被 Go 装配层正确判定（跨语言接入试点，含真实 serve 运行抓包实证）
+- [x] PR 偏差1：TS 插桩器 deep 级数据流插桩（`--enable-deep`，变量赋值/分支捕获，幂等独立标记）
+- [x] PR 偏差2：Go `internal/instrument` 用 go/ast 做 Go 源码自动插桩 + `camera-dsl instrument` CLI + 6 项测试
+- [x] PR 偏差3：Go `JudgeClient` 走 HTTP 调 TS 判定服务（`/api/camera/judge`），未配置时降级本地判定（4 项测试）
 
 ---
 

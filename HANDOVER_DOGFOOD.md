@@ -271,6 +271,10 @@ TRAE 侧：
 | P1 DSL 仓库 | `dsl_store.go`（DesignDSLStore：版本化 + 快照审计 `dsl.history.jsonl` + 原子写 tmp+rename） | ✅ |
 | P1 CLI | `dsl_cli.go` + `main.go`（`camera-dsl show/history/rollback/seed`，纯本地、APIKey 检查前处理、剥离 --project-root） | ✅ |
 | 测试 | `probe_test.go` / `camera_demo_test.go` / `dsl_store_test.go` / `llm_judge_test.go` / `camera_llm_e2e_test.go`（`go test -tags e2e -run TestCameraLLME2E`） | ✅ |
+| GO 自动插桩 | `internal/instrument/instrument.go`（go/ast 全函数插桩：enter/exit/return/IO/deep，幂等标记 + 备份还原 + dry-run） | ✅ |
+| GO 插桩测试 | `internal/instrument/instrument_test.go`（6 用例） | ✅ |
+| 判定统一入口 | `judge_client.go`（JudgeClient：`CAMERA_JUDGE_URL` 走 HTTP 调 TS 判定服务，未配置降级本地 SilentErrorDiscard） | ✅ |
+| 判定入口测试 | `judge_client_test.go`（4 用例：本地降级 / 远程代理 / 远程错误） | ✅ |
 
 要点：契约已从 lesion-rules **解耦**——契约来源 `static-rule` → `llm-design`，规则 id → `design:silent-error-discard`，探针包零 import lesion-rules；lesion-rules 降级为 seed 清单仓库，不再做判定中心。`TaskCamera` 已注册到 `provider/router.go`，LLM 判定走 `router.ForTask(TaskCamera)`，自动记入 UsageJournal 账本。
 
@@ -282,12 +286,13 @@ TRAE 侧：
 
 完成标准：`{projectRoot}/.agent/camera/` 下 `dsl.json` + `dsl.history.jsonl` + `actual.dsl.json` + `revisions/` 四件套闭环可运行，偏差报告经 LLM 复核与 DSL 契约语义一致。
 
-**机制差距（重要，别按错方向继续）**：当前探针（`probe.go` / `global.go`）是**关键点手动 `emit`**——只在代码里显式调 `Capture` 的点才埋点，属于"选点埋点"的基础层。而 §12.1 的核心机制是**全量自动插桩 + DSL 筛选**。后续应演进为自动全量埋点（如按 AST 自动注入 / build tag 包裹，对所有函数与数据流自动捕获），让采集层真正"全量"，再由 DSL 筛选压缩。**在实现自动全量插桩前，手动 emit 只是过渡手段，不是最终形态**。
+**机制差距（重要，别按错方向继续）**：当前探针（`probe.go` / `global.go`）是**关键点手动 `emit`**——只在代码里显式调 `Capture` 的点才埋点，属于"选点埋点"的基础层。而 §12.1 的核心机制是**全量自动插桩 + DSL 筛选**。**自动全量插桩已落地（2026-08-15，PR 偏差1/2）**：TS 侧 `src/camera/instrument.ts`（tree-sitter）与 Go 侧 `internal/instrument`（go/ast）均实现全函数插桩（enter/exit/return/catch/IO + 可选 deep 级变量赋值），带幂等标记、备份还原与 `--dry-run`/`--restore`。但**当前被测项目仍以手动 `emit` 探针为主**，把自动插桩器接入真实被测代码（`npm run instrument <dir>` / `camera-dsl instrument <dir>`）是后续把采集层真正"全量"的关键一步，再由 DSL 筛选压缩。
 
 ### 12.4 关键约束（硬约束，别破坏）
 
 - LLM 判定只喂「事件快照 + DSL 契约声明」，不含项目文档 / 架构历史 / 注释背景
 - 双层判定：规则快判确定性事件；可疑事件才交 LLM；降级不阻断流程
+- 判定统一入口（跨语言）：Go 侧走 `JudgeClient`，配置 `CAMERA_JUDGE_URL` 则 POST `/api/camera/judge` 复用 TS 判定实现（判定权威），未配置降级本地 `SilentErrorDiscard`（语义与 TS 逐条对齐，保证离线可用）
 - 双层 DSL：`actual.dsl.json`（事实画像，可再生非权威）+ `dsl.json`（设计 DSL，判定唯一权威）
 - 仓库 `{projectRoot}/.agent/camera/`：版本单调递增、原子写（tmp+rename）、可回滚
 - 提案权与写盘权分离：LLM 修订只落 `revisions/` 提案区；写盘只走 camera-dsl（P3 后走验证门）

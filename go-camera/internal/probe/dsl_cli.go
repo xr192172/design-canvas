@@ -13,6 +13,7 @@ package probe
 // 写盘通道，本 CLI 是当前唯一的定稿/回滚入口（P3 验证门接入后由它代写）。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go-camera/internal/instrument"
 )
 
 // RunDSLCLI 处理 camera-dsl 子命令。args 为 camera-dsl 之后的参数（可能含
@@ -70,6 +73,8 @@ func RunDSLCLI(args []string, dataDir string) bool {
 		return dslLoop(args[1:], dataDir)
 	case "log":
 		return dslLog(args[1:])
+	case "instrument":
+		return dslInstrument(args[1:])
 	case "help", "-h", "--help":
 		usageDSL()
 		return true
@@ -96,6 +101,7 @@ func usageDSL() {
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
   camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
   camera-dsl log <events.jsonl> [--file <path>]... [--all]  日志：按文件路径过滤（可多次），默认只列异常，--all 显示全部
+  camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--restore]  Go 源码自动插桩（PR 偏差2）
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
@@ -447,9 +453,13 @@ func dslLog(args []string) bool {
 	}
 	defer f.Close()
 
-	judge := new(Judge).
-		AddRule("design:silent-error-discard", SilentErrorDiscard)
-	verdicts, err := judge.JudgeLog(f)
+	judge := NewJudgeClient("")
+	parsed, perr := loadEvents(f)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl log: %v\n", perr)
+		return true
+	}
+	verdicts, err := judge.JudgeEvents(context.Background(), parsed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "camera-dsl log: %v\n", err)
 		return true
@@ -538,6 +548,85 @@ func renderLogLine(v Verdict, emphasize bool) {
 		return
 	}
 	fmt.Printf("  · %s  [%s]  %s\n", ts, rule, ev.Probe)
+}
+
+// dslInstrument 对 Go 项目目录做源码级自动插桩（PR 偏差2）。
+//   - --dry-run    只报告探针点，不写盘
+//   - --enable-deep 额外捕获函数内部变量赋值（deep 级）
+//   - --restore    还原上次插桩前的原始文件（从备份目录拷回）
+func dslInstrument(args []string) bool {
+	dir := ""
+	dryRun := false
+	enableDeep := false
+	restore := false
+	for _, a := range args {
+		switch a {
+		case "--dry-run":
+			dryRun = true
+		case "--enable-deep":
+			enableDeep = true
+		case "--restore":
+			restore = true
+		default:
+			if dir == "" {
+				dir = a
+			}
+		}
+	}
+	if dir == "" {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--restore]")
+		return true
+	}
+
+	if restore {
+		restored := instrument.RestoreInstrumented(dir)
+		if len(restored) == 0 {
+			fmt.Println("instrument: 无备份可还原（或目录已清洁）")
+		} else {
+			fmt.Printf("已将 %d 个文件还原为插桩前原版：\n", len(restored))
+			for _, f := range restored {
+				fmt.Printf("  · %s\n", f)
+			}
+		}
+		return true
+	}
+
+	opts := instrument.Options{
+		ProbeImport: "go-camera/internal/probe",
+		Write:       !dryRun,
+		EnableDeep:  enableDeep,
+		BackupRoot:  dir,
+	}
+	results := instrument.InstrumentDir(dir, opts)
+	var total int
+	hits := 0
+	for _, r := range results {
+		if len(r.Sites) == 0 {
+			continue
+		}
+		hits++
+		total += len(r.Sites)
+		modes := map[string]int{}
+		for _, s := range r.Sites {
+			modes[s.Level]++
+		}
+		summary := ""
+		for _, lvl := range []string{"core", "event", "deep"} {
+			if n := modes[lvl]; n > 0 {
+				summary += fmt.Sprintf("  %s×%d", lvl, n)
+			}
+		}
+		fmt.Printf("  · %s  +%d 探针%s\n", r.File, len(r.Sites), summary)
+	}
+	verb := "注入"
+	if dryRun {
+		verb = "将注入（dry-run）"
+	}
+	fmt.Printf("instrument: %d/%d 文件%s %d 个探针点\n", hits, len(results), verb, total)
+	if !dryRun && hits > 0 {
+		fmt.Println("提示: 用 `camera-dsl instrument <dir> --restore` 可还原为插桩前原版")
+	}
+	return true
 }
 
 // writeJSON 原子写 JSON 文件（临时文件 + rename）。

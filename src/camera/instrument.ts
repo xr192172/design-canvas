@@ -61,7 +61,7 @@ export type ProbeLevel = 'core' | 'event' | 'deep';
 export interface InstrumentedSite {
   file: string;
   line: number;
-  kind: 'enter' | 'exit' | 'catch' | 'io';
+  kind: 'enter' | 'exit' | 'catch' | 'io' | 'deep';
   level: ProbeLevel;
   // 注入的探针源码（用于报告）
   injected: string;
@@ -85,10 +85,17 @@ export interface InstrumentOptions {
   backupRoot?: string;
   /** 是否实际写盘；false 只做 dry-run 报告（默认 true） */
   write?: boolean;
+  /** 是否启用 deep 级插桩（函数内部变量赋值/条件分支捕获）。默认 false——
+   *  deep 事件量很大，按需放大。core/event 不受此开关影响。 */
+  enableDeep?: boolean;
 }
 
 /** 探针调用标记：已插桩文件里若含此标记则跳过（幂等） */
 const PROBE_MARKER = 'camera:instrumented';
+
+/** deep 级插桩独立标记：deep 是可选放大（enableDeep），可与 core/event 分次施加。
+ *  文件含此标记说明 deep 探针已注入，避免重复。 */
+const DEEP_MARKER = 'camera:deep';
 
 /** 备份目录名（相对被插桩项目根，位于 .design-canvas 下，collectTsFiles 会跳过） */
 const BACKUP_DIR = '.design-canvas/camera-backup';
@@ -344,6 +351,7 @@ function isBracelessGuardReturn(parent: InstrNode | undefined): boolean {
  */
 export async function instrumentFile(file: string, opts: InstrumentOptions = {}): Promise<InstrumentFileResult> {
   const applyWrite = opts.write ?? true;
+  const enableDeep = opts.enableDeep ?? false;
   const result: InstrumentFileResult = { file, sites: [] };
   let content: string;
   try {
@@ -353,8 +361,12 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
     return result;
   }
 
-  // 幂等：已插桩跳过
-  if (content.includes(PROBE_MARKER)) return result;
+  // 幂等：按标记判断该文件已注入哪些级别的探针，避免重复。
+  //   - core/event 已注入（PROBE_MARKER）且未请求 deep → 跳过
+  //   - core/event 与 deep 都已注入 → 跳过
+  const hasCore = content.includes(PROBE_MARKER);
+  const hasDeep = content.includes(DEEP_MARKER);
+  if ((hasCore && !enableDeep) || (hasCore && hasDeep)) return result;
 
   const parsed = await parseAstRoot(file, content);
   if (!parsed) {
@@ -369,7 +381,10 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
 
   // 收集插入点（从后往前构造，偏移由大到小）
   const insertions: { index: number; removeTo?: number; site: InstrumentedSite }[] = [];
-  collectSites(root, file, content, insertions, fileRel);
+  // core/event 探针：仅当文件尚未注入 core/event 时收集（避免对已插桩文件重复注入）
+  if (!hasCore) collectSites(root, file, content, insertions, fileRel);
+  // deep 探针：仅在请求 enableDeep 且尚未注入 deep 时收集
+  if (enableDeep && !hasDeep) collectDeepSites(root, file, content, insertions, fileRel);
 
   if (insertions.length === 0) return result;
 
@@ -384,7 +399,9 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
     const removeTo = ins.removeTo ?? ins.index; // 默认纯插入；removeTo>index 表示替换区间
     out = out.slice(0, ins.index) + ins.site.injected + out.slice(removeTo);
   }
-  out = importStmt + `// ${PROBE_MARKER}\n` + out;
+  // 头部补 import 与分级标记（避免重复补：import 已存在则跳过）
+  if (!hasCore) out = importStmt + `// ${PROBE_MARKER}\n` + out;
+  if (enableDeep && !hasDeep) out = `// ${DEEP_MARKER}\n` + out;
 
   result.sites = insertions.map((i) => i.site);
   if (applyWrite) {
@@ -467,6 +484,131 @@ function collectSites(
         const probeName = `${path.basename(file).replace('.ts', '')}.${fnName}.${IO_CALLS[callee]}`;
         const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
         insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
+      }
+    }
+
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c, n);
+    }
+  };
+  walk(root);
+}
+
+// ─────────────────────────────────────────────────────────────
+// deep 级插桩（enableDeep=true 时启用）：捕获函数内部数据流动——
+// 变量赋值、赋值表达式、分支/循环条件的关键中间值。事件量很大，默认关闭。
+// 注入点统一打 level:'deep' 标签，与 core/event 分级正交，可按需选择性读取。
+// ─────────────────────────────────────────────────────────────
+
+/** 判断表达式是否无副作用（无调用/赋值/更新/await/yield）——deep 捕获需重求值，
+ *  仅对无副作用表达式这样做，避免双求值或改变语义。 */
+function isSideEffectFreeExpr(n: InstrNode): boolean {
+  const bad = new Set([
+    'call_expression', 'new_expression', 'import_expression',
+    'assignment_expression', 'update_expression', 'await_expression',
+    'yield_expression', 'sequence_expression', 'arrow_function',
+  ]);
+  if (bad.has(n.type)) return false;
+  for (let i = 0; i < n.childCount; i++) {
+    const c = n.child(i);
+    if (c && !isSideEffectFreeExpr(c)) return false;
+  }
+  return true;
+}
+
+/** 取括号表达式内部的实际表达式（parenthesized_expression → 内层），无括号原名返回。 */
+function parenInner(n: InstrNode): InstrNode {
+  let cur = n;
+  while (cur.type === 'parenthesized_expression') {
+    cur = asInstr(cur.child(1) ?? cur.child(0) ?? cur);
+  }
+  return cur;
+}
+
+/** 找节点下第一个 statement_block 直接子节点（if/while/for 的体，位置子节点，无字段名）。 */
+function findBlockChild(n: InstrNode): InstrNode | null {
+  for (let i = 0; i < n.childCount; i++) {
+    const c = n.child(i);
+    if (c && c.type === 'statement_block') return c;
+  }
+  return null;
+}
+
+/** 计算某函数内 deep 探针名（基名复用函数名，.deep 后缀；模块级为 module.deep）。 */
+function deepProbeName(root: InstrNode, file: string, atIndex: number): string {
+  const mod = path.basename(file).replace('.ts', '');
+  const fn = detectEnclosingFunction(root, atIndex);
+  return `${mod}.${fn}.deep`;
+}
+
+/** 构造一条 deep 探针注入文本。fields 为捕获字段（value 用重求值安全的表达式文本）。 */
+function deepProbeInjected(probeName: string, fileRel: string, fields: string): string {
+  return `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, level: 'deep', ${fields} });`;
+}
+
+/**
+ * 收集一个文件内所有 deep 级插桩点（enableDeep 时调用）。与 collectSites 互补，
+ * 只处理 core/event 未覆盖的「函数内部数据流动」节点：
+ *   A. variable_declaration：对每个带初值的简单标识符声明，在声明后捕获绑定变量值
+ *      （`const y = a + b;` → 捕获 y）。跳过 for 头部的计数器声明。
+ *   B. expression_statement 内的赋值表达式：`x = <expr>;` → 捕获赋值后 x 的值。
+ *   C. if/while/for 的无副作用条件：在分支体内捕获条件判定值。
+ * 所有注入都限定在可安全放置语句的位置，避免破坏语法。
+ */
+function collectDeepSites(
+  root: InstrNode,
+  file: string,
+  content: string,
+  insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
+  fileRel: string,
+): void {
+  const walk = (n: InstrNode, parent?: InstrNode): void => {
+    // A. 变量声明（跳过 for 头：父节点是 for_*_statement）
+    // 注意：const/let 是 lexical_declaration，var 才是 variable_declaration。
+    if (n.type === 'variable_declaration' || n.type === 'lexical_declaration') {
+      const inForHeader = parent && (parent.type === 'for_statement' || parent.type === 'for_in_statement' || parent.type === 'for_of_statement');
+      if (!inForHeader) {
+        for (let i = 0; i < n.childCount; i++) {
+          const d = n.child(i);
+          if (!d || d.type !== 'variable_declarator') continue;
+          const nameNode = d.childForFieldName?.('name');
+          const init = d.childForFieldName?.('value');
+          if (!nameNode || nameNode.type !== 'identifier' || !init) continue;
+          const name = nameNode.text;
+          const probeName = deepProbeName(root, file, d.startIndex);
+          const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(name)}, value: ${name}`);
+          insertions.push({ index: d.endIndex, site: { file, line: d.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+        }
+      }
+    }
+
+    // B. 赋值表达式（仅当位于表达式语句中，避免破坏 for 头/条件等非语句位置）
+    if (n.type === 'assignment_expression' && parent?.type === 'expression_statement') {
+      const left = n.childForFieldName?.('left');
+      if (left && (left.type === 'identifier' || left.type === 'member_expression') && isSideEffectFreeExpr(left)) {
+        const probeName = deepProbeName(root, file, n.startIndex);
+        const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(left.text)}, value: ${left.text}`);
+        insertions.push({ index: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+      }
+    }
+
+    // C. 分支/循环条件捕获（仅在无副作用时重求值，且在块体内注入）。
+    //  if/while/for 的体是位置子节点（statement_block），无 consequent/body 字段名。
+    if (n.type === 'if_statement' || n.type === 'while_statement' || n.type === 'for_statement') {
+      const cond = n.childForFieldName?.('condition');
+      const body = findBlockChild(n);
+      if (cond && body) {
+        const inner = parenInner(cond);
+        if (isSideEffectFreeExpr(inner)) {
+          const probeName = deepProbeName(root, file, n.startIndex);
+          const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, level: 'deep', cond: ${JSON.stringify(inner.text)}, value: ${inner.text} });`;
+          // 在块体 '{' 之后注入
+          let idx = body.startIndex;
+          if (content[idx] === '{') idx++;
+          while (idx < content.length && /\s/.test(content[idx])) idx++;
+          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+        }
       }
     }
 
