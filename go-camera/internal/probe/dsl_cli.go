@@ -68,6 +68,8 @@ func RunDSLCLI(args []string, dataDir string) bool {
 		return dslReject(args[1:], dataDir)
 	case "loop":
 		return dslLoop(args[1:], dataDir)
+	case "log":
+		return dslLog(args[1:])
 	case "help", "-h", "--help":
 		usageDSL()
 		return true
@@ -93,6 +95,7 @@ func usageDSL() {
   camera-dsl approve <id> [--reviewer <名字>]        验证门审批 → 定稿为设计 DSL 新版本
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
   camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
+  camera-dsl log <events.jsonl> [--all]             异常日志：逐条列出偏差（默认只列异常，--all 显示全部）
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
@@ -397,6 +400,90 @@ func dslLoop(args []string, dataDir string) bool {
 		fmt.Printf("  %s rule=%s probe=%s\n", p.ID, p.Decls[0].Rule, p.Decls[0].Probe)
 	}
 	return true
+}
+
+// dslLog 输出异常日志：逐条判定事件，默认只列偏差（设计不符 / 静默吞错），
+// --all 时连正常流动数据也列出（供 LLM 查看某个数据流具体怎么实现）。
+func dslLog(args []string) bool {
+	eventsPath := ""
+	all := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--all" {
+			all = true
+			continue
+		}
+		if strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		if eventsPath == "" {
+			eventsPath = args[i]
+		}
+	}
+	if eventsPath == "" {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl log <events.jsonl> [--all]")
+		return true
+	}
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl log: %v\n", err)
+		return true
+	}
+	defer f.Close()
+
+	judge := new(Judge).
+		AddRule("design:silent-error-discard", SilentErrorDiscard)
+	verdicts, err := judge.JudgeLog(f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl log: %v\n", err)
+		return true
+	}
+
+	var anomalies []Verdict
+	for _, v := range verdicts {
+		if v.Result == "deviation" {
+			anomalies = append(anomalies, v)
+		}
+	}
+
+	fmt.Printf("Camera 运行日志：%d 事件 · %d 异常\n", len(verdicts), len(anomalies))
+	if !all {
+		// 默认只列异常，正常流动数据不显示（除非 LLM 想看实现细节）
+		if len(anomalies) == 0 {
+			fmt.Println("  ✓ 无异常（无静默吞错 / 设计不符）")
+			return true
+		}
+		fmt.Println()
+		for _, v := range anomalies {
+			renderLogLine(v, true)
+		}
+		return true
+	}
+	// --all：全部事件，异常打标记，正常事件仅一行概要
+	fmt.Println()
+	for _, v := range verdicts {
+		renderLogLine(v, v.Result == "deviation")
+	}
+	return true
+}
+
+// renderLogLine 格式化单条日志行。emphasize 为 true 时（异常）打满详情，否则仅概要。
+func renderLogLine(v Verdict, emphasize bool) {
+	ev := v.Event
+	ts := ev.Time.Format("15:04:05.000")
+	rule := v.Rule
+	if rule == "" {
+		rule = "-"
+	}
+	if emphasize {
+		fmt.Printf("  ✗ %s  [%s]  %s\n", ts, rule, ev.Probe)
+		fmt.Printf("      %s\n", v.Reason)
+		if len(ev.Fields) > 0 {
+			data, _ := json.Marshal(ev.Fields)
+			fmt.Printf("      fields: %s\n", data)
+		}
+		return
+	}
+	fmt.Printf("  · %s  [%s]  %s\n", ts, rule, ev.Probe)
 }
 
 // writeJSON 原子写 JSON 文件（临时文件 + rename）。

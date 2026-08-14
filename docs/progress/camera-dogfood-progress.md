@@ -116,3 +116,13 @@
 - **E2E 验证（真实 SSE）**：临时项目把 live 文件占位成目录制造写盘失败 → 启动 serve → 开 SSE 客户端监听 `/api/events` → 发 `POST /api/save` → **SSE 毫秒级收到 `camera-alert`**：`rule=design:silent-error-discard`，`reason=nont-benign error silently discarded (op=writefile): "EISDIR..."`，含完整 fields。
 - **意义**：完整「开发时即时观测提示」链路打通——运行中探针采集 → 即时判定 → SSE 推给画布，错误出现即提示，无需事后跑命令。
 - 测试：新增 `tests/camera/judge.test.ts` 6 用例（err nil / writefile 非良性 / cleanup benign / cleanup 非良性 / judgeEvent 多规则 / 无偏差），camera 全量 26 通过。
+
+## ✅ 异常日志工具 camera-dsl log（已完成并验证）
+- **定位（2026-08-14）**：用户进一步明确 Camera 的纠错形态是「日志工具」——像普通日志一样事后可查，每跑一轮把异常逐条列出来（哪个数据流、什么类型问题），不打断心流。LLM 靠工具调用 + 工具返回获取信息，没有"余光"，所以不能靠推送，要靠 LLM 主动拉取。
+- **筛选层**：默认只筛两类异常——静默吞错（catch 的错误）+ 设计不符（DSL 契约偏差）；正常流动数据默认不报，除非 LLM 想看某个功能怎么实现（--all）。
+- **改动**：`go-camera/internal/probe/dsl_cli.go` 新增 `camera-dsl log <events.jsonl> [--all]` 子命令 + `dslLog()`/`renderLogLine()`。复用 `Judge.JudgeLog` + `SilentErrorDiscard` 谓词逐条判定。
+  - 默认：只列偏差（✗ 标记，含时间/rule/数据流 probe/原因/fields），无异常显示"✓ 无异常"。
+  - `--all`：全部事件，异常打 ✗ 满详情，正常事件一行概要（供 LLM 查看实现细节）。
+- **E2E 验证（真实事件文件）**：4 事件（2 正常 + 1 EISDIR 异常 + 1 enter）→ `camera-dsl log` 默认只列出 1 条 EISDIR 偏差（`rule=design:silent-error-discard`，`reason=non-benign error silently discarded (op=writefile): "EISDIR..."`，含 path 字段）；`--all` 全列但异常打标。正常事件被筛选层正确过滤。
+- **说明（文件维度待补）**：当前日志含「数据流」（probe 名，如 saveSink.writefile）和「类型」（rule），但未含完整文件路径——probe 名的 mod 前缀即文件 basename（saveSink 来自 save_sink.ts）。若需精确文件路径，需让 TS 探针 emit 时带 file 字段（待后续增强）。
+- 测试：新增 `dsl_log_test.go` 3 用例，go 全量测试通过。
