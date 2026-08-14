@@ -104,3 +104,15 @@
 - **E2E 实证 2（真实错误捕获）**：把 live 文件 `design-canvas.json` 占位成**目录**制造写盘失败 → 再次 `POST /api/save` → 服务端返回 500（EISDIR）→ **探针自动捕获 err 事件**（`err: "EISDIR: illegal operation on a directory..."`）→ Go `camera-dsl loop` 判定 **1 违反**：`design:silent-error-discard` 契约被触发，报告明确错误信息。
 - **意义**：证明「全量无脑插桩 + DSL 筛选」能收敛到 CI 数据流门禁——运行中自动抓包，判定层识别错误，报告偏差。serve 的每个真实保存请求都会被 Camera 全程观测。
 - 说明：本次只接入 serve 一个入口（含 storage.ts 已有 saveDSL 手动埋点）。未做 serve 单测——端到端真实 HTTP 请求已充分验证，避免过度工程。
+
+## ✅ 开发时即时观测提示（已完成并验证）
+- **定位澄清（2026-08-14）**：用户明确 Camera 的纠错形态是「开发时即时观测提示」，不是 CI 门禁。本项目是「开发工具 + 自动化纠错工具 + 活文档」三合一，Camera 应在开发时（跑 serve/改 DSL）在旁边自动观测、发现错误即时提示，不打断开发。
+- **改动**：
+  - `src/camera/judge.ts`（新增）：TS 侧轻量即时判定器，`silentErrorDiscard()` / `judgeEvent()`，与 Go `SilentErrorDiscard` 谓词语义对齐（err 非空 + op 分层良性判断：cleanup/remove 的 benign 良性，writefile/save/mkdirall 一律非良性）。
+  - `src/camera/probe.ts`：`TSProbeCapture` 构造函数加可选 `onEvent` 即时回调，每条事件落盘后立即调用（不阻塞，失败不影响落盘）。
+  - `src/camera/run_sentinel.ts`：`enableCameraFromEnv(onEvent?)` 透传即时回调。
+  - `src/tools/serve.ts`：`startServer()` 的哨兵注入即时判定回调——事件命中契约偏差即 `broadcastSSE('camera-alert', ...)` 推给画布。
+- **定位说明**：即时判定器是「秒级轻量提示」，不做全量聚合/未观测判定；那部分仍由 `camera-dsl loop` 事后权威执行。语义对齐，定位互补。
+- **E2E 验证（真实 SSE）**：临时项目把 live 文件占位成目录制造写盘失败 → 启动 serve → 开 SSE 客户端监听 `/api/events` → 发 `POST /api/save` → **SSE 毫秒级收到 `camera-alert`**：`rule=design:silent-error-discard`，`reason=nont-benign error silently discarded (op=writefile): "EISDIR..."`，含完整 fields。
+- **意义**：完整「开发时即时观测提示」链路打通——运行中探针采集 → 即时判定 → SSE 推给画布，错误出现即提示，无需事后跑命令。
+- 测试：新增 `tests/camera/judge.test.ts` 6 用例（err nil / writefile 非良性 / cleanup benign / cleanup 非良性 / judgeEvent 多规则 / 无偏差），camera 全量 26 通过。

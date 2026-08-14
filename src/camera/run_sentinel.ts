@@ -14,13 +14,18 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { TSProbeCapture, setGlobalProbeSink } from './probe.js';
+import { TSProbeCapture, setGlobalProbeSink, type TSEvent } from './probe.js';
 
-/** 从环境变量启用 Camera 全局探针 sink。返回是否已启用。 */
-export function enableCameraFromEnv(): boolean {
+/**
+ * 从环境变量启用 Camera 全局探针 sink。返回是否已启用。
+ * @param onEvent 可选的即时回调：每条事件落盘后立即调用（不阻塞）。
+ *                用于「开发时即时观测提示」——serve 借此在事件产生瞬间判定并
+ *                通过 SSE 推给画布，而非事后跑 Go loop 才知道结果。
+ */
+export function enableCameraFromEnv(onEvent?: (ev: TSEvent) => void): boolean {
   const eventsFile = process.env.CAMERA_EVENTS_FILE;
   if (!eventsFile) return false;
-  const sink = new TSProbeCapture(eventsFile);
+  const sink = new TSProbeCapture(eventsFile, onEvent);
   setGlobalProbeSink(sink);
   // 幂等：确保事件文件可写（目录存在）
   fs.mkdirSync(path.dirname(eventsFile), { recursive: true });

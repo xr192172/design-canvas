@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '../storage.js';
 import { enableCameraFromEnv } from '../camera/run_sentinel.js';
+import { judgeEvent } from '../camera/judge.js';
 import { importProject } from './import_project.js';
 import { getProjectCacheDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
@@ -1561,9 +1562,21 @@ export async function startServer(port?: number): Promise<void> {
   const listenPort = port || PORT;
 
   // Camera 运行哨兵：设置 CAMERA_EVENTS_FILE 时激活全局探针 sink，
-  // 运行中自动采集数据流事件（saveDSL 写盘等），供 CI 数据流门禁判定。
+  // 运行中自动采集数据流事件（saveDSL 写盘等）。每条事件落盘后立即用轻量
+  // 判定器判断，命中契约偏差就 SSE 推送给画布（开发时即时观测提示）。
   // 未设置时 no-op，不改变 serve 行为。
-  enableCameraFromEnv();
+  enableCameraFromEnv((ev) => {
+    const v = judgeEvent(ev);
+    if (v.result === 'deviation') {
+      broadcastSSE('camera-alert', {
+        probe: v.probe,
+        rule: v.rule,
+        reason: v.reason,
+        fields: v.fields,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
 
   // 注册 DSL 变更回调：MCP saveDSL → SSE 广播
   onDslChange((feature, source) => {

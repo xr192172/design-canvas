@@ -76,9 +76,17 @@ export type ExtraFields = Record<string, unknown>;
  */
 export class TSProbeCapture {
   private readonly eventsPath: string;
+  private readonly onEvent?: (ev: TSEvent) => void;
 
-  constructor(eventsPath: string) {
+  /**
+   * @param eventsPath events.jsonl 路径
+   * @param onEvent    可选的即时回调：每条事件写入后立即调用（不阻塞）。
+   *                   用于「开发时即时观测提示」——serve 侧借此在事件产生瞬间
+   *                   判定并 SSE 推送，而非事后跑 Go loop 才知道结果。
+   */
+  constructor(eventsPath: string, onEvent?: (ev: TSEvent) => void) {
     this.eventsPath = eventsPath;
+    this.onEvent = onEvent;
   }
 
   /** 确定 events.jsonl 路径（默认 <cameraDir>/events.jsonl）。 */
@@ -99,6 +107,13 @@ export class TSProbeCapture {
     };
     fs.mkdirSync(path.dirname(this.eventsPath), { recursive: true });
     fs.appendFileSync(this.eventsPath, JSON.stringify(ev) + '\n', 'utf8');
+    if (this.onEvent) {
+      try {
+        this.onEvent(ev);
+      } catch {
+        /* 即时回调失败不影响落盘 */
+      }
+    }
     return ev;
   }
 
