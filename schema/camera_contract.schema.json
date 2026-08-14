@@ -1,0 +1,278 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://design-canvas.dev/schema/camera_contract.schema.json",
+  "title": "Camera 多语言数据契约",
+  "description": "语言无关的动态插桩数据契约：事件(event) → 观测画像(actual) ⇄ 设计契约(contract/design) → 偏差报告(deviation)。任何语言接入 Camera 只需按其语言惯例实现这四类结构的读写，判定语义由统一规则谓词 & LLM 判定层承载，不随语言而变。",
+  "type": "object",
+  "definitions": {
+    "Event": {
+      "type": "object",
+      "title": "探针事件快照",
+      "description": "一次动态插桩捕获的数据快照。所有语言探针必须产出此结构并追加写入 events.jsonl（每行一个 JSON 对象）。",
+      "required": ["probe", "time", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "probe": {
+          "type": "string",
+          "description": "探针点 id，形如 'save.writefile'。命名建议 <module>.<site>，跨语言全局唯一。"
+        },
+        "time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "捕获时间戳（UTC，RFC3339）。"
+        },
+        "source": {
+          "type": "string",
+          "description": "期望来源：static-rule / llm-design / runtime-invariant。缺省时视为 static-rule。"
+        },
+        "fields": {
+          "type": "object",
+          "description": "捕获的具体值（err、path、bytes、benign、op…）。键值均为 JSON 可序列化类型。",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "DSLDecl": {
+      "type": "object",
+      "title": "设计契约声明",
+      "description": "Camera DSL 的一条行为契约——行为级判定的唯一真相源。LLM 判定输入 = 事件快照 + 匹配的 DSLDecl，不含项目文档背景。",
+      "required": ["rule", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "rule": {
+          "type": "string",
+          "description": "规则 id，如 design:silent-error-discard。确定性谓词按此 id 注册。"
+        },
+        "probe": {
+          "type": "string",
+          "description": "探针点 id；空字符串 = 匹配所有探针（全局声明）。"
+        },
+        "expect": {
+          "type": "string",
+          "description": "期望行为（人类可读，喂给 LLM 判定）。"
+        },
+        "constraint": {
+          "type": "string",
+          "description": "可选精确约束，进一步限定 expect（喂给 LLM）。"
+        }
+      }
+    },
+
+    "DesignDSLDoc": {
+      "type": "object",
+      "title": "设计 DSL（权威真相源）",
+      "description": "当前生效的设计契约集合，版本化 + 快照式审计历史。对应 dsl.json。",
+      "required": ["version", "updated_at", "decls"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "integer",
+          "description": "单调递增版本号。"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "本次定稿时间（UTC）。"
+        },
+        "decls": {
+          "type": "array",
+          "description": "全部生效声明。",
+          "items": { "$ref": "#/definitions/DSLDecl" }
+        }
+      }
+    },
+
+    "HistoryEntry": {
+      "type": "object",
+      "title": "DSL 审计历史条目",
+      "description": "DSL 定稿/回滚的一次记录。快照式：decls 存完整快照，可任意回滚。对应 dsl.history.jsonl（append-only，每行一个）。",
+      "required": ["version", "at", "reason", "source", "decls"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "integer",
+          "description": "本次写入后的版本号。"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "变更时间（UTC）。"
+        },
+        "reason": {
+          "type": "string",
+          "description": "变更原因（人类可读）。"
+        },
+        "source": {
+          "type": "string",
+          "description": "来源：seed / manual / llm-revise / rollback。"
+        },
+        "decls": {
+          "type": "array",
+          "description": "本版本的完整 DSL 快照。",
+          "items": { "$ref": "#/definitions/DSLDecl" }
+        }
+      }
+    },
+
+    "ProbeObs": {
+      "type": "object",
+      "title": "单探针观测画像",
+      "description": "单个探针点的观测统计与全量证据。actual DSL 是「可再生·非权威」的：只描述观测到的真实行为分布，不做期望声明。",
+      "required": ["probe", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "probe": {
+          "type": "string",
+          "description": "探针点 id。"
+        },
+        "count": {
+          "type": "integer",
+          "description": "该探针捕获事件总数。"
+        },
+        "errs": {
+          "type": "integer",
+          "description": "捕获到非空 err 的事件数。"
+        },
+        "benigns": {
+          "type": "integer",
+          "description": "标记为良性的事件数。"
+        },
+        "ops": {
+          "type": "array",
+          "description": "去重的 op 取值（保持出现顺序）。",
+          "items": { "type": "string" }
+        },
+        "facts": {
+          "type": "array",
+          "description": "人类可读的事实摘要。",
+          "items": { "type": "string" }
+        },
+        "events": {
+          "type": "array",
+          "description": "全量证据事件（可再生自 events.jsonl，使 actual.dsl.json 自给自足）。",
+          "items": { "$ref": "#/definitions/Event" }
+        }
+      }
+    },
+
+    "ActualDSLDoc": {
+      "type": "object",
+      "title": "观测事实画像（可再生·非权威）",
+      "description": "观测到的真实行为分布。对应 actual.dsl.json。区别于设计 DSL（权威），它不声明期望。",
+      "required": ["generated_at", "event_count", "probes"],
+      "additionalProperties": false,
+      "properties": {
+        "generated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "画像生成时间（UTC）。"
+        },
+        "source": {
+          "type": "string",
+          "description": "事件来源路径。"
+        },
+        "event_count": {
+          "type": "integer",
+          "description": "事件总数。"
+        },
+        "bad_lines": {
+          "type": "integer",
+          "description": "读取事件时跳过的坏行数。"
+        },
+        "probes": {
+          "type": "array",
+          "description": "各探针点的观测画像。",
+          "items": { "$ref": "#/definitions/ProbeObs" }
+        }
+      }
+    },
+
+    "Deviation": {
+      "type": "object",
+      "title": "偏差",
+      "description": "观测画像 vs 设计契约的一条偏差。",
+      "required": ["kind", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["unobserved", "violated", "undesigned"],
+          "description": "unobserved=设计声明未被观测到；violated=观测事件违反声明；undesigned=观测到事实无对应声明。"
+        },
+        "rule": {
+          "type": "string",
+          "description": "命中的 DSL 规则 id。undesigned 时通常为空。"
+        },
+        "probe": {
+          "type": "string",
+          "description": "关联探针点 id。"
+        },
+        "detail": {
+          "type": "string",
+          "description": "偏差说明。"
+        }
+      }
+    },
+
+    "DiffReport": {
+      "type": "object",
+      "title": "偏差报告",
+      "description": "actual vs design 的对比结果。对应偏差报告输出。",
+      "required": ["generated_at", "event_count", "deviations"],
+      "additionalProperties": false,
+      "properties": {
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "design": {
+          "type": "string",
+          "description": "设计 DSL 来源。"
+        },
+        "actual": {
+          "type": "string",
+          "description": "观测画像来源。"
+        },
+        "event_count": {
+          "type": "integer"
+        },
+        "deviations": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Deviation" }
+        },
+        "unobserved": {
+          "type": "integer"
+        },
+        "violated": {
+          "type": "integer"
+        },
+        "undesigned": {
+          "type": "integer"
+        }
+      }
+    },
+
+    "Verdict": {
+      "type": "object",
+      "title": "单事件判定结果",
+      "description": "规则秒判（Judge）/ LLM 判定（LLMJudge）的统一结构化结果。",
+      "required": ["result"],
+      "additionalProperties": false,
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": ["ok", "deviation"]
+        },
+        "rule": {
+          "type": "string",
+          "description": "命中的 DSL 规则 id；ok 时可空。"
+        },
+        "reason": {
+          "type": "string",
+          "description": "判定理由（一句话）。"
+        }
+      }
+    }
+  }
+}
