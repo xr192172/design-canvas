@@ -32,7 +32,7 @@
 1. agent-shell 核心是上下文引擎，加可视化编辑器会分散精力
 2. 这个工具价值不限于本项目，任何 LLM 辅助开发场景都能用
 3. 作为 MCP server 对外开放，Claude Desktop / Cursor 等都能接入
-4. 与 codebase-memory-mcp、lesion-rules 形成"现状 + 规范 + 目标"生态三角
+4. 与 codebase-memory-mcp 形成"现状 + 规范"生态互补
 
 ## 2. 双层 DSL 设计（核心）
 
@@ -437,7 +437,7 @@ design-canvas 依赖 codebase-memory-mcp 的以下 action：
 
 - **开源**：MCP server + 基础渲染器
 - **付费**：多人协作云服务（WebSocket 实时同步）/ 企业版主题 / 自定义渲染插件
-- **生态**：与 codebase-memory-mcp / lesion-rules 联动，形成"现状+规范+目标"工具链
+- **生态**：与 codebase-memory-mcp 联动，形成"现状 + 规范"工具链
 
 ## 7. 设计决策记录
 
