@@ -58,6 +58,14 @@ func RunDSLCLI(args []string, dataDir string) bool {
 		return dslActual(args[1:], dataDir)
 	case "diff":
 		return dslDiff(args[1:], dataDir)
+	case "propose":
+		return dslPropose(args[1:], dataDir)
+	case "proposals":
+		return dslProposals(dataDir)
+	case "approve":
+		return dslApprove(args[1:], dataDir)
+	case "reject":
+		return dslReject(args[1:], dataDir)
 	case "help", "-h", "--help":
 		usageDSL()
 		return true
@@ -78,11 +86,16 @@ func usageDSL() {
   camera-dsl seed               播种 v1 种子（幂等）
   camera-dsl actual <events.jsonl> [--out <path>]  聚合观测画像 → actual.dsl.json
   camera-dsl diff [--actual <path>]                对比 actual vs design，出三类偏差报告
+  camera-dsl propose <decls.json> [--reason <原因>] [--source <来源>]  提交修订提案（不落权威盘）
+  camera-dsl proposals                               列出全部修订提案
+  camera-dsl approve <id> [--reviewer <名字>]        验证门审批 → 定稿为设计 DSL 新版本
+  camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
   dsl.history.jsonl  快照式审计历史
   actual.dsl.json    观测事实画像（可再生·非权威，由 camera-dsl actual 生成）
+  proposals/         修订提案目录（写盘权分离，审批后才并入 dsl.json）
 `)
 }
 
@@ -233,6 +246,130 @@ func dslDiff(args []string, dataDir string) bool {
 	report.Design = "dsl.json"
 	report.Actual = actualPath
 	fmt.Print(RenderDiffReport(report))
+	return true
+}
+
+// dslPropose 从 decls JSON 文件创建一份修订提案（写盘权分离，不触碰 dsl.json）。
+func dslPropose(args []string, dataDir string) bool {
+	var declsPath, reason, source = "", "", "manual"
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--reason" && i+1 < len(args):
+			reason = args[i+1]
+			i++
+		case args[i] == "--source" && i+1 < len(args):
+			source = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "-"):
+			continue
+		default:
+			if declsPath == "" {
+				declsPath = args[i]
+			}
+		}
+	}
+	if declsPath == "" {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl propose <decls.json> [--reason <原因>] [--source <来源>]")
+		return true
+	}
+	decls, err := loadDeclsFile(declsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl propose: %v\n", err)
+		return true
+	}
+	p, err := NewProposalStore(dataDir).Create(decls, reason, source)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl propose: %v\n", err)
+		return true
+	}
+	fmt.Printf("已创建修订提案 %s（%d 条声明，状态 pending）\n  运行 `camera-dsl approve %s` 定稿为设计 DSL 新版本\n",
+		p.ID, len(p.Decls), p.ID)
+	return true
+}
+
+// loadDeclsFile 解析声明文件：接受 DSLDecl 数组，或 {"decls":[...]} 包装对象。
+func loadDeclsFile(path string) ([]DSLDecl, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var arr []DSLDecl
+	if err := json.Unmarshal(data, &arr); err == nil {
+		return arr, nil
+	}
+	var wrap struct {
+		Decls []DSLDecl `json:"decls"`
+	}
+	if err := json.Unmarshal(data, &wrap); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败（需 DSLDecl 数组或 {\"decls\":[...]}）: %w", path, err)
+	}
+	return wrap.Decls, nil
+}
+
+// dslProposals 列出全部修订提案。
+func dslProposals(dataDir string) bool {
+	list, err := NewProposalStore(dataDir).List()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl proposals: %v\n", err)
+		return true
+	}
+	if len(list) == 0 {
+		fmt.Println("无修订提案")
+		return true
+	}
+	fmt.Println("修订提案：")
+	for _, p := range list {
+		reason := p.Reason
+		if len(reason) > 40 {
+			reason = reason[:40] + "…"
+		}
+		fmt.Printf("  %-24s %-9s %d 条声明  src=%s  %s\n", p.ID, p.Status, len(p.Decls), p.Source, reason)
+	}
+	return true
+}
+
+// dslApprove 验证门审批：通过后借 DesignDSLStore 定稿为新版本。
+func dslApprove(args []string, dataDir string) bool {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl approve <id> [--reviewer <名字>]")
+		return true
+	}
+	id := args[0]
+	reviewer := "cli"
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--reviewer" && i+1 < len(args) {
+			reviewer = args[i+1]
+			i++
+		}
+	}
+	ver, err := NewProposalStore(dataDir).Approve(id, reviewer, NewDesignDSLStore(dataDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl approve: %v\n", err)
+		return true
+	}
+	fmt.Printf("已审批通过提案 %s → 设计 DSL v%d（审计链保留）\n", id, ver)
+	return true
+}
+
+// dslReject 拒绝修订提案。
+func dslReject(args []string, dataDir string) bool {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl reject <id> [--reviewer <名字>]")
+		return true
+	}
+	id := args[0]
+	reviewer := "cli"
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--reviewer" && i+1 < len(args) {
+			reviewer = args[i+1]
+			i++
+		}
+	}
+	if err := NewProposalStore(dataDir).Reject(id, reviewer); err != nil {
+		fmt.Fprintf(os.Stderr, "camera-dsl reject: %v\n", err)
+		return true
+	}
+	fmt.Printf("已拒绝修订提案 %s\n", id)
 	return true
 }
 
