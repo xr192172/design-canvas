@@ -38,5 +38,16 @@
 - **根因**：`str()/req()` 直接访问 `args[k]`，args 为 undefined 时抛 TypeError。
 - **修复（bug #5）**：`manageFeature` 对 `args` 兜底为空对象 `args = input.args ?? {}`，缺参时改抛清晰错误。回归测试：`tests/tools/manage_feature.test.ts`。
 
+## ✅ 阶段P3：修订提案 + 验证门审批（写盘权分离，已完成并验证）
+- **原则**：提案权与写盘权分离。修订提案驻留 `{dataDir}/proposals/`，只描述"想把设计 DSL 改成什么"，绝不触碰权威 `dsl.json`；LLM 无直接写盘通道，只能产提案。
+- **验证门审批**：只有 `approve` 通过后，才借 `DesignDSLStore.Save` 定稿为新版本并入审计历史（快照式，可回滚）。校验 rule/expect 必填、声明集非空，防畸形契约污染权威真相源。
+- **新增**：
+  - `internal/probe/proposal.go`：`Proposal`/`ProposalStore`（Create/Get/List/Approve/Reject），状态 pending→approved/rejected。
+  - `internal/probe/proposal_test.go`：6 个用例（propose 不触碰 dsl.json、approve 定稿新版本+状态翻转、非 pending 拒绝审批、reject、按创建序 list、空/畸形声明被验证门拒绝）。
+  - `internal/probe/dsl_cli.go`：新增 `propose`/`proposals`/`approve`/`reject` 子命令。
+- **修复**：提案 ID 用 `UnixNano` 在 Windows 时钟粒度粗时同纳秒重复导致第二个提案覆盖第一个 → 加随机后缀 `proposal-<ns>-<4hex>`。
+- **E2E CLI 验证（临时根）**：`seed`(v1,1声明) → `propose`(2声明,pending) → `approve` → `show`(v2,2声明) → `history`(v1 seed + v2 llm-revise) → `proposals`(approved)。全链路通过。
+- Go 测试全量通过。
+
 ## 下一步（待办）
-- 推进 P3 修订+验证门 / P4 循环+触发，及 TS 跨语言契约试点。
+- 推进 P4 循环+触发（观测→偏差→提案→定稿的闭环触发），及 TS 跨语言契约试点。
