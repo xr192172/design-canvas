@@ -147,10 +147,10 @@ Comparator:
 
 - [x] Schema 与 9 个 Go 类型字段逐一对齐（见 §2 表）
 - [x] Schema 为合法 JSON（draft-07）
-- [ ] 端到端：Go 探针产出 events.jsonl → loader → aggregator → actual.dsl.json
-- [ ] 端到端：actual.dsl.json + dsl.json → comparator → DiffReport（三类偏差计数正确）
-- [ ] 端到端：`camera-dsl actual` / `camera-dsl diff` CLI 输出符合 Schema
-- [ ] 契约语义对齐：TS 探针埋点产出的事件能被 Go 装配层正确判定（跨语言接入试点）
+- [x] 端到端：Go 探针产出 events.jsonl → loader → aggregator → actual.dsl.json
+- [x] 端到端：actual.dsl.json + dsl.json → comparator → DiffReport（三类偏差计数正确）
+- [x] 端到端：`camera-dsl actual` / `camera-dsl diff` / `camera-dsl loop` CLI 输出符合 Schema
+- [x] 契约语义对齐：TS 探针埋点产出的事件能被 Go 装配层正确判定（跨语言接入试点，含真实 serve 运行抓包实证）
 
 ---
 

@@ -96,3 +96,11 @@
   - 运行真实 save 路径 → 采集 **6 条事件**（constructor.enter/exit、save.enter、mkdirall、writefile、save.exit，core/event 分级正确）。
   - Go `camera-dsl loop` 判定：**6 事件，0 未观测 · 0 违反 · 0 未声明，完全一致**。
 - TS camera 测试 20 个（含新增回归）+ Go 全量测试通过。
+
+## ✅ 运行中抓包实证：serve 启动接入哨兵 + 真实错误捕获（已完成并验证）
+- **目标**：把「运行中直接抓包」落到 design-canvas 自身真实数据流——serve 的 `/api/save` 保存路径。这是从「演示脚本」到「自项目真实运行观测」的关键一跳，也是 CI 数据流门禁的核心链路。
+- **改动**：`src/tools/serve.ts` 的 `startServer()` 开头调用 `enableCameraFromEnv()`（import `../camera/run_sentinel.js`）。设置 `CAMERA_EVENTS_FILE` 时激活全局探针 sink，未设置时 no-op 不改变 serve 行为。
+- **E2E 实证 1（正常保存）**：临时目录启动 serve（cwd 指向临时项目，`CAMERA_EVENTS_FILE` 指向临时事件文件）→ 真实 `POST /api/save` → 采集 **2 条 `save.writefile` 事件**（feature 文件 + live 文件，err=null）→ Go `camera-dsl loop` 判定 **0 违反 0 未声明，完全一致**。
+- **E2E 实证 2（真实错误捕获）**：把 live 文件 `design-canvas.json` 占位成**目录**制造写盘失败 → 再次 `POST /api/save` → 服务端返回 500（EISDIR）→ **探针自动捕获 err 事件**（`err: "EISDIR: illegal operation on a directory..."`）→ Go `camera-dsl loop` 判定 **1 违反**：`design:silent-error-discard` 契约被触发，报告明确错误信息。
+- **意义**：证明「全量无脑插桩 + DSL 筛选」能收敛到 CI 数据流门禁——运行中自动抓包，判定层识别错误，报告偏差。serve 的每个真实保存请求都会被 Camera 全程观测。
+- 说明：本次只接入 serve 一个入口（含 storage.ts 已有 saveDSL 手动埋点）。未做 serve 单测——端到端真实 HTTP 请求已充分验证，避免过度工程。
