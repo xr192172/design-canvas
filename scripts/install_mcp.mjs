@@ -22,6 +22,7 @@
  *   gemini   ~/.gemini/settings.json            (Gemini CLI)
  *   windsurf ~/.codeium/windsurf/mcp_config.json(Windsurf 用户级)
  *   cline    ~/.cline/mcp_settings.json         (Cline 扩展)
+ *   trae     <root>/.trae/mcp.json              (TRAE 项目级 MCP，需在设置中开启「启用项目级 MCP」)
  *
  * 安全：所有写入前备份原文件为 <file>.design-canvas.bak；合并时保留已有其他 server。
  */
@@ -35,6 +36,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SERVER = path.join(ROOT, 'dist', 'src', 'server.js');
+
+// TRAE 专用：以字面字符串保留 ${workspaceFolder}，让 MCP 配置随项目根迁移（git worktree / 换目录）
+const WF = '${workspaceFolder}';
 
 // ── 命令行参数 ──
 const args = process.argv.slice(2);
@@ -156,12 +160,33 @@ const PLATFORMS = [
     keyPath: 'mcpServers',
     serverKey: 'design-canvas',
   },
+  {
+    name: 'trae',
+    label: 'TRAE（项目级）',
+    configPath: path.join(ROOT, '.trae', 'mcp.json'),
+    kind: 'json',
+    keyPath: 'mcpServers',
+    serverKey: 'design-canvas',
+    // TRAE 要求 command 不含空格（Windows node 位于 C:\Program Files 下有空格），故用 PATH 内 node
+    command: 'node',
+    // 用 ${workspaceFolder} 相对项目根：git worktree / 目录迁移时仍指向当前项目 dist
+    args: [`${WF}/dist/src/server.js`],
+  },
 ];
 
-const serverValue = {
+const baseServerValue = {
   command: process.execPath || 'node',
   args: [SERVER],
 };
+
+/** 平台级 serverValue：部分平台（如 TRAE）要求 command 不含空格，可覆盖 command/args */
+function serverValueOf(p) {
+  return {
+    ...baseServerValue,
+    ...(p.command ? { command: p.command } : {}),
+    ...(p.args ? { args: p.args } : {}),
+  };
+}
 
 // ── 通用写入 ──
 function writeConfig(p, outText) {
@@ -180,8 +205,9 @@ function present(v) {
 }
 
 function buildOutput(p, existingText) {
+  const sv = serverValueOf(p);
   if (p.kind === 'toml') {
-    return patchToml(existingText ?? '', p.serverKey, serverValue);
+    return patchToml(existingText ?? '', p.serverKey, sv);
   }
   let parsed = null;
   const raw = (existingText ?? '').replace(/^\uFEFF/, ''); // 容忍 UTF-8 BOM（Windows 常见）
@@ -194,7 +220,7 @@ function buildOutput(p, existingText) {
       return null;
     }
   }
-  const patched = jsonPatch(parsed, p.keyPath, p.serverKey, serverValue);
+  const patched = jsonPatch(parsed, p.keyPath, p.serverKey, sv);
   return JSON.stringify(patched, null, 2) + '\n';
 }
 

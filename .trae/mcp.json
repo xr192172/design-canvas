@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "design-canvas": {
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/dist/src/server.js"
+      ]
+    }
+  }
+}
