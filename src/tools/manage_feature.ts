@@ -23,7 +23,9 @@ export interface ManageFeatureResult {
 }
 
 export function manageFeature(input: ManageFeatureInput): ManageFeatureResult {
-  const { action, args } = input;
+  // args 可能为空（如 delete 只传 action 时），统一兜底为空对象，避免 args[k] 抛 TypeError
+  const { action } = input;
+  const args = input.args ?? {};
   const str = (k: string): string | undefined => {
     const x = args[k];
     return typeof x === 'string' ? x : undefined;

@@ -230,6 +230,7 @@ const TOOL_DEFS: ToolDef[] = [
       annotation_id: z.string().optional().describe('query=approval_history 时：标注 ID'),
       feature_a: z.string().optional().describe('query=diff 时：源 feature'),
       feature_b: z.string().optional().describe('query=diff 时：目标 feature'),
+      view_b: z.enum(['design', 'live']).optional().describe('query=diff 时：feature_b 视图层级，默认跟随 view（design）；对比"设计 vs 代码现状"时传 live'),
     },
     handler: getDslHandler,
   },

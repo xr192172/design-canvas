@@ -40,6 +40,12 @@ describe('manage_feature', () => {
     expect(() => manageFeature({ action: 'delete', args: {} })).toThrow(/"feature"/);
   });
 
+  it('args 为空（undefined）时不抛 TypeError，改抛缺参错误', () => {
+    // bug #5：delete/其他 action 在 args 未传（undefined）时，args[k] 直接解构会抛 TypeError
+    expect(() => manageFeature({ action: 'delete' } as never)).toThrow(/"feature"/);
+    expect(() => manageFeature({ action: 'create' } as never)).toThrow(/"feature"/);
+  });
+
   it('未知 action 报错', () => {
     expect(() => manageFeature({ action: 'bogus' as never, args: {} })).toThrow(/未知 manage_feature action/);
   });

@@ -27,15 +27,16 @@
 - 实際导入用 `project_dir=go-camera`，路径为 `internal/probe/probe.go`，少了 `go-camera/` 前缀。
 - 后果：design⇄live 按路径对齐失效。需统一路径基底（设计 DSL 用与 live 导入相同的相对根）。
 
-### 4. live_only 导入新 feature 不进设计注册表（真实 bug）
+### 4. live_only 导入新 feature 不进设计注册表（真实 bug，已修复）
 - `import_project(live_only=true, feature=新名)` 只在 live 存储，`get_dsl query=diff` 与 features 列表都找不到它。
 - 正确意图：应导入到**已存在 feature 名**填充其 live 视图（🎭设计/⚡实际切换），而非开新 feature。
+- **修复（bug #4）**：`diff_features` 增加 `view_a/view_b` 视图参数，改用 `getDSLByView` 读取；`get_dsl query=diff` 支持 `view_b=live`，从而能对比「设计 degine vs 实际 live-only」快照。回归测试：`tests/tools/diff_features.test.ts`。
 
-### 5. manage_feature delete 对 live-only feature 抛 JS 错误（真实 bug）
+### 5. manage_feature delete 对 live-only feature 抛 JS 错误（真实 bug，已修复）
 - `manage_feature delete camera_live` 报 `Cannot read properties of undefined (reading 'feature')`。
-- 应改为优雅报错（"live-only feature 不存在于设计注册表"），而非 TypeError。
+- **根因**：`str()/req()` 直接访问 `args[k]`，args 为 undefined 时抛 TypeError。
+- **修复（bug #5）**：`manageFeature` 对 `args` 兜底为空对象 `args = input.args ?? {}`，缺参时改抛清晰错误。回归测试：`tests/tools/manage_feature.test.ts`。
 
 ## 下一步（待办）
 - 决策：统一设计 DSL 与 live 导入的路径基底，让 design⇄live diff 可对齐。
-- 修复 bug #4/#5（live feature 注册/删除的健壮性）。
 - 推进 P3 修订+验证门 / P4 循环+触发，及 TS 跨语言契约试点。

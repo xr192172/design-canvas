@@ -2,11 +2,15 @@
  * diff_features：对比两个 feature 的差异
  */
 
-import { getDSL } from '../storage.js';
+import { getDSLByView } from '../storage.js';
 
 export interface DiffFeaturesInput {
   feature_a: string;
   feature_b: string;
+  /** feature_a 视图层级，默认 design */
+  view_a?: 'design' | 'live';
+  /** feature_b 视图层级，默认 design；对比"设计 vs 代码现状"时设 live */
+  view_b?: 'design' | 'live';
 }
 
 export interface DiffItem {
@@ -32,13 +36,13 @@ export interface DiffFeaturesResult {
 }
 
 export function diffFeatures(input: DiffFeaturesInput): DiffFeaturesResult {
-  const { feature_a, feature_b } = input;
+  const { feature_a, feature_b, view_a = 'design', view_b = 'design' } = input;
 
-  const dslA = getDSL(feature_a);
-  if (!dslA) throw new Error(`feature_a "${feature_a}" 不存在`);
+  const dslA = getDSLByView(feature_a, view_a);
+  if (!dslA) throw new Error(`feature_a "${feature_a}" 不存在（视图: ${view_a}）`);
 
-  const dslB = getDSL(feature_b);
-  if (!dslB) throw new Error(`feature_b "${feature_b}" 不存在`);
+  const dslB = getDSLByView(feature_b, view_b);
+  if (!dslB) throw new Error(`feature_b "${feature_b}" 不存在（视图: ${view_b}）`);
 
   const diffs: DiffItem[] = [];
 
@@ -186,7 +190,7 @@ export function diffFeatures(input: DiffFeaturesInput): DiffFeaturesResult {
   const modified = diffs.filter(d => d.type === 'modified').length;
 
   const lines: string[] = [];
-  lines.push(`差异对比: ${feature_a} vs ${feature_b}`);
+  lines.push(`差异对比: ${feature_a}(${view_a}) vs ${feature_b}(${view_b})`);
   lines.push('');
   lines.push(`总计: +${added} 新增, -${removed} 删除, ~${modified} 修改`);
   lines.push('');

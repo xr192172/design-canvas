@@ -95,6 +95,8 @@ export interface QueryFeatureInput {
   feature_b?: string;
   /** 视图层级：design（默认，活态文件）/ live（实际代码快照，仅 query=dsl/nodes/edges/node/files/file 生效） */
   view?: DSLView;
+  /** diff：feature_b 视图层级，默认跟随 view（design）；对比"设计 vs 代码现状"时传 live 以读取实际快照 */
+  view_b?: DSLView;
   /** calls：项目根目录（用于打开 cache.db 查询调用关系） */
   project_dir?: string;
 }
@@ -599,7 +601,12 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       if (!input.feature_a || !input.feature_b) {
         throw new Error('query "diff" 需要 feature_a 和 feature_b 参数');
       }
-      const r = diffFeatures({ feature_a: input.feature_a, feature_b: input.feature_b });
+      const r = diffFeatures({
+        feature_a: input.feature_a,
+        feature_b: input.feature_b,
+        view_a: input.view, // 默认 design
+        view_b: input.view_b, // 可选，对比"设计 vs 代码现状"时传 live
+      });
       const lines = [
         `diff "${input.feature_a}" → "${input.feature_b}"`,
         `新增 ${r.summary.added} · 删除 ${r.summary.removed} · 修改 ${r.summary.modified}`,
