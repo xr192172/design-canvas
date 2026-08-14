@@ -60,5 +60,18 @@
 - **E2E CLI 验证（临时根）**：seed→propose(特定探针)→approve→loop 报告正确（未观测 save.writefile）→show 权威未变。全链路通过。
 - Go 测试全量通过。
 
+## ✅ TS 跨语言契约试点（已完成并验证）
+- **目标**：验证 schema 清单「TS 探针埋点产出的事件能被 Go 装配层正确判定」，证明 Camera 契约语言无关。
+- **新增**：
+  - `src/camera/probe.ts`：TS 探针端口（`TSProbeCapture`，追加写 events.jsonl，自动补 time）+ `loadTSEvents`（坏行跳过）。
+  - `src/camera/contract.ts`：TS 判定哨兵（`TSComparator`，三类偏差），`silentErrorDiscardTS` 谓词与 Go contract.go 语义逐条对齐。
+  - `src/camera/index.ts`：统一导出。
+  - `tests/camera/camera.test.ts`：9 用例（emission/schema 对齐、坏行容错、三类偏差、op 语义、报告渲染）。
+  - `scripts/camera_ts_probe_demo.mjs`：TS 埋点演示（save + cleanup 场景）。
+- **跨语言 E2E 验证**：TS 探针埋点产出 4 事件 → Go `camera-dsl loop` 判定：2 违反（save.writefile ENOENT、cleanup.remove permission denied）+ 2 良性正确放行。TS 哨兵与 Go 装配层判定语义一致。
+- TS 全量 609 测试 + Go 全量测试通过。
+
 ## 下一步（待办）
-- 推进 TS 跨语言契约试点（把 Camera DSL 契约从 Go 扩到 TS 侧消费/判定）。
+- 判定端口下沉为独立服务（`/api/camera/judge`），探针语言与判定彻底解耦。
+- 事件聚合体积告警/抽样策略（海量事件降级为统计）。
+- 与 design-canvas MCP 工具链整合（import_project 自动埋点 + render_dsl 可视化偏差全景）。
