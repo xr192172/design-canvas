@@ -9,22 +9,43 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { LANGUAGES, findLanguageByExt, LanguageEntry } from './languages.js';
 
 /** 缓存扫描结果（启动时一次扫，后续零开销） */
 let probeCache: Set<string> | null = null;
 let nodeModulesRoot: string | null = null;
 
+/**
+ * 定位 node_modules 根目录。
+ *
+ * 优先从 process.cwd() 向上找（老行为），再回退到本模块自身位置向上找——
+ * MCP client（TRAE/Claude Desktop/Cursor 等）常以用户目录为 cwd 启动 stdio 子进程，
+ * 若只依赖 cwd，将找不到项目根的 node_modules，导致语言包探测为空、import_project 无法解析。
+ * 从模块位置（dist/src/tools/ts_kernel/probe.js）向上 4 级即项目根，与 cwd 无关，任何 client 下都稳定。
+ */
 function getNodeModulesRoot(): string {
   if (nodeModulesRoot !== null) return nodeModulesRoot;
+
+  const candidates = new Set<string>();
   let dir = process.cwd();
   while (dir !== path.dirname(dir)) {
-    const candidate = path.join(dir, 'node_modules');
+    candidates.add(dir);
+    dir = path.dirname(dir);
+  }
+  // 模块自身位置向上链（dist/src/tools/ts_kernel/ → … → 项目根）
+  let modDir = path.dirname(fileURLToPath(import.meta.url));
+  while (modDir !== path.dirname(modDir)) {
+    candidates.add(modDir);
+    modDir = path.dirname(modDir);
+  }
+
+  for (const c of candidates) {
+    const candidate = path.join(c, 'node_modules');
     if (fs.existsSync(candidate)) {
       nodeModulesRoot = candidate;
       return nodeModulesRoot;
     }
-    dir = path.dirname(dir);
   }
   nodeModulesRoot = path.join(process.cwd(), 'node_modules');
   return nodeModulesRoot;
