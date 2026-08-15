@@ -17,12 +17,19 @@
  */
 
 import { judgeEvent, type JudgeVerdict } from './judge.js';
+import { callChat, loadLlmConfig } from '../tools/llm_focus.js';
 import type { TSEvent } from './probe.js';
 
 /** 单条判定结果（含事件副本，方便调用方对齐）。 */
 export interface JudgeEntry {
   verdict: JudgeVerdict;
   event: TSEvent;
+}
+
+/** 单条判定结果（use_llm=true 时含 LLM 复核意见）。 */
+export interface JudgeEntryWithLLM extends JudgeEntry {
+  /** LLM 行为级复核结果（use_llm=true 且事件被判为可疑时存在；否则缺省）。 */
+  llm?: { result: 'ok' | 'deviation'; rule: string; reason: string };
 }
 
 /** 判定服务响应：逐条 verdict + 汇总统计。 */
@@ -58,6 +65,69 @@ export function judgeEvents(events: TSEvent[]): JudgeResult {
   const entries: JudgeEntry[] = events.map((ev) => ({ verdict: judgeEvent(ev), event: ev }));
   const deviation = entries.filter((e) => e.verdict.result === 'deviation').length;
   return { total: entries.length, ok: entries.length - deviation, deviation, entries };
+}
+
+/** judgeEvents 的 LLM 增强版：对规则秒判为「deviation」的事件做 LLM 行为级复核。
+ * use_llm=false（默认）等价 judgeEvents，纯规则秒判、零 LLM 成本。
+ * use_llm=true 时对可疑事件调 LLM 复核；LLM 不可用/调用失败时降级——保留规则
+ * 判定结果，不阻断流程（与 Go LLMJudge 失败降级语义一致）。
+ * LLM 判定只喂「事件快照 + 契约语义」，不接触项目文档（DSL 唯一真相源）。 */
+export async function judgeEventsWithLLM(
+  events: TSEvent[],
+  useLlm = false,
+): Promise<JudgeResult> {
+  const base = judgeEvents(events);
+  if (!useLlm) return base;
+
+  const cfg = loadLlmConfig();
+  const entries: JudgeEntryWithLLM[] = base.entries.map((e) => ({ ...e }));
+  for (const entry of entries) {
+    if (entry.verdict.result !== 'deviation') continue; // 只复核可疑事件，成本可控
+    if (!cfg) {
+      // 未配置 LLM：降级为纯规则，不补 llm 字段
+      continue;
+    }
+    try {
+      const raw = await callChat(cfg, [
+        {
+          role: 'system',
+          content:
+            '你是代码行为判定器。只依据给出的契约语义与事件观测快照判定，不得臆测契约之外的背景。输出纯 JSON，不要 markdown。',
+        },
+        { role: 'user', content: buildLLMPrompt(entry.event, entry.verdict.rule) },
+      ]);
+      const parsed = JSON.parse(raw) as { result?: string; rule?: string; reason?: string };
+      if (parsed.result === 'ok' || parsed.result === 'deviation') {
+        entry.llm = {
+          result: parsed.result,
+          rule: parsed.rule || entry.verdict.rule,
+          reason: parsed.reason || '',
+        };
+      }
+    } catch {
+      // LLM 调用失败 → 降级，保留规则判定，不阻断
+    }
+  }
+
+  const deviation = entries.filter((e) => e.verdict.result === 'deviation').length;
+  return { total: entries.length, ok: entries.length - deviation, deviation, entries: entries as JudgeEntry[] };
+}
+
+/** 组装 LLM 复核 prompt：只含事件快照 + 契约语义（唯一真相源，无文档）。 */
+function buildLLMPrompt(ev: TSEvent, rule: string): string {
+  const lines: string[] = ['【事件观测快照】', `probe: ${ev.probe}`, `source: ${ev.source}`];
+  lines.push('fields:');
+  for (const [k, v] of Object.entries(ev.fields)) lines.push(`  ${k}: ${JSON.stringify(v)}`);
+  lines.push(`\n【契约语义】（判定唯一依据）rule=${rule}`);
+  if (rule === 'design:silent-error-discard') {
+    lines.push(
+      '在本来会静默丢弃错误的位置，捕获到的 err 必须为 nil 或可证明是良性的（benign）。' +
+        'op=writefile/save/mkdirall 时任何错误都不可良性（父目录缺失的 ENOENT 也算非良性，因为数据未持久化）；' +
+        'op=remove/cleanup 仅 os.IsNotExist 良性。',
+    );
+  }
+  lines.push('\n【输出】纯 JSON：{"result":"ok"|"deviation","rule":"<命中的规则id>","reason":"一句话说明"}');
+  return lines.join('\n');
 }
 
 /** 渲染人类可读的判定报告（与 Go RenderReport 对齐）。 */

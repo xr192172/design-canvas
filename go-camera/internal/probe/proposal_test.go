@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestProposalStore_ApproveWritesNewVersionAndFlags(t *testing.T) {
 	}
 	ps := NewProposalStore(dir)
 	decls := []DSLDecl{
-		{Rule: "design:no-op-io", Probe: "fs.writefile", Expect: "写文件必须处理错误"},
+		{Rule: "design:silent-error-discard", Probe: "fs.writefile", Expect: "写文件必须处理错误"},
 	}
 	p, err := ps.Create(decls, "补充一条契约", "llm-revise")
 	if err != nil {
@@ -64,7 +65,7 @@ func TestProposalStore_ApproveWritesNewVersionAndFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if doc.Version != 2 || len(doc.Decls) != 1 || doc.Decls[0].Rule != "design:no-op-io" {
+	if doc.Version != 2 || len(doc.Decls) != 1 || doc.Decls[0].Rule != "design:silent-error-discard" {
 		t.Fatalf("审批后 dsl.json 应整体替换为提案声明，got version=%d decls=%+v", doc.Version, doc.Decls)
 	}
 	// 提案标记 approved
@@ -173,8 +174,14 @@ func TestApprove_RecordsVerificationEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := ps.Approve(p.ID, "reviewer-gate", dsl); err != nil {
-		t.Fatalf("Approve: %v", err)
+	// LLM 复核门：对无谓词声明返回 ok（通过）
+	gate := VerifyGate{LLMReview: func(_ context.Context, decls []DSLDecl) ([]LLMVerdict, error) {
+		return []LLMVerdict{
+			{Rule: "design:no-op-io", Result: "ok", Reason: "契约语义合理，可定稿"},
+		}, nil
+	}}
+	if _, err := ps.ApproveGated(context.Background(), p.ID, "reviewer-gate", dsl, gate); err != nil {
+		t.Fatalf("ApproveGated: %v", err)
 	}
 
 	// 提案落盘了验证门证据
@@ -184,6 +191,9 @@ func TestApprove_RecordsVerificationEvidence(t *testing.T) {
 	}
 	if !strings.Contains(got.VerifiedBy, "1/2") {
 		t.Fatalf("VerifiedBy 应标注 1/2 声明可判定，got %q", got.VerifiedBy)
+	}
+	if !strings.Contains(got.VerifiedBy, "llm-review") {
+		t.Fatalf("VerifiedBy 应含 llm-review 证据，got %q", got.VerifiedBy)
 	}
 
 	// 定稿的 dsl.json 里声明带验证证据与状态
@@ -197,8 +207,100 @@ func TestApprove_RecordsVerificationEvidence(t *testing.T) {
 	if doc.Decls[0].VerifiedBy != "rule-regression" || doc.Decls[0].Status != "verified" {
 		t.Fatalf("有谓词声明应 verified/rule-regression，got %+v", doc.Decls[0])
 	}
-	if doc.Decls[1].VerifiedBy != "needs-llm-review" || doc.Decls[1].Status != "proposed" {
-		t.Fatalf("无谓词声明应 needs-llm-review/proposed，got %+v", doc.Decls[1])
+	if doc.Decls[1].VerifiedBy != "llm-review" || doc.Decls[1].Status != "verified" {
+		t.Fatalf("无谓词声明经 LLM 复核应 verified/llm-review，got %+v", doc.Decls[1])
+	}
+
+	// 审计历史带验证门证据（HistoryEntry.Verification）
+	hist, _ := dsl.History()
+	if len(hist) != 2 {
+		t.Fatalf("审计链应含 2 条，got %d", len(hist))
+	}
+	if !strings.Contains(hist[1].Verification, "llm-review") {
+		t.Fatalf("审计 v2 应带验证门证据（llm-review），got %q", hist[1].Verification)
+	}
+	if hist[1].Action != "approve" || hist[1].FromVersion != 1 {
+		t.Fatalf("审计 v2 应 action=approve from=1，got %+v", hist[1])
+	}
+}
+
+// 严格门：提案含无谓词声明且 LLM 复核不可用 → 定稿冻结，dsl.json 维持旧版。
+func TestApprove_StrictGateFreezesUncoveredWithoutLLM(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	if _, err := dsl.SeedDefault(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ps := NewProposalStore(dir)
+	// 只有无谓词声明（无确定性谓词）
+	p, err := ps.Create([]DSLDecl{{Rule: "design:no-op-io", Probe: "fs.copy", Expect: "复制必须处理错误"}}, "无谓词", "llm-revise")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := ps.Approve(p.ID, "reviewer-x", dsl); err == nil {
+		t.Fatal("无 LLM 复核能力时，含无谓词声明的提案应被冻结（拒绝定稿）")
+	}
+	// 提案标记 rejected（冻结）
+	got, _ := ps.Get(p.ID)
+	if got.Status != ProposalRejected {
+		t.Fatalf("冻结提案应 rejected，got %s", got.Status)
+	}
+	if !strings.Contains(got.VerifiedBy, "frozen") {
+		t.Fatalf("冻结提案应带 frozen 证据，got %q", got.VerifiedBy)
+	}
+	// dsl.json 未变，判定继续用旧版
+	if v := dslVersion(t, dsl); v != 1 {
+		t.Fatalf("冻结后 dsl.json 应保持 v1，got v%d", v)
+	}
+}
+
+// 严格门：LLM 复核调用失败 → 冻结，不落盘。
+func TestApproveGated_LLMReviewFailureFreezes(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	if _, err := dsl.SeedDefault(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ps := NewProposalStore(dir)
+	p, err := ps.Create([]DSLDecl{{Rule: "design:no-op-io", Probe: "fs.copy", Expect: "复制必须处理错误"}}, "复核失败", "llm-revise")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	gate := VerifyGate{LLMReview: func(_ context.Context, _ []DSLDecl) ([]LLMVerdict, error) {
+		return nil, context.DeadlineExceeded
+	}}
+	if _, err := ps.ApproveGated(context.Background(), p.ID, "r", dsl, gate); err == nil {
+		t.Fatal("LLM 复核失败应冻结提案")
+	}
+	if v := dslVersion(t, dsl); v != 1 {
+		t.Fatalf("复核失败后 dsl.json 应保持 v1，got v%d", v)
+	}
+}
+
+// 严格门：LLM 复核未覆盖全部无谓词声明 → 冻结（防部分放行漏洞）。
+func TestApproveGated_LLMReviewIncompleteFreezes(t *testing.T) {
+	dir := t.TempDir()
+	dsl := NewDesignDSLStore(dir)
+	if _, err := dsl.SeedDefault(); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ps := NewProposalStore(dir)
+	p, err := ps.Create([]DSLDecl{
+		{Rule: "design:no-op-io", Probe: "fs.copy", Expect: "复制必须处理错误"},
+		{Rule: "design:another-unknown", Probe: "net.http", Expect: "网络必须处理错误"},
+	}, "复核不全", "llm-revise")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// 只复核了一条无谓词声明 → 覆盖不全 → 冻结
+	gate := VerifyGate{LLMReview: func(_ context.Context, _ []DSLDecl) ([]LLMVerdict, error) {
+		return []LLMVerdict{{Rule: "design:no-op-io", Result: "ok", Reason: "ok"}}, nil
+	}}
+	if _, err := ps.ApproveGated(context.Background(), p.ID, "r", dsl, gate); err == nil {
+		t.Fatal("LLM 复核未覆盖全部无谓词声明应冻结")
+	}
+	if v := dslVersion(t, dsl); v != 1 {
+		t.Fatalf("复核不全后 dsl.json 应保持 v1，got v%d", v)
 	}
 }
 

@@ -37,7 +37,7 @@ import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
 import { getDSLByView, getLiveDir } from './storage.js';
 import { queryCameraLog } from './camera/log_query.js';
-import { normalizeEvents, judgeEvents, renderJudgeReport } from './camera/judge_service.js';
+import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -238,7 +238,8 @@ const cameraJudgeHandler = wrap(async (a) => {
   }
   const { events: norm, error } = normalizeEvents(events);
   if (error) throw new Error(error);
-  const report = judgeEvents(norm);
+  const useLlm = a.use_llm === true || a.use_llm === 'true' || a.use_llm === '1';
+  const report = useLlm ? await judgeEventsWithLLM(norm, true) : judgeEvents(norm);
   const text = a.text === true || a.text === '1' ? renderJudgeReport(report) : JSON.stringify(report);
   return { message: text, data: report };
 });
@@ -509,6 +510,7 @@ const TOOL_DEFS: ToolDef[] = [
         .array(z.record(z.string(), z.unknown()))
         .describe('要判定的事件数组（TSEvent 形状：probe 必填，fields 含 err/op/benign）'),
       text: z.boolean().optional().describe('true=返回人类可读报告；false=返回 JSON（默认 JSON）'),
+      use_llm: z.boolean().optional().describe('true=对可疑事件做 LLM 行为级复核（默认 false 纯规则秒判）'),
     },
     handler: cameraJudgeHandler,
   },

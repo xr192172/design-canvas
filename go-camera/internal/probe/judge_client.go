@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -59,10 +60,22 @@ func (c *JudgeClient) IsRemote() bool { return c.Endpoint != "" }
 // JudgeEvents 判定一批事件。远程可用则 POST 到 TS 判定服务（复用同一判定实现），
 // 否则降级本地判定。远程调用失败时返回错误（调用方决定是否降级）。
 func (c *JudgeClient) JudgeEvents(ctx context.Context, events []Event) ([]Verdict, error) {
+	return c.judgeWithLLM(ctx, events, false)
+}
+
+// JudgeEventsLLM 判定一批事件，并对规则秒判为「deviation」的事件做 LLM 行为级复核
+// （POST 时带 use_llm=1，由 TS 判定服务调 LLM）。远程不可用/调用失败时降级为
+// 本地规则判定（不阻断流程）。LLM 判定只喂「事件快照 + 契约语义」，不接触项目文档。
+func (c *JudgeClient) JudgeEventsLLM(ctx context.Context, events []Event) ([]Verdict, error) {
+	return c.judgeWithLLM(ctx, events, true)
+}
+
+// judgeWithLLM 统一判定入口。useLLM 控制是否请求 TS 侧做 LLM 行为级复核。
+func (c *JudgeClient) judgeWithLLM(ctx context.Context, events []Event, useLLM bool) ([]Verdict, error) {
 	if !c.IsRemote() {
 		return judgeLocal(c, events), nil
 	}
-	return c.judgeRemote(ctx, events)
+	return c.judgeRemote(ctx, events, useLLM)
 }
 
 // judgeLocal 本地判定：逐事件跑注册的本地谓词。
@@ -89,7 +102,15 @@ type tsEntry struct {
 		Rule   string `json:"rule"`
 		Reason string `json:"reason"`
 	} `json:"verdict"`
-	Event tsEvent `json:"event"`
+	Event tsEvent     `json:"event"`
+	LLM   *tsLLMVerdict `json:"llm"` // use_llm 时返回的 LLM 行为级复核（可为空）
+}
+
+// tsLLMVerdict 是判定服务返回的 LLM 复核结果（与 LLMVerdict 对齐）。
+type tsLLMVerdict struct {
+	Result string `json:"result"`
+	Rule   string `json:"rule"`
+	Reason string `json:"reason"`
 }
 
 // tsResult 是 TS JudgeResult 的 JSON 形状。
@@ -100,17 +121,27 @@ type tsResult struct {
 	Entries    []tsEntry `json:"entries"`
 }
 
-// judgeRemote 把事件 POST 到 TS 判定服务，解析回 Verdict。
-func (c *JudgeClient) judgeRemote(ctx context.Context, events []Event) ([]Verdict, error) {
+// judgeRemote 把事件 POST 到 TS 判定服务，解析回 Verdict。useLLM 为 true 时
+// 在 URL 上附加 use_llm=1，请求 TS 侧对可疑事件做 LLM 行为级复核。
+func (c *JudgeClient) judgeRemote(ctx context.Context, events []Event, useLLM bool) ([]Verdict, error) {
 	payload := map[string]any{"events": toTSEvents(events)}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("judge_client: marshal events: %w", err)
 	}
 
+	endpoint := c.Endpoint
+	if useLLM {
+		sep := "?"
+		if strings.Contains(endpoint, "?") {
+			sep = "&"
+		}
+		endpoint += sep + "use_llm=1"
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("judge_client: new request: %w", err)
 	}
@@ -136,7 +167,7 @@ func (c *JudgeClient) judgeRemote(ctx context.Context, events []Event) ([]Verdic
 
 	out := make([]Verdict, 0, len(res.Entries))
 	for _, e := range res.Entries {
-		out = append(out, Verdict{
+		v := Verdict{
 			Event: Event{
 				Probe:  e.Event.Probe,
 				Source: e.Event.Source,
@@ -145,7 +176,15 @@ func (c *JudgeClient) judgeRemote(ctx context.Context, events []Event) ([]Verdic
 			Rule:   e.Verdict.Rule,
 			Result: e.Verdict.Result,
 			Reason: e.Verdict.Reason,
-		})
+		}
+		if e.LLM != nil {
+			v.LLM = &LLMVerdict{
+				Result: e.LLM.Result,
+				Rule:   e.LLM.Rule,
+				Reason: e.LLM.Reason,
+			}
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }

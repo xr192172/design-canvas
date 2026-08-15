@@ -11,6 +11,7 @@ package probe
 // 外部定时/事件触发（watch/cron），实现持续校准。
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -24,6 +25,9 @@ type LoopOptions struct {
 	// MinUndesigned 未声明探针数量阈值：观测到的新探针达到该数才生成补契约提案
 	// （默认 1）。
 	MinUndesigned int
+	// UseLLM 对规则秒判为可疑/违反的事件做 LLM 行为级复核（走统一判定服务，
+	// POST use_llm=1）。LLM 不可用/失败时降级为规则判定，不阻断闭环。
+	UseLLM bool
 }
 
 // withDefaults 填充未设置项的默认值。
@@ -43,6 +47,11 @@ type LoopResult struct {
 	Proposals  []Proposal `json:"proposals"`               // 本次为未声明探针生成的修订提案
 	Triggered  bool       `json:"triggered"`               // 是否触发了演进（低于阈值则 false）
 	SkipReason string     `json:"skip_reason,omitempty"`   // 未触发时的原因（低频护栏）
+
+	// LLM 行为级复核（--use-llm）：
+	LLMRun      bool         `json:"llm_run,omitempty"`       // 是否请求了 LLM 复核
+	LLMDegraded bool         `json:"llm_degraded,omitempty"`  // LLM 不可用/失败，降级为规则判定
+	LLMVerdicts []LLMVerdict `json:"llm_verdicts,omitempty"`  // 对可疑/违反事件的 LLM 复核结果
 }
 
 // RunLoop 执行一次闭环迭代：读观测 → 聚合 → 对比 → 按触发条件对未声明探针
@@ -77,12 +86,35 @@ func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error
 	// 4. 对比出三类偏差
 	res.Report = NewComparator().RegisterDefaultPredicates().Compare(design, actual)
 
-	// 5. 触发条件判定（低频演进护栏）
+	// 4.5 可选 LLM 行为级复核（--use-llm）：对规则秒判为可疑/违反的事件，交付
+	// 统一判定服务做 LLM 复核（POST use_llm=1，由服务侧调 LLM 记账）。LLM 只喂
+	// 「事件快照 + DSL 声明」，不接触项目文档。失败降级：保留规则判定，不阻断。
 	opt := LoopOptions{}
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
 	opt = opt.withDefaults()
+	if opt.UseLLM {
+		res.LLMRun = true
+		judge := NewJudgeClient("")
+		if !judge.IsRemote() {
+			// 未配置判定服务 → LLM 复核不可用，诚实标注降级
+			res.LLMDegraded = true
+		} else {
+			verdicts, err := judge.JudgeEventsLLM(context.Background(), events)
+			if err != nil {
+				res.LLMDegraded = true
+			} else {
+				for _, v := range verdicts {
+					if v.LLM != nil {
+						res.LLMVerdicts = append(res.LLMVerdicts, *v.LLM)
+					}
+				}
+			}
+		}
+	}
+
+	// 5. 触发条件判定（低频演进护栏）
 	rate := 0.0
 	if res.Report.EventCount > 0 {
 		rate = float64(res.Report.Violated) / float64(res.Report.EventCount)

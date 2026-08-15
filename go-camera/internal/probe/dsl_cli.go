@@ -396,16 +396,19 @@ func dslReject(args []string, dataDir string) bool {
 }
 
 // dslLoop 执行一次闭环迭代：观测→偏差→（触发条件满足时）对未声明探针自动提案。
-// 支持 --min-deviation-rate <比例> / --min-undesigned <数量> 调节触发阈值。
+// 支持 --min-deviation-rate <比例> / --min-undesigned <数量> 调节触发阈值，
+// --use-llm 对可疑/违反事件做 LLM 行为级复核。
 func dslLoop(args []string, dataDir string) bool {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl> [--min-deviation-rate 0.1] [--min-undesigned 1]")
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl> [--min-deviation-rate 0.1] [--min-undesigned 1] [--use-llm]")
 		return true
 	}
 	var eventsPath string
 	opt := LoopOptions{}
 	for i := 0; i < len(args); i++ {
 		switch {
+		case args[i] == "--use-llm":
+			opt.UseLLM = true
 		case args[i] == "--min-deviation-rate" && i+1 < len(args):
 			v, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil {
@@ -436,6 +439,18 @@ func dslLoop(args []string, dataDir string) bool {
 		return true
 	}
 	fmt.Print(RenderDiffReport(res.Report))
+	if res.LLMRun {
+		if res.LLMDegraded {
+			fmt.Println("LLM 复核：判定服务不可用/调用失败，已降级为规则判定（不阻断）")
+		} else if len(res.LLMVerdicts) > 0 {
+			fmt.Printf("LLM 复核：%d 个可疑事件经行为级复核\n", len(res.LLMVerdicts))
+			for _, lv := range res.LLMVerdicts {
+				fmt.Printf("  • [%s] %s\n", lv.Result, lv.Reason)
+			}
+		} else {
+			fmt.Println("LLM 复核：无可疑事件，全部规则秒判通过")
+		}
+	}
 	if !res.Triggered {
 		fmt.Printf("闭环：未触发演进（%s）\n", res.SkipReason)
 		return true

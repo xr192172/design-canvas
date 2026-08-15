@@ -19,7 +19,7 @@ import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '..
 import { enableCameraFromEnv } from '../camera/run_sentinel.js';
 import { judgeEvent } from '../camera/judge.js';
 import { queryCameraLog } from '../camera/log_query.js';
-import { judgeEvents, normalizeEvents, renderJudgeReport } from '../camera/judge_service.js';
+import { judgeEvents, judgeEventsWithLLM, normalizeEvents, renderJudgeReport } from '../camera/judge_service.js';
 import { judgeGuardLog } from '../camera/judge_guard.js';
 import { importProject } from './import_project.js';
 import { getProjectCacheDb } from '../db/db.js';
@@ -202,8 +202,9 @@ async function handleApiCameraJudge(req: http.IncomingMessage, res: http.ServerR
       sendError(res, 400, error);
       return;
     }
-    const result = judgeEvents(events);
     const url = new URL(req.url || '/', 'http://localhost');
+    const useLlm = url.searchParams.get('use_llm') === '1' || url.searchParams.get('use_llm') === 'true';
+    const result = useLlm ? await judgeEventsWithLLM(events, true) : judgeEvents(events);
     if (url.searchParams.get('text') === '1') {
       sendJson(res, 200, { text: renderJudgeReport(result), ...result });
       return;

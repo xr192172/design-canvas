@@ -8,6 +8,7 @@ package probe
 // LLM 无直接写盘通道——它只能产提案，不能直接改权威契约。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -130,12 +131,34 @@ func (s *ProposalStore) Get(id string) (Proposal, error) {
 	return p, nil
 }
 
-// Approve 验证门审批：规则回归校验 → 借 DesignDSLStore.Save 定稿为新版本
-// （并入审计）→ 标记 approved。仅 pending 提案可审批。
-// 验证门（定稿方案 DSLVerify）：每条声明做"规则可判定性回归"——有确定性谓词的
-// 规则标记 verified + verified_by 证据；无谓词的规则（需 LLM 判定）标记为
-// needs-llm-review，不阻塞定稿但作为证据留痕。
+// VerifyGate 是验证门的能力注入点。LLMReview 为 nil 表示 LLM 复核不可用。
+//
+// 定稿资格（DSLVerify 严格门）：提案声明分两类——
+//   - 有确定性谓词的规则：规则回归可秒判 → 直接 verified（rule-regression 证据）。
+//   - 无确定性谓词的规则：必须经 LLM 行为级复核通过（llm-review 证据）；
+//     复核不可用或失败 → 定稿冻结（提案拒收，dsl.json 维持旧版继续判定）。
+type VerifyGate struct {
+	// LLMReview 对无谓词声明做 LLM 行为级复核，返回各声明的复核结论。
+	// 返回 err 视为复核失败 → 冻结。nil 表示复核能力不可用 → 存在无谓词声明即冻结。
+	LLMReview func(ctx context.Context, decls []DSLDecl) ([]LLMVerdict, error)
+}
+
+// Approve 验证门审批（严格模式，无 LLM 复核能力）：规则回归 → 定稿或冻结。
+// 等价于 ApproveGated(ctx, ..., VerifyGate{})。见 ApproveGated 说明。
 func (s *ProposalStore) Approve(id, reviewer string, dsl *DesignDSLStore) (int, error) {
+	return s.ApproveGated(context.Background(), id, reviewer, dsl, VerifyGate{})
+}
+
+// ApproveGated 验证门审批：规则回归 → LLM 复核（如需）→ 定稿为新版本（并入审计）。
+// 仅 pending 提案可审批。写盘权分离：只有通过门禁才借 SaveWithMeta 定稿。
+//
+// 门禁逻辑：
+//  1. 非空/rule/expect 校验（validateDecls）。
+//  2. 规则回归：有谓词 → verified；无谓词 → 需 LLM 复核。
+//  3. 存在无谓词声明时，若 LLMReview 不可用或复核失败 → 提案冻结（rejected），
+//     dsl.json 不变，判定继续用旧版。
+//  4. 全部过门 → 定稿 v+1，verified_by 证据写入审计历史（SaveWithMeta）。
+func (s *ProposalStore) ApproveGated(ctx context.Context, id, reviewer string, dsl *DesignDSLStore, gate VerifyGate) (int, error) {
 	p, err := s.Get(id)
 	if err != nil {
 		return 0, fmt.Errorf("approve: %v", err)
@@ -146,13 +169,34 @@ func (s *ProposalStore) Approve(id, reviewer string, dsl *DesignDSLStore) (int, 
 	if err := validateDecls(p.Decls); err != nil {
 		return 0, fmt.Errorf("approve: 提案校验未通过: %v", err)
 	}
+
 	// ── 验证门：规则回归 ──
 	reg := VerifyRuleRegression(p.Decls)
-	final := finalizeDecls(p.Decls, reg)
-	p.VerifiedBy = reg.Summary()
+
+	// 无谓词声明必须过 LLM 复核，否则冻结
+	var llmVerdicts []LLMVerdict
+	if len(reg.Uncovered) > 0 {
+		if gate.LLMReview == nil {
+			return s.freeze(p, reviewer, reg,
+				"LLM 复核不可用，存在无确定性谓词的声明，定稿冻结（判定继续用旧版 dsl.json）")
+		}
+		llmVerdicts, err = gate.LLMReview(ctx, p.Decls)
+		if err != nil {
+			return s.freeze(p, reviewer, reg, "LLM 复核失败: "+err.Error())
+		}
+		if err := verifyLLMCoverage(reg.Uncovered, llmVerdicts); err != nil {
+			return s.freeze(p, reviewer, reg, "LLM 复核未覆盖全部无谓词声明: "+err.Error())
+		}
+	}
+
+	final := finalizeDecls(p.Decls, reg, llmVerdicts)
+	p.VerifiedBy = regressionEvidence(reg, len(llmVerdicts))
 	p.Verification = reg.Describe()
 
-	ver, err := dsl.Save(final, p.Reason, p.Source)
+	ver, err := dsl.SaveWithMeta(final, p.Reason, p.Source, SaveMeta{
+		Action:       "approve",
+		Verification: p.VerifiedBy,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -165,6 +209,51 @@ func (s *ProposalStore) Approve(id, reviewer string, dsl *DesignDSLStore) (int, 
 		return 0, err
 	}
 	return ver, nil
+}
+
+// freeze 把未过验证门的提案标记为 rejected（定稿冻结），并返回解释性错误。
+// 不触碰 dsl.json——判定继续用旧版。
+func (s *ProposalStore) freeze(p Proposal, reviewer string, reg RuleRegression, reason string) (int, error) {
+	p.Status = ProposalRejected
+	p.ReviewedAt = time.Now().UTC()
+	p.Reviewer = reviewer
+	p.VerifiedBy = "frozen: " + reason
+	p.Verification = reg.Describe()
+	if err := s.write(p); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("approve: 提案 %s 定稿冻结：%s", p.ID, reason)
+}
+
+// verifyLLMCoverage 校验 LLM 复核覆盖了全部无谓词规则（每条规则至少一个结论），
+// 避免"复核了部分声明却整体放行"的漏洞。
+func verifyLLMCoverage(uncovered []string, verdicts []LLMVerdict) error {
+	covered := map[string]bool{}
+	for _, v := range verdicts {
+		if v.Rule != "" {
+			covered[v.Rule] = true
+		}
+	}
+	var missing []string
+	for _, r := range uncovered {
+		if !covered[r] {
+			missing = append(missing, r)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("缺复核: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// regressionEvidence 生成定稿证据摘要（写入 Proposal.VerifiedBy 与审计历史）：
+// 全规则可判定 → rule-regression 计数；含无谓词 → 追加 llm-review 条数。
+func regressionEvidence(reg RuleRegression, llmReviewed int) string {
+	if len(reg.Uncovered) == 0 {
+		return reg.Summary()
+	}
+	return fmt.Sprintf("rule-regression: %d/%d 声明可确定性判定 + llm-review %d 条",
+		reg.Covered, reg.Checked, llmReviewed)
 }
 
 // Reject 拒绝提案。仅 pending 提案可拒绝。
@@ -254,14 +343,28 @@ func (r RuleRegression) Describe() string {
 
 // finalizeDecls 验证门通过后，为每条声明补齐验证证据与状态（写进定稿快照）：
 //   - 有谓词 → verified_by=rule-regression, status=verified
-//   - 无谓词 → verified_by=needs-llm-review, status=proposed（保留待复核）
-func finalizeDecls(decls []DSLDecl, reg RuleRegression) []DSLDecl {
+//   - 无谓词但经 LLM 复核通过 → verified_by=llm-review, status=verified
+//   - 无谓词且未过 LLM 复核 → verified_by=needs-llm-review, status=proposed（保留待复核）
+//
+// llmVerdicts 为 nil 时视为无 LLM 复核（仅全谓词提案可达此状态）。
+func finalizeDecls(decls []DSLDecl, reg RuleRegression, llmVerdicts []LLMVerdict) []DSLDecl {
 	preds := defaultRulePredicates()
+	llmOK := map[string]bool{}
+	for _, v := range llmVerdicts {
+		if v.Rule != "" && v.Result == "ok" {
+			llmOK[v.Rule] = true
+		}
+	}
 	out := make([]DSLDecl, len(decls))
 	for i, d := range decls {
 		out[i] = d
 		if _, ok := preds[d.Rule]; ok {
 			out[i].VerifiedBy = "rule-regression"
+			out[i].Status = "verified"
+			continue
+		}
+		if llmOK[d.Rule] {
+			out[i].VerifiedBy = "llm-review"
 			out[i].Status = "verified"
 			continue
 		}

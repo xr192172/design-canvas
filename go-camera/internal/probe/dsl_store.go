@@ -40,6 +40,17 @@ type HistoryEntry struct {
 	Reason  string    `json:"reason"`  // 变更原因（人类可读）
 	Source  string    `json:"source"`  // 来源：seed / manual / llm-revise / rollback
 	Decls   []DSLDecl `json:"decls"`   // 本版本的完整 DSL 快照
+
+	// 审计增强（2026-08-15，对齐定稿方案）：
+	Action       string `json:"action,omitempty"`        // seed | save | approve | rollback
+	FromVersion  int    `json:"from_version,omitempty"`  // 变更前版本（0 = 初始）
+	Verification string `json:"verification,omitempty"`  // 验证门证据摘要（如 rule-regression: 2/2 可判定）
+}
+
+// SaveMeta 携带定稿审计元信息（Action / Verification）。
+type SaveMeta struct {
+	Action       string
+	Verification string
 }
 
 // DesignDSLStore 持久化设计 DSL 与审计历史。
@@ -87,11 +98,12 @@ func (s *DesignDSLStore) SeedDefault() (bool, error) {
 		return false, err
 	}
 	return true, s.appendHistory(HistoryEntry{
-		Version: doc.Version,
-		At:      doc.UpdatedAt,
-		Reason:  "initial seed: silent-error-discard 契约",
-		Source:  "seed",
-		Decls:   doc.Decls,
+		Version:     doc.Version,
+		At:          doc.UpdatedAt,
+		Reason:      "initial seed: silent-error-discard 契约",
+		Source:      "seed",
+		Action:      "seed",
+		Decls:       doc.Decls,
 	})
 }
 
@@ -99,6 +111,12 @@ func (s *DesignDSLStore) SeedDefault() (bool, error) {
 // decls 为 nil 时沿用当前声明的裸拷贝（纯 reason/source 更新场景），
 // 正常情况下应传入完整新声明集。
 func (s *DesignDSLStore) Save(decls []DSLDecl, reason, source string) (int, error) {
+	return s.SaveWithMeta(decls, reason, source, SaveMeta{Action: "save"})
+}
+
+// SaveWithMeta 定稿写入新版本，并携带审计元信息（Action/Verification）。
+// 验证门审批（Approve）用它把 verified_by 证据写进审计历史。
+func (s *DesignDSLStore) SaveWithMeta(decls []DSLDecl, reason, source string, meta SaveMeta) (int, error) {
 	cur, err := s.Load()
 	if err != nil && !os.IsNotExist(err) {
 		return 0, err
@@ -118,12 +136,19 @@ func (s *DesignDSLStore) Save(decls []DSLDecl, reason, source string) (int, erro
 	if err := s.writeDoc(doc); err != nil {
 		return 0, err
 	}
+	action := meta.Action
+	if action == "" {
+		action = "save"
+	}
 	return next, s.appendHistory(HistoryEntry{
-		Version: doc.Version,
-		At:      doc.UpdatedAt,
-		Reason:  reason,
-		Source:  source,
-		Decls:   doc.Decls,
+		Version:      doc.Version,
+		At:           doc.UpdatedAt,
+		Reason:       reason,
+		Source:       source,
+		Action:       action,
+		FromVersion:  cur.Version,
+		Verification: meta.Verification,
+		Decls:        doc.Decls,
 	})
 }
 

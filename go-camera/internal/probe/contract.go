@@ -16,6 +16,8 @@ type Verdict struct {
 	Rule   string `json:"rule"`   // contract rule id that fired
 	Result string `json:"result"` // ok | deviation
 	Reason string `json:"reason"` // why it deviates (or why ok)
+	// LLM 是可选的行为级复核结果（use_llm 时由判定服务产出），nil = 未做 LLM 复核。
+	LLM *LLMVerdict `json:"llm,omitempty"`
 }
 
 // Judge evaluates events against a set of contract rules.
