@@ -221,15 +221,21 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     return { query, provider: 'fts', indexed: 0, hits: [], message: '查询为空' };
   }
 
-  // 打开缓存（失败降级为提示性空结果）
+  // project_dir 必填：缺失时抛可行动错误（而非静默空结果，LLM 会误判为"索引不存在"）
+  if (!input.project_dir || !String(input.project_dir).trim()) {
+    throw new Error(
+      '缺参数 "project_dir"：语义搜索需要指定要搜索的项目根目录（该项目需先运行 import_project 建立符号索引）。',
+    );
+  }
+
+  // 打开缓存：打不开 = 索引未建立，抛可行动错误（callTool 层会标 isError）
   let db: Database;
   try {
     db = getProjectCacheDb(path.resolve(input.project_dir));
   } catch (e) {
-    return {
-      query, provider: 'fts', indexed: 0, hits: [],
-      message: `无法打开符号缓存：${(e as Error).message}。请先对该项目运行 import_project 建缓存。`,
-    };
+    throw new Error(
+      `无法打开符号缓存：${(e as Error).message}。请先对该项目运行 import_project 建缓存。`,
+    );
   }
 
   const rows = db
@@ -248,10 +254,9 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
   }>;
 
   if (rows.length === 0) {
-    return {
-      query, provider: 'fts', indexed: 0, hits: [],
-      message: '符号缓存为空。请先对该项目运行 import_project 建立符号缓存。',
-    };
+    throw new Error(
+      `项目 "${input.project_dir}" 的符号缓存为空（尚未建立索引）。请先运行 import_project 导入该项目后再搜索。`,
+    );
   }
 
   // 取配置；无配置走降级

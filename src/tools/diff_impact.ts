@@ -134,7 +134,6 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     const base = rel.split('/').pop();
     return base && semanticPaths.has(base) ? base : undefined;
   };
-  const changedSemantic = changedRels.map((rel) => ({ rel, sem: resolveSemanticPath(rel) }));
 
   // 打开缓存连接（失败降级为提示性空结果）
   let db: Database;
@@ -154,10 +153,24 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     warnings.push('缓存中没有调用边（kind=call）。请先对该项目运行 import_project 建立符号缓存。');
   }
 
+  // 缓存路径直探：历史库可能与当前 project_dir 基准不一致（如以 src/ 为根建的库），
+  // 语义映射（feature semantic.files）覆盖不到时，直接到 files 表按多形式探测兜底。
+  const probeCachePath = (rel: string): string | undefined => {
+    const candidates = rel.startsWith('src/') ? [rel, rel.slice(4)] : [rel];
+    for (const c of candidates) {
+      const hit = db.prepare('SELECT 1 FROM files WHERE path = ? LIMIT 1').get(c);
+      if (hit) return c;
+    }
+    return undefined;
+  };
+  const changedSemantic = changedRels.map((rel) => {
+    const sem = resolveSemanticPath(rel);
+    return { rel, sem, cachePath: probeCachePath(sem ?? rel) ?? sem ?? rel };
+  });
+
   // ── 直接受影响符号（changed 文件里的所有符号，depth=0）──
   const direct: ImpactedSymbol[] = [];
-  for (const { rel, sem } of changedSemantic) {
-    const cachePath = sem ?? rel; // 缓存 file_path 与语义基准一致
+  for (const { rel, cachePath } of changedSemantic) {
     const rows = db
       .prepare(
         "SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id",

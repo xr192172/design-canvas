@@ -128,15 +128,21 @@ describe('semantic_search FTS 降级（无 embedding 配置）', () => {
     expect(r.message).toContain('查询为空');
   });
 
-  it('符号缓存为空 → 提示性空结果', async () => {
+  it('符号缓存为空 → 抛可行动错误（提示先 import_project）', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sem-empty-'));
     roots.push(root);
     // 建空缓存（无符号）
     const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
     db.close();
-    const r = await semanticSearch({ project_dir: root, query: 'anything' });
-    expect(r.hits).toEqual([]);
-    expect(r.message).toMatch(/符号缓存为空|无法打开符号缓存/);
+    await expect(semanticSearch({ project_dir: root, query: 'anything' })).rejects.toThrow(
+      /符号缓存为空.*import_project/,
+    );
+  });
+
+  it('缺 project_dir → 抛缺参数错误（杜绝静默空结果）', async () => {
+    await expect(semanticSearch({ project_dir: '', query: 'anything' } as never)).rejects.toThrow(
+      /缺参数 "project_dir"/,
+    );
   });
 
   it('loadEmbeddingConfig：无配置返回 null', () => {

@@ -45,10 +45,6 @@ export const EXPLORE_ACTIONS = [
 
 export type ExploreAction = (typeof EXPLORE_ACTIONS)[number];
 
-function req(v: Record<string, unknown>): string {
-  return v['project_dir'] as string;
-}
-
 /** 必填字符串参数：缺失或空串抛 `缺参数 "key"` 风格报错（分发器统一校验，消息含缺失 key） */
 function requireStr(v: Record<string, unknown>, key: string): string {
   const val = v[key];
@@ -85,8 +81,13 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
 
   switch (action) {
     case 'search': {
-      // 语义搜索：query 空串由 semanticSearch 温和返回"查询为空"，不强制抛错
-      const r = await semanticSearch({ query: args['query'] as string, project_dir: req(args) });
+      // 空 query 温和返回"查询为空"（在 project_dir 校验之前——query 都空了无需纠结库）；
+      // project_dir 必填——缺失/索引为空时 semanticSearch 抛可行动错误（杜绝静默空结果）
+      const q = typeof args['query'] === 'string' ? (args['query'] as string) : '';
+      if (!q.trim()) {
+        return { message: '查询为空', data: { query: q, provider: 'fts', indexed: 0, hits: [], message: '查询为空' } };
+      }
+      const r = await semanticSearch({ query: q, project_dir: requireStr(args, 'project_dir') });
       // message 内联可读命中列表：外层 wrap 只回显 message，纯 data 易被丢弃导致静默空结果
       const lines = [r.message];
       for (const h of r.hits) {

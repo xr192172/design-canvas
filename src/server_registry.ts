@@ -31,6 +31,7 @@ import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
 import { getDSLByView, getLiveDir } from './storage.js';
+import { getProjectCacheDb } from './db/db.js';
 import { queryCameraLog } from './camera/log_query.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
 import {
@@ -496,7 +497,16 @@ const TOOL_DEFS: ToolDef[] = [
       functional_mode: z.boolean().optional().describe('true=按调用图做功能性聚合（跨目录功能社区，优先于 design_mode）'),
     },
     handler: wrap(async (a) => {
-      const r = await importProject(a as unknown as ImportProjectInput);
+      // MCP 路径默认连项目级符号缓存（<project_dir>/.design-canvas/cache.db）：
+      // 不连则 importProject 走无缓存路径，符号缓存永远不更新（增量 re-parse 失效）。
+      // 开库失败（只读目录等）降级为无缓存导入，不阻断导入本身。
+      let cacheDb;
+      try {
+        cacheDb = getProjectCacheDb(path.resolve(a.project_dir as string));
+      } catch {
+        cacheDb = undefined;
+      }
+      const r = await importProject({ ...(a as unknown as ImportProjectInput), cache_db: cacheDb });
       return { message: r.message };
     }),
   },
