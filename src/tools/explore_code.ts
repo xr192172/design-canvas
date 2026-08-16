@@ -11,7 +11,7 @@
  * - 异步 action（import/derive_* / watch）统一 await，错误分级可恢复
  * - 新增 action 只加 switch case，不改注册表
  *
- * 注意：render_dsl / query_feature / diff_views 等"读"工具不在此聚合中，
+ * 注意：render_dsl / get_dsl / diff_views 等"读"工具不在此聚合中，
  * 它们在注册表独立存在，因为 LLM 需要在 import 后立刻渲染/查询，动作链较短。
  */
 
@@ -87,7 +87,12 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
     case 'search': {
       // 语义搜索：query 空串由 semanticSearch 温和返回"查询为空"，不强制抛错
       const r = await semanticSearch({ query: args['query'] as string, project_dir: req(args) });
-      return toResult(r);
+      // message 内联可读命中列表：外层 wrap 只回显 message，纯 data 易被丢弃导致静默空结果
+      const lines = [r.message];
+      for (const h of r.hits) {
+        lines.push(`  [${h.score.toFixed(3)}] ${h.qualified_name} (${h.file_path}:${h.start_line})`);
+      }
+      return { message: lines.filter(Boolean).join('\n'), data: r };
     }
     case 'diff_impact': {
       const r = await diffImpact({

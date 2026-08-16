@@ -1,13 +1,12 @@
 /**
  * server_registry：MCP 工具注册表（路线图序号 2 收敛）
  *
- * 统一注册 8 个主工具 + 旧工具别名（兼容存量会话/脚本/文档）。
+ * 只注册主工具（2026-08-17 起旧工具名别名已全部移除，无兼容层）。
  *
  * 设计：
  * - 每个工具定义 = { name, title, description, inputSchema, handler }
  * - handler(args) 返回 MCP content 数组（text + isError）
- * - ALIASES 把旧工具名映射到某个主工具的 handler + 参数适配器
- * - 主工具走强 hutong schema；explore_code/manage_feature 用宽松 record，内部强校验
+ * - 主工具走强 schema；explore_code/manage_feature 用宽松 record，内部强校验
  *
  * 主工具 handler 复用现有纯函数（src/tools/*.ts），不重写业务逻辑，因此
  * 500+ 单测（针对纯函数）不受影响。
@@ -27,10 +26,6 @@ import { exploreCode, EXPLORE_ACTIONS } from './tools/explore_code.js';
 import { importProject } from './tools/import_project.js';
 import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
-import { addAnnotationByTool, resolveAnnotation } from './tools/annotation_tools.js';
-import { dagLayout, forceLayout, gridAlign } from './tools/dag_layout.js';
-import { submitApproval, reviewAnnotation } from './tools/approval.js';
-import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './tools/snapshot.js';
 import { diffViews } from './tools/diff_views.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
@@ -76,6 +71,26 @@ function wrap(
   };
 }
 
+/** 同 wrap，但 data 一并序列化进文本（---DATA--- 分隔），避免只回显 message 导致静默丢数据 */
+function wrapData(
+  fn: (args: Record<string, unknown>) => { message: string; data?: unknown } | Promise<{ message: string; data?: unknown }>,
+): ToolDef['handler'] {
+  return async (args) => {
+    try {
+      const r = await fn(args);
+      const parts: string[] = [];
+      if (r.message) parts.push(r.message);
+      if (r.data !== undefined) {
+        parts.push('---DATA---');
+        parts.push(JSON.stringify(r.data));
+      }
+      return { text: parts.join('\n') };
+    } catch (e) {
+      return { text: (e as Error).message, isError: true };
+    }
+  };
+}
+
 // ─────────────────────────────────────────────────────────────
 // 8 个主工具 handler
 // ─────────────────────────────────────────────────────────────
@@ -89,7 +104,7 @@ const editDslHandler = wrap(async (a) => {
   if (a.view === 'live') {
     throw new Error(
       '实际视图（view=live）是代码快照，只读，请勿手改。要改请用 view=design（设计视图）；' +
-        '要重建实际视图请用 explore_code action=import / watch。',
+        '要重建实际视图请用 import_project 工具（全量导入），增量监听用 explore_code action=watch。',
     );
   }
   // 活文档：变更原因四层校验（L1-L4），不通过拒绝写入
@@ -184,8 +199,8 @@ const consistencyHandler = wrap(async (a) => {
   return { message: r.message };
 });
 
-/** explore_code：参数化代码理解 */
-const exploreCodeHandler = wrap(async (a) => {
+/** explore_code：参数化代码理解（用 wrapData：data 不丢弃，杜绝「有结果却静默空输出」） */
+const exploreCodeHandler = wrapData(async (a) => {
   const action = a.action as never;
   const result = await exploreCode({ action, args: (a.args ?? {}) as Record<string, unknown> });
   return { message: result.message, data: result.data };
@@ -253,6 +268,10 @@ const cameraInstrumentHandler = wrap(async (a) => {
   const unintrument = a.action === 'uninstrument' || a.action === 'restore';
   const dryRun = a.dry_run === true || a.dry_run === 'true' || a.dry_run === '1';
   const projectRoot = a.project_root as string | undefined;
+  // 契约模式：contract_probes 非空数组时只注入声明的探针点；缺省/空数组 → 探索模式全量插桩
+  const contractProbes = Array.isArray(a.contract_probes) && a.contract_probes.length > 0
+    ? (a.contract_probes as string[])
+    : undefined;
 
   if (unintrument) {
     const restored = restoreInstrumented(target);
@@ -266,12 +285,13 @@ const cameraInstrumentHandler = wrap(async (a) => {
   }
 
   const files = collectTsFiles(target);
-  const results = await instrumentProject(target, { projectRoot, write: !dryRun });
+  const results = await instrumentProject(target, { projectRoot, write: !dryRun, contractProbes });
   let totalSites = 0;
   let instrumented = 0;
   let skipped = 0;
   let errors = 0;
-  const lines = [`Camera 插桩 [${dryRun ? 'DRY-RUN' : 'WRITE'}] → ${target}`, `  扫描 ${files.length} 个 .ts 文件`];
+  const mode = contractProbes ? `契约模式（${contractProbes.length} 个探针）` : '探索模式（全量插桩）';
+  const lines = [`Camera 插桩 [${mode}] ${dryRun ? 'DRY-RUN' : 'WRITE'} → ${target}`, `  扫描 ${files.length} 个 .ts 文件`];
   for (const r of results) {
     if (r.error) {
       errors++;
@@ -449,6 +469,38 @@ const TOOL_DEFS: ToolDef[] = [
     handler: consistencyHandler,
   },
   {
+    name: 'import_project',
+    title: 'Import a code project as DSL',
+    description:
+      '扫描代码项目（.go/.ts/.py/.js 等）生成 DSL：文件节点 + 调用边 + 符号/API 语义层，写入 design-canvas 存储。' +
+      '默认生成设计 DSL；live_only=true 只生成"实际视图"快照（live/ 目录，供 🎭设计/⚡实际 双视图对比）。' +
+      'design_mode=true 按目录聚合成模块节点；functional_mode=true 按调用图做功能性聚合（优先级高于 design_mode）。' +
+      '导入后可用 render_dsl 渲染可视化，或 diff_views 对比设计 vs 实际。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径或相对 cwd）'),
+      feature: z.string().describe('新 feature 名（^[a-zA-Z0-9_-]+$）'),
+      title: z.string().optional().describe('显示标题（默认等于 feature）'),
+      max_files: z.number().optional().describe('最多解析文件数（默认 200）'),
+      include_tests: z.boolean().optional().describe('是否包含测试文件（默认 false）'),
+      include_archive: z.boolean().optional().describe('是否索引归档目录 _archive/archive/_old 等（默认 false）'),
+      live_only: z
+        .boolean()
+        .optional()
+        .describe('true=仅生成实际视图快照（写 live/，不覆盖设计 DSL），默认 false=写设计 DSL'),
+      live_dir: z.string().optional().describe('live_only 时实际 DSL 归属的项目根（默认 dataHome）'),
+      gen_roles: z
+        .boolean()
+        .optional()
+        .describe('true=用 LLM 为文件节点生成中文职责标题（默认 false，未配置 LLM 时静默跳过）'),
+      design_mode: z.boolean().optional().describe('true=按目录聚合为模块节点（设计草图模式）'),
+      functional_mode: z.boolean().optional().describe('true=按调用图做功能性聚合（跨目录功能社区，优先于 design_mode）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await importProject(a as unknown as ImportProjectInput);
+      return { message: r.message };
+    }),
+  },
+  {
     name: 'explore_code',
     title: 'Explore, analyze and understand code',
     description:
@@ -520,7 +572,9 @@ const TOOL_DEFS: ToolDef[] = [
     description:
       '对目标项目全自动 AST 插桩（函数出入口/return/catch/IO 写盘），幂等（已含探针文件跳过）。' +
       'action=uninstrument|restore 一键还原（从自动备份拷回原文件并删备份目录）。' +
-      'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。',
+      'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。' +
+      '契约模式：contract_probes 传探针 id 数组（如 ["store.save.writefile"]）则只注入声明的探针点；' +
+      '缺省/空数组则探索模式全量插桩（挖掘隐藏问题）。',
     inputSchema: {
       action: z
         .enum(['instrument', 'uninstrument', 'restore'])
@@ -528,6 +582,10 @@ const TOOL_DEFS: ToolDef[] = [
         .describe('instrument=插桩（默认）；uninstrument/restore=还原'),
       target: z.string().describe('要插桩/还原的目标项目目录'),
       dry_run: z.boolean().optional().describe('true=只预览探针点不写盘（默认 false）'),
+      contract_probes: z
+        .array(z.string())
+        .optional()
+        .describe('契约模式探针 id 数组（如 ["store.save.writefile"]），只注入这些探针点；缺省=探索模式全量插桩'),
       project_root: z.string().optional().describe('design-canvas 根（探针实现 src/camera/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
     },
     handler: cameraInstrumentHandler,
@@ -535,324 +593,10 @@ const TOOL_DEFS: ToolDef[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────
-// 别名：旧工具名 → 主工具 handler + 参数适配
-// ─────────────────────────────────────────────────────────────
-
-/**
- * 别名工具的宽松入参 schema。
- * 注意：不能传空 schema `{}`——SDK 会把 raw shape 转成 `z.object({})`，默认 strip 未知键，
- * 导致别名调用参数被清空（handler 收到 undefined）。用 `z.record` 透传任意键、不做校验，
- * 具体参数校验交给 adapter 指向的主工具 handler。
- */
-const LOOSE_INPUT_SCHEMA = z.record(z.string(), z.unknown());
-
-/** 别名定义：name 为旧工具名，target 为主工具名，adapter 把旧参数转成主工具 handler 参数 */
-interface AliasDef {
-  name: string;
-  description: string;
-  target: string;
-  adapter: (args: Record<string, unknown>) => Record<string, unknown>;
-}
-
-const ALIASES: AliasDef[] = [
-  // get_dsl 家族（query_feature 原名保留）
-  { name: 'query_feature', description: '别名 → get_dsl', target: 'get_dsl', adapter: (a) => a },
-  // edit_dsl 家族
-  { name: 'update_feature', description: '别名 → edit_dsl', target: 'edit_dsl', adapter: (a) => a },
-  // manage_feature 家族
-  {
-    name: 'create_feature',
-    description: '别名 → manage_feature(action=create)',
-    target: 'manage_feature',
-    adapter: (a) => ({ action: 'create', args: { feature: a.feature, title: a.title } }),
-  },
-  {
-    name: 'clone_feature',
-    description: '别名 → manage_feature(action=clone)',
-    target: 'manage_feature',
-    adapter: (a) => ({ action: 'clone', args: { source_feature: a.source_feature, target_feature: a.target_feature, title: a.title } }),
-  },
-  {
-    name: 'create_from_template',
-    description: '别名 → manage_feature(action=template)',
-    target: 'manage_feature',
-    adapter: (a) => ({ action: 'template', args: { template_id: a.template_id, feature: a.feature, title: a.title } }),
-  },
-  // render_dsl 家族
-  {
-    name: 'export_svg',
-    description: '别名 → render_dsl(format=svg)',
-    target: 'render_dsl',
-    adapter: (a) => ({ feature: a.feature, format: 'svg', output_path: a.output_path }),
-  },
-  {
-    name: 'export_markdown',
-    description: '别名 → render_dsl(format=markdown)',
-    target: 'render_dsl',
-    adapter: (a) => ({ feature: a.feature, format: 'markdown', output_path: a.output_path }),
-  },
-  // scaffold 家族
-  {
-    name: 'check_status',
-    description: '别名 → scaffold',
-    target: 'scaffold',
-    adapter: (a) => a,
-  },
-  // explore_code 家族：把旧工具名/参数映射到 action + args
-  {
-    name: 'import_project',
-    description: '别名 → importProject（独立工具，不再经 explore_code 分发）',
-    target: 'import_project',
-    adapter: (a) => a,
-  },
-  {
-    name: 'semantic_search',
-    description: '别名 → explore_code(action=semantic_search)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'semantic_search', args: a }),
-  },
-  {
-    name: 'diff_impact',
-    description: '别名 → explore_code(action=diff_impact)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'diff_impact', args: a }),
-  },
-  {
-    name: 'arch_layer',
-    description: '别名 → explore_code(action=arch_layer)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'arch_layer', args: a }),
-  },
-  {
-    name: 'guided_tour',
-    description: '别名 → explore_code(action=guided_tour)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'guided_tour', args: a }),
-  },
-  {
-    name: 'check_monolith',
-    description: '别名 → explore_code(action=check_monolith)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'check_monolith', args: a }),
-  },
-  {
-    name: 'analyze_monolith',
-    description: '别名 → explore_code(action=analyze_monolith)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'analyze_monolith', args: a }),
-  },
-  {
-    name: 'derive_split',
-    description: '别名 → explore_code(action=derive_split)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'derive_split', args: a }),
-  },
-  {
-    name: 'derive_detail_chain',
-    description: '别名 → explore_code(action=derive_detail_chain)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'derive_detail_chain', args: a }),
-  },
-  {
-    name: 'derive_anim_flow',
-    description: '别名 → explore_code(action=derive_anim_flow)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'derive_anim_flow', args: a }),
-  },
-  {
-    name: 'derive_algorithm',
-    description: '别名 → explore_code(action=derive_algorithm)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'derive_algorithm', args: a }),
-  },
-  {
-    name: 'inject_replay',
-    description: '别名 → explore_code(action=inject_replay)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'inject_replay', args: a }),
-  },
-  {
-    name: 'run_simulation',
-    description: '别名 → explore_code(action=run_simulation)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'run_simulation', args: a }),
-  },
-  {
-    name: 'reset_simulation',
-    description: '别名 → explore_code(action=reset_simulation)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'reset_simulation', args: a }),
-  },
-  {
-    name: 'watch_project',
-    description: '别名 → explore_code(action=watch)',
-    target: 'explore_code',
-    adapter: (a) => ({ action: 'watch', args: a }),
-  },
-  // 尚未吸收进 edit_dsl 的旧写工具：直接复用原纯函数（后续 Step 2 并入 edit_dsl）
-  {
-    name: 'add_annotation',
-    description: '别名 → 原 add_annotation（后续并入 edit_dsl）',
-    target: 'add_annotation',
-    adapter: (a) => a,
-  },
-  {
-    name: 'resolve_annotation',
-    description: '别名 → 原 resolve_annotation（后续并入 edit_dsl）',
-    target: 'resolve_annotation',
-    adapter: (a) => a,
-  },
-  {
-    name: 'dag_layout',
-    description: '别名 → 原 dag_layout（后续并入 edit_dsl）',
-    target: 'dag_layout',
-    adapter: (a) => a,
-  },
-  {
-    name: 'force_layout',
-    description: '别名 → 原 force_layout（后续并入 edit_dsl）',
-    target: 'force_layout',
-    adapter: (a) => a,
-  },
-  {
-    name: 'grid_align',
-    description: '别名 → 原 grid_align（后续并入 edit_dsl）',
-    target: 'grid_align',
-    adapter: (a) => a,
-  },
-  {
-    name: 'submit_approval',
-    description: '别名 → 原 submit_approval（后续并入 edit_dsl）',
-    target: 'submit_approval',
-    adapter: (a) => a,
-  },
-  {
-    name: 'review_annotation',
-    description: '别名 → 原 review_annotation（后续并入 edit_dsl）',
-    target: 'review_annotation',
-    adapter: (a) => a,
-  },
-  {
-    name: 'save_snapshot',
-    description: '别名 → 原 save_snapshot（后续并入 edit_dsl）',
-    target: 'save_snapshot',
-    adapter: (a) => a,
-  },
-  {
-    name: 'rollback_snapshot',
-    description: '别名 → 原 rollback_snapshot（后续并入 edit_dsl）',
-    target: 'rollback_snapshot',
-    adapter: (a) => a,
-  },
-  {
-    name: 'delete_snapshot',
-    description: '别名 → 原 delete_snapshot（后续并入 edit_dsl）',
-    target: 'delete_snapshot',
-    adapter: (a) => a,
-  },
-];
-
-// ─────────────────────────────────────────────────────────────
 // 注册
 // ─────────────────────────────────────────────────────────────
 
-/** handler 索引：target 名 → handler */
-const handlerByTarget = new Map<string, ToolDef['handler']>();
-for (const def of TOOL_DEFS) handlerByTarget.set(def.name, def.handler);
-
-/** 遗留工具 handler（尚未吸收进 8 主工具，先保兼容，后续 Step 2 并入 edit_dsl） */
-const LEGACY_HANDLERS: Record<string, ToolDef['handler']> = {
-  import_project: wrap(async (a) => importProject(a as unknown as ImportProjectInput)),
-  add_annotation: wrap(async (a) => {
-    const r = addAnnotationByTool({
-      feature: a.feature as string,
-      text: a.text as string,
-      node_id: a.node_id as string | undefined,
-      type: a.type as 'comment' | 'question' | 'issue' | 'suggestion' | 'approval' | undefined,
-      severity: a.severity as 'info' | 'warning' | 'critical' | undefined,
-      author: a.author as string | undefined,
-    });
-    return { message: r.message };
-  }),
-  resolve_annotation: wrap(async (a) => {
-    const r = resolveAnnotation({
-      feature: a.feature as string,
-      annotation_id: a.annotation_id as string,
-      resolution_note: a.resolution_note as string | undefined,
-    });
-    return { message: r.message };
-  }),
-  dag_layout: wrap(async (a) => {
-    const r = dagLayout({
-      feature: a.feature as string,
-      direction: a.direction as 'horizontal' | 'vertical' | undefined,
-      h_gap: a.h_gap as number | undefined,
-      v_gap: a.v_gap as number | undefined,
-      width: a.width as number | undefined,
-      respect_swimlanes: a.respect_swimlanes as boolean | undefined,
-    });
-    return { message: r.message };
-  }),
-  force_layout: wrap(async (a) => {
-    const r = forceLayout({
-      feature: a.feature as string,
-      repulsion: a.repulsion as number | undefined,
-      stiffness: a.stiffness as number | undefined,
-      damping: a.damping as number | undefined,
-      iterations: a.iterations as number | undefined,
-      node_radius: a.node_radius as number | undefined,
-      width: a.width as number | undefined,
-      height: a.height as number | undefined,
-    });
-    return { message: r.message };
-  }),
-  grid_align: wrap(async (a) => {
-    const r = gridAlign({ feature: a.feature as string, grid_size: a.grid_size as number | undefined });
-    return { message: r.message };
-  }),
-  submit_approval: wrap(async (a) => {
-    const r = submitApproval({
-      feature: a.feature as string,
-      annotation_id: a.annotation_id as string,
-      assignee: a.assignee as string | undefined,
-      submitter: a.submitter as string | undefined,
-      comment: a.comment as string | undefined,
-    });
-    return { message: r.message };
-  }),
-  review_annotation: wrap(async (a) => {
-    const r = reviewAnnotation({
-      feature: a.feature as string,
-      annotation_id: a.annotation_id as string,
-      decision: a.decision as 'approve' | 'reject' | 'request_revision',
-      reviewer: a.reviewer as string,
-      comment: a.comment as string | undefined,
-    });
-    return { message: r.message };
-  }),
-  save_snapshot: wrap(async (a) => {
-    const r = saveSnapshot({
-      feature: a.feature as string,
-      label: a.label as string,
-      description: a.description as string | undefined,
-    });
-    return { message: r.message };
-  }),
-  rollback_snapshot: wrap(async (a) => {
-    const r = rollbackSnapshot({
-      feature: a.feature as string,
-      snapshot_id: a.snapshot_id as string,
-    });
-    return { message: r.message };
-  }),
-  delete_snapshot: wrap(async (a) => {
-    const r = deleteSnapshot({ feature: a.feature as string, snapshot_id: a.snapshot_id as string });
-    return { message: r.message };
-  }),
-};
-for (const [name, handler] of Object.entries(LEGACY_HANDLERS)) handlerByTarget.set(name, handler);
-
-/** 注册全部工具（主工具 + 别名）到 McpServer */
+/** 注册全部主工具到 McpServer（旧工具名别名已于 2026-08-17 全部移除） */
 export function registerAllTools(server: McpServer): void {
   for (const def of TOOL_DEFS) {
     server.registerTool(def.name, { title: def.title, description: def.description, inputSchema: def.inputSchema }, async (args) => {
@@ -860,19 +604,6 @@ export function registerAllTools(server: McpServer): void {
       return textOut(r.text, r.isError);
     });
   }
-  for (const alias of ALIASES) {
-    const handler = handlerByTarget.get(alias.target);
-    if (!handler) throw new Error(`别名 ${alias.name} 指向未知主工具 ${alias.target}`);
-    server.registerTool(
-      alias.name,
-      { title: alias.name, description: alias.description, inputSchema: LOOSE_INPUT_SCHEMA },
-      async (args) => {
-        const adapted = alias.adapter((args ?? {}) as Record<string, unknown>);
-        const r = await handler(adapted);
-        return textOut(r.text, r.isError);
-      },
-    );
-  }
 }
 
-export { TOOL_DEFS, ALIASES };
+export { TOOL_DEFS };
