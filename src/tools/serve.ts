@@ -43,6 +43,7 @@ import { renderHomePage, renderProjectPage } from './hub_page.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
+import { getOverview } from './overview.js';
 import { getMindMapFile } from './derive_mind_map.js';
 import { runMindmapAgent } from './mindmap_agent.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
@@ -793,6 +794,42 @@ function handleApiMindMapGet(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
     sendJson(res, 200, { success: true, mind_map: mindMap });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET/POST /api/overview：小白视图数据（摘要 + 功能树 + 上手步骤）
+ * GET ?feature=X —— 快速读：摘要走缓存（无则规则兜底），不调 LLM，页面秒开
+ * POST { feature, refresh?, refresh_llm?, first_steps? } —— refresh_llm=true 时
+ * 调 LLM 升级摘要与导图描述并落缓存（慢，首次访问/用户主动刷新用） */
+async function handleApiOverview(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  method: string,
+): Promise<void> {
+  try {
+    let feature = '';
+    let refresh = false;
+    let refreshLlm = false;
+    let firstSteps = 3;
+    if (method === 'GET') {
+      const url = new URL(req.url || '/', 'http://localhost');
+      feature = (url.searchParams.get('feature') || '').trim();
+    } else {
+      const body = await readBody(req);
+      const params = JSON.parse(body.toString('utf-8') || '{}');
+      feature = String(params.feature || '').trim();
+      refresh = params.refresh === true;
+      refreshLlm = params.refresh_llm === true;
+      if (typeof params.first_steps === 'number') firstSteps = params.first_steps;
+    }
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const result = await getOverview({ feature, refresh, refresh_llm: refreshLlm, first_steps: firstSteps });
+    sendJson(res, 200, { success: true, ...result });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1864,6 +1901,11 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/mind-map') && method === 'POST') {
       handleApiMindMap(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/overview') && (method === 'GET' || method === 'POST')) {
+      void handleApiOverview(req, res, method);
       return;
     }
     if (url.startsWith('/api/mind-map') && method === 'GET') {

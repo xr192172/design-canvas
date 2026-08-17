@@ -65,7 +65,7 @@ async function groupFeaturesByLLM(
   if (!cfg) return null;
 
   const list = comms
-    .map((c) => `- ${c.id}: 锚点[${c.name}] · ${c.files.length} 文件(如 ${c.files.slice(0, 3).join(', ')}) · ~${c.est_lines} 行`)
+    .map((c) => `- ${c.id}: 锚点[${c.name}] · ${c.files.slice(0, 2).join(',')} 等${c.files.length}文件`)
     .join('\n');
   const prompt =
     `下面是一个软件项目的 ${comms.length} 个"功能社区"（每个社区 = 一个按调用边聚到一起的功能锚点及成员文件）。` +
@@ -75,9 +75,9 @@ async function groupFeaturesByLLM(
     `1) 每个社区必须且只能归入一个功能；\n` +
     `2) 归并依据是业务语义（锚点/文件体现的职责），不是目录名；\n` +
     `3) 社区特别大时可单独成功能，不要强行塞进无关功能。\n` +
-    `只输出 JSON 对象，形如 {"features":[{"name":"渲染引擎","community_ids":[1,5,7]}]}，不要任何其他文字。\n\n${list}`;
+    `只输出紧凑 JSON（无空格无解释）：{"features":[{"name":"渲染引擎","community_ids":[1,5,7]}]}\n\n${list}`;
   try {
-    const text = await callChat(cfg, [{ role: 'user', content: prompt }]);
+    const text = await callChat(cfg, [{ role: 'user', content: prompt }], 0.2, 120_000);
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const parsed = JSON.parse(m[0]) as { features?: Array<{ name?: string; community_ids?: unknown }> };
@@ -132,6 +132,40 @@ function groupByDir(
   return features;
 }
 
+/**
+ * LLM 仅重命名（降级路径）：全量语义归并失败/超时时的保底人话化。
+ * 分组沿用目录归并（快而稳），只让 LLM 给每组起中文名——输出极小（N 个名字），
+ * 秒级返回。返回与 groups 等长的名字数组，或 null（失败保持原名）。
+ */
+async function renameGroupsByLLM(groups: FeatureNode[]): Promise<string[] | null> {
+  if (groups.length === 0) return null;
+  const cfg = loadLlmConfig() ?? toLlmCfg(loadExplainConfig());
+  if (!cfg) return null;
+  const list = groups
+    .map((g, i) => {
+      const anchors = g.communities.slice(0, 5).map((c) => c.name).join('、');
+      const files = [...new Set(g.communities.flatMap((c) => c.files))].slice(0, 4).join(', ');
+      return `- ${i}: 现名[${g.name}] · 社区锚点：${anchors} · 文件如：${files}`;
+    })
+    .join('\n');
+  const prompt =
+    `下面是一个软件项目按目录粗分的功能组。请给每组起一个简短的**中文名**（4-8 字，体现业务用途，` +
+    `如"渲染引擎""配置加载"），不要用目录名/英文原名。\n` +
+    `只输出紧凑 JSON：{"names":["名字0","名字1",...]}，顺序与组号一致，共 ${groups.length} 个。\n\n${list}`;
+  try {
+    const text = await callChat(cfg, [{ role: 'user', content: prompt }], 0.2, 45_000);
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const parsed = JSON.parse(m[0]) as { names?: unknown };
+    if (!Array.isArray(parsed.names) || parsed.names.length !== groups.length) return null;
+    const out = parsed.names.map((n) => String(n).trim());
+    if (out.some((n) => !n || n.length > 12)) return null;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export async function deriveFeatureTree(
   input: FeatureTreeInput,
 ): Promise<FeatureTreeResult> {
@@ -167,6 +201,7 @@ export async function deriveFeatureTree(
   // 3. 归并成功能：LLM 优先，规则兜底
   let named: Array<{ name: string; community_ids: number[] }> | null = null;
   let usedLlm = false;
+  let renameOnly = false; // 语义归并失败，仅做了目录分组 + LLM 重命名
   if (input.gen_names) {
     named = await groupFeaturesByLLM(comms);
     usedLlm = named !== null;
@@ -183,6 +218,17 @@ export async function deriveFeatureTree(
     }));
   } else {
     nodes = groupByDir(comms);
+    // 降级人话化：语义归并失败时至少把目录名换成中文名（小输出，秒级）
+    if (input.gen_names) {
+      const names = await renameGroupsByLLM(nodes);
+      if (names) {
+        nodes.forEach((n, i) => {
+          if (names[i]) n.name = names[i];
+        });
+        usedLlm = true;
+        renameOnly = true;
+      }
+    }
   }
 
   // 4. 稳定功能 id（f0, f1, …），供 file_map 引用
@@ -217,32 +263,86 @@ export async function deriveFeatureTree(
   features.sort((a, b) => b.file_count - a.file_count);
 
   // 5. file_map：文件 → 主导社区 → 功能
+  // 路径形态可能不一致：cache.db 的路径相对其项目根（如本仓库 camera/internal/...），
+  // DSL 的路径相对导入快照根（顶层目录已剥，如 internal/...）。
+  // 用后缀索引兜底（≥2 段，避免单文件名误命中）。
+  const suffixToCommunity = new Map<string, number>();
+  for (const [p, cid] of fileToCommunity) {
+    const segs = p.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const key = segs.slice(k).join('/');
+      if (!suffixToCommunity.has(key)) suffixToCommunity.set(key, cid); // 长后缀优先
+    }
+  }
+  function communityOf(relPath: string): number | undefined {
+    const segs = relPath.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const hit = suffixToCommunity.get(segs.slice(k).join('/'));
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
   const fileMap: Record<string, { feature_id: string; community_id: number }> = {};
   const dsl = input.feature ? getDSL(input.feature) : null;
   const semanticFiles = dsl?.semantic?.files ?? [];
   for (const sf of semanticFiles) {
-    const cid = fileToCommunity.get(sf.path);
+    const cid = fileToCommunity.get(sf.path) ?? communityOf(sf.path);
     if (cid === undefined) continue;
     const fid = commFeatureId.get(cid);
     if (!fid) continue;
     fileMap[sf.id] = { feature_id: fid, community_id: cid };
   }
 
+  // 5.5 范围过滤 + 命中率闸门：cache.db 覆盖整个 project_dir，而 feature 可能只是
+  // 其中一个子目录，甚至属于完全无关的代码库（早期无 source_root 的数据）。
+  // 闸门判据用 **db 侧命中率**：db 索引文件中属于该 feature 的比例 < 50% 视为
+  // 不相关（db 必须是 feature 范围内的子集索引才合法）。注意 db 可只索引 feature
+  // 的一部分（如跳过 scripts），DSL 侧命中率会偏低，故不用 DSL 侧做判据。
+  const semExact = new Set(semanticFiles.map((f) => f.path));
+  const semSuffix = new Set<string>();
+  for (const f of semanticFiles) {
+    const segs = f.path.split('/');
+    for (let k = 0; k < segs.length - 1; k++) semSuffix.add(segs.slice(k).join('/'));
+  }
+  function inFeature(p: string): boolean {
+    if (semExact.has(p)) return true;
+    const segs = p.split('/');
+    for (let k = 0; k < segs.length - 1; k++) if (semSuffix.has(segs.slice(k).join('/'))) return true;
+    return false;
+  }
+  const dbTotal = mono.file_view.length;
+  const dbHit = mono.file_view.filter((fv) => inFeature(fv.path)).length;
+  if (dbTotal > 0 && dbHit < dbTotal * 0.5) {
+    return {
+      feature: input.feature,
+      features: [],
+      file_count: Object.keys(fileMap).length,
+      unassigned_count: semanticFiles.length,
+      message: `cache.db 与该 feature 不相关（db 文件 ${dbHit}/${dbTotal} 属于此项目），已拒绝生成功能树`,
+    };
+  }
+  // 规则：功能下任一社区的文件都没进 file_map → 该功能整体剔除。
+  const mappedFids = new Set(Object.values(fileMap).map((m) => m.feature_id));
+  let scoped = features;
+  if (semanticFiles.length > 0 && mappedFids.size > 0) {
+    scoped = features.filter((f) => mappedFids.has(f.id));
+  }
+
   // 6. 落盘
   if (input.feature && dsl) {
-    dsl.feature_tree = { features, file_map: fileMap };
+    dsl.feature_tree = { features: scoped, file_map: fileMap, source: usedLlm ? 'llm' : 'rule' };
     saveDSL(dsl, 'feature_tree');
   }
 
   const total = semanticFiles.length;
   return {
     feature: input.feature,
-    features,
+    features: scoped,
     file_count: Object.keys(fileMap).length,
     unassigned_count: Math.max(0, total - Object.keys(fileMap).length),
     message:
       `功能树生成：${features.length} 个功能 · ${mono.community_count} 个社区 · ` +
       `${Object.keys(fileMap).length}/${total} 个文件完成归属` +
-      (usedLlm ? '（LLM 归并命名）' : '（规则目录归并）'),
+      (renameOnly ? '（LLM 重命名目录分组）' : usedLlm ? '（LLM 归并命名）' : '（规则目录归并）'),
   };
 }

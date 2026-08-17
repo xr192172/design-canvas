@@ -77,21 +77,42 @@ interface FileInfo {
   layer?: string;
 }
 
-/** 从语义层构建 文件路径 → FileInfo 索引，并保留 id（= geometry node id） */
-function buildFileIndex(dsl: DesignDSL): Map<string, FileInfo> {
-  const map = new Map<string, FileInfo>();
+/** 从语义层构建 文件路径 → FileInfo 索引，并保留 id（= geometry node id）。
+ *  另建后缀索引（≥2 段）：功能树社区的 files 相对 cache.db 项目根，
+ *  DSL 路径相对导入快照根，前缀可能不一致（如 camera/internal/… vs internal/…）。 */
+function buildFileIndex(dsl: DesignDSL): { exact: Map<string, FileInfo>; bySuffix: Map<string, FileInfo> } {
+  const exact = new Map<string, FileInfo>();
+  const bySuffix = new Map<string, FileInfo>();
   for (const f of dsl.semantic?.files ?? []) {
     if (!f.path) continue;
-    map.set(f.path, {
+    const info: FileInfo = {
       id: f.id,
       path: f.path,
       responsibility: f.responsibility || '',
       lines: f.lines,
       status: f.status,
       layer: f.layer,
-    });
+    };
+    exact.set(f.path, info);
+    const segs = f.path.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const key = segs.slice(k).join('/');
+      if (!bySuffix.has(key)) bySuffix.set(key, info); // 长后缀优先
+    }
   }
-  return map;
+  return { exact, bySuffix };
+}
+
+/** 精确 → 后缀（至少保留 2 段）查文件信息 */
+function lookupFile(idx: { exact: Map<string, FileInfo>; bySuffix: Map<string, FileInfo> }, rel: string): FileInfo | undefined {
+  const hit = idx.exact.get(rel);
+  if (hit) return hit;
+  const segs = rel.split('/');
+  for (let k = 0; k < segs.length - 1; k++) {
+    const s = idx.bySuffix.get(segs.slice(k).join('/'));
+    if (s) return s;
+  }
+  return undefined;
 }
 
 /** 规则描述：功能节点 */
@@ -118,7 +139,9 @@ function ruleFileDesc(f: FileInfo): string {
 
 /**
  * 用 LLM 为一批功能/社区节点批量生成人话描述。
- * 返回 { 节点id → 描述 }；调用失败返回 null（调用方降级规则）。
+ * 分批并行（每批 12 个条目，批间 Promise.all），单批 60s 超时——
+ * 一次性喂几十个条目会让慢端点生成超长输出甚至悬挂（实测 5 分钟）。
+ * 返回 { 节点id → 描述 }（合并各批成功部分）；全部失败返回 null（调用方降级规则）。
  */
 async function llmEnrichDescriptions(
   nodes: Array<{ id: string; label: string; kind: string; hint: string }>,
@@ -126,43 +149,54 @@ async function llmEnrichDescriptions(
 ): Promise<Map<string, string> | null> {
   const cfg = loadAgentConfig();
   if (!cfg) return null;
-  const list = nodes
-    .map((n) => `- id=${n.id} · ${n.kind === 'feature' ? '功能' : '子模块'}「${n.label}」· ${n.hint}`)
-    .join('\n');
+  const BATCH = 12;
+  const chunks: Array<typeof nodes> = [];
+  for (let i = 0; i < nodes.length; i += BATCH) chunks.push(nodes.slice(i, i + BATCH));
   const system =
     '你是软件项目的"人话翻译官"。用户要把一个项目的结构做成给普通人看的思维导图。' +
     '给定项目里的功能/子模块清单，请为每个条目写一句**通俗易懂的介绍**（2-3 句以内），' +
     '讲清"这是什么、大概干嘛用"，避免只重复技术名词。基于给定事实，不要编造。' +
     '只输出 JSON：{"descriptions":{"<id>":"<人话描述>", ...}}，id 必须来自给定清单。';
-  try {
-    const res = await fetch(`${cfg.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: `项目：${projectTitle}\n条目清单：\n${list}` },
-        ],
-        temperature: 0.4,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) throw new Error(`LLM 调用失败 ${res.status}`);
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content ?? '';
-    const parsed = extractJsonObject(content);
-    const raw = parsed?.descriptions as Record<string, unknown> | undefined;
-    if (!raw || typeof raw !== 'object') return null;
-    const out = new Map<string, string>();
-    for (const [id, v] of Object.entries(raw)) {
-      const s = typeof v === 'string' ? v.trim() : '';
-      if (s) out.set(id, s);
-    }
-    return out.size > 0 ? out : null;
-  } catch {
-    return null;
-  }
+  const results = await Promise.all(
+    chunks.map(async (chunk) => {
+      const list = chunk
+        .map((n) => `- id=${n.id} · ${n.kind === 'feature' ? '功能' : '子模块'}「${n.label}」· ${n.hint}`)
+        .join('\n');
+      try {
+        const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: `项目：${projectTitle}\n条目清单：\n${list}` },
+            ],
+            temperature: 0.4,
+            response_format: { type: 'json_object' },
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) return null;
+        const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const content = data.choices?.[0]?.message?.content ?? '';
+        const parsed = extractJsonObject(content);
+        const raw = parsed?.descriptions as Record<string, unknown> | undefined;
+        if (!raw || typeof raw !== 'object') return null;
+        const out = new Map<string, string>();
+        for (const [id, v] of Object.entries(raw)) {
+          const s = typeof v === 'string' ? v.trim() : '';
+          if (s) out.set(id, s);
+        }
+        return out.size > 0 ? out : null;
+      } catch {
+        return null; // 单批失败不拖垮其余批次
+      }
+    }),
+  );
+  const merged = new Map<string, string>();
+  for (const r of results) if (r) for (const [k, v] of r) merged.set(k, v);
+  return merged.size > 0 ? merged : null;
 }
 
 /** 递归统计子树文件数 */
@@ -209,7 +243,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
         const fileNodes: MindMapNode[] = [];
         const files = c.files.slice(0, max_files_per_community);
         for (const rel of files) {
-          const info = fileIndex.get(rel);
+          const info = lookupFile(fileIndex, rel);
           if (!info) continue;
           fileNodes.push({
             id: info.id,

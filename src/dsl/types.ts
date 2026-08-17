@@ -161,6 +161,8 @@ export interface FeatureTree {
   features: FeatureNode[];
   /** 文件 → 主导归属映射（key 为 SemanticFile.id，即 geometry.node.id） */
   file_map: Record<string, { feature_id: string; community_id: number }>;
+  /** 功能名生成方式：llm=LLM 人话命名；rule=目录归并兜底（可被 refresh_llm 升级） */
+  source?: 'llm' | 'rule';
 }
 
 /** 顶层 DSL 文档 */

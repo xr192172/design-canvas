@@ -28,6 +28,10 @@ beforeEach(() => {
   delete process.env.LLM_API_KEY;
   delete process.env.LLM_MODEL;
   delete process.env.LLM_BASE_URL;
+  // loadLlmConfig 会兜底复用 agent 配置（AGNES），测试"无配置"场景需一并隔离
+  delete process.env.AGNES_API_KEY;
+  delete process.env.AGNES_MODEL;
+  delete process.env.AGNES_BASE_URL;
 });
 afterEach(() => {
   delete process.env.DESIGN_CANVAS_HOME;

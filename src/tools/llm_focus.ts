@@ -101,11 +101,17 @@ export function loadLlmConfig(): LlmConfig | null {
       // config 损坏：忽略，走环境变量/无配置
     }
   }
-  const cfg: LlmConfig = {
+  let cfg: LlmConfig = {
     apiKey: fromEnv.apiKey ?? fileCfg.apiKey ?? '',
     model: fromEnv.model ?? fileCfg.model ?? 'gpt-4o-mini',
     baseURL: (fromEnv.baseURL ?? fileCfg.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, ''),
   };
+  // 兜底：未配置专用 llm 段时复用 agent.mmd（AGNES，OpenAI 兼容），
+  // 使 overview / feature_tree / mind_map 等通用提炼功能开箱即用
+  if (!cfg.apiKey) {
+    const agent = loadAgentConfig();
+    if (agent) cfg = { apiKey: agent.apiKey, model: agent.model, baseURL: agent.baseURL };
+  }
   return cfg.apiKey ? cfg : null;
 }
 
@@ -122,6 +128,8 @@ export async function callChat(
   cfg: LlmConfig,
   messages: ChatMessage[],
   temperature = 0.2,
+  /** 请求超时（默认 90s；慢端点上大 prompt 曾出现 5 分钟悬挂，必须有保护） */
+  timeoutMs = 90_000,
 ): Promise<string> {
   const res = await fetch(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
@@ -135,6 +143,7 @@ export async function callChat(
       temperature,
       response_format: { type: 'json_object' }, // 兼容 OpenAI/DeepSeek 等
     }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     throw new Error(`LLM 调用失败 ${res.status}：${(await res.text()).slice(0, 200)}`);
