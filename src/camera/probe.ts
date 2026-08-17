@@ -34,6 +34,11 @@ function getGlobalSink(): TSProbeCapture | null {
   return (globalThis as unknown as SinkHolder)[GLOBAL_SINK_KEY] ?? null;
 }
 
+/** 全局 sink 是否已配置（供 lazy 初始化方判断，避免覆盖已有 sink）。 */
+export function hasGlobalProbeSink(): boolean {
+  return getGlobalSink() !== null;
+}
+
 /**
  * 配置全局探针 sink（null 关闭）。返回前一个 sink，便于测试隔离/恢复。
  * 与 Go 侧 SetGlobalSink 语义一致：probe 只依赖这个开关，未配置则 no-op。

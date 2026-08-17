@@ -19,6 +19,7 @@ import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
 import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
+import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../camera/probe.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -221,6 +222,21 @@ export interface WatchProjectToolResult {
 // 实现
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * impact 事件入 Camera 流的 lazy sink（Step 3 合流）：
+ * MCP stdio 进程默认无全局 sink（captureProbe 是 no-op，事件会丢）——首次注入前
+ * 按项目落盘 <projectRoot>/.design-canvas/camera/events.jsonl。
+ * 已有 sink（serve 设 CAMERA_EVENTS_FILE / 先前 watch 已建）则复用不覆盖。
+ * 注：全局 sink 只有一个，多项目同进程 watch 时共用首个项目的流（可接受：serve
+ * 场景本来就走全局单文件）。
+ */
+function ensureCameraSink(projectRoot: string): void {
+  if (process.env.CAMERA_EVENTS_FILE) return; // serve/哨兵已配置，复用全局
+  if (hasGlobalProbeSink()) return;
+  const eventsPath = TSProbeCapture.pathFor(path.join(projectRoot, '.design-canvas', 'camera'));
+  setGlobalProbeSink(new TSProbeCapture(eventsPath));
+}
+
 /** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + 影响报告） */
 async function onBatchChange(entry: ActiveWatch, summary: WatchBatchSummary): Promise<void> {
   entry.last_change_at = new Date().toISOString();
@@ -263,6 +279,8 @@ async function doWork(entry: ActiveWatch): Promise<void> {
   }
 
   // ② 影响报告：取走冷却窗口内积累的变更文件，全文落盘 + 摘要入 alerts
+  //    + 注入 Camera 事件流（Step 3 合流：serve SSE 即时播报 / camera_log 事后查 /
+  //      camera_judge 判定爆炸半径 design:impact-blast-radius）
   if (entry.impact_on_change && entry.pending_files.size > 0) {
     const files = [...entry.pending_files];
     entry.pending_files.clear();
@@ -277,9 +295,35 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: s.summary_line });
       if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
       entry.last_impact_seq = s.seq;
+      // 成功事件：err 空 + 波及统计。radius 超阈值时被 impactBlastRadius 判 deviation
+      ensureCameraSink(entry.project_dir);
+      captureProbe(
+        'impact.report',
+        {
+          file: files[0],
+          op: 'impact-report',
+          err: '',
+          level: 'event',
+          changed_files: files,
+          seq: s.seq,
+          direct_files: s.direct_files,
+          direct_symbols: s.direct_symbols,
+          indirect_files: s.indirect_files,
+          indirect_symbols: s.indirect_symbols,
+          summary: s.summary_line,
+        },
+        'runtime-invariant',
+      );
     } catch (e) {
-      // 影响报告失败不阻断监听（如 cache 未建），记录到 error
+      // 影响报告失败不阻断监听（如 cache 未建），记录到 error + 注入失败事件
+      // （err 非空 → silentErrorDiscard 判 deviation → serve SSE 即时报警）
       entry.error = '影响报告失败: ' + (e as Error).message;
+      ensureCameraSink(entry.project_dir);
+      captureProbe(
+        'impact.report',
+        { file: files[0], op: 'impact-report', err: (e as Error).message, level: 'event', changed_files: files },
+        'runtime-invariant',
+      );
     }
   }
 }

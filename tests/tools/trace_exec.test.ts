@@ -177,7 +177,7 @@ describe('trace_exec - Python 真实执行', () => {
     if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
     expect(result.steps[0].status).toBe('ok');
     expect(result.steps[0].out_value).toBe('pass');
-  });
+  }, 15000); // 子进程执行（内部超时 10s + Python 启动开销），默认 5s 在环境抖动（如 Defender 扫描）下过紧
 });
 
 const GO_FIXTURE = `package main
@@ -200,7 +200,7 @@ describe('trace_exec - Go 真实执行', () => {
     if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
     expect(result.steps[0].status).toBe('ok');
     expect(result.steps[0].out_value).toBe(5);
-  });
+  }, 30000); // go run 需编译，首次或冷缓存时显著慢于 5s
 });
 
 // ─────────────────────────────────────────────────────────────

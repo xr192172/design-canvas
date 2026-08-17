@@ -45,10 +45,44 @@ export function silentErrorDiscard(ev: TSEvent): JudgeVerdict {
 }
 
 /**
+ * 变更影响爆炸半径契约（Step 3：watch 影响报告与 Camera 合流）。
+ *
+ * watch impact_on_change=true 生成的 `impact.report` 事件：波及文件总数
+ * （direct+indirect）超阈值即偏差——提醒"这一改动的爆炸半径过大，考虑拆分"。
+ * 只对 probe 以 `impact.` 开头的事件生效，其他事件一律 ok（不干扰既有规则）。
+ * 生成失败（fields.err 非空）由 silentErrorDiscard 先命中，不在此重复。
+ */
+export const IMPACT_BLAST_RADIUS_LIMIT = 50;
+
+export function impactBlastRadius(ev: TSEvent): JudgeVerdict {
+  if (!ev.probe.startsWith('impact.')) {
+    return { probe: ev.probe, rule: 'design:impact-blast-radius', result: 'ok', reason: 'not an impact event', fields: ev.fields };
+  }
+  const num = (k: string): number => (typeof ev.fields[k] === 'number' ? (ev.fields[k] as number) : 0);
+  const direct = num('direct_files');
+  const indirect = num('indirect_files');
+  const threshold = num('threshold') || IMPACT_BLAST_RADIUS_LIMIT;
+  const total = direct + indirect;
+  if (total > threshold) {
+    return {
+      probe: ev.probe,
+      rule: 'design:impact-blast-radius',
+      result: 'deviation',
+      reason: `blast radius ${total} files (direct ${direct} + indirect ${indirect}) exceeds threshold ${threshold} — consider splitting the change`,
+      fields: ev.fields,
+    };
+  }
+  return { probe: ev.probe, rule: 'design:impact-blast-radius', result: 'ok', reason: `blast radius ${total} files within threshold ${threshold}`, fields: ev.fields };
+}
+
+/**
  * 对单条事件执行全部已注册规则判定，返回首条命中偏差的判定（无偏差则 ok）。
  * 规则顺序即优先级。
  */
-export function judgeEvent(ev: TSEvent, rules: Array<(e: TSEvent) => JudgeVerdict> = [silentErrorDiscard]): JudgeVerdict {
+export function judgeEvent(
+  ev: TSEvent,
+  rules: Array<(e: TSEvent) => JudgeVerdict> = [silentErrorDiscard, impactBlastRadius],
+): JudgeVerdict {
   for (const rule of rules) {
     const v = rule(ev);
     if (v.result === 'deviation') return v;
