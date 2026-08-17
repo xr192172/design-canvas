@@ -14,6 +14,16 @@
 /** 思维导图节点类型 */
 export type MindMapKind = 'root' | 'feature' | 'community' | 'file' | 'note';
 
+/** 科普分镜步骤（teach 模式 feature 节点专用，像科普视频的镜头脚本） */
+export interface TeachStep {
+  /** 步骤标题（≤12 字，动宾结构，如「接收用户输入」「写入结果缓存」） */
+  title: string;
+  /** 一步人话讲解：这步发生什么、数据从哪来到哪去（1-2 句） */
+  detail: string;
+  /** 这步涉及的关键文件/模块（技术锚点，供下钻追溯，可选） */
+  involves?: string[];
+}
+
 /** 思维导图节点 */
 export interface MindMapNode {
   /** 锚点 id，尽力与 L2/L1 共享（文件节点 = file_xxx） */
@@ -35,6 +45,8 @@ export interface MindMapNode {
     /** 指向 L2 设计图层节点的显式引用（无法用 id 对齐时） */
     l2_ref?: string;
   };
+  /** 实现原理分镜（teach 模式功能节点：像科普视频一步步讲"这是怎么实现的"） */
+  steps?: TeachStep[];
   /** 子节点 */
   children?: MindMapNode[];
 }
@@ -45,6 +57,8 @@ export interface MindMap {
   feature: string;
   /** 生成方式：llm=LLM 提炼；rule=规则骨架（未配置 LLM 或失败降级） */
   mode: 'llm' | 'rule';
+  /** 视图形态：structure=结构树（功能→社区→文件）；teach=科普教学（功能+实现原理分镜） */
+  view?: 'structure' | 'teach';
   /** 根节点 */
   root: MindMapNode;
   /** 生成时间 */

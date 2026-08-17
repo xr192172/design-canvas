@@ -27,7 +27,7 @@ import { getDSL, getStorageRoot, getDataHome } from '../storage.js';
 import { extractJsonObject } from './explain_gen.js';
 import { loadAgentConfig } from './llm_focus.js';
 import type { DesignDSL, FeatureTree } from '../dsl/types.js';
-import type { MindMap, MindMapNode } from '../dsl/mindmap.js';
+import type { MindMap, MindMapNode, TeachStep } from '../dsl/mindmap.js';
 
 export interface DeriveMindMapInput {
   /** feature 名（必填） */
@@ -38,6 +38,10 @@ export interface DeriveMindMapInput {
   max_files_per_community?: number;
   /** 产物输出路径（可选，默认 output/mind_map_<feature>.html） */
   output_path?: string;
+  /** 视图形态（默认 structure）：
+   *  structure = 结构树（功能→社区→文件，开发者下钻用）
+   *  teach     = 科普教学（功能 + 实现原理分镜 steps，像科普视频讲解，小白用） */
+  view?: 'structure' | 'teach';
 }
 
 export interface DeriveMindMapResult {
@@ -52,9 +56,10 @@ export interface DeriveMindMapResult {
   message: string;
 }
 
-/** 思维导图 JSON 落盘路径：<storageRoot>/mindmap/<feature>.json */
-export function getMindMapFile(feature: string): string {
-  return path.join(getStorageRoot(), 'mindmap', `${feature}.json`);
+/** 思维导图 JSON 落盘路径：<storageRoot>/mindmap/<feature>.json（teach 版加 .teach 后缀） */
+export function getMindMapFile(feature: string, view: 'structure' | 'teach' = 'structure'): string {
+  const suffix = view === 'teach' ? '.teach' : '';
+  return path.join(getStorageRoot(), 'mindmap', `${feature}${suffix}.json`);
 }
 
 /** 默认 HTML 输出路径：<dataHome>/output/mind_map_<feature>.html */
@@ -75,6 +80,8 @@ interface FileInfo {
   lines?: number;
   status?: string;
   layer?: string;
+  /** 关键函数签名（actual_apis 优先，teach 模式喂给 LLM 的实现材料） */
+  apis?: string[];
 }
 
 /** 从语义层构建 文件路径 → FileInfo 索引，并保留 id（= geometry node id）。
@@ -92,6 +99,7 @@ function buildFileIndex(dsl: DesignDSL): { exact: Map<string, FileInfo>; bySuffi
       lines: f.lines,
       status: f.status,
       layer: f.layer,
+      apis: (f.actual_apis ?? f.expected_apis ?? []).slice(0, 4).map((a) => a.signature),
     };
     exact.set(f.path, info);
     const segs = f.path.split('/');
@@ -205,6 +213,199 @@ function countFiles(n: MindMapNode): number {
   return n.children.reduce((s, c) => s + countFiles(c), 0);
 }
 
+// ─────────────────────────────────────────────────────────────
+// teach 模式：科普教学导图（功能 + 实现原理分镜）
+// 叙事框架参考科普视频：项目是什么 → 有哪些功能 → 每个功能怎么实现的（分镜）
+// ─────────────────────────────────────────────────────────────
+
+/** 给 LLM 的科普分镜产出 */
+interface TeachScript {
+  what: string;
+  steps: TeachStep[];
+}
+
+/**
+ * 科普编剧（teach 核心）：给 LLM 喂一个功能的全部实现材料
+ * （文件职责 + 关键函数签名 + 协作模块锚点），产出科普视频式分镜。
+ * 返回 null 表示失败/未配置（调用方降级规则描述）。
+ */
+async function llmTeachFeature(material: string): Promise<TeachScript | null> {
+  const cfg = loadAgentConfig();
+  if (!cfg) return null;
+  const system =
+    '你是技术科普编剧，擅长把软件功能讲成普通人爱看的科普视频。' +
+    '给定一个功能的所有实现材料（每个文件的职责说明、关键函数签名、协作模块），请为这个功能写科普分镜：\n' +
+    '1. what：这个功能是干嘛的、解决什么问题。1-2 句，说人话，假设观众完全不懂编程。\n' +
+    '2. steps：实现原理分镜，3-6 步，像视频镜头一样**按真实执行/数据流顺序**推进。每步：\n' +
+    '   title：≤12 字动宾短语（如「接收用户输入」「比对预期与实际」）；\n' +
+    '   detail：1-2 句，讲清这步发生什么、数据从哪来、送到哪去；说人话但必须准确；\n' +
+    '   involves：这步涉及的关键文件名数组（只能从材料里出现的文件中选）。\n' +
+    '只基于给定材料，不得编造。只输出 JSON（无其他文字）：\n' +
+    '{"what":"...","steps":[{"title":"...","detail":"...","involves":["a.ts"]}]}';
+  try {
+    const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: material },
+        ],
+        temperature: 0.4,
+        response_format: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const parsed = extractJsonObject(data.choices?.[0]?.message?.content ?? '');
+    if (!parsed) return null;
+    const what = typeof parsed.what === 'string' ? parsed.what.trim() : '';
+    const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+    const steps: TeachStep[] = [];
+    for (const s of rawSteps) {
+      const step = s as { title?: unknown; detail?: unknown; involves?: unknown };
+      const t = typeof step.title === 'string' ? step.title.trim() : '';
+      const d = typeof step.detail === 'string' ? step.detail.trim() : '';
+      if (!t || !d) continue;
+      const inv = Array.isArray(step.involves)
+        ? step.involves.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 5)
+        : undefined;
+      steps.push({ title: t.slice(0, 24), detail: d.slice(0, 300), involves: inv });
+    }
+    if (!what || steps.length === 0) return null;
+    return { what: what.slice(0, 200), steps: steps.slice(0, 8) };
+  } catch {
+    return null;
+  }
+}
+
+/** 组装单个功能的实现材料（喂给科普编剧）：文件职责 + 函数签名 + 协作锚点 */
+function buildTeachMaterial(
+  projectTitle: string,
+  fName: string,
+  communities: FeatureTree['features'][number]['communities'],
+  fileIndex: ReturnType<typeof buildFileIndex>,
+): string {
+  const anchors = communities.slice(0, 8).map((c) => c.name);
+  const rels = [...new Set(communities.flatMap((c) => c.files))];
+  const MAX = 25;
+  const shown = rels.slice(0, MAX);
+  const lines: string[] = [
+    `项目：${projectTitle}`,
+    `功能：${fName}（${rels.length} 个文件${anchors.length ? `，协作模块：${anchors.join('、')}` : ''}）`,
+    '实现材料：',
+  ];
+  for (const rel of shown) {
+    const info = lookupFile(fileIndex, rel);
+    if (!info) continue;
+    const resp = info.responsibility || '（无职责说明）';
+    const apis = info.apis?.length ? `（关键函数：${info.apis.join(' / ')}）` : '';
+    lines.push(`- ${rel}：${resp}${apis}`);
+  }
+  if (rels.length > shown.length) lines.push(`（材料截断，等共 ${rels.length} 个文件）`);
+  return lines.join('\n');
+}
+
+/**
+ * 构建 teach 导图：root → 功能（what + 实现原理分镜 steps）。
+ * useLlm=true 时各功能并行调科普编剧；失败/未配置降级规则版（无分镜，仅描述）。
+ * teach 只落 JSON（小白入口是项目页圆框图，不需要独立 HTML 查看器）。
+ */
+async function buildTeachMindMap(
+  dsl: DesignDSL,
+  feature: string,
+  title: string,
+  useLlm: boolean,
+): Promise<DeriveMindMapResult> {
+  const fileIndex = buildFileIndex(dsl);
+  const ft = dsl.feature_tree;
+  const jsonFile = getMindMapFile(feature, 'teach');
+
+  // 平铺兜底：无功能树（早期数据）——诚实降级，与 structure 一致
+  if (!ft || ft.features.length === 0) {
+    const root: MindMapNode = {
+      id: 'root',
+      label: title,
+      description: '项目总览（未生成功能树，按文件平铺）',
+      kind: 'root',
+      children: (dsl.semantic?.files ?? [])
+        .filter((f) => f.path)
+        .slice(0, 30)
+        .map((f) => ({
+          id: f.id,
+          label: basename(f.path),
+          description: f.responsibility || '（无描述）',
+          kind: 'file' as const,
+        })),
+    };
+    const mindMap: MindMap = {
+      feature,
+      mode: 'rule',
+      view: 'teach',
+      root,
+      generated_at: new Date().toISOString(),
+      note: '该项目缺少源码快照（早期导入数据），无法生成科普分镜；重新导入可获得完整教学视图',
+    };
+    fs.mkdirSync(path.dirname(jsonFile), { recursive: true });
+    fs.writeFileSync(jsonFile, JSON.stringify(mindMap, null, 2), 'utf-8');
+    return { feature, mode: 'rule', mind_map: mindMap, jsonFile, htmlFile: '', message: mindMap.note ?? '' };
+  }
+
+  // LLM 科普编剧：各功能并行
+  const scripts = useLlm
+    ? await Promise.all(ft.features.map((f) => llmTeachFeature(buildTeachMaterial(title, f.name, f.communities, fileIndex))))
+    : ft.features.map(() => null as TeachScript | null);
+  const anyLlm = scripts.some((s) => s !== null);
+
+  const root: MindMapNode = {
+    id: 'root',
+    label: title,
+    description: `项目总览：${ft.features.length} 个功能`,
+    kind: 'root',
+    children: ft.features.map((f, i) => {
+      const rels = [...new Set(f.communities.flatMap((c) => c.files))];
+      const script = scripts[i];
+      const anchors = f.communities.slice(0, 6).map((c) => c.name).join('、');
+      return {
+        id: `f${i}`,
+        label: f.name,
+        kind: 'feature' as const,
+        description: script?.what ?? `由 ${f.communities.length} 个子模块协作完成的业务功能`,
+        steps: script?.steps ?? [
+          {
+            title: '协作总览',
+            detail: `主要由 ${anchors || '多个子模块'} 协作完成${rels.length ? `，涉及 ${rels.length} 个文件` : ''}。（AI 分镜生成中或不可用）`,
+          },
+        ],
+        meta: { files: rels.length },
+      };
+    }),
+  };
+
+  const mindMap: MindMap = {
+    feature,
+    mode: anyLlm ? 'llm' : 'rule',
+    view: 'teach',
+    root,
+    generated_at: new Date().toISOString(),
+    note: anyLlm
+      ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜`
+      : 'LLM 分镜不可用（未配置或调用失败），已降级规则描述',
+  };
+  fs.mkdirSync(path.dirname(jsonFile), { recursive: true });
+  fs.writeFileSync(jsonFile, JSON.stringify(mindMap, null, 2), 'utf-8');
+  return {
+    feature,
+    mode: mindMap.mode,
+    mind_map: mindMap,
+    jsonFile,
+    htmlFile: '',
+    message: `科普教学导图（teach）已生成：${jsonFile}\n说明：${mindMap.note}`,
+  };
+}
+
 /** 构建思维导图（规则骨架 + 可选 LLM 描述） */
 export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMindMapResult> {
   const { feature, gen_descriptions = false, max_files_per_community = 20 } = input;
@@ -212,6 +413,11 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 render_dsl 或 import_project 创建`);
 
   const title = dsl.title || feature;
+
+  // teach 模式独立分支：科普教学导图（功能 + 实现原理分镜）
+  if ((input.view ?? 'structure') === 'teach') {
+    return buildTeachMindMap(dsl, feature, title, gen_descriptions);
+  }
   const fileIndex = buildFileIndex(dsl);
   const ft: FeatureTree | undefined = dsl.feature_tree;
 
@@ -338,6 +544,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   const mindMap: MindMap = {
     feature,
     mode,
+    view: 'structure',
     root,
     generated_at: new Date().toISOString(),
     note,

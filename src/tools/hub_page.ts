@@ -248,8 +248,19 @@ export function renderProjectPage(feature: string): string {
     .acard h4 { font-size:15px; color:#e8f1ff; margin-bottom:5px; }
     .acard .sub { font-size:12px; opacity:.55; }
     #bubble-wrap svg text { font-family:inherit; cursor:pointer; }
-    #bubble-wrap svg .bnode { cursor:pointer; }
-    #bubble-wrap svg .bnode:hover { filter:brightness(1.35); }
+            #bubble-wrap svg .bnode { cursor:pointer; }
+            #bubble-wrap svg .bnode:hover { filter:brightness(1.35); }
+            #node-detail { max-width:860px; }
+            .steps-tl-title { font-size:12.5px; font-weight:700; color:#8fb7e8; margin:14px 0 8px; letter-spacing:.5px; }
+            .steps-tl { position:relative; padding-left:6px; }
+            .tstep { display:flex; gap:12px; position:relative; padding-bottom:14px; }
+            .tstep:last-child { padding-bottom:2px; }
+            .tstep:not(:last-child)::before { content:''; position:absolute; left:13px; top:30px; bottom:0; width:2px; background:rgba(125,211,252,.25); }
+            .tno { flex:none; width:28px; height:28px; border-radius:50%; background:linear-gradient(135deg,#155a8a,#7dd3fc); color:#fff; font-size:12.5px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+            .tbody { flex:1; min-width:0; padding-top:3px; }
+            .ttitle { font-size:13.5px; font-weight:700; color:#e8f1ff; margin-bottom:3px; }
+            .tdetail { font-size:12.5px; color:#c9dcf5; opacity:.85; line-height:1.65; }
+            .tinv { font-size:11px; color:#7a93b8; margin-top:4px; font-family:ui-monospace,Consolas,monospace; word-break:break-all; }
   </style>`;
 
   const script = `
@@ -333,6 +344,7 @@ export function renderProjectPage(feature: string): string {
         svg += '<text x="'+cx+'" y="'+(CY + 5 + (li - (lines.length-1)/2)*16 + 4)+'" text-anchor="middle" font-size="13" font-weight="700" fill="#e8f1ff">'+__esc(ln)+'</text>';
       });
       if(f.meta && f.meta.files) svg += '<text x="'+cx+'" y="'+(CY+R+13)+'" text-anchor="middle" font-size="10" fill="#7a93b8">'+f.meta.files+' 文件</text>';
+              if(f.steps && f.steps.length > 1) svg += '<text x="'+cx+'" y="'+(CY-R-10)+'" text-anchor="middle" font-size="10.5" fill="#8fb7e8">⚙️ '+f.steps.length+' 步原理</text>';
       svg += '</g>';
       // 子模块椭圆（最多 4 个，多出的折叠提示）
       var subs = (f.children || []).filter(function(c){ return c && c.label; }).slice(0, 4);
@@ -358,9 +370,22 @@ export function renderProjectPage(feature: string): string {
         var i = +el.getAttribute('data-i'), kind = el.getAttribute('data-kind');
         var f = feats[i], det = document.getElementById('node-detail');
         if(kind === 'feature'){
+          var stepsHtml = '';
+          if(f.steps && f.steps.length){
+            stepsHtml = '<div class="steps-tl-title">⚙️ 实现原理（AI 科普分镜）</div><div class="steps-tl">'
+              + f.steps.map(function(st, si){
+                  return '<div class="tstep"><div class="tno">'+(si+1)+'</div><div class="tbody">'
+                    + '<div class="ttitle">'+__esc(st.title)+'</div>'
+                    + '<div class="tdetail">'+__esc(st.detail)+'</div>'
+                    + (st.involves && st.involves.length ? '<div class="tinv">'+ st.involves.map(__esc).join(' · ') +'</div>' : '')
+                    + '</div></div>';
+                }).join('')
+              + '</div>';
+          }
           det.innerHTML = '<b style="color:#e8f1ff;font-size:14px;">'+__esc(f.label)+'</b>'
             + '<span style="opacity:.5;font-size:11px;margin-left:8px;">功能</span>'
-            + '<div style="margin-top:6px;opacity:.8;line-height:1.7;">'+__esc(f.description||'（待 AI 提炼说明）')+'</div>';
+            + '<div style="margin-top:6px;opacity:.8;line-height:1.7;">'+__esc(f.description||'（待 AI 提炼说明）')+'</div>'
+            + stepsHtml;
         } else if(kind === 'community'){
           var c = (f.children||[])[+el.getAttribute('data-si')];
           if(!c) return;

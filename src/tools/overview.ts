@@ -186,35 +186,44 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
   const title = dsl.title || feature;
   let dslRev = dsl._dsl_rev ?? 0;
 
-  // 1. 思维导图：有现成的用现成的；没有现场生成（rule 快速版）
+  // 1. 思维导图：优先 teach（科普分镜版）→ structure 降级 → 现场生成 rule 版 teach
   let mindMap: MindMap | null = null;
-  const mmFile = getMindMapFile(feature);
-  if (fs.existsSync(mmFile)) {
+  const teachFile = getMindMapFile(feature, 'teach');
+  if (fs.existsSync(teachFile)) {
     try {
-      mindMap = JSON.parse(fs.readFileSync(mmFile, 'utf-8')) as MindMap;
+      mindMap = JSON.parse(fs.readFileSync(teachFile, 'utf-8')) as MindMap;
     } catch {
       mindMap = null;
     }
   }
+  if (!mindMap) {
+    const mmFile = getMindMapFile(feature);
+    if (fs.existsSync(mmFile)) {
+      try {
+        mindMap = JSON.parse(fs.readFileSync(mmFile, 'utf-8')) as MindMap;
+      } catch {
+        mindMap = null;
+      }
+    }
+  }
   let note: string | undefined;
   if (!mindMap) {
-    const result = refresh_llm
-      ? await deriveMindMap({ feature, gen_descriptions: true })
-      : await deriveMindMap({ feature });
+    const result = await deriveMindMap({ feature, view: 'teach' });
     mindMap = result.mind_map;
-    note = `思维导图已生成（${result.mode === 'llm' ? 'LLM 提炼' : '规则骨架'}）`;
+    note = `思维导图已生成（${result.mode === 'llm' ? 'LLM 科普分镜' : '规则骨架'}）`;
   }
 
   // 1.5 平铺兜底修复 + 规则树升级：小白第一屏不能是文件名列表，功能名也不能
   // 一直是目录名（tools/camera）。两种情况需要（重）生成功能树：
   //   a) 导图平铺（DSL 缺 feature_tree）→ 现场聚类（refresh_llm 时用 LLM 命名）
   //   b) refresh_llm 且现有树是规则版（source!=='llm'）→ 用 LLM 重新归并命名
+  // 树更新后 teach 导图需重建（吃新功能名）；树已是 LLM 版但 teach 未升级时也补生成。
   const treeIsRule = (dsl.feature_tree?.source ?? 'rule') !== 'llm';
   const wasFlat = isFlatMindMap(mindMap);
   if (wasFlat || (refresh_llm && treeIsRule)) {
     const ok = await tryDeriveFeatureTree(feature, dsl, refresh_llm);
     if (ok) {
-      mindMap = (await deriveMindMap({ feature, gen_descriptions: refresh_llm })).mind_map;
+      mindMap = (await deriveMindMap({ feature, view: 'teach', gen_descriptions: refresh_llm })).mind_map;
       const fresh = getDSL(feature);
       const upgraded = fresh?.feature_tree?.source === 'llm';
       note = wasFlat
@@ -226,6 +235,17 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
       if (fresh) dslRev = fresh._dsl_rev ?? dslRev;
     } else if (!dsl.source_root && wasFlat) {
       note = '该项目缺少源码快照（早期导入数据），无法聚类功能树；重新导入可获得完整功能视图';
+    }
+  } else if (
+    refresh_llm &&
+    (mindMap.view !== 'teach' || mindMap.mode !== 'llm') &&
+    (dsl.feature_tree?.features?.length ?? 0) > 0
+  ) {
+    // 树已是 LLM 人话版，但 teach 分镜缺失/未升级 → 补生成（慢路径专用）
+    const result = await deriveMindMap({ feature, view: 'teach', gen_descriptions: true });
+    if (result.mode === 'llm') {
+      mindMap = result.mind_map;
+      note = '已生成 AI 科普分镜';
     }
   }
 
