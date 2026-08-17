@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { silentErrorDiscard, judgeEvent, impactBlastRadius, IMPACT_BLAST_RADIUS_LIMIT } from '../../src/camera/judge.js';
+import { silentErrorDiscard, judgeEvent, impactBlastRadius, IMPACT_BLAST_RADIUS_LIMIT, impactUnplannedSpread } from '../../src/camera/judge.js';
 import type { TSEvent } from '../../src/camera/probe.js';
 
 function ev(over: Partial<TSEvent> = {}): TSEvent {
@@ -103,5 +103,39 @@ describe('Camera 即时判定器 · impact-blast-radius（Step 3 合流）', () 
   it('judgeEvent：普通事件行为不变（默认规则追加后零回归）', () => {
     expect(judgeEvent(ev({ fields: { op: 'writefile', err: 'x' } })).rule).toBe('design:silent-error-discard');
     expect(judgeEvent(ev({ fields: { op: 'writefile', err: '' } })).result).toBe('ok');
+  });
+});
+
+describe('Camera 即时判定器 · impact-unplanned-spread（Impact Ledger）', () => {
+  it('非 spread 探针 → ok（不干扰既有规则）', () => {
+    const v = impactUnplannedSpread(ev({ fields: { op: 'writefile', err: '' } }));
+    expect(v.result).toBe('ok');
+    expect(v.reason).toContain('not a spread event');
+  });
+
+  it('spread 事件无未预告文件 → ok（波及在预告面内）', () => {
+    const v = impactUnplannedSpread(
+      ev({ probe: 'impact.spread', fields: { err: '', expected_count: 3, actual_count: 3, unexpected_files: [] } }),
+    );
+    expect(v.result).toBe('ok');
+    expect(v.reason).toContain('within declared preview');
+  });
+
+  it('spread 事件有未预告文件 → deviation（列出越界文件）', () => {
+    const v = impactUnplannedSpread(
+      ev({ probe: 'impact.spread', fields: { err: '', expected_count: 3, actual_count: 4, unexpected_files: ['src/d.ts'] } }),
+    );
+    expect(v.result).toBe('deviation');
+    expect(v.rule).toBe('design:impact-unplanned-spread');
+    expect(v.reason).toContain('src/d.ts');
+    expect(v.reason).toContain('unplanned spread');
+  });
+
+  it('judgeEvent 默认规则含 spread 谓词：未预告波及判 deviation', () => {
+    const v = judgeEvent(
+      ev({ probe: 'impact.spread', fields: { err: '', op: 'impact-ledger', expected_count: 2, actual_count: 3, unexpected_files: ['x/y.ts'] } }),
+    );
+    expect(v.result).toBe('deviation');
+    expect(v.rule).toBe('design:impact-unplanned-spread');
   });
 });

@@ -18,6 +18,7 @@ import path from 'node:path';
 import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
+import { diffImpact } from './diff_impact.js';
 import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
 import { pushAlert } from './alert_inbox.js';
 import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../camera/probe.js';
@@ -120,6 +121,15 @@ export function createRebuildThrottler(opts: RebuildThrottleOptions): RebuildThr
 // 注册表（MCP 长进程内按 project_dir 复用）
 // ─────────────────────────────────────────────────────────────
 
+/** 改前预告声明（Impact Ledger）：LLM 动手前登记"我打算改这些文件"，一次声明被下一次报告消费 */
+interface ImpactDeclaration {
+  /** 登记的打算修改文件（相对项目根 posix） */
+  declared_files: string[];
+  /** 预期波及面（declared + diffImpact both 两跳的全部文件，相对项目根 posix） */
+  expected_files: Set<string>;
+  created_at: string;
+}
+
 interface ActiveWatch {
   project_dir: string;
   feature?: string;
@@ -127,6 +137,8 @@ interface ActiveWatch {
   diff_on_change: boolean;
   /** 变更后自动生成影响报告（Step 2）：摘要行入 alerts 队列，全文落盘 impact/ 目录 */
   impact_on_change: boolean;
+  /** 未消费的改前预告声明（Impact Ledger，doWork 报告后对比即清） */
+  declaration?: ImpactDeclaration;
   started_at: string;
   last_change_at?: string;
   last_rebuild_at?: string;
@@ -162,8 +174,8 @@ function keyOf(projectDir: string): string {
 export interface WatchProjectToolInput {
   /** 被监听项目根目录（绝对路径或相对 cwd） */
   project_dir: string;
-  /** start（默认）| status | stop | impact（读影响报告全文） */
-  action?: 'start' | 'status' | 'stop' | 'impact';
+  /** start（默认）| status | stop | impact（读影响报告全文）| declare（改前预告登记） */
+  action?: 'start' | 'status' | 'stop' | 'impact' | 'declare';
   /** 提供时，变更后按该 feature 重建实际 DSL 到 live/（不覆盖设计 DSL） */
   feature?: string;
   /** 事件合并窗口（ms），默认 150 */
@@ -189,6 +201,8 @@ export interface WatchProjectToolInput {
   impact_on_change?: boolean;
   /** action=impact 时指定报告序号；缺省取最近一份 */
   seq?: number;
+  /** action=declare 时必填：打算修改的文件（相对项目根或绝对路径）。登记后下一次影响报告自动对比，计划外波及报警 */
+  files?: string[];
 }
 
 export interface WatchProjectToolResult {
@@ -236,6 +250,12 @@ function ensureCameraSink(projectRoot: string): void {
   if (hasGlobalProbeSink()) return;
   const eventsPath = TSProbeCapture.pathFor(path.join(projectRoot, '.design-canvas', 'camera'));
   setGlobalProbeSink(new TSProbeCapture(eventsPath));
+}
+
+/** 相对项目根归一化为 posix 路径（接受相对/绝对；与 diffImpact 的 toRel 同语义） */
+function relOf(root: string, p: string): string {
+  const abs = path.isAbsolute(p) ? p : path.join(root, p);
+  return path.relative(root, abs).split(path.sep).join('/');
 }
 
 /** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + 影响报告） */
@@ -298,8 +318,40 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       entry.last_impact_seq = s.seq;
       // 响应注入通道：任何 MCP 工具的下一次响应自动附带此提醒（一次投递即消费）
       pushAlert({ project_dir: entry.project_dir, seq: s.seq, line: s.summary_line, created_at: s.created_at });
+      ensureCameraSink(entry.project_dir); // 先建 sink，下方 spread/report 事件才能落流
+
+      // Impact Ledger 对比：有未消费的改前预告 → 实际波及 vs 预告，计划外扩散报警（一次消费）
+      if (entry.declaration) {
+        const decl = entry.declaration;
+        entry.declaration = undefined; // 消费即清（下一次报告不再对比旧声明）
+        const actual = new Set<string>([...files.map((f) => relOf(entry.project_dir, f)), ...s.impacted_file_paths]);
+        const unexpected = [...actual].filter((f) => !decl.expected_files.has(f));
+        const spreadLine = `[计划外扩散#${s.seq}] 预告 ${decl.expected_files.size} 文件，实际波及 ${actual.size}，未预告 ${unexpected.length}${unexpected.length > 0 ? '：' + unexpected.join(', ') : ''}`;
+        entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: spreadLine });
+        if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
+        captureProbe(
+          'impact.spread',
+          {
+            file: files[0],
+            op: 'impact-ledger',
+            err: '',
+            level: 'event',
+            seq: s.seq,
+            declared_files: decl.declared_files,
+            expected_count: decl.expected_files.size,
+            actual_count: actual.size,
+            unexpected_files: unexpected,
+            summary: spreadLine,
+          },
+          'runtime-invariant',
+        );
+        if (unexpected.length > 0) {
+          // 计划外扩散是高优先级信号：直接入响应注入收件箱（judge 判 deviation，serve SSE 同步报警）
+          pushAlert({ project_dir: entry.project_dir, seq: s.seq, line: spreadLine, created_at: s.created_at });
+        }
+      }
+
       // 成功事件：err 空 + 波及统计。radius 超阈值时被 impactBlastRadius 判 deviation
-      ensureCameraSink(entry.project_dir);
       captureProbe(
         'impact.report',
         {
@@ -519,11 +571,82 @@ function impactWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   }
 }
 
+/**
+ * action=declare（Impact Ledger 改前预告）：登记"我打算改这些文件"，立刻返回预期
+ * 波及面（改前预告）。一次声明被下一次影响报告消费：实际波及 ⊆ 预告 → 安静；
+ * 出现未预告文件 → impact.spread 事件 + 计划外扩散报警。
+ *
+ * 语义保障：声明前置条件是"改完有人对比"——未监听自动 start（impact_on_change
+ * 强制开），已监听但影响报告关着则顺手打开。声明存在内存（一次消费），MCP 进程
+ * 重启即弃——预告本来就是短期意图，跨会话残留反而失真。
+ */
+async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectToolResult> {
+  const files = (input.files ?? []).map((f) => f.trim()).filter(Boolean);
+  if (files.length === 0) {
+    return {
+      action: 'declare', project_dir: path.resolve(input.project_dir), watching: false, running: false,
+      rebuild: false, diff_on_change: false,
+      message: '缺少 files 参数：declare 需要登记打算修改的文件（相对项目根或绝对路径）。',
+      error: 'files 为空',
+    };
+  }
+
+  // 确保监听 + 影响报告在跑（无 watch 自动 start；有但 impact 关则打开）
+  const start = await watchProjectTool({ project_dir: input.project_dir, action: 'start', impact_on_change: true, feature: input.feature });
+  if (!start.watching) return start; // 启动失败原样上抛
+  const entry = active.get(keyOf(input.project_dir));
+  if (!entry) {
+    return { ...start, action: 'declare', message: '内部错误：监听已启动但注册表缺项。', error: 'registry miss' };
+  }
+  entry.impact_on_change = true;
+  if (!entry.throttle) {
+    // 复用既有 watch 且当初未建节流器（rebuild/impact 都没开）→ 补上（doWork 由它驱动）
+    entry.throttle = createRebuildThrottler({ windowMs: input.rebuild_window_ms ?? 2000, run: () => doWork(entry) });
+  }
+
+  // 预期波及面：declared 本身 + diffImpact both 两跳
+  const declared = files.map((f) => relOf(entry.project_dir, f));
+  let expected = new Set(declared);
+  let previewLine = '';
+  try {
+    const r = diffImpact({ project_dir: entry.project_dir, feature: entry.feature, changed: declared, direction: 'both', max_depth: 2 });
+    expected = new Set([...declared, ...r.impacted_files.map((f) => f.path)]);
+    previewLine = `预期波及 ${expected.size} 文件（直接 ${r.impacted_files.filter((f) => f.direct).length} + 间接 ${r.impacted_files.filter((f) => !f.direct).length}）：${[...expected].join(', ')}`;
+  } catch (e) {
+    previewLine = `波及面计算失败（${(e as Error).message}）——仅登记声明文件本身为预告面。`;
+  }
+
+  entry.declaration = { declared_files: declared, expected_files: expected, created_at: new Date().toISOString() };
+  ensureCameraSink(entry.project_dir);
+  captureProbe(
+    'impact.declare',
+    {
+      file: declared[0],
+      op: 'impact-ledger',
+      err: '',
+      level: 'event',
+      declared_files: declared,
+      expected_count: expected.size,
+      summary: `预告改 ${declared.length} 文件，预期波及 ${expected.size} 文件`,
+    },
+    'runtime-invariant',
+  );
+
+  return {
+    action: 'declare', project_dir: entry.project_dir, watching: true, running: true,
+    feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
+    impact_on_change: true,
+    started_at: entry.started_at,
+    message: `已登记改前预告（下一次影响报告自动对比，计划外波及将报警）。${previewLine}`,
+  };
+}
+
 export async function watchProjectTool(input: WatchProjectToolInput): Promise<WatchProjectToolResult> {
   const action = input.action ?? 'start';
   if (action === 'status') return statusWatch(input.project_dir);
   if (action === 'stop') return stopWatch(input.project_dir);
   if (action === 'impact') return impactWatch(input);
+  if (action === 'declare') return declareWatch(input);
   return startWatch(input);
 }
 

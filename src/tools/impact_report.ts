@@ -35,6 +35,8 @@ export interface ImpactReportSummary {
   direct_symbols: number;
   /** 间接波及符号数 */
   indirect_symbols: number;
+  /** 波及文件清单（相对项目根 posix，direct+indirect；Impact Ledger 对比用） */
+  impacted_file_paths: string[];
   /** 一行推送摘要 */
   summary_line: string;
 }
@@ -139,6 +141,7 @@ export function runImpactReport(input: RunImpactReportInput): ImpactReportSummar
     indirect_files: indirectFiles,
     direct_symbols: directSymbols,
     indirect_symbols: indirectSymbols,
+    impacted_file_paths: result.impacted_files.map((f) => f.path),
   };
   const summary: ImpactReportSummary = { ...base, summary_line: buildSummaryLine(base) };
 

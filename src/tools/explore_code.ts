@@ -165,7 +165,7 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
     case 'watch': {
       const r = await watchProjectTool({
         project_dir: requireStr(args, 'project_dir'),
-        action: str(args, 'action') as 'start' | 'status' | 'stop' | 'impact' | undefined,
+        action: str(args, 'action') as 'start' | 'status' | 'stop' | 'impact' | 'declare' | undefined,
         feature: str(args, 'feature'),
         debounce_ms: num(args, 'debounce_ms'),
         rebuild_on_change: bool(args, 'rebuild_on_change'),
@@ -174,6 +174,7 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
         diff_on_change: bool(args, 'diff_on_change'),
         impact_on_change: bool(args, 'impact_on_change'),
         seq: num(args, 'seq'),
+        files: (args['files'] as string[] | undefined)?.map(String),
       });
       return toResult(r, true);
     }

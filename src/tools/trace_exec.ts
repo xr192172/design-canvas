@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { parseFileFull, type ParsedSymbol } from './ts_kernel/index.js';
 
@@ -217,20 +218,18 @@ function runSubprocess(cmd: string, args: string[], stdin: string, timeoutMs = 1
   });
 }
 
-/** Python：临时脚本 exec（参数 **kwargs，stdlib 可用），stdin 传输入 JSON */
+/** Python：临时脚本 exec（参数 **kwargs，stdlib 可用），stdin 传输入 JSON。
+ *  临时文件按内容 hash 命名并复用（不删除）：每次新建文件会被 Defender 等
+ *  实时扫描间歇性锁住（观测到 15s+），同名复用让扫描只发生在首次。 */
 async function execPy(codeText: string, entryName: string, kwargs: Record<string, unknown>): Promise<unknown> {
-  const tmp = path.join(os.tmpdir(), `dc_exec_${Date.now()}_${Math.floor(Math.random() * 1e6)}.py`);
-  fs.writeFileSync(
-    tmp,
-    `${codeText}\nimport json, sys\n_result = ${entryName}(**json.loads(sys.stdin.read()))\nprint(json.dumps(_result, default=str))`,
-    'utf-8',
+  const script = `${codeText}\nimport json, sys\n_result = ${entryName}(**json.loads(sys.stdin.read()))\nprint(json.dumps(_result, default=str))`;
+  const tmp = path.join(
+    os.tmpdir(),
+    `dc_exec_${createHash('sha1').update(script).digest('hex').slice(0, 16)}.py`,
   );
-  try {
-    const out = await runSubprocess('python', [tmp], JSON.stringify(kwargs));
-    return JSON.parse(out.trim());
-  } finally {
-    try { fs.unlinkSync(tmp); } catch { /* 已删 */ }
-  }
+  fs.writeFileSync(tmp, script, 'utf-8');
+  const out = await runSubprocess('python', [tmp], JSON.stringify(kwargs));
+  return JSON.parse(out.trim());
 }
 
 /** Go 字面量（v1：基本类型；复合类型不支持） */

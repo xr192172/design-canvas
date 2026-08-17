@@ -76,12 +76,38 @@ export function impactBlastRadius(ev: TSEvent): JudgeVerdict {
 }
 
 /**
+ * 计划外扩散契约（Impact Ledger：改前预告-改后验证闭环）。
+ *
+ * `impact.spread` 事件：改前 declare 登记的预告波及面 vs 改后实际波及面对比结果。
+ * unexpected_files 非空 = 出现了预告之外的波及文件 → 偏差（改动走出了预告面，
+ * 说明计划遗漏或改动越界）。只对 probe === 'impact.spread' 生效。
+ */
+export function impactUnplannedSpread(ev: TSEvent): JudgeVerdict {
+  if (ev.probe !== 'impact.spread') {
+    return { probe: ev.probe, rule: 'design:impact-unplanned-spread', result: 'ok', reason: 'not a spread event', fields: ev.fields };
+  }
+  const unexpected = Array.isArray(ev.fields['unexpected_files']) ? (ev.fields['unexpected_files'] as string[]) : [];
+  if (unexpected.length > 0) {
+    return {
+      probe: ev.probe,
+      rule: 'design:impact-unplanned-spread',
+      result: 'deviation',
+      reason: `unplanned spread: ${unexpected.length} file(s) impacted beyond the declared preview: ${unexpected.join(', ')}`,
+      fields: ev.fields,
+    };
+  }
+  const expected = typeof ev.fields['expected_count'] === 'number' ? (ev.fields['expected_count'] as number) : 0;
+  const actual = typeof ev.fields['actual_count'] === 'number' ? (ev.fields['actual_count'] as number) : 0;
+  return { probe: ev.probe, rule: 'design:impact-unplanned-spread', result: 'ok', reason: `impact within declared preview (${actual}/${expected} files)`, fields: ev.fields };
+}
+
+/**
  * 对单条事件执行全部已注册规则判定，返回首条命中偏差的判定（无偏差则 ok）。
  * 规则顺序即优先级。
  */
 export function judgeEvent(
   ev: TSEvent,
-  rules: Array<(e: TSEvent) => JudgeVerdict> = [silentErrorDiscard, impactBlastRadius],
+  rules: Array<(e: TSEvent) => JudgeVerdict> = [silentErrorDiscard, impactUnplannedSpread, impactBlastRadius],
 ): JudgeVerdict {
   for (const rule of rules) {
     const v = rule(ev);
