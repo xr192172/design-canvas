@@ -29,7 +29,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */
 export function getDbFile(): string {
@@ -58,13 +58,26 @@ export function openDb(dbFile: string = getDbFile()): Database {
   } catch {
     /* 列已存在 */
   }
+  // v4 增列：files.norm_hash + symbol_diffs.norm_from/norm_to（文件级归一化全文 hash，
+  // 捕捉符号提取覆盖不到的变更——常量值/字符串/顶层表达式）
+  for (const ddl of [
+    'ALTER TABLE files ADD COLUMN norm_hash TEXT',
+    "ALTER TABLE symbol_diffs ADD COLUMN norm_from TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE symbol_diffs ADD COLUMN norm_to TEXT NOT NULL DEFAULT ''",
+  ]) {
+    try {
+      db.exec(ddl);
+    } catch {
+      /* 列已存在 */
+    }
+  }
   const v = db.prepare('SELECT MAX(version) v FROM schema_versions').get() as { v: number | null };
   if (v.v !== null && v.v < SCHEMA_VERSION) {
     db.exec('DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM unresolved_refs; DELETE FROM symbol_diffs;');
   }
   db.prepare(
     'INSERT OR IGNORE INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)',
-  ).run(SCHEMA_VERSION, Date.now(), 'v3: nodes.sym_hash + symbol_diffs 表（符号级影响分析数据源）');
+  ).run(SCHEMA_VERSION, Date.now(), 'v4: files.norm_hash + symbol_diffs.norm_from/to（符号外变更判定——常量值等符号级盲区）');
   return db;
 }
 

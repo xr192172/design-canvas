@@ -1,18 +1,26 @@
 /**
- * diff_impact —— 变更影响分析
+ * diff_impact —— 变更影响分析（v4：多边类型影响图）
  *
- * 给定一组已变更文件，沿 SQLite 缓存中的调用边（kind='call'）追溯，
- * 找出"这次改动波及了哪些符号/文件"，聚合到 DSL 文件级节点。
+ * 给定一组已变更文件，沿 SQLite 缓存中的三类边追溯"这次改动波及谁"：
+ *   - kind='call'     符号级：A 调用 B。改 B → A 受影响（波及语义：谁调用受影响）
+ *   - kind='type_ref' 符号级：A 引用类型 B（interface/type/class）。改 B → A 受影响
+ *                     （call 图对此不可见——改接口签名，引用者全要改）
+ *   - kind='import'   文件级：A 导入 B。改 B → A 文件受影响（粗粒度兜底：
+ *                     常量/类型别名等未建符号边的依赖也计入）
  *
- * 借 Understand Anything 的 /understand-diff；数据源是已完成的基础设施：
- *   - 序号 1：SQLite 符号缓存（cache.db）
- *   - 序号 3：调用边（同文件 + 跨文件，symbols.ts 写入）
+ * 传播模型：
+ *   符号级 BFS（call + type_ref）：源=changed 符号，逐跳附 via_edge 记录首达边类；
+ *   文件级 BFS（import）：源=变更文件，只沿 import 链传染文件级，不触发符号级
+ *   传染（防 util 文件改动→全项目符号入图的爆炸回归）。
+ *
+ * 波及面命中 DSL 语义层 API（expected_apis/actual_apis 函数名）时产出
+ * dsl_contract_hits——设计契约被代码变更撞上，优先复核。
  *
  * 只读，不修改 DSL。与 consistency_check（"这文件对不对"）正交——
  * 本工具回答"这个改动波及谁"。
  *
- * 关键映射：SQLite 调用边是符号级，DSL 渲染图主要是文件级节点。
- * 在符号级图上做有向 BFS，再按 file_path 聚合回 DSL 文件节点。
+ * 关键映射：SQLite 边是符号级（"<file>#<qn>"）或文件级（file 节点 id = rel 路径），
+ * DSL 渲染图主要是文件级节点。BFS 后按 file_path 聚合回 DSL 文件节点。
  */
 
 import path from 'node:path';
@@ -20,6 +28,7 @@ import { getDSL } from '../storage.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
 
 export type ImpactDirection = 'callers' | 'callees' | 'both';
+export type EdgeKind = 'call' | 'type_ref' | 'import';
 
 export interface DiffImpactInput {
   /** 可选：提供时用于 DSL 文件节点映射（dsl_node_id）与语义路径基准；缺省纯缓存分析 */
@@ -28,7 +37,7 @@ export interface DiffImpactInput {
   project_dir: string;
   /** 已变更文件（相对项目根的路径，或绝对路径） */
   changed: string[];
-  /** 追溯方向：callers=谁调用受影响（默认）/ callees=受影响调用了谁 / both=双向 */
+  /** 追溯方向：callers=谁调用/引用/导入受影响（默认）/ callees=受影响方 / both=双向 */
   direction?: ImpactDirection;
   /** 最大追溯深度，默认 3 */
   max_depth?: number;
@@ -40,9 +49,11 @@ export interface ImpactedSymbol {
   qualified_name: string;
   file_path: string;
   start_line: number;
-  /** 0=直接改动，>0=经调用边间接波及 */
+  /** 0=直接改动，>0=经边间接波及 */
   depth: number;
   role: 'changed' | 'caller' | 'callee';
+  /** 首达边类：undefined=直接变更源；call=经调用边；type_ref=经类型引用边 */
+  via_edge?: 'call' | 'type_ref';
 }
 
 export interface ImpactedFile {
@@ -53,6 +64,22 @@ export interface ImpactedFile {
   depth: number;
   direct: boolean;
   symbol_count: number;
+  /** 该文件经何种边类被波及（多值；直接变更文件为空数组） */
+  via_edges: EdgeKind[];
+}
+
+/** DSL 契约命中：波及符号撞上语义层 API（设计契约被变更波及，优先复核） */
+export interface DslContractHit {
+  dsl_node_id: string;
+  /** 语义层文件路径 */
+  path: string;
+  /** 命中的 API 签名 */
+  api: string;
+  /** 命中字段：expected=设计契约 API / actual=代码回填 API */
+  api_source: 'expected' | 'actual';
+  /** 命中的波及符号（qualified_name@file） */
+  matched_symbol: string;
+  depth: number;
 }
 
 export interface DiffImpactResult {
@@ -65,9 +92,13 @@ export interface DiffImpactResult {
   impacted_symbols: ImpactedSymbol[];
   /** 每个变更文件的符号级变更明细（v3）：波及源粒度与收敛依据 */
   symbol_diffs: SymbolDiffInfo[];
-  /** 已知警告（如缓存无调用边 / changed 文件不在缓存） */
+  /** 波及面 ∩ DSL 语义层 API（feature 给出且命中时） */
+  dsl_contract_hits: DslContractHit[];
+  /** 已知警告（如缓存无边 / changed 文件不在缓存） */
   warnings: string[];
   has_call_edges: boolean;
+  /** 边类计数（v4：分层追溯数据源规模） */
+  edge_counts: { call: number; type_ref: number; import: number };
   message: string;
 }
 
@@ -83,6 +114,8 @@ export interface SymbolDiffInfo {
   added: string[];
   removed: string[];
   changed: string[];
+  /** v4：符号级零差异但全文归一化 hash 变了（常量值/字符串/顶层表达式）——符号外实质变更 */
+  norm_changed: boolean;
   note?: string;
 }
 
@@ -105,8 +138,10 @@ function emptyResult(
     impacted_files: [],
     impacted_symbols: [],
     symbol_diffs: [],
+    dsl_contract_hits: [],
     warnings,
     has_call_edges: false,
+    edge_counts: { call: 0, type_ref: 0, import: 0 },
     message,
   };
 }
@@ -121,6 +156,12 @@ function toRel(root: string, p: string): string {
 function dslFileNodeId(rel: string): string {
   return `file_${rel.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 }
+
+const EDGE_KIND_LABEL: Record<EdgeKind, string> = {
+  call: '调用边',
+  type_ref: '类型引用',
+  import: 'import 依赖',
+};
 
 export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   const { feature, project_dir, changed, direction = 'callers', max_depth = 3 } = input;
@@ -167,10 +208,12 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     );
   }
 
-  // 是否有调用边
-  const callCount = (db.prepare("SELECT COUNT(*) c FROM edges WHERE kind='call'").get() as { c: number }).c;
-  if (callCount === 0) {
-    warnings.push('缓存中没有调用边（kind=call）。请先对该项目运行 import_project 建立符号缓存。');
+  // ── 多边类数据源规模 ──
+  const countOf = (kind: string): number =>
+    (db.prepare('SELECT COUNT(*) c FROM edges WHERE kind = ?').get(kind) as { c: number }).c;
+  const edge_counts = { call: countOf('call'), type_ref: countOf('type_ref'), import: countOf('import') };
+  if (edge_counts.call === 0 && edge_counts.type_ref === 0 && edge_counts.import === 0) {
+    warnings.push('缓存中没有任何边（call/type_ref/import）。请先对该项目运行 import_project 建立符号缓存。');
   }
 
   // 缓存路径直探：历史库可能与当前 project_dir 基准不一致（如以 src/ 为根建的库），
@@ -216,8 +259,10 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   };
   for (const { rel, cachePath } of changedSemantic) {
     const diffRow = db
-      .prepare('SELECT from_hash, to_hash, added, removed, changed FROM symbol_diffs WHERE file_path = ?')
-      .get(cachePath) as { from_hash: string; to_hash: string; added: string; removed: string; changed: string } | undefined;
+      .prepare('SELECT from_hash, to_hash, added, removed, changed, norm_from, norm_to FROM symbol_diffs WHERE file_path = ?')
+      .get(cachePath) as
+      | { from_hash: string; to_hash: string; added: string; removed: string; changed: string; norm_from: string; norm_to: string }
+      | undefined;
     const filesRow = db.prepare('SELECT content_hash FROM files WHERE path = ?').get(cachePath) as
       | { content_hash: string }
       | undefined;
@@ -226,16 +271,21 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
       const added = parseQnList(diffRow.added);
       const removed = parseQnList(diffRow.removed);
       const changed = parseQnList(diffRow.changed);
+      // v4：符号级零差异 ≠ 无实质变更——norm hash 变了（常量值/字符串）= 符号外实质变更。
+      // 符号数组已有任一差异（added/removed/changed）时，norm 变化可由符号变更解释，
+      // 不算符号外变更（否则 added-only 恒 norm_changed，波及面误含变更文件自身）
+      const normChanged =
+        diffRow.norm_from !== diffRow.norm_to && added.length === 0 && removed.length === 0 && changed.length === 0;
       if (removed.length > 0) {
         // 删除符号的入边已随节点级联消失，无法定位受影响调用方 → 保守按整文件分析
-        symbol_diffs.push({ path: rel, granularity: 'file', added, removed, changed, note: `含删除符号（${removed.join(', ')}）——入边已消失，保守按文件级分析` });
+        symbol_diffs.push({ path: rel, granularity: 'file', added, removed, changed, norm_changed: normChanged, note: `含删除符号（${removed.join(', ')}）——入边已消失，保守按文件级分析` });
         const rows = db
           .prepare("SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id")
           .all(cachePath) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
         if (rows.length === 0) warnings.push(`变更文件 ${rel} 不在缓存中（可能未同步、删除了符号，或非受支持语言）。`);
         collectRows(rows);
       } else if (changed.length > 0) {
-        symbol_diffs.push({ path: rel, granularity: 'symbol', added, removed, changed });
+        symbol_diffs.push({ path: rel, granularity: 'symbol', added, removed, changed, norm_changed: normChanged });
         const ph = changed.map(() => '?').join(',');
         const rows = db
           .prepare(`SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' AND qualified_name IN (${ph}) ORDER BY start_line, id`)
@@ -243,12 +293,16 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
         collectRows(rows);
       } else {
         symbol_diffs.push({
-          path: rel, granularity: 'symbol', added, removed, changed,
-          note: added.length > 0 ? `仅新增符号（${added.join(', ')}）——无既有调用方，不扩散` : '无实质符号变更（注释/空白/格式）——不计入波及',
+          path: rel, granularity: 'symbol', added, removed, changed, norm_changed: normChanged,
+          note: added.length > 0
+            ? `仅新增符号（${added.join(', ')}）——无既有调用方，不扩散`
+            : normChanged
+              ? '无符号级变更但存在符号外实质变更（常量值/字符串/顶层表达式）——波及按文件级（import 层兜底）'
+              : '无实质符号变更（注释/空白/格式）——不计入波及',
         });
       }
     } else {
-      symbol_diffs.push({ path: rel, granularity: 'file', added: [], removed: [], changed: [], note: '无符号级 diff（首次导入/旧缓存/未同步）——按文件级分析' });
+      symbol_diffs.push({ path: rel, granularity: 'file', added: [], removed: [], changed: [], norm_changed: true, note: '无符号级 diff（首次导入/旧缓存/未同步）——按文件级分析' });
       const rows = db
         .prepare("SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id")
         .all(cachePath) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
@@ -257,35 +311,45 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     }
   }
 
-  // 加载调用边，建正/反向邻接表
-  const callerOf = new Map<string, string[]>(); // target → callers
-  const calleeOf = new Map<string, string[]>(); // source → callees
-  const allEdges = db.prepare('SELECT source, target FROM edges WHERE kind = ?').all('call') as Array<{
-    source: string;
-    target: string;
-  }>;
-  for (const e of allEdges) {
-    let cs = callerOf.get(e.target);
-    if (!cs) {
-      cs = [];
-      callerOf.set(e.target, cs);
-    }
-    cs.push(e.source);
-    let cl = calleeOf.get(e.source);
-    if (!cl) {
-      cl = [];
-      calleeOf.set(e.source, cl);
-    }
-    cl.push(e.target);
+  // ── 加载符号级边（call + type_ref），建正/反向邻接表（附边类）──
+  // 两类边同构：source 依赖 target → 改 target 波及 source（callers 侧）。
+  interface SymAdjEntry { to: string; kind: 'call' | 'type_ref' }
+  const symRev = new Map<string, SymAdjEntry[]>(); // target → 依赖它的 source（callers 方向展开）
+  const symFwd = new Map<string, SymAdjEntry[]>(); // source → 它依赖的 target（callees 方向展开）
+  const symEdgeRows = db
+    .prepare("SELECT source, target, kind FROM edges WHERE kind IN ('call','type_ref')")
+    .all() as Array<{ source: string; target: string; kind: 'call' | 'type_ref' }>;
+  for (const e of symEdgeRows) {
+    let rs = symRev.get(e.target);
+    if (!rs) symRev.set(e.target, (rs = []));
+    rs.push({ to: e.source, kind: e.kind });
+    let fs = symFwd.get(e.source);
+    if (!fs) symFwd.set(e.source, (fs = []));
+    fs.push({ to: e.target, kind: e.kind });
+  }
+
+  // ── 加载文件级 import 边邻接表（file 节点 id = 缓存基准相对路径）──
+  const importerOf = new Map<string, string[]>(); // 被导入文件 → 导入它的文件
+  const importeeOf = new Map<string, string[]>(); // 导入方 → 被导入的文件
+  const importRows = db
+    .prepare("SELECT source, target FROM edges WHERE kind = 'import'")
+    .all() as Array<{ source: string; target: string }>;
+  for (const e of importRows) {
+    let im = importerOf.get(e.target);
+    if (!im) importerOf.set(e.target, (im = []));
+    im.push(e.source);
+    let ie = importeeOf.get(e.source);
+    if (!ie) importeeOf.set(e.source, (ie = []));
+    ie.push(e.target);
   }
   // 注意：不 close db——getProjectCacheDb 返回的是连接池连接，由池统一管理
   //（测试隔离用 closeAllProjectCacheDbs；此处复用，避免与 import_project 缓存路径互踩）
 
-  // ── 符号级有向 BFS（按 direction 追溯，深度 ≤ max_depth）──
-  const reached = new Map<string, number>(); // symbolId → depth
+  // ── 符号级 BFS（call + type_ref，附首达边类）──
+  const reached = new Map<string, { depth: number; via?: 'call' | 'type_ref' }>();
   const roles = new Map<string, ImpactedSymbol['role']>();
   for (const s of direct) {
-    reached.set(s.id, 0);
+    reached.set(s.id, { depth: 0 });
     roles.set(s.id, 'changed');
   }
 
@@ -293,23 +357,60 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   for (let depth = 1; depth <= max_depth && frontier.length > 0; depth++) {
     const next: string[] = [];
     for (const id of frontier) {
-      const expand = (adj: Map<string, string[]>, role: ImpactedSymbol['role']) => {
+      const expand = (adj: Map<string, SymAdjEntry[]>, role: ImpactedSymbol['role']) => {
         for (const t of adj.get(id) || []) {
-          if (reached.has(t)) continue;
-          reached.set(t, depth);
-          roles.set(t, role);
-          next.push(t);
+          if (reached.has(t.to)) continue;
+          reached.set(t.to, { depth, via: t.kind });
+          roles.set(t.to, role);
+          next.push(t.to);
         }
       };
-      if (direction === 'callers' || direction === 'both') expand(callerOf, 'caller');
-      if (direction === 'callees' || direction === 'both') expand(calleeOf, 'callee');
+      if (direction === 'callers' || direction === 'both') expand(symRev, 'caller');
+      if (direction === 'callees' || direction === 'both') expand(symFwd, 'callee');
     }
     frontier = next;
   }
 
+  // ── 文件级 BFS（import 边：只传染文件级，不触发符号级传染）──
+  // 叠加规则：import 层是【符号提取盲区的兜底】，不无条件叠加——
+  //   - 符号级精准判定（changed 非空）：波及已沿 call/type_ref 符号边传染到真实
+  //     依赖方，再叠 import 层会把"只用未变符号的导入方"拉回波及面（虚报回归）
+  //   - 仅新增 / 纯注释格式：无波及
+  //   - 符号级全空但 norm_changed（常量值/字符串等符号外变更）：唯一启用 import
+  //     层的场景——无符号可指，import 依赖是仅剩的波及通道
+  const diffByPath = new Map(symbol_diffs.map((d) => [d.path, d]));
+  const importSources = new Set<string>();
+  for (const { rel, cachePath } of changedSemantic) {
+    const d = diffByPath.get(rel);
+    if (d && d.granularity === 'symbol' && d.changed.length === 0 && d.added.length === 0 && d.norm_changed) {
+      importSources.add(cachePath);
+    }
+  }
+  const importReached = new Map<string, number>(); // file → depth（via='import'）
+  let importFrontier: string[] = [];
+  for (const cachePath of importSources) {
+    importReached.set(cachePath, 0);
+    importFrontier.push(cachePath);
+  }
+  for (let depth = 1; depth <= max_depth && importFrontier.length > 0; depth++) {
+    const next: string[] = [];
+    for (const f of importFrontier) {
+      const expandFiles = (adj: Map<string, string[]>) => {
+        for (const t of adj.get(f) || []) {
+          if (importReached.has(t)) continue;
+          importReached.set(t, depth);
+          next.push(t);
+        }
+      };
+      if (direction === 'callers' || direction === 'both') expandFiles(importerOf);
+      if (direction === 'callees' || direction === 'both') expandFiles(importeeOf);
+    }
+    importFrontier = next;
+  }
+
   // ── 组装受影响符号（含直接 + 间接）──
   const impacted_symbols: ImpactedSymbol[] = [];
-  for (const [id, depth] of reached) {
+  for (const [id, info] of reached) {
     // 符号 id 即 "<file>#<qualified_name>"，qualified_name 从缓存查全
     const file = id.split('#')[0];
     const qn = id.slice(file.length + 1);
@@ -322,29 +423,44 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
       qualified_name: meta?.qualified_name ?? qn,
       file_path: file,
       start_line: meta?.start_line ?? 0,
-      depth,
+      depth: info.depth,
       role: roles.get(id) ?? 'changed',
+      via_edge: info.via,
     });
   }
   impacted_symbols.sort((a, b) => a.depth - b.depth || a.file_path.localeCompare(b.file_path) || a.start_line - b.start_line);
 
-  // ── 聚合到文件级 ──
-  const fileMeta = new Map<string, { depth: number; direct: boolean; count: number }>();
+  // ── 聚合到文件级（via_edges = 符号首达边类 ∪ import 波及）──
+  const fileMeta = new Map<string, { depth: number; direct: boolean; count: number; via: Set<EdgeKind> }>();
+  const mergeFile = (file: string, depth: number, directFlag: boolean, via?: EdgeKind): void => {
+    const m = fileMeta.get(file) || { depth: Infinity, direct: false, count: 0, via: new Set<EdgeKind>() };
+    if (directFlag) m.direct = true;
+    if (depth < m.depth) m.depth = depth;
+    if (via) m.via.add(via);
+    fileMeta.set(file, m);
+  };
   for (const s of impacted_symbols) {
-    const m = fileMeta.get(s.file_path) || { depth: Infinity, direct: false, count: 0 };
+    const m = fileMeta.get(s.file_path) || { depth: Infinity, direct: false, count: 0, via: new Set<EdgeKind>() };
     if (s.depth === 0) m.direct = true;
     if (s.depth < m.depth) m.depth = s.depth;
+    if (s.via_edge) m.via.add(s.via_edge);
     m.count++;
     fileMeta.set(s.file_path, m);
   }
-  // 直接改动但无符号的文件（如空文件）也计入直接受影响——
+  for (const [file, depth] of importReached) {
+    // 深度 0 的起点即变更文件本身（direct 语义由符号级/兜底循环补）
+    mergeFile(file, depth, depth === 0, depth === 0 ? undefined : 'import');
+  }
+  // 直接改动但无符号的文件（如空文件/纯常量文件）也计入直接受影响——
   // 除非符号级判定"无实质变更/仅新增"（注释格式调整不该出现在波及清单里）
-  const noRealChange = new Set(
-    symbol_diffs.filter((d) => d.granularity === 'symbol' && d.changed.length === 0).map((d) => d.path),
-  );
-  for (const rel of changedRels) {
-    if (noRealChange.has(rel)) continue;
-    if (!fileMeta.has(rel)) fileMeta.set(rel, { depth: 0, direct: true, count: 0 });
+  const hasRealChange = (rel: string): boolean => {
+    const d = diffByPath.get(rel);
+    if (!d) return true;
+    return d.granularity === 'file' || d.changed.length > 0 || d.norm_changed;
+  };
+  for (const { rel, cachePath } of changedSemantic) {
+    if (!hasRealChange(rel)) continue;
+    mergeFile(cachePath, 0, true);
   }
 
   const dslNodeIds = new Set((dsl?.geometry.nodes || []).map((n) => n.id));
@@ -362,17 +478,54 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
         depth: m.depth,
         direct: m.direct,
         symbol_count: m.count,
+        via_edges: [...m.via],
       };
     })
     .sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
 
+  // ── DSL 契约命中：波及符号（含直接变更）撞上语义层 API ──
+  const dsl_contract_hits: DslContractHit[] = [];
+  if (semanticFiles.length > 0) {
+    const fnNameOf = (sig: string): string | undefined => {
+      const head = sig.split('(')[0].trim();
+      return head.split('.').pop()?.trim() || undefined;
+    };
+    // 预索引：语义文件 path → 函数名 → API（expected 优先于 actual）
+    for (const sf of semanticFiles) {
+      if (!sf.path) continue;
+      const apiList: Array<{ sig: string; src: 'expected' | 'actual' }> = [
+        ...(sf.expected_apis ?? []).map((a) => ({ sig: a.signature, src: 'expected' as const })),
+        ...(sf.actual_apis ?? []).map((a) => ({ sig: a.signature, src: 'actual' as const })),
+      ];
+      for (const { sig, src } of apiList) {
+        const fn = fnNameOf(sig);
+        if (!fn) continue;
+        const hit = impacted_symbols.find(
+          (s) => s.name === fn && resolveSemanticPath(s.file_path) === sf.path,
+        );
+        if (hit) {
+          dsl_contract_hits.push({
+            dsl_node_id: sf.id,
+            path: sf.path,
+            api: sig,
+            api_source: src,
+            matched_symbol: `${hit.qualified_name}@${hit.file_path}`,
+            depth: hit.depth,
+          });
+        }
+      }
+    }
+    dsl_contract_hits.sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
+  }
+
   // ── 文本报告 ──
-  const dirLabel = direction === 'callers' ? '谁调用受影响' : direction === 'callees' ? '受影响调用了谁' : '双向调用';
+  const dirLabel = direction === 'callers' ? '谁调用/引用/导入受影响' : direction === 'callees' ? '受影响调用了谁' : '双向追溯';
   const lines: string[] = [];
   lines.push(`=== 变更影响分析 - ${feature ?? path.basename(root)} ===`);
   lines.push(`  项目: ${root}`);
   lines.push(`  变更文件 (${changedRels.length}): ${changedRels.join(', ')}`);
-  lines.push(`  方向: ${dirLabel} | 最大深度: ${max_depth} | 调用边: ${allEdges.length} 条`);
+  lines.push(`  方向: ${dirLabel} | 最大深度: ${max_depth}`);
+  lines.push(`  边: 调用 ${edge_counts.call} | 类型引用 ${edge_counts.type_ref} | import ${edge_counts.import}`);
   lines.push('');
   if (symbol_diffs.length > 0) {
     lines.push('【符号级变更】');
@@ -388,7 +541,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     lines.push('');
   }
   if (impacted_files.length === 0) {
-    lines.push('未分析出受影响范围（无变更文件或缓存无调用边）。');
+    lines.push('未分析出受影响范围（无变更文件或缓存无边）。');
   } else {
     const directFiles = impacted_files.filter((f) => f.direct);
     const indirectFiles = impacted_files.filter((f) => !f.direct);
@@ -400,15 +553,36 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
       lines.push('');
     }
     if (indirectFiles.length > 0) {
-      lines.push(`【间接波及（${dirLabel}）】`);
+      lines.push(`【间接波及（${dirLabel}，按边类分层）】`);
+      const byKind = new Map<EdgeKind, ImpactedFile[]>();
       for (const f of indirectFiles) {
-        lines.push(`  - ${f.path} (深度 ${f.depth}${f.symbol_count ? `, ${f.symbol_count} 符号` : ''})`);
+        for (const k of f.via_edges.length > 0 ? f.via_edges : (['call'] as EdgeKind[])) {
+          let arr = byKind.get(k);
+          if (!arr) byKind.set(k, (arr = []));
+          arr.push(f);
+        }
+      }
+      for (const kind of ['call', 'type_ref', 'import'] as EdgeKind[]) {
+        const arr = byKind.get(kind);
+        if (!arr || arr.length === 0) continue;
+        lines.push(`  ▸ 经${EDGE_KIND_LABEL[kind]} (${arr.length} 文件):`);
+        for (const f of arr) {
+          lines.push(`    - ${f.path} (深度 ${f.depth}${f.symbol_count ? `, ${f.symbol_count} 符号` : ''})`);
+        }
+      }
+      lines.push('');
+    }
+    if (dsl_contract_hits.length > 0) {
+      lines.push('【DSL 契约命中】（波及符号撞上设计契约 API——优先复核）');
+      for (const h of dsl_contract_hits) {
+        lines.push(`  - ${h.path} [${h.dsl_node_id}] ${h.api} ← ${h.matched_symbol} (深度 ${h.depth}, ${h.api_source})`);
       }
       lines.push('');
     }
     lines.push(`【受影响符号明细】`);
     for (const s of impacted_symbols) {
-      lines.push(`  - ${s.file_path}#${s.qualified_name} (深度 ${s.depth}, ${s.role})`);
+      const via = s.via_edge ? ` via ${s.via_edge}` : '';
+      lines.push(`  - ${s.file_path}#${s.qualified_name} (深度 ${s.depth}, ${s.role}${via})`);
     }
     lines.push('');
   }
@@ -427,8 +601,10 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     impacted_files,
     impacted_symbols,
     symbol_diffs,
+    dsl_contract_hits,
     warnings,
-    has_call_edges: callCount > 0,
+    has_call_edges: edge_counts.call > 0,
+    edge_counts,
     message: lines.join('\n'),
   };
 }

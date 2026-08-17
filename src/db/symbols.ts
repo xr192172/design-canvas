@@ -178,8 +178,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
   }
 
   const hash = contentHash(content);
-  const existing = db.prepare('SELECT content_hash FROM files WHERE path = ?').get(rel) as
-    | { content_hash: string }
+  const existing = db.prepare('SELECT content_hash, norm_hash FROM files WHERE path = ?').get(rel) as
+    | { content_hash: string; norm_hash: string | null }
     | undefined;
   if (existing && existing.content_hash === hash) {
     return { path: rel, status: 'skipped', node_count: 0, edge_count: 0 };
@@ -201,6 +201,9 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
   // 删旧符号前读出旧 sym_hash 对比；与未消费的历史 diff 行链式合并（同一文件
   // 一个节流窗口内多次编辑 → 净差异 vA→vNow）。首次导入（无 files 行）不产出。
   const symHashList = parsed.symbols.map((s) => symbolSpanHash(lines, s.start_line, s.end_line, ext));
+  // v4：全文归一化 hash——符号提取不含顶层 const/赋值表达式，常量值变更（FLAG=true→false）
+  // 符号级零差异。norm 对比兜第二道判定：符号无差异且 norm 无差异才是纯注释/格式。
+  const normHash = symbolSpanHash(lines, 1, lines.length, ext);
   const symbolDiff = (() => {
     if (!existing) return undefined;
     const oldSets = hashSetsOf(
@@ -231,12 +234,17 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     }
     // 链式合并：上一份 diff 的 to_hash == 本次旧 content_hash → 无消费直连，合成净差异
     let from = existing.content_hash;
+    let normFrom = existing.norm_hash ?? ''; // null（v4 前的旧行）= 未知 → 保守视为已变
     const stored = db
-      .prepare('SELECT from_hash, to_hash, added, removed, changed FROM symbol_diffs WHERE file_path = ?')
-      .get(rel) as { from_hash: string; to_hash: string; added: string; removed: string; changed: string } | undefined;
+      .prepare('SELECT from_hash, to_hash, added, removed, changed, norm_from, norm_to FROM symbol_diffs WHERE file_path = ?')
+      .get(rel) as
+      | { from_hash: string; to_hash: string; added: string; removed: string; changed: string; norm_from: string; norm_to: string }
+      | undefined;
     let net = cur;
     if (stored && stored.to_hash === existing.content_hash) {
       from = stored.from_hash;
+      // norm 链式：起点链到最初版本的 norm_from（终点恒为新算的 normHash）
+      if (stored.norm_from) normFrom = stored.norm_from;
       const prev = new Map<string, SymbolStatus>();
       for (const qn of JSON.parse(stored.added) as string[]) prev.set(qn, 'added');
       for (const qn of JSON.parse(stored.removed) as string[]) prev.set(qn, 'removed');
@@ -248,7 +256,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       }
     }
     const by = (st: SymbolStatus) => [...net.entries()].filter(([, s]) => s === st).map(([qn]) => qn).sort();
-    return { from, added: by('added'), removed: by('removed'), changed: by('changed') };
+    return { from, added: by('added'), removed: by('removed'), changed: by('changed'), normFrom, normTo: normHash };
   })();
 
   db.exec('BEGIN');
@@ -268,9 +276,9 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     //    （对端的 unresolved_refs 已是 resolved，不会重试）。先备份，重插后还原。
     const backupInEdges = db
       .prepare(
-        "SELECT source, target, line, col, metadata FROM edges WHERE kind='call' AND target LIKE ? AND source NOT LIKE ?",
+        "SELECT source, target, kind, line, col, metadata FROM edges WHERE kind IN ('call','type_ref') AND target LIKE ? AND source NOT LIKE ?",
       )
-      .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; line: number; col: number | null; metadata: string | null }>;
+      .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; kind: string; line: number; col: number | null; metadata: string | null }>;
     db.prepare("DELETE FROM nodes WHERE file_path = ? AND kind != 'file'").run(rel);
     const insNode = db.prepare(
       `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, sym_hash, updated_at)
@@ -290,11 +298,12 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     // 2.1 符号级 diff 落库（v3）：diffImpact 的波及源数据。首次导入 symbolDiff=undefined 不写
     if (symbolDiff) {
       db.prepare(
-        `INSERT OR REPLACE INTO symbol_diffs(file_path, from_hash, to_hash, added, removed, changed, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO symbol_diffs(file_path, from_hash, to_hash, added, removed, changed, norm_from, norm_to, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         rel, symbolDiff.from, hash,
         JSON.stringify(symbolDiff.added), JSON.stringify(symbolDiff.removed), JSON.stringify(symbolDiff.changed),
+        symbolDiff.normFrom, symbolDiff.normTo,
         now,
       );
     }
@@ -306,10 +315,10 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
         (db.prepare("SELECT id FROM nodes WHERE file_path = ? AND kind != 'file'").all(rel) as Array<{ id: string }>).map((r) => r.id),
       );
       const insIn = db.prepare(
-        "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', ?, ?, ?)",
+        'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, ?, ?, ?, ?)',
       );
       for (const e of backupInEdges) {
-        if (currentIds.has(e.target)) insIn.run(e.source, e.target, e.line, e.col, e.metadata);
+        if (currentIds.has(e.target)) insIn.run(e.source, e.target, e.kind, e.line, e.col, e.metadata);
       }
     }
 
@@ -354,6 +363,29 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       }
     }
 
+    // 3.6 类型引用边（kind='type_ref'：引用者函数/类 → 被引用 interface/type/class 符号）。
+    //     波及语义：改类型定义 → 引用者受影响。跨文件引用进 unresolved_refs，
+    //     收尾 resolveCrossFileCalls 沿 imports 解析（目标限定 interface/type/class）。
+    db.prepare("DELETE FROM edges WHERE source LIKE ? AND kind = 'type_ref'").run(`${rel}#%`);
+    db.prepare(
+      "DELETE FROM unresolved_refs WHERE from_node_id LIKE ? AND reference_kind = 'type_ref'",
+    ).run(`${rel}#%`);
+    const insTypeRef = db.prepare(
+      "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'type_ref', ?, NULL, NULL)",
+    );
+    const insUnresolvedType = db.prepare(
+      `INSERT OR IGNORE INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col, file_path, language, status, name_tail)
+       VALUES (?, ?, 'type_ref', ?, 0, ?, ?, 'pending', ?)`,
+    );
+    for (const t of parsed.type_refs) {
+      const srcId = idOf(t.referrer);
+      if (t.resolved && t.target_qn) {
+        insTypeRef.run(srcId, idOf(t.target_qn), t.line);
+      } else {
+        insUnresolvedType.run(srcId, t.type_name, t.line, rel, ext, t.type_name);
+      }
+    }
+
     // 4. 原始 import 记录（全量种类：relative + package）
     //    import_project 缓存路径靠它重建依赖边——edges 表只有已解析的相对导入，
     //    Go 包路径 / Python 点分模块的原始 source 串只存在这里
@@ -365,9 +397,9 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
 
     // 5. files 行
     db.prepare(
-      `INSERT OR REPLACE INTO files(path, content_hash, language, size, modified_at, indexed_at, node_count, errors)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-    ).run(rel, hash, ext, stat.size, Math.round(stat.mtimeMs), now, parsed.symbols.length);
+      `INSERT OR REPLACE INTO files(path, content_hash, language, size, modified_at, indexed_at, node_count, errors, norm_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    ).run(rel, hash, ext, stat.size, Math.round(stat.mtimeMs), now, parsed.symbols.length, normHash);
 
     db.exec('COMMIT');
     return {
@@ -472,7 +504,9 @@ export interface CrossFileResolveStats {
 }
 
 /**
- * 跨文件调用解析：把 unresolved_refs 里同文件未命中的调用解析到目标文件符号。
+ * 跨文件引用解析（call + type_ref）：把 unresolved_refs 里同文件未命中的引用解析到目标文件符号。
+ * type_ref：type_name 沿 relative imports 定位目标文件的 interface/type/class 符号；
+ * 内置类型（string/Record 等）→ external。其余策略同 call。
  *
  * 策略（v1，保守防误连）：
  *   - 无点调用：内置黑名单 → external；否则沿本文件 relative imports 定位目标文件，
@@ -485,8 +519,10 @@ export interface CrossFileResolveStats {
  */
 export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossFileResolveStats {
   const rows = db
-    .prepare("SELECT id, from_node_id, reference_name, line FROM unresolved_refs WHERE status='pending' AND reference_kind='call'")
-    .all() as Array<{ id: number; from_node_id: string; reference_name: string; line: number }>;
+    .prepare(
+      "SELECT id, from_node_id, reference_name, reference_kind, line FROM unresolved_refs WHERE status='pending' AND reference_kind IN ('call','type_ref')",
+    )
+    .all() as Array<{ id: number; from_node_id: string; reference_name: string; reference_kind: string; line: number }>;
   if (rows.length === 0) return { total: 0, resolved: 0, external: 0, failed: 0 };
 
   // 预加载：文件名 → 符号名集合（import 限定匹配用）
@@ -496,6 +532,16 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
     if (!set) {
       set = new Set();
       symbolsByFile.set(s.file_path, set);
+    }
+    set.add(s.name);
+  }
+  // 预加载：文件 → 类型符号名集合（type_ref 目标限定 interface/type/class）
+  const typeNamesByFile = new Map<string, Set<string>>();
+  for (const s of db.prepare("SELECT name, file_path FROM nodes WHERE kind IN ('interface','type','class')").all() as Array<{ name: string; file_path: string }>) {
+    let set = typeNamesByFile.get(s.file_path);
+    if (!set) {
+      set = new Set();
+      typeNamesByFile.set(s.file_path, set);
     }
     set.add(s.name);
   }
@@ -514,20 +560,38 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
   const updExternal = db.prepare("UPDATE unresolved_refs SET status='external' WHERE id = ?");
   const updFailed = db.prepare("UPDATE unresolved_refs SET status='failed' WHERE id = ?");
   const insEdge = db.prepare(
-    "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', ?, NULL, ?)",
+    'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, ?, ?, NULL, ?)',
   );
+  const CROSS_META = JSON.stringify({ cross: true });
 
   const stats: CrossFileResolveStats = { total: rows.length, resolved: 0, external: 0, failed: 0 };
   for (const r of rows) {
     const rel = r.from_node_id.split('#')[0];
     const expr = r.reference_name;
+    const kind = r.reference_kind as 'call' | 'type_ref';
+
+    if (kind === 'type_ref') {
+      if (BUILTIN_TYPES.has(expr)) {
+        updExternal.run(r.id);
+        stats.external++;
+        continue;
+      }
+      const t = findCrossFileTarget(db, relImportsByFile, projectRoot, rel, expr, typeNamesByFile);
+      if (t) {
+        insEdge.run(r.from_node_id, `${t.file}#${t.qn}`, 'type_ref', r.line, CROSS_META);
+        updResolved.run(r.id);
+        stats.resolved++;
+      } else {
+        updFailed.run(r.id);
+        stats.failed++;
+      }
+      continue;
+    }
 
     if (expr.includes('.')) {
       // 有点调用：内置前缀 external；其余（局部变量/Go 包调用）保守 external
-      const prefix = expr.split('.')[0];
       updExternal.run(r.id);
       stats.external++;
-      void prefix;
       continue;
     }
 
@@ -538,9 +602,9 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
     }
 
     // 无点调用：沿 relative imports 定位目标文件，符号表命中即解析
-    const target = findCrossFileTarget(db, symbolsByFile, relImportsByFile, projectRoot, rel, expr);
+    const target = findCrossFileTarget(db, relImportsByFile, projectRoot, rel, expr, symbolsByFile);
     if (target) {
-      insEdge.run(r.from_node_id, `${target.file}#${target.qn}`, r.line, JSON.stringify({ cross: true }));
+      insEdge.run(r.from_node_id, `${target.file}#${target.qn}`, 'call', r.line, CROSS_META);
       updResolved.run(r.id);
       stats.resolved++;
     } else {
@@ -551,14 +615,24 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
   return stats;
 }
 
-/** 沿源文件的 relative imports 找 callee 对应的目标符号（首个命中）；找不到返回 null */
+/** TS/JS 内置与全局常见类型（type_ref 解析黑名单，external 不建边） */
+const BUILTIN_TYPES = new Set([
+  'string', 'number', 'boolean', 'void', 'any', 'unknown', 'never', 'object', 'symbol', 'bigint',
+  'null', 'undefined', 'readonly', 'Array', 'Record', 'Partial', 'Required', 'Readonly', 'Pick',
+  'Omit', 'Exclude', 'Extract', 'NonNullable', 'ReturnType', 'Parameters', 'Awaited', 'Promise',
+  'Function', 'Error', 'Date', 'RegExp', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Iterable',
+  'IterableIterator', 'Generator', 'AsyncGenerator', 'HTMLElement', 'Event', 'Node',
+]);
+
+/** 沿源文件的 relative imports 找符号对应的目标符号（首个命中）；找不到返回 null。
+ *  namesByFile：候选符号名集合（call=全符号表，type_ref=仅 interface/type/class） */
 function findCrossFileTarget(
   db: Database,
-  symbolsByFile: Map<string, Set<string>>,
   relImportsByFile: Map<string, Array<{ source: string; line: number }>>,
   projectRoot: string,
   fromRel: string,
-  callee: string,
+  name: string,
+  namesByFile: Map<string, Set<string>>,
 ): { file: string; qn: string } | null {
   const imports = relImportsByFile.get(fromRel);
   if (!imports) return null;
@@ -567,12 +641,12 @@ function findCrossFileTarget(
     const target = resolveImportTarget(projectRoot, fromRel, imp.source);
     if (!target || seen.has(target)) continue;
     seen.add(target);
-    const syms = symbolsByFile.get(target);
-    if (syms && syms.has(callee)) {
+    const syms = namesByFile.get(target);
+    if (syms && syms.has(name)) {
       // 目标文件确有该符号 → 取 qualified_name（重名取首个，v1 近似）
       const q = db
         .prepare('SELECT qualified_name FROM nodes WHERE file_path = ? AND name = ? LIMIT 1')
-        .get(target, callee) as { qualified_name: string } | undefined;
+        .get(target, name) as { qualified_name: string } | undefined;
       if (q) return { file: target, qn: q.qualified_name };
     }
   }

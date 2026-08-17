@@ -13,5 +13,5 @@ export {
   isLanguageInstalled,
 } from './kernel.js';
 
-export type { ParsedSymbol, ParsedImport, ParsedCall, ParsedFile, LanguageEntry, SyntaxNodeLike } from './kernel.js';
+export type { ParsedSymbol, ParsedImport, ParsedCall, ParsedTypeRef, ParsedFile, LanguageEntry, SyntaxNodeLike } from './kernel.js';
 export type { LanguageEntry as LanguageMeta } from './languages.js';

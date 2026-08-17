@@ -60,6 +60,20 @@ export interface ParsedCall {
   callee_qn?: string;
 }
 
+/** 类型引用边（同文件内）：函数/类签名或体内引用了 interface/type/class 符号。
+ *  波及语义：改类型定义 → 所有引用者受影响（call 图对此不可见） */
+export interface ParsedTypeRef {
+  /** 引用者符号 qualified_name（归属包含它的最近符号） */
+  referrer: string;
+  /** 被引用类型名 */
+  type_name: string;
+  line: number;
+  /** 同文件符号表命中（interface/type/class） */
+  resolved: boolean;
+  /** resolved 时对应的同文件类型符号 qualified_name */
+  target_qn?: string;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 节点类型 → 通用 Symbol kind 映射
 // ─────────────────────────────────────────────────────────────
@@ -352,6 +366,66 @@ function traverseAndExtractCalls(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 类型引用提取（TS 系 v1：type_identifier 节点 = 类型位置标识符）
+// ─────────────────────────────────────────────────────────────
+
+const TYPE_KINDS = new Set(['interface', 'type', 'class']);
+
+/**
+ * 遍历 AST 提取类型引用：TS 语法里类型位置的标识符是 type_identifier 节点
+ * （参数注解 `: Foo`、泛型 `Array<Foo>`、`implements Bar`、`extends Baz`）。
+ * 归属 = 包含它的最近符号（函数/方法/类）；定义处自身名字跳过（同行同名判定，
+ * tree-sitter 绑定的节点对象身份不稳定，不能靠引用相等）。
+ * Go/Python 的类型引用 AST 结构不同（qualified_type/identifier 混用），v1 不提取（返回空）。
+ */
+function traverseAndExtractTypeRefs(
+  node: SyntaxNodeLike,
+  lang: LanguageEntry,
+  symbols: ParsedSymbol[],
+  typeRefs: ParsedTypeRef[],
+  stack: Array<{ qn: string; defName: string; defRow: number }> = [],
+  depth: number = 0,
+): void {
+  if (depth > 200) return;
+  if (lang.symbol_nodes.includes(node.type)) {
+    const name = extractName(node, lang.field_map);
+    if (name) {
+      const parent = stack.length > 0 ? stack[stack.length - 1].qn : undefined;
+      const qn = parent ? `${parent}.${name}` : name;
+      stack.push({ qn, defName: name, defRow: node.startPosition.row });
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        if (child) traverseAndExtractTypeRefs(child, lang, symbols, typeRefs, stack, depth + 1);
+      }
+      stack.pop();
+      return;
+    }
+  }
+  if (node.type === 'type_identifier' && stack.length > 0) {
+    const top = stack[stack.length - 1];
+    const text = node.text;
+    const row = node.startPosition.row;
+    // 跳过定义处：栈顶符号定义行上的同名标识符（如 `interface Foo {` 的 Foo）
+    const isDefName = text === top.defName && row === top.defRow;
+    if (!isDefName && isValidIdentifier(text)) {
+      const sym = symbols.find((s) => s.name === text && TYPE_KINDS.has(s.kind));
+      typeRefs.push({
+        referrer: top.qn,
+        type_name: text,
+        line: row + 1,
+        resolved: !!sym,
+        target_qn: sym ? sym.qualified_name : undefined,
+      });
+    }
+    return; // type_identifier 是叶子
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child) traverseAndExtractTypeRefs(child, lang, symbols, typeRefs, stack, depth + 1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // import 提取（逐语言）
 // ─────────────────────────────────────────────────────────────
 
@@ -498,12 +572,14 @@ export async function parseAstRoot(
 
 export type { SyntaxNodeLike };
 
-/** 单文件完整解析结果（一次 parse，符号 + import + 调用边三产出） */
+/** 单文件完整解析结果（一次 parse，符号 + import + 调用边 + 类型引用四产出） */
 export interface ParsedFile {
   symbols: ParsedSymbol[];
   imports: ParsedImport[];
   /** 函数级调用边（同文件解析；跨文件/外部为 resolved=false，见 ParsedCall） */
   calls: ParsedCall[];
+  /** 类型引用边（同文件解析，TS 系 v1；跨文件引用 resolved=false） */
+  type_refs: ParsedTypeRef[];
   /** 解析失败原因（语言包加载失败 / parse 抛错）；成功时缺省。
    *  调用方借此区分"文件本为空"与"解析静默失败"（后者会丢依赖边）。 */
   error?: string;
@@ -514,7 +590,7 @@ export interface ParsedFile {
  * 返回空数组字段表示：文件类型不支持 / 解析失败 / 无对应内容。
  */
 export async function parseFileFull(filePath: string, content: string): Promise<ParsedFile> {
-  const empty: ParsedFile = { symbols: [], imports: [], calls: [] };
+  const empty: ParsedFile = { symbols: [], imports: [], calls: [], type_refs: [] };
   const ext = '.' + (filePath.split('.').pop() || '');
   const lang = isExtSupported(ext);
   if (!lang) return empty;
@@ -527,10 +603,12 @@ export async function parseFileFull(filePath: string, content: string): Promise<
     const symbols: ParsedSymbol[] = [];
     const imports: ParsedImport[] = [];
     const calls: ParsedCall[] = [];
+    const typeRefs: ParsedTypeRef[] = [];
     traverseAndExtract(tree.rootNode, lang, symbols, undefined);
     traverseAndExtractImports(tree.rootNode, lang, imports);
     traverseAndExtractCalls(tree.rootNode, lang, symbols, calls);
-    return { symbols, imports, calls };
+    traverseAndExtractTypeRefs(tree.rootNode, lang, symbols, typeRefs);
+    return { symbols, imports, calls, type_refs: typeRefs };
   } catch (e) {
     console.warn(`[ts_kernel] parse ${filePath} failed: ${(e as Error).message}`);
     return { ...empty, error: (e as Error).message };

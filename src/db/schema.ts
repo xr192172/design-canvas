@@ -12,6 +12,10 @@
  *   - v2：+imports 表（原始 import 记录，import_project 缓存路径的数据源）
  *   - v3：nodes.sym_hash（符号 span 归一化 hash）+ symbol_diffs 表（sync 时新旧对比，
  *     记录每个文件"真正改动了哪些符号"——符号级影响分析的数据源）
+ *   - v4：files.norm_hash + symbol_diffs.norm_from/norm_to（文件级归一化全文 hash）。
+ *     符号提取不含顶层 const/赋值表达式——常量值变更（FLAG=true→false）符号级零差异，
+ *     曾被误判"无实质变更"漏掉 import 层波及。norm_hash 补第二道判定：符号无差异
+ *     且全文归一化无差异才是纯注释/格式；norm 变了 → 符号外实质变更，按文件级波及
  *
  * 节点 id 约定：
  *   - 文件节点：id = 相对项目根的 posix 路径（如 "src/tools/serve.ts"），kind='file'
@@ -73,7 +77,8 @@ CREATE TABLE IF NOT EXISTS files (
     modified_at INTEGER NOT NULL,
     indexed_at INTEGER NOT NULL,
     node_count INTEGER DEFAULT 0,
-    errors TEXT              -- JSON array
+    errors TEXT,             -- JSON array
+    norm_hash TEXT           -- v4：全文归一化 hash（剔注释行+去空白）——符号外变更判定依据
 );
 
 -- 原始 import 记录（v2）：import_project 缓存读取路径的数据源。
@@ -102,6 +107,8 @@ CREATE TABLE IF NOT EXISTS symbol_diffs (
     added TEXT NOT NULL,           -- JSON array：新增符号 qualified_name
     removed TEXT NOT NULL,         -- JSON array：删除符号 qualified_name
     changed TEXT NOT NULL,         -- JSON array：实质变更符号 qualified_name（span hash 变）
+    norm_from TEXT NOT NULL DEFAULT '',  -- v4：起点全文归一化 hash（''=未知，保守视为已变）
+    norm_to TEXT NOT NULL DEFAULT '',    -- v4：终点全文归一化 hash；norm_from≠norm_to = 符号外实质变更
     updated_at INTEGER NOT NULL
 );
 
