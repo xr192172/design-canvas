@@ -29,7 +29,7 @@ import { loadAgentConfig } from './llm_focus.js';
 import { openDb } from '../db/db.js';
 import type { Database } from '../db/db.js';
 import type { DesignDSL, FeatureTree } from '../dsl/types.js';
-import type { MindMap, MindMapNode, TeachStep } from '../dsl/mindmap.js';
+import type { MindMap, MindMapNode, TeachStep, ProposalFeature } from '../dsl/mindmap.js';
 
 export interface DeriveMindMapInput {
   /** feature 名（必填） */
@@ -283,6 +283,30 @@ function loadCallEdges(db: Database, featureRels: string[], maxEdges = 40): stri
     if (out.length >= maxEdges) break;
   }
   return out;
+}
+
+/**
+ * 功能内文件热度：该文件在功能集合中作为跨文件调用 source/target 的总次数。
+ * teach 功能节点下的"关键文件"子层按它取 topN——下钻有据，不是全量平铺（那是星图的杂乱）。
+ */
+function loadFileHeat(db: Database, featureRels: string[]): Map<string, number> {
+  const match = makeFileMatcher(featureRels);
+  const rows = db
+    .prepare(
+      `SELECT n1.file_path AS sf, n2.file_path AS tf, COUNT(*) AS w
+       FROM edges e
+       JOIN nodes n1 ON n1.id = e.source
+       JOIN nodes n2 ON n2.id = e.target
+       WHERE e.kind = 'call' AND n1.file_path != n2.file_path
+       GROUP BY n1.file_path, n2.file_path`,
+    )
+    .all() as Array<{ sf: string; tf: string; w: number }>;
+  const heat = new Map<string, number>();
+  for (const r of rows) {
+    if (match(r.sf)) heat.set(r.sf, (heat.get(r.sf) ?? 0) + r.w);
+    if (match(r.tf)) heat.set(r.tf, (heat.get(r.tf) ?? 0) + r.w);
+  }
+  return heat;
 }
 
 /**
@@ -634,6 +658,8 @@ async function buildTeachMindMap(
   const { deps, foundations, shared } = db
     ? loadFeatureDeps(db, ft.features.map((f) => f.name), featureRels)
     : { deps: [], foundations: [] as string[], shared: [] as Array<{ file: string; used_by: Array<{ feature: string; count: number }>; total: number }> };
+  // 功能内文件热度：teach 下钻"关键文件"子层的排序依据（db 关闭前算好）
+  const fileHeat = featureRels.map((rels) => (db ? loadFileHeat(db, rels) : new Map<string, number>()));
   db?.close();
 
   // 主人批注分拣：导图节点 id f{i}（功能）/ f{i}:{j}（步骤），target_id 前缀匹配
@@ -675,6 +701,20 @@ async function buildTeachMindMap(
     return [...annTexts, ...nodeTexts, ...rootLevelNotes.map((t) => `（项目级理解）${t}`)].slice(0, 14);
   });
 
+  // 旧 teach JSON 的分镜缓存：功能名没变 + 本次不强制 LLM 时直接复用，
+  // 避免规则重建（gen_descriptions=false）把已有 LLM 分镜覆盖成降级文案
+  const prevScripts = new Map<string, TeachScript>();
+  try {
+    if (fs.existsSync(jsonFile)) {
+      const old = JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap;
+      for (const c of old.root?.children ?? []) {
+        if (c.steps?.length && c.description) prevScripts.set(c.label, { what: c.description, steps: c.steps });
+      }
+    }
+  } catch {
+    /* 旧文件损坏则忽略 */
+  }
+
   // 限并发调用（3 个一批）：全量 Promise.all 并行易触发 API 限流（429），导致整批"AI 分镜暂不可用"
   const scripts: (TeachScript | null)[] = useLlm
     ? await mapLimit(
@@ -686,7 +726,7 @@ async function buildTeachMindMap(
             f.name,
           ),
       )
-    : ft.features.map(() => null as TeachScript | null);
+    : ft.features.map((f) => prevScripts.get(f.name) ?? (null as TeachScript | null));
   const anyLlm = scripts.some((s) => s !== null);
 
   // 展示顺序：底座功能排根下首位（承认其"地板"身份），但 f{i} id 保持原始索引——批注/用户节点锚点不漂移
@@ -706,6 +746,21 @@ async function buildTeachMindMap(
       const rels = featureRels[i];
       const script = scripts[i];
       const hasEdges = callEdgeLists[i].length > 0;
+      // 关键文件子层：按功能内跨文件调用热度 top6（下钻一层直达 watch_project_tool 这种
+      // 实际功能单元；全量平铺是星图的杂乱，这里只放最热的几块地板）
+      const heat = fileHeat[i] ?? new Map<string, number>();
+      const keyFiles = [...new Set(rels)]
+        .map((p) => ({ p, w: heat.get(p) ?? 0, info: lookupFile(fileIndex, p) }))
+        .filter((x) => x.info && x.w > 0)
+        .sort((a, b) => b.w - a.w)
+        .slice(0, 6)
+        .map(({ p, info }) => ({
+          id: info!.id,
+          label: basename(p),
+          description: info!.responsibility || '',
+          kind: 'file' as const,
+          meta: { lines: info!.lines, l2_ref: info!.id },
+        }));
       return {
         id: `f${i}`,
         label: f.name,
@@ -720,10 +775,21 @@ async function buildTeachMindMap(
             involves: rels.slice(0, 3),
           },
         ],
+        children: keyFiles,
         meta: { files: rels.length },
       };
     }),
   };
+
+  // 旧 teach JSON 里 placeProposals 写入的构想分支：重建分镜不能抹掉主人的构想
+  let prevProposals: MindMap['proposals'];
+  try {
+    if (fs.existsSync(jsonFile)) {
+      prevProposals = (JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap).proposals;
+    }
+  } catch {
+    /* 旧文件损坏则忽略 */
+  }
 
   const mindMap: MindMap = {
     feature,
@@ -733,6 +799,7 @@ async function buildTeachMindMap(
     deps: deps.length > 0 ? deps : undefined,
     foundations: foundations.length > 0 ? foundations : undefined,
     shared: shared.length > 0 ? shared : undefined,
+    proposals: prevProposals,
     generated_at: new Date().toISOString(),
     note: anyLlm
       ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜`
@@ -747,6 +814,133 @@ async function buildTeachMindMap(
     jsonFile,
     htmlFile: '',
     message: `科普教学导图（teach）已生成：${jsonFile}\n说明：${mindMap.note}`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 新功能构想定位：主人在根节点写"我要加个 XXX" → LLM 找到适合的位置画上去
+// 人出意图、LLM 出结构——主人不需要理解现有树该在哪挂分支
+// ─────────────────────────────────────────────────────────────
+
+export interface PlaceProposalsResult {
+  proposals: ProposalFeature[];
+  mode: 'llm' | 'rule';
+  message: string;
+}
+
+/** 根级 user_nodes 即"新功能构想"（页面约定：挂 root = 新功能，挂功能/步骤 = 补充理解） */
+export async function placeProposals(feature: string): Promise<PlaceProposalsResult> {
+  const dsl = getDSL(feature);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在`);
+  const ideas = (dsl.user_nodes ?? []).filter((u) => u.parent_id === 'root' && (u.text ?? '').trim());
+  const teachFile = getMindMapFile(feature, 'teach');
+  let mindMap: MindMap;
+  if (fs.existsSync(teachFile)) {
+    mindMap = JSON.parse(fs.readFileSync(teachFile, 'utf-8')) as MindMap;
+  } else {
+    mindMap = (await buildTeachMindMap(dsl, feature, dsl.title || feature, false)).mind_map;
+  }
+
+  if (ideas.length === 0) {
+    if (mindMap.proposals?.length) {
+      delete mindMap.proposals;
+      fs.writeFileSync(teachFile, JSON.stringify(mindMap, null, 2), 'utf-8');
+    }
+    return { proposals: [], mode: 'rule', message: '没有待定位的新功能构想（根级节点为空）' };
+  }
+
+  // 现有功能清单 = 树里的真实功能（JSON root.children 不含前端合成的 shared 分支）
+  const featNames = (mindMap.root.children ?? []).map((c) => c.label);
+  const featDescs = (mindMap.root.children ?? []).map((c) => `${c.label}：${(c.description || '').slice(0, 60)}`).join('\n');
+
+  const cfg = loadAgentConfig();
+  let proposals: ProposalFeature[] = [];
+  let mode: 'llm' | 'rule' = 'rule';
+  if (cfg) {
+    const list = ideas.map((u) => `- ${u.id}：「${u.text.slice(0, 120)}」`).join('\n');
+    try {
+      const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            {
+              role: 'system',
+              content:
+                '你是软件架构师。主人要在项目里加新功能，他只写一句构想，你来定位：\n' +
+                '1. 起个功能名（≤8字，动宾或名词）；\n' +
+                '2. 一句人话介绍（15~40字，解决什么问题）；\n' +
+                '3. parent：它属于哪个现有功能（是其子能力）？独立新功能则填 ""；\n' +
+                '4. steps：2-3 步实现分镜（每步 title ≤12字 + detail 一两句）；\n' +
+                '5. depends_on：预判它要踩哪些现有功能（数组，可空）。\n' +
+                '基于给定现有功能事实判断，不要编造不存在的功能名。只输出 JSON：\n' +
+                '{"proposals":{"<id>":{"title":"","desc":"","parent":"","steps":[{"title":"","detail":""}],"depends_on":[""]}}}',
+            },
+            { role: 'user', content: `项目：${dsl.title || feature}\n\n现有功能：\n${featDescs}\n\n主人的新功能构想：\n${list}` },
+          ],
+          temperature: 0.4,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const parsed = extractJsonObject(data.choices?.[0]?.message?.content ?? '');
+        const raw = parsed?.proposals as Record<string, Record<string, unknown>> | undefined;
+        if (raw && typeof raw === 'object') {
+          for (const u of ideas) {
+            const r = raw[u.id];
+            if (!r || typeof r !== 'object') continue;
+            const parent = typeof r.parent === 'string' && featNames.includes(r.parent) ? r.parent : undefined;
+            const dependsOn = Array.isArray(r.depends_on)
+              ? r.depends_on.filter((d): d is string => typeof d === 'string' && featNames.includes(d))
+              : [];
+            const steps = Array.isArray(r.steps)
+              ? r.steps
+                  .filter((s): s is { title: string; detail: string } => !!s && typeof (s as { title?: unknown }).title === 'string')
+                  .slice(0, 3)
+                  .map((s) => ({ title: String(s.title).slice(0, 16), detail: String(s.detail ?? '').slice(0, 160) }))
+              : [];
+            proposals.push({
+              id: u.id,
+              raw: u.text,
+              title: typeof r.title === 'string' && r.title.trim() ? r.title.trim().slice(0, 12) : u.text.slice(0, 10),
+              desc: typeof r.desc === 'string' ? r.desc.trim().slice(0, 80) : u.text,
+              parent,
+              steps: steps.length > 0 ? steps : undefined,
+              depends_on: dependsOn.length > 0 ? dependsOn : undefined,
+              mode: 'llm',
+            });
+          }
+        }
+      }
+    } catch {
+      /* LLM 失败走 rule 降级 */
+    }
+  }
+  // 降级 / 兜底：没配 LLM 或调用失败——构想直挂根，原文即介绍（不丢主人输入）
+  if (proposals.length === 0) {
+    proposals = ideas.map((u) => ({
+      id: u.id,
+      raw: u.text,
+      title: u.text.slice(0, 10),
+      desc: u.text,
+      mode: 'rule' as const,
+    }));
+  } else {
+    mode = 'llm';
+  }
+
+  mindMap.proposals = proposals;
+  fs.writeFileSync(teachFile, JSON.stringify(mindMap, null, 2), 'utf-8');
+  return {
+    proposals,
+    mode,
+    message:
+      mode === 'llm'
+        ? `AI 已定位 ${proposals.length} 个构想（挂靠关系见 parent 字段）`
+        : `已按原始构想直挂根节点（${proposals.length} 个）——LLM 不可用，未做智能定位`,
   };
 }
 

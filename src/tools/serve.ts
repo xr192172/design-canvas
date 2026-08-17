@@ -44,6 +44,7 @@ import { renderMindmapPage } from './mindmap_page.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
+import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
 import { getMindMapFile } from './derive_mind_map.js';
 import { runMindmapAgent } from './mindmap_agent.js';
@@ -2023,6 +2024,25 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/mind-map') && method === 'POST') {
       handleApiMindMap(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/proposals') && method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const params = JSON.parse(body.toString('utf-8') || '{}');
+          const feature = String(params.feature || '').trim();
+          if (!feature) {
+            sendError(res, 400, '缺少 feature 参数');
+            return;
+          }
+          const result = await placeProposals(feature);
+          sendJson(res, 200, { success: true, ...result });
+        } catch (e) {
+          sendError(res, 500, (e as Error).message);
+        }
+      })();
       return;
     }
 

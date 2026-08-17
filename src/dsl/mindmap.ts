@@ -77,6 +77,26 @@ export interface SharedCapability {
   total: number;
 }
 
+/** 用户构想的新功能：主人在根节点写"我要加个 XXX"，LLM 定位归属并补全介绍/分镜/预判依赖 */
+export interface ProposalFeature {
+  /** 锚点 = 对应 user_node id（跨再生成稳定） */
+  id: string;
+  /** 原始构想文本（主人原话） */
+  raw: string;
+  /** LLM 起的功能名（无 LLM 时截取原文） */
+  title: string;
+  /** 人话介绍：这是什么、解决什么问题 */
+  desc: string;
+  /** 挂靠的现有功能名（空 = 根下独立分支） */
+  parent?: string;
+  /** 预判实现分镜（可选） */
+  steps?: TeachStep[];
+  /** 预判依赖的现有功能名（画虚线弧） */
+  depends_on?: string[];
+  /** 定位方式：llm=LLM 定位；rule=未配置 LLM 直挂根 */
+  mode: 'llm' | 'rule';
+}
+
 /** L3 思维导图 */
 export interface MindMap {
   /** feature 名 */
@@ -93,6 +113,9 @@ export interface MindMap {
   foundations?: string[];
   /** 共享能力文件（跨功能被调 ≥3 次的"隐形地板"，树内 🧰 分支，排在功能之前） */
   shared?: SharedCapability[];
+
+  /** 用户的新功能构想（根级 user_nodes 经 LLM 定位融入）：🔮 虚线分支，与已实现功能区分 */
+  proposals?: ProposalFeature[];
   /** 生成时间 */
   generated_at: string;
   /** 说明（生成方式/降级原因） */

@@ -55,7 +55,7 @@ export function renderMindmapPage(feature: string): string {
     <textarea id="ed-text" placeholder="写你的理解、纠正、问题……&#10;例如：这一步其实先查缓存；这个功能应该叫配置中心"></textarea>
     <div class="ed-btns"><button id="ed-cancel">取消</button><button id="ed-ok" class="primary">确定</button></div>
   </div>
-  <div id="hint">点节点看详情 · 点左侧圆点折叠 · hover 节点点 ⊕ 新增分支 · 双击 AI 节点写批注 / 双击自己的节点改字</div>
+  <div id="hint">点节点看详情 · 点左侧圆点折叠 · hover 节点点 ⊕ 新增分支 · 双击 AI 节点写批注 / 双击自己的节点改字 · <b style="color:#d8b4fe;">加新功能：根节点写构想 → 保存 → AI 自动定位挂上去（🔮）</b></div>
   <style>
     html, body { height: 100%; overflow: hidden; }
     .wrap { max-width: none; margin: 0; padding: 0; }
@@ -107,19 +107,29 @@ export function renderMindmapPage(feature: string): string {
   var INLINE = null;    // inline 编辑状态：{ parentId, editId, x, y }
 
   // ── 数据加载 ──
-  Promise.all([
-    fetch('/api/overview?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }),
-    fetch('/api/annotations?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }).catch(function(){ return { annotations: [] }; }),
-    fetch('/api/user_nodes?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }).catch(function(){ return { user_nodes: [] }; })
-  ]).then(function(rs){
-    if(!rs[0].success){ document.getElementById('hint').textContent = '加载失败：' + (rs[0].error || ''); return; }
-    OV = rs[0];
-    ANNS = (rs[1].annotations || []).filter(function(a){ return a.author === 'human'; });
-    UNODES = rs[2].user_nodes || [];
-    DEPS = (OV.mind_map && OV.mind_map.deps) || [];
+  function applyData(rs0, rs1, rs2){
+    OV = rs0;
+    ANNS = (rs1.annotations || []).filter(function(a){ return a.author === 'human'; });
+    UNODES = rs2.user_nodes || [];
+    DEPS = ((OV.mind_map && OV.mind_map.deps) || []).slice();
     FOUNDATIONS = (OV.mind_map && OV.mind_map.foundations) || [];
+    // 构想的预判依赖：紫色"预判"弧（区别于真实调用证据的橙色弧）
+    ((OV.mind_map && OV.mind_map.proposals) || []).forEach(function(pp){
+      (pp.depends_on || []).forEach(function(d){ DEPS.push({ from: pp.title, to: d, weight: 0, _pred: true }); });
+    });
     rebuild(); fitView();
     pollSharedDesc();
+  }
+  function fetchAll(){
+    return Promise.all([
+      fetch('/api/overview?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }),
+      fetch('/api/annotations?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }).catch(function(){ return { annotations: [] }; }),
+      fetch('/api/user_nodes?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }).catch(function(){ return { user_nodes: [] }; })
+    ]);
+  }
+  fetchAll().then(function(rs){
+    if(!rs[0].success){ document.getElementById('hint').textContent = '加载失败：' + (rs[0].error || ''); return; }
+    applyData(rs[0], rs[1], rs[2]);
   });
 
   // ── 共享能力介绍回填：首次请求触发后台 LLM 生成（页面秒开），这里轮询取结果 ——
@@ -161,6 +171,12 @@ export function renderMindmapPage(feature: string): string {
         NODE_BY_ID[sn.id] = sn;
         fn.children.push(sn);
       });
+      // 关键文件子层：功能内调用热度 top6——下钻一层直达实际功能单元（watch_project_tool 这种）
+      (f.children || []).forEach(function(c){
+        var cn = { id: c.id, label: c.label, kind: 'file', children: [], raw: c, _host: f };
+        NODE_BY_ID[cn.id] = cn;
+        fn.children.push(cn);
+      });
       root.children.push(fn);
     });
     // 共享能力分支：被多个功能真实调用的"隐形地板"（聚类把它们吸进大功能里不可见，
@@ -178,11 +194,32 @@ export function renderMindmapPage(feature: string): string {
       });
       root.children.unshift(shn); // 地板最先铺：共享能力 → 底座功能 → 业务功能
     }
-    // 用户节点：重复扫描挂载（支持嵌套：父节点也是本轮新挂的 user node）
+    // 新功能构想分支：主人写在根节点的构想经 AI 定位（挂靠现有功能 / 根下独立）——
+    // 🔮 虚线紫框与已实现功能区分；对应的原始 user node 隐藏（被结构化分支替代）
+    var PR = (OV.mind_map && OV.mind_map.proposals) || [];
+    var ppIds = {};
+    PR.forEach(function(pp){
+      ppIds[pp.id] = true;
+      var pn = { id: 'pp:' + pp.id, label: pp.title, kind: 'proposal', children: [], raw: pp };
+      NODE_BY_ID[pn.id] = pn;
+      (pp.steps || []).forEach(function(s, j){
+        var sn = { id: 'pp:' + pp.id + ':' + j, label: s.title, kind: 'step', children: [], raw: s, owner: pp };
+        NODE_BY_ID[sn.id] = sn;
+        pn.children.push(sn);
+      });
+      var host = null;
+      if(pp.parent){
+        for(var k in NODE_BY_ID){ var t = NODE_BY_ID[k]; if(t.kind === 'feature' && t.label === pp.parent){ host = t; break; } }
+      }
+      if(host){ host.children.push(pn); delete COLLAPSED[host.id]; } // AI 说它属于这里——展开宿主让主人看见
+      else root.children.push(pn);
+    });
+    // 用户节点：重复扫描挂载（支持嵌套：父节点也是本轮新挂的 user node；
+    // 已被 AI 定位成 proposal 分支的根级节点跳过，避免双份显示）
     TREE = root; // 先指向新树：resolveTarget('root') 才能挂到本轮树，而不是上一轮旧树
     var uNodeById = {};
     UNODES.forEach(function(u){ uNodeById[u.id] = { id: u.id, label: u.text, kind: 'user', children: [], raw: u }; });
-    var pending = UNODES.slice(), guard = 0;
+    var pending = UNODES.filter(function(u){ return !ppIds[u.id]; }), guard = 0;
     while(pending.length && guard++ < 12){
       var rest = [];
       pending.forEach(function(u){
@@ -209,7 +246,7 @@ export function renderMindmapPage(feature: string): string {
   // ── 水平树布局（tidy tree：叶子行高累加，父垂直居中于子块） ──
   var LEAF_H = 36, MIN_H = 40, GAP = 14, BRANCH_GAP = 48;
   function nodeLines(n){
-    var per = n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : (n.kind === 'shared' ? 16 : 11));
+    var per = n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : ((n.kind === 'shared' || n.kind === 'file') ? 16 : 11));
     return wrap(n.label || '', per);
   }
   function nodeH(n){ var ls = nodeLines(n); return Math.max(MIN_H, 22 + ls.length * 15); }
@@ -296,7 +333,11 @@ export function renderMindmapPage(feature: string): string {
   // ── 依赖叠加层：树管归属、线管依赖（正交关系不挤一棵树）──
   // 功能间真实调用（DEPS）画为橙色虚线弧，从依赖方左缘绕过根节点外侧连到底座；粗细=调用频次
   function featureByLabel(lb){
-    return (TREE.children || []).filter(function(c){ return c.kind === 'feature'; }).filter(function(c){ return c.label === lb; })[0] || null;
+    // 构想分支可能挂在某个功能下（非 root 直属），全树查找；真实功能仍从 root 直属取
+    var top = (TREE.children || []).filter(function(c){ return c.kind === 'feature' && c.label === lb; })[0];
+    if(top) return top;
+    for(var k in NODE_BY_ID){ var n = NODE_BY_ID[k]; if((n.kind === 'proposal') && n.label === lb) return n; }
+    return null;
   }
   function renderDeps(){
     var G = document.getElementById('deplayer');
@@ -325,11 +366,11 @@ export function renderMindmapPage(feature: string): string {
       var x2 = b._x - b._w / 2 - 24, y2 = b._y;
       // 扇形错开：每条弧的控制点逐条左移，弧线不互相叠压
       var cx = TREE._x - TREE._w / 2 - 74 - (idx % 5) * 26;
-      var sw = Math.min(1.3 + d.weight / 12, 3.6);
+      var sw = d._pred ? 1.6 : Math.min(1.3 + d.weight / 12, 3.6);
       var path = document.createElementNS('http://www.w3.org/2000/svg','path');
       path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+y1+', '+cx+' '+y2+', '+x2+' '+y2);
       path.setAttribute('fill','none');
-      path.setAttribute('stroke','rgba(251,146,60,.6)');
+      path.setAttribute('stroke', d._pred ? 'rgba(192,132,252,.55)' : 'rgba(251,146,60,.6)');
       path.setAttribute('stroke-width', sw);
       path.setAttribute('stroke-dasharray','7 5');
       path.setAttribute('marker-end','url(#arrowDep)');
@@ -359,14 +400,22 @@ export function renderMindmapPage(feature: string): string {
       placedPts.push(pt);
       var t = document.createElementNS('http://www.w3.org/2000/svg','text');
       t.setAttribute('x', pt.x); t.setAttribute('y', pt.y - 6);
-      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5'); t.setAttribute('fill','rgba(251,146,60,.9)');
+      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5');
+      t.setAttribute('fill', d._pred ? 'rgba(192,132,252,.95)' : 'rgba(251,146,60,.9)');
       t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#02040d'); t.setAttribute('stroke-width','3');
-      t.textContent = '×' + d.weight;
+      t.textContent = d._pred ? '预判' : '×' + d.weight;
       G.appendChild(t);
     });
   }
   function showDep(d){
     var det = document.getElementById('detail');
+    if(d._pred){
+      det.innerHTML = '<b style="color:#c084fc;">🔮 预判依赖</b>'
+        + '<p>' + esc(d.from) + ' <b style="color:#c084fc;">可能踩着</b> ' + esc(d.to) + '</p>'
+        + '<p style="font-size:11px;color:#7a93b8;">构想尚未实现，这是 AI 按现有结构预判的依赖（紫色弧）；真实调用证据画橙色弧。</p>';
+      det.style.display = 'block';
+      return;
+    }
     var via = (d.via_files && d.via_files.length)
       ? '<p class="files">主要打向：' + d.via_files.map(esc).join(' · ') + '</p>' : '';
     det.innerHTML = '<b style="color:#fb923c;">🔗 功能依赖</b>'
@@ -392,13 +441,23 @@ export function renderMindmapPage(feature: string): string {
     } else if(n.kind === 'shared'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(13,60,68,.9)" stroke="#2dd4bf" stroke-width="1.6"/>'
         + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#5eead4">🔧 共享</text>';
+    } else if(n.kind === 'file'){
+      // 关键文件：功能内调用热度 top 的实际功能单元，小号青蓝、左上 📄 标
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="8" fill="rgba(15,38,63,.9)" stroke="#4c9fd8" stroke-width="1.3"/>'
+        + '<text y="'+(-h/2+11)+'" text-anchor="middle" font-size="8" fill="#8ec8ef">📄 文件</text>';
+    } else if(n.kind === 'proposal'){
+      // 新功能构想：紫虚线（尚不存在，是主人想加的）；AI 定位挂靠现有功能或根下独立
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="rgba(88,28,135,.28)" stroke="rgba(192,132,252,.9)" stroke-width="2" stroke-dasharray="8 5"/>'
+        + '<g transform="translate('+(-w/2+2)+','+(-h/2-9)+')">'
+        + '<rect x="0" y="-10" width="56" height="18" rx="9" fill="rgba(192,132,252,.16)" stroke="rgba(192,132,252,.85)" stroke-width="1.2"/>'
+        + '<text x="28" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#d8b4fe">🔮 构想</text></g>';
     } else { // user：暖色贴纸感（虚线边框 + 折角）
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="9" fill="rgba(251,191,36,.10)" stroke="rgba(251,191,36,.75)" stroke-width="1.6" stroke-dasharray="7 4"/>';
     }
     // 文字
-    var fs = n.kind === 'root' ? 14 : (n.kind === 'feature' ? 13 : 12);
-    var fw = (n.kind === 'root' || n.kind === 'feature') ? ' font-weight="700"' : '';
-    var fillc = n.kind === 'user' ? '#fde9c0' : '#e8f1ff';
+    var fs = n.kind === 'root' ? 14 : ((n.kind === 'feature' || n.kind === 'proposal') ? 13 : 12);
+    var fw = (n.kind === 'root' || n.kind === 'feature' || n.kind === 'proposal') ? ' font-weight="700"' : '';
+    var fillc = n.kind === 'user' ? '#fde9c0' : (n.kind === 'proposal' ? '#e9d5ff' : '#e8f1ff');
     s += ls.map(function(ln, li){
       return '<text y="'+(5 + (li-(ls.length-1)/2)*15)+'" text-anchor="middle" font-size="'+fs+'"'+fw+' fill="'+fillc+'">'+esc(ln)+'</text>';
     }).join('');
@@ -523,6 +582,30 @@ export function renderMindmapPage(feature: string): string {
     } else if(n.kind === 'step'){
       det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.detail||'')+'</p>'
         + (n.raw.involves && n.raw.involves.length ? '<p class="files">'+n.raw.involves.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
+    } else if(n.kind === 'file'){
+      det.innerHTML = '<b style="color:#8ec8ef;">📄 ' + esc(n.label) + '</b><span class="tag">关键文件</span>'
+        + '<p>' + esc(n.raw.description || '（暂无职责描述）') + '</p>'
+        + (n._host ? '<p class="files">属于功能：' + esc(n._host.label) + '</p>' : '')
+        + (n.raw.meta && n.raw.meta.lines ? '<p class="files">' + n.raw.meta.lines + ' 行</p>' : '')
+        + '<p style="font-size:11px;color:#7a93b8;">功能内调用热度最高的实际功能单元——功能的原理分镜最终落到这些文件上执行。</p>'
+        + myNoteHtml;
+    } else if(n.kind === 'proposal'){
+      var pp = n.raw;
+      var parentHtml = pp.parent
+        ? '<p style="color:#e9d5ff;">AI 判断它属于「' + esc(pp.parent) + '」的子能力，已挂到该功能下。</p>'
+        : '<p style="color:#e9d5ff;">AI 判断它是独立新功能，挂在根节点下。</p>';
+      var depP = (pp.depends_on && pp.depends_on.length)
+        ? '<p style="color:#d8b4fe;">🔮 预判要踩：' + pp.depends_on.map(esc).join('、') + '（紫色虚线弧）</p>' : '';
+      var stepsHtml = (pp.steps && pp.steps.length)
+        ? '<p style="margin-top:6px;"><b style="color:#c084fc;">实现分镜（AI 预判）：</b></p>' + pp.steps.map(function(s, i){
+            return '<p>' + (i+1) + '. <b>' + esc(s.title) + '</b> — ' + esc(s.detail) + '</p>';
+          }).join('')
+        : '';
+      det.innerHTML = '<b style="color:#d8b4fe;">🔮 ' + esc(pp.title) + '</b><span class="tag">' + (pp.mode === 'llm' ? '构想 · AI 已定位' : '构想') + '</span>'
+        + '<p style="color:#bae6fd;">' + esc(pp.desc) + '</p>'
+        + parentHtml + depP + stepsHtml
+        + '<p style="font-size:11px;color:#7a93b8;">你的原话：「' + esc(pp.raw) + '」——改原话：删除这个构想节点重写；要细化：给它加子节点后保存。</p>'
+        + myNoteHtml;
     } else if(n.kind === 'shared'){
       var ub = n.raw.used_by || [];
       det.innerHTML = '<b style="color:#2dd4bf;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
@@ -595,10 +678,34 @@ export function renderMindmapPage(feature: string): string {
       fetch('/api/user_nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ feature: FEATURE, nodes: nodePayload }) }).then(function(r){ return r.json(); })
     ]).then(function(rs){
-      btn.disabled = false; btn.textContent = '💾 保存';
-      if(rs[0].success && rs[1].success){ DIRTY = false; updateSaveState(); flash('已保存：'+nodePayload.length+' 个我的节点 + '+notesPayload.length+' 条批注（AI 再生成时将读到）'); }
-      else flash('保存失败：' + ((rs[0].error||'') + ' ' + (rs[1].error||'')).trim());
+      if(rs[0].success && rs[1].success){
+        DIRTY = false; updateSaveState();
+        // 根级节点 = 新功能构想：保存后自动让 AI 定位融入（人出意图、LLM 出结构）
+        var rootIdeas = nodePayload.filter(function(u){ return u.parent_id === 'root'; });
+        if(rootIdeas.length > 0) mergeProposals(btn, rootIdeas.length);
+        else { btn.disabled = false; btn.textContent = '💾 保存'; flash('已保存：'+nodePayload.length+' 个我的节点 + '+notesPayload.length+' 条批注（AI 再生成时将读到）'); }
+      } else {
+        btn.disabled = false; btn.textContent = '💾 保存';
+        flash('保存失败：' + ((rs[0].error||'') + ' ' + (rs[1].error||'')).trim());
+      }
     }).catch(function(e){ btn.disabled = false; btn.textContent = '💾 保存'; flash('保存失败：' + e.message); });
+  };
+  // AI 定位构想：POST /api/proposals → 重载页面数据（构想分支自动出现在 AI 判断的位置）
+  function mergeProposals(btn, count){
+    btn.disabled = true; btn.textContent = '🤖 AI 定位构想中…';
+    fetch('/api/proposals', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feature: FEATURE }) })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        btn.disabled = false; btn.textContent = '💾 保存';
+        if(j.success){
+          fetchAll().then(function(rs){
+            if(rs[0].success) applyData(rs[0], rs[1], rs[2]);
+          });
+          flash('AI 已定位 ' + (j.proposals || []).length + ' 个构想' + (j.mode === 'llm' ? '（智能挂靠，见 🔮 分支）' : '（LLM 不可用，直挂根节点）'));
+        } else flash('定位失败：' + (j.error || ''));
+      })
+      .catch(function(e){ btn.disabled = false; btn.textContent = '💾 保存'; flash('定位失败：' + e.message); });
   };
   function flash(msg){
     var el = document.getElementById('save-state');
