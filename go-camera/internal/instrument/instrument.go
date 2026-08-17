@@ -60,6 +60,12 @@ type Options struct {
 	EnableDeep bool
 	// BackupRoot 备份根：写盘前把原文件备份到 <backupRoot>/.design-canvas/camera-backup/<rel>。
 	BackupRoot string
+	// ExcludeDirs 相对目录名列表（如 internal/probe），这些目录下的文件跳过插桩。
+	// 用于避免把探针打进探针包自身/其依赖链造成 import cycle。
+	ExcludeDirs []string
+	// ContractProbes 契约模式探针列表：非 nil 时只注入其中声明的探针点（精确匹配
+	// pkg.FuncName.suffix），并做文件级包过滤；nil 时全量无脑插桩（探索模式）。
+	ContractProbes []ContractProbe
 }
 
 // 探针 import 别名（保持在此处，注入统一使用）。
@@ -84,13 +90,13 @@ var ioOps = map[string]string{
 }
 
 // collectGoFiles 递归收集目录下所有 .go 源文件（跳过 node_modules/dist/.git/.design-canvas 等）。
-func collectGoFiles(root string) []string {
+func collectGoFiles(root string, excludes []string) []string {
 	var out []string
-	skip := map[string]bool{
-		"node_modules": true, "dist": true, ".git": true,
-		".design-canvas": true, "coverage": true, "vendor": false,
+	// excludes 是相对根目录的路径（如 internal/probe），命中则跳过整目录
+	excludeSet := map[string]bool{}
+	for _, e := range excludes {
+		excludeSet[filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(e), "./"))] = true
 	}
-	_ = skip
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -99,6 +105,14 @@ func collectGoFiles(root string) []string {
 			if d.Name() == "node_modules" || d.Name() == ".git" ||
 				d.Name() == ".design-canvas" || d.Name() == "coverage" {
 				return filepath.SkipDir
+			}
+			// 相对 root 的目录路径（slash），命中 exclude 则跳过
+			rel, rerr := filepath.Rel(root, path)
+			if rerr == nil {
+				relSlash := filepath.ToSlash(rel)
+				if excludeSet[relSlash] {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -189,7 +203,8 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 
 	backupRoot := opts.BackupRoot
 	if backupRoot == "" {
-		backupRoot = filepath.Dir(findProjectRoot(file, f.Name.Name))
+		// findProjectRoot 已返回含 go.mod 的项目根，不要再包 filepath.Dir（否则备份写到父目录，还原时找不到）
+		backupRoot = findProjectRoot(file, f.Name.Name)
 	}
 
 	probeImport := opts.ProbeImport
@@ -200,8 +215,18 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	fileRel := filepath.ToSlash(relPath(backupRoot, file))
 	pkg := f.Name.Name
 
+	// 契约模式文件级包过滤：契约探针声明的包不包含当前文件包名则整文件跳过。
+	// 探索模式（probes==nil）不做此过滤，全量扫描。
+	if probes := opts.ContractProbes; probes != nil {
+		if pkgs := PackageFilter(probes); len(pkgs) > 0 {
+			if !pkgs[pkg] {
+				return res, nil
+			}
+		}
+	}
+
 	var sites []Site
-	collectFuncSites(fset, f, pkg, fileRel, enableDeep, &sites)
+	collectFuncSites(fset, f, pkg, fileRel, enableDeep, opts.ContractProbes, &sites)
 
 	if len(sites) == 0 {
 		return res, nil
@@ -212,10 +237,12 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 
 	// 探针 import 注入：在 package 声明行后补一行
 	importLine := "\nimport " + probeAlias + " \"" + probeImport + "\"\n"
-	insertOffset := packageLineEnd(src)
+	insertOffset := packageLineEnd(src, fset, f)
 
 	out := src
-	for i := len(sites) - 1; i >= 0; i-- {
+	// 按 Offset 降序遍历（sites[0]=文件末尾），从后往前注入避免偏移漂移。
+	// 注：sortSites 已按 Offset 降序排列，此处正向遍历 = 从最大Offset（文件末尾）开始。
+	for i := 0; i < len(sites); i++ {
 		s := sites[i]
 		out = out[:s.Offset] + s.Code + out[s.Offset:]
 	}
@@ -231,6 +258,12 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	}
 
 	res.Sites = sites
+	// 防御性清理：块末探针破坏终止性（missing return）时删除多余探针。
+	// 触发场景：switch case / comm 分支 / 函数体等块，原最后一条是终止语句
+	// （return/for/switch...），但探针被插到它之后使块不再终止。
+	if cleaned := cleanupTrailingProbes(file, []byte(out)); cleaned != nil {
+		out = string(cleaned)
+	}
 	if applyWrite {
 		backupOriginal(backupRoot, file, src)
 		if err := os.WriteFile(file, []byte(out), 0o644); err != nil {
@@ -258,18 +291,57 @@ func findProjectRoot(file, _ string) string {
 }
 
 // packageLineEnd 返回 package 声明行结束（换行）的字节偏移，用于插入 import。
-func packageLineEnd(src string) int {
-	// 找到 "package " 之后的包名，跳到该行末尾
-	idx := strings.Index(src, "package ")
-	if idx < 0 {
+// 用 AST 的 f.Package（package 关键字）与 f.Name.End()（包名结尾）定位真实声明行，
+// 避免文件头注释里出现 "// Package xxx" 时字符串匹配误判（如 ws_brain.go）。
+func packageLineEnd(src string, fset *token.FileSet, f *ast.File) int {
+	if f == nil || f.Package == token.NoPos {
 		return 0
 	}
-	rest := src[idx+len("package "):]
-	nl := strings.IndexByte(rest, '\n')
-	if nl < 0 {
+	tf := fset.File(f.Package)
+	if tf == nil {
+		return 0
+	}
+	// 包名结尾的字节偏移
+	endOff := tf.Offset(f.Name.End())
+	if endOff < 0 || endOff >= len(src) {
 		return len(src)
 	}
-	return idx + len("package ") + nl + 1
+	// 从包名结尾跳到该行行尾
+	rest := src[endOff:]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		return endOff + nl + 1
+	}
+	return len(src)
+}
+
+
+// terminatesFunction 判断语句是否可能使函数不落出（return / 无限循环 / 全分支返回）。
+// 用于决定是否在函数体末尾补出口探针——在这些语句之后插任何语句都是不可达代码，
+// Go 编译器会报 "missing return"。
+func terminatesFunction(stmt ast.Stmt) bool {
+	switch t := stmt.(type) {
+	case *ast.ReturnStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SelectStmt:
+		return true
+	case *ast.SwitchStmt, *ast.TypeSwitchStmt:
+		return true
+	case *ast.IfStmt:
+		if t.Else == nil {
+			return false // 无 else，可能不返回
+		}
+		// else 分支：仅当是 BlockStmt 且末尾是 return 才算终止
+		eb, ok := t.Else.(*ast.BlockStmt)
+		if !ok || len(eb.List) == 0 {
+			return false
+		}
+		_, ebRet := eb.List[len(eb.List)-1].(*ast.ReturnStmt)
+		_, ifRet := false, false
+		if t.Body != nil && len(t.Body.List) > 0 {
+			_, ifRet = t.Body.List[len(t.Body.List)-1].(*ast.ReturnStmt)
+		}
+		return ebRet && ifRet
+	default:
+		return false
+	}
 }
 
 // sortSites 按 Offset 降序排列（注入时从文件末尾往前）。
@@ -281,17 +353,17 @@ func sortSites(sites []Site) {
 	}
 }
 
-// collectFuncSites 遍历文件 AST，收集所有插桩点。
-func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, enableDeep bool, sites *[]Site) {
+// collectFuncSites 遍历文件 AST，收集所有插桩点。probes 非 nil 时按契约过滤。
+func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, enableDeep bool, probes []ContractProbe, sites *[]Site) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch t := n.(type) {
 		case *ast.FuncDecl:
 			if t.Body != nil {
-				processFunction(fset, t.Name.Name, t.Type.Params, t.Body, pkg, fileRel, enableDeep, sites)
+				processFunction(fset, t.Name.Name, t.Type.Params, t.Body, pkg, fileRel, enableDeep, probes, sites)
 			}
 		case *ast.FuncLit:
 			if t.Body != nil {
-				processFunction(fset, "", t.Type.Params, t.Body, pkg, fileRel, enableDeep, sites)
+				processFunction(fset, "", t.Type.Params, t.Body, pkg, fileRel, enableDeep, probes, sites)
 			}
 		}
 		return true
@@ -299,7 +371,9 @@ func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, ena
 }
 
 // processFunction 处理一个函数体（FuncDecl 或 FuncLit）：入口/出口/return/IO/deep。
-func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body *ast.BlockStmt, pkg, fileRel string, enableDeep bool, sites *[]Site) {
+// probes 非 nil（契约模式）时，每条探针注入前用 MatchProbe 精确门控——只注入
+// DSL 声明的 pkg.FuncName.suffix。
+func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body *ast.BlockStmt, pkg, fileRel string, enableDeep bool, probes []ContractProbe, sites *[]Site) {
 	if fn == "" {
 		fn = "closure"
 	}
@@ -314,7 +388,7 @@ func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body
 	}
 
 	// ── 入口（core）：在函数体 '{' 后注入参数捕获 ──
-	{
+	if MatchProbe(probeName("enter"), probes) {
 		openOffset := offsetOf(body.Lbrace)
 		insertAt := openOffset + 1
 		argsMap := paramCapture(params)
@@ -324,14 +398,24 @@ func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body
 	}
 
 	// 遍历函数体语句：return / IO / deep 由语句级处理
-	walkStmts(fset, body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+	walkStmts(fset, body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 
-	// 函数体末尾出口探针（处理的 return 之外的落点，如 named-return 尾部）
-	{
-		closeOffset := offsetOf(body.Rbrace)
-		code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "core"});`,
-			probeName("exit"), fileRel)
-		*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(body.Rbrace), Offset: closeOffset, Code: "\n" + code})
+	// 函数体末尾出口探针：仅当最后一条语句不是 return 时注入（named-return 尾部自然落出等）。
+	// 若最后一条是 return，return 前已有 exit 探针捕获出口；在 return 后插任何语句
+	// （探针/调用）都会成为不可达代码，Go 编译器报 "missing return"（已实验证实）。
+	// 注入位置用最后一条语句的 End()，避免与 Rbrace 前位置冲突。
+	if MatchProbe(probeName("exit"), probes) && len(body.List) > 0 {
+		last := body.List[len(body.List)-1]
+		// 末尾是「可能不落出函数」的控制流时不插末尾探针：
+		// return（已有 return 前探针）、for/select/switch（可能无限或全分支返回）、
+		// if-else（两分支均以 return 收尾）。在这些语句后插任何语句都有
+		// "missing return" 风险（Go 对不可达代码的规则）。
+		if !terminatesFunction(last) {
+			lastEnd := offsetOf(last.End())
+			code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "core"});`,
+				probeName("exit"), fileRel)
+			*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(body.Rbrace), Offset: lastEnd, Code: "\n" + code})
+		}
 	}
 }
 
@@ -343,6 +427,9 @@ func paramCapture(params *ast.FieldList) string {
 	var fields []string
 	add := func(names []*ast.Ident) {
 		for _, n := range names {
+			if n.Name == "_" {
+				continue // 空标识符 _ 不能作 map key 也不能作值，跳过
+			}
 			fields = append(fields, fmt.Sprintf("%q: %s", n.Name, n.Name))
 		}
 	}
@@ -356,70 +443,91 @@ func paramCapture(params *ast.FieldList) string {
 }
 
 // walkStmts 递归遍历语句列表，收集 return / IO / deep 探针。
-func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) string, fileRel string, enableDeep bool, offsetOf func(token.Pos) int, lineOf func(token.Pos) int, sites *[]Site) {
+// probes 非 nil（契约模式）时，每条探针注入前用 MatchProbe 精确门控。
+func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) string, fileRel string, enableDeep bool, offsetOf func(token.Pos) int, lineOf func(token.Pos) int, probes []ContractProbe, sites *[]Site) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.ReturnStmt:
 			// return 出口（core）：在 return 前注入。取值捕获仅当无副作用。
-			fields := returnCapture(s)
-			code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "core", %s});`,
-				probeName("exit"), fileRel, fields)
-			*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(s.Pos()), Offset: offsetOf(s.Pos()), Code: code + "\n"})
+			if MatchProbe(probeName("exit"), probes) {
+				fields := returnCapture(s)
+				// fields 可能为空（return 无值或有副作用表达式），此时不拼 "ret:" 字段，
+				// 否则会出现 map 字面量里的 "level": "core", 空字段 trailing comma，Go 语法错误。
+				suffix := ""
+				if fields != "" {
+					suffix = ", " + fields
+				}
+				code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "core"%s});`,
+					probeName("exit"), fileRel, suffix)
+				*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(s.Pos()), Offset: offsetOf(s.Pos()), Code: code + "\n"})
+			}
 		case *ast.BlockStmt:
-			walkStmts(fset, s.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+			walkStmts(fset, s.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 		case *ast.IfStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 			if s.Else != nil {
 				if el, ok := s.Else.(*ast.BlockStmt); ok {
-					walkStmts(fset, el.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+					walkStmts(fset, el.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 				}
 			}
 		case *ast.ForStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.RangeStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.SwitchStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.TypeSwitchStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.SelectStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.CaseClause:
-			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 		case *ast.CommClause:
-			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, sites)
+			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
 		case *ast.DeferStmt:
 			// defer/recover（event）：捕获 defer 调用中的错误场景（Op）
-			if op := deferOp(s); op != "" {
-				code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "event", "op": %q});`,
-					probeName("defer"), fileRel, op)
-				*sites = append(*sites, Site{Kind: ProbeIO, Level: "event", Line: lineOf(s.Pos()), Offset: offsetOf(s.Call.Lparen) + 1, Code: code + "\n"})
+			if MatchProbe(probeName("defer"), probes) {
+				if op := deferOp(s); op != "" {
+					code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "event", "op": %q});`,
+						probeName("defer"), fileRel, op)
+					// Bug5 修复：不能注入到 s.Call.Lparen+1（参数括号内部=语法错误），
+					// 改为在 defer 语句末尾之后注入，并前缀换行与原 token 分隔。
+					*sites = append(*sites, Site{Kind: ProbeIO, Level: "event", Line: lineOf(s.Pos()), Offset: offsetOf(s.End()), Code: "\n" + code + "\n"})
+				}
 			}
 		}
 
 		// ── IO 写盘（event）：语句内含 IO 调用 → 语句后注入 ──
-		if op := ioOpInStmt(stmt); op != "" {
+		// 跳过 ReturnStmt：return 表达式里的 IO 调用（如 return os.Rename(...)）
+		// 已由 return 前的 exit 探针覆盖；在 return 后插任何语句都是不可达代码，
+		// Go 编译器报 "missing return"。
+		if _, isRetStmt := stmt.(*ast.ReturnStmt); isRetStmt {
+			continue // 仅跳过当前语句的 IO 探针，不能 return（会退出整个 walkStmts，丢掉后续兄弟语句）
+		}
+		if op := ioOpInStmt(stmt); op != "" && MatchProbe(probeName(op), probes) {
 			code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "event", "op": %q});`,
 				probeName(op), fileRel, op)
-			*sites = append(*sites, Site{Kind: ProbeIO, Level: "event", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: code + "\n"})
+			// Bug4 修复：前置换行避免与前一个 token（如 `}`）粘连成 `}camprobe` 语法错误
+			*sites = append(*sites, Site{Kind: ProbeIO, Level: "event", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: "\n" + code + "\n"})
 		}
 
 		// ── deep（可选）：变量赋值捕获 ──
-		if enableDeep {
+		if enableDeep && MatchProbe(probeName("deep"), probes) {
 			if code, ok := deepCapture(stmt, probeName, fileRel); ok {
-				*sites = append(*sites, Site{Kind: ProbeDeep, Level: "deep", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: code + "\n"})
+				// 同 Bug4：前置换行避免粘连
+				*sites = append(*sites, Site{Kind: ProbeDeep, Level: "deep", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: "\n" + code + "\n"})
 			}
 		}
 	}
@@ -444,7 +552,7 @@ func returnCapture(s *ast.ReturnStmt) string {
 	for i, r := range s.Results {
 		parts = append(parts, fmt.Sprintf("%q: %s", fmt.Sprintf("%d", i), exprString(r)))
 	}
-	return "ret: map[string]any{" + strings.Join(parts, ", ") + "}"
+	return "\"ret\": map[string]any{" + strings.Join(parts, ", ") + "}"
 }
 
 // isSideEffectFree 判断表达式是否无副作用（可安全地再次求值）。
@@ -491,6 +599,29 @@ func exprString(e ast.Expr) string {
 		return exprString(t.X) + "." + t.Sel.Name
 	case *ast.IndexExpr:
 		return exprString(t.X) + "[" + exprString(t.Index) + "]"
+	case *ast.StarExpr:
+		return "*" + exprString(t.X)
+	case *ast.ArrayType:
+		if t.Len == nil {
+			return "[]" + exprString(t.Elt)
+		}
+		return "[" + exprString(t.Len) + "]" + exprString(t.Elt)
+	case *ast.CompositeLit:
+		// 复合字面量：&T{...} 或 T{...}。元素递归渲染（仅简单字面量，前面已有 isSideEffectFree 把关）
+		typeName := exprString(t.Type)
+		if typeName == "nil" {
+			return "nil" // 类型无法渲染 → 整体降级为 nil，调用方会因值含 "nil" 表达式而跳过
+		}
+		elts := make([]string, 0, len(t.Elts))
+		for _, el := range t.Elts {
+			switch kv := el.(type) {
+			case *ast.KeyValueExpr:
+				elts = append(elts, exprString(kv.Key)+": "+exprString(kv.Value))
+			default:
+				elts = append(elts, exprString(el))
+			}
+		}
+		return typeName + "{" + strings.Join(elts, ", ") + "}"
 	default:
 		return "nil"
 	}
@@ -560,7 +691,7 @@ func deepCapture(stmt ast.Stmt, probeName func(string) string, fileRel string) (
 
 // InstrumentDir 对目录下所有 .go 文件插桩。返回每个文件的插桩结果。
 func InstrumentDir(root string, opts Options) []Result {
-	files := collectGoFiles(root)
+	files := collectGoFiles(root, opts.ExcludeDirs)
 	var results []Result
 	for _, f := range files {
 		o := opts
@@ -569,4 +700,71 @@ func InstrumentDir(root string, opts Options) []Result {
 		results = append(results, r)
 	}
 	return results
+}
+
+// isProbeCall 判断语句是否为 camprobe.Capture(...) 探针调用（插桩器生成的探针）。
+func isProbeCall(stmt ast.Stmt) bool {
+	es, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	ce, ok := es.X.(*ast.CallExpr)
+	if !ok || len(ce.Args) == 0 {
+		return false
+	}
+	sel, ok := ce.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	return sel.Sel.Name == "Capture"
+}
+
+// cleanupTrailingProbes 删除「块末探针破坏终止性」的探针语句。
+// 场景：块（函数体/if/for/case/comm 体）的最后一条原本是终止语句，
+// 但探针（IO/deep/错位 Site）被插到它之后 → 块不再以终止语句结尾 → Go 报
+// "missing return"。这类探针是多余的：出口信息已由 return 前的 exit 探针覆盖。
+// 返回清理后的源码；无改动时返回 nil。
+func cleanupTrailingProbes(file string, src []byte) []byte {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, src, parser.ParseComments)
+	if err != nil {
+		return nil
+	}
+	var removes []ast.Stmt
+	ast.Inspect(f, func(n ast.Node) bool {
+		var list []ast.Stmt
+		switch blk := n.(type) {
+		case *ast.BlockStmt:
+			list = blk.List
+		case *ast.CaseClause:
+			list = blk.Body
+		case *ast.CommClause:
+			list = blk.Body
+		default:
+			return true
+		}
+		if len(list) >= 2 && isProbeCall(list[len(list)-1]) && terminatesFunction(list[len(list)-2]) {
+			removes = append(removes, list[len(list)-1])
+		}
+		return true
+	})
+	if len(removes) == 0 {
+		return nil
+	}
+	// 按 Pos 降序删除，避免偏移漂移；顺带吃掉语句后随的空白/换行。
+	for i := 1; i < len(removes); i++ {
+		for j := i; j > 0 && removes[j].Pos() > removes[j-1].Pos(); j-- {
+			removes[j], removes[j-1] = removes[j-1], removes[j]
+		}
+	}
+	out := append([]byte(nil), src...)
+	for _, r := range removes {
+		start := fset.Position(r.Pos()).Offset
+		end := fset.Position(r.End()).Offset
+		for end < len(out) && (out[end] == '\n' || out[end] == '\r' || out[end] == '\t' || out[end] == ' ') {
+			end++
+		}
+		out = append(out[:start], out[end:]...)
+	}
+	return out
 }

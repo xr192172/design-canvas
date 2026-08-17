@@ -128,19 +128,19 @@ func (s *DesignDSLStore) SaveWithMeta(decls []DSLDecl, reason, source string, me
 	if decls == nil {
 		decls = append([]DSLDecl(nil), cur.Decls...)
 	}
+	if len(decls) == 0 {
+		return 0, fmt.Errorf("save: 声明集为空，至少需要 1 条声明")
+	}
 	doc := DesignDSLDoc{
 		Version:   next,
 		UpdatedAt: time.Now().UTC(),
 		Decls:     decls,
 	}
-	if err := s.writeDoc(doc); err != nil {
-		return 0, err
-	}
 	action := meta.Action
 	if action == "" {
 		action = "save"
 	}
-	return next, s.appendHistory(HistoryEntry{
+	entry := HistoryEntry{
 		Version:      doc.Version,
 		At:           doc.UpdatedAt,
 		Reason:       reason,
@@ -149,7 +149,14 @@ func (s *DesignDSLStore) SaveWithMeta(decls []DSLDecl, reason, source string, me
 		FromVersion:  cur.Version,
 		Verification: meta.Verification,
 		Decls:        doc.Decls,
-	})
+	}
+	if err := s.appendHistory(entry); err != nil {
+		return 0, err
+	}
+	if err := s.writeDoc(doc); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 // Rollback 把设计 DSL 恢复到指定历史版本（该版本必须存在于审计历史中）。

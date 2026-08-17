@@ -74,7 +74,7 @@ func RunDSLCLI(args []string, dataDir string) bool {
 	case "log":
 		return dslLog(args[1:])
 	case "instrument":
-		return dslInstrument(args[1:])
+		return dslInstrument(args[1:], dataDir)
 	case "help", "-h", "--help":
 		usageDSL()
 		return true
@@ -101,7 +101,7 @@ func usageDSL() {
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
   camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
   camera-dsl log <events.jsonl> [--file <path>]... [--all]  日志：按文件路径过滤（可多次），默认只列异常，--all 显示全部
-  camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--restore]  Go 源码自动插桩（PR 偏差2）
+  camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--explore] [--restore]  Go 源码自动插桩（契约模式默认，--explore 全量）
 
 仓库位置: {projectRoot}/.agent/camera/
   dsl.json           当前生效版本（权威判定依据）
@@ -609,22 +609,37 @@ func renderLogLine(v Verdict, emphasize bool) {
 }
 
 // dslInstrument 对 Go 项目目录做源码级自动插桩（PR 偏差2）。
-//   - --dry-run    只报告探针点，不写盘
-//   - --enable-deep 额外捕获函数内部变量赋值（deep 级）
-//   - --restore    还原上次插桩前的原始文件（从备份目录拷回）
-func dslInstrument(args []string) bool {
+//   - --dry-run      只报告探针点，不写盘
+//   - --enable-deep  额外捕获函数内部变量赋值（deep 级）
+//   - --explore      探索模式：全量无脑插桩（挖掘隐藏问题），默认契约模式只注入 DSL 声明的探针
+//   - --restore      还原上次插桩前的原始文件（从备份目录拷回）
+func dslInstrument(args []string, dataDir string) bool {
 	dir := ""
 	dryRun := false
 	enableDeep := false
 	restore := false
-	for _, a := range args {
-		switch a {
-		case "--dry-run":
+	explore := false
+	probeImport := ""
+	var excludeDirs []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--dry-run":
 			dryRun = true
-		case "--enable-deep":
+		case a == "--enable-deep":
 			enableDeep = true
-		case "--restore":
+		case a == "--restore":
 			restore = true
+		case a == "--explore":
+			explore = true
+		case a == "--probe-import" && i+1 < len(args):
+			i++
+			probeImport = args[i]
+		case a == "--exclude-dir" && i+1 < len(args):
+			i++
+			excludeDirs = append(excludeDirs, args[i])
+		case strings.HasPrefix(a, "-"):
+			fmt.Fprintln(os.Stderr, "未知参数: "+a)
 		default:
 			if dir == "" {
 				dir = a
@@ -632,7 +647,7 @@ func dslInstrument(args []string) bool {
 		}
 	}
 	if dir == "" {
-		fmt.Fprintln(os.Stderr, "用法: camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--restore]")
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--explore] [--restore] [--probe-import <path>]")
 		return true
 	}
 
@@ -649,11 +664,46 @@ func dslInstrument(args []string) bool {
 		return true
 	}
 
+	if probeImport == "" {
+		probeImport = "go-camera/internal/probe"
+	}
+
+	// 模式：默认契约模式（读 DSL 声明探针），--explore 全量无脑插桩。
+	var contractProbes []instrument.ContractProbe
+	modeNote := "契约模式"
+	if explore {
+		contractProbes = nil
+		modeNote = "探索模式（全量插桩，挖掘隐藏问题）"
+	} else {
+		store := NewDesignDSLStore(dataDir)
+		doc, err := store.Load()
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintln(os.Stderr, "camera-dsl instrument: 设计 DSL 尚未初始化（契约模式需要 DSL），先 `camera-dsl seed` 或用 `--explore` 全量插桩")
+				return true
+			}
+			fmt.Fprintf(os.Stderr, "camera-dsl instrument: 加载 DSL: %v\n", err)
+			return true
+		}
+		for _, d := range doc.Decls {
+			// 只取有具体探针点的声明驱动插桩；空 Probe（全局规则）只作用于判定阶段
+			if d.Probe != "" {
+				contractProbes = append(contractProbes, instrument.ContractProbe{Probe: d.Probe})
+			}
+		}
+		if len(contractProbes) == 0 {
+			fmt.Fprintln(os.Stderr, "camera-dsl instrument: DSL 尚无具体探针点声明（只有全局规则），契约模式将不注入任何探针；可用 `--explore` 全量插桩发现可提升的探针点")
+			return true
+		}
+	}
+
 	opts := instrument.Options{
-		ProbeImport: "go-camera/internal/probe",
-		Write:       !dryRun,
-		EnableDeep:  enableDeep,
-		BackupRoot:  dir,
+		ProbeImport:    probeImport,
+		Write:          !dryRun,
+		EnableDeep:     enableDeep,
+		BackupRoot:     dir,
+		ExcludeDirs:    excludeDirs,
+		ContractProbes: contractProbes,
 	}
 	results := instrument.InstrumentDir(dir, opts)
 	var total int
@@ -680,11 +730,23 @@ func dslInstrument(args []string) bool {
 	if dryRun {
 		verb = "将注入（dry-run）"
 	}
-	fmt.Printf("instrument: %d/%d 文件%s %d 个探针点\n", hits, len(results), verb, total)
+	fmt.Printf("instrument: [%s] %d/%d 文件%s %d 个探针点\n", modeNote, hits, len(results), verb, total)
+	if contractProbes != nil {
+		fmt.Printf("  契约探针 %d 个: %v\n", len(contractProbes), contractProbeNames(contractProbes))
+	}
 	if !dryRun && hits > 0 {
 		fmt.Println("提示: 用 `camera-dsl instrument <dir> --restore` 可还原为插桩前原版")
 	}
 	return true
+}
+
+// contractProbeNames 提取契约探针 id 列表（用于输出）。
+func contractProbeNames(probes []instrument.ContractProbe) []string {
+	out := make([]string, 0, len(probes))
+	for _, p := range probes {
+		out = append(out, p.Probe)
+	}
+	return out
 }
 
 // writeJSON 原子写 JSON 文件（临时文件 + rename）。

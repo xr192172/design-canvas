@@ -88,6 +88,20 @@ export interface InstrumentOptions {
   /** 是否启用 deep 级插桩（函数内部变量赋值/条件分支捕获）。默认 false——
    *  deep 事件量很大，按需放大。core/event 不受此开关影响。 */
   enableDeep?: boolean;
+  /** 契约模式探针列表：非 undefined 时只注入其中声明的探针点（精确匹配
+   *  `<mod>.<fn>.<suffix>`），并做模块级过滤；undefined 时全量无脑插桩（探索模式）。
+   *  与 Go 侧 instrument.Options.ContractProbes 语义对齐。 */
+  contractProbes?: string[];
+}
+
+/**
+ * 契约门：探针名是否命中契约列表。
+ *   - probes === undefined → 探索模式，恒 true（全量无脑插桩）
+ *   - probes 非 undefined → 精确匹配（契约模式）
+ */
+function matchContract(probeName: string, probes?: string[]): boolean {
+  if (probes === undefined) return true;
+  return probes.includes(probeName);
 }
 
 /** 探针调用标记：已插桩文件里若含此标记则跳过（幂等） */
@@ -381,10 +395,11 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
 
   // 收集插入点（从后往前构造，偏移由大到小）
   const insertions: { index: number; removeTo?: number; site: InstrumentedSite }[] = [];
+  const probes = opts.contractProbes;
   // core/event 探针：仅当文件尚未注入 core/event 时收集（避免对已插桩文件重复注入）
-  if (!hasCore) collectSites(root, file, content, insertions, fileRel);
+  if (!hasCore) collectSites(root, file, content, insertions, fileRel, probes);
   // deep 探针：仅在请求 enableDeep 且尚未注入 deep 时收集
-  if (enableDeep && !hasDeep) collectDeepSites(root, file, content, insertions, fileRel);
+  if (enableDeep && !hasDeep) collectDeepSites(root, file, content, insertions, fileRel, probes);
 
   if (insertions.length === 0) return result;
 
@@ -415,7 +430,8 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
 
 /**
  * 收集一个文件内所有插桩点脚本。site.injected 为要插入/替换的源码文本，
- * site.line 为插入位置所在行（1-based）。
+ * site.line 为插入位置所在行（1-based）。probes 非 undefined（契约模式）时
+ * 每个注入点用 matchContract 精确门控。
  */
 function collectSites(
   root: InstrNode,
@@ -423,6 +439,7 @@ function collectSites(
   content: string,
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
   fileRel: string,
+  probes?: string[],
 ): void {
   const walk = (n: InstrNode, parent?: InstrNode): void => {
     // ── 函数入口/出口（core）──
@@ -434,28 +451,32 @@ function collectSites(
       const probeName = `${mod}.${fn}`;
 
       // 入口：body.startIndex 指向 '{'，跳过后首非空白
-      const open = body.startIndex;
-      let entryIdx = open;
-      if (content[entryIdx] === '{') entryIdx++;
-      while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
-      const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
-      const enterProbe = `captureProbe(${JSON.stringify(probeName + '.enter')}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj}, level: 'core' });\n`;
-      insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: enterProbe } });
+      if (matchContract(probeName + '.enter', probes)) {
+        const open = body.startIndex;
+        let entryIdx = open;
+        if (content[entryIdx] === '{') entryIdx++;
+        while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
+        const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
+        const enterProbe = `captureProbe(${JSON.stringify(probeName + '.enter')}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj}, level: 'core' });\n`;
+        insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: enterProbe } });
+      }
 
       // 出口：若函数体无 return，则在末尾补末尾出口探针（有 return 的由 return 分支负责）
-      const returns: InstrNode[] = [];
-      collectReturns(body, returns);
-      if (returns.length === 0) {
-        // 在函数体最后一个 `}` 之前插入出口探针（保持函数体语法完整）
-        const tailIdx = body.endIndex - 1; // 指向 '}'
-        const exitProbe = `;captureProbe(${JSON.stringify(probeName + '.exit')}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
-        insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: exitProbe } });
+      if (matchContract(probeName + '.exit', probes)) {
+        const returns: InstrNode[] = [];
+        collectReturns(body, returns);
+        if (returns.length === 0) {
+          // 在函数体最后一个 `}` 之前插入出口探针（保持函数体语法完整）
+          const tailIdx = body.endIndex - 1; // 指向 '}'
+          const exitProbe = `;captureProbe(${JSON.stringify(probeName + '.exit')}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
+          insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: exitProbe } });
+        }
       }
     }
 
     // ── return 出口（core）──
     if (n.type === 'return_statement') {
-      handleReturn(n, root, file, content, insertions, fileRel, parent);
+      handleReturn(n, root, file, content, insertions, fileRel, parent, probes);
     }
 
     // catch 块（event）：在 catch 体开头注入
@@ -469,8 +490,10 @@ function collectSites(
         while (idx < text.length && /\s/.test(text[idx])) idx++;
         const fn = detectEnclosingFunction(root, open);
         const probeName = `${path.basename(file).replace('.ts', '')}.${fn}.catch`;
-        const injected = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: 'catch', err: (e as Error)?.message ?? '', level: 'event' });\n`;
-        insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'catch', level: 'event', injected } });
+        if (matchContract(probeName, probes)) {
+          const injected = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: 'catch', err: (e as Error)?.message ?? '', level: 'event' });\n`;
+          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'catch', level: 'event', injected } });
+        }
       }
     }
 
@@ -482,8 +505,10 @@ function collectSites(
         const idx = n.endIndex;
         const fnName = detectEnclosingFunction(root, n.startIndex);
         const probeName = `${path.basename(file).replace('.ts', '')}.${fnName}.${IO_CALLS[callee]}`;
-        const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
-        insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
+        if (matchContract(probeName, probes)) {
+          const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
+          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
+        }
       }
     }
 
@@ -562,6 +587,7 @@ function collectDeepSites(
   content: string,
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
   fileRel: string,
+  probes?: string[],
 ): void {
   const walk = (n: InstrNode, parent?: InstrNode): void => {
     // A. 变量声明（跳过 for 头：父节点是 for_*_statement）
@@ -577,6 +603,8 @@ function collectDeepSites(
           if (!nameNode || nameNode.type !== 'identifier' || !init) continue;
           const name = nameNode.text;
           const probeName = deepProbeName(root, file, d.startIndex);
+          // 契约门：deep 探针名统一为 `mod.fn.deep`
+          if (!matchContract(probeName, probes)) continue;
           const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(name)}, value: ${name}`);
           insertions.push({ index: d.endIndex, site: { file, line: d.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
         }
@@ -588,8 +616,10 @@ function collectDeepSites(
       const left = n.childForFieldName?.('left');
       if (left && (left.type === 'identifier' || left.type === 'member_expression') && isSideEffectFreeExpr(left)) {
         const probeName = deepProbeName(root, file, n.startIndex);
-        const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(left.text)}, value: ${left.text}`);
-        insertions.push({ index: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+        if (matchContract(probeName, probes)) {
+          const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(left.text)}, value: ${left.text}`);
+          insertions.push({ index: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+        }
       }
     }
 
@@ -602,12 +632,14 @@ function collectDeepSites(
         const inner = parenInner(cond);
         if (isSideEffectFreeExpr(inner)) {
           const probeName = deepProbeName(root, file, n.startIndex);
-          const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, level: 'deep', cond: ${JSON.stringify(inner.text)}, value: ${inner.text} });`;
-          // 在块体 '{' 之后注入
-          let idx = body.startIndex;
-          if (content[idx] === '{') idx++;
-          while (idx < content.length && /\s/.test(content[idx])) idx++;
-          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+          if (matchContract(probeName, probes)) {
+            const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, level: 'deep', cond: ${JSON.stringify(inner.text)}, value: ${inner.text} });`;
+            // 在块体 '{' 之后注入
+            let idx = body.startIndex;
+            if (content[idx] === '{') idx++;
+            while (idx < content.length && /\s/.test(content[idx])) idx++;
+            insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+          }
         }
       }
     }
@@ -629,10 +661,13 @@ function handleReturn(
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
   fileRel: string,
   parent?: InstrNode,
+  probes?: string[],
 ): void {
   const fn = detectEnclosingFunction(root, n.startIndex);
   const mod = path.basename(file).replace('.ts', '');
   const probeName = `${mod}.${fn}.exit`;
+  // 契约门：未声明的 exit 探针不注入（匹配 `mod.fn.exit`）
+  if (!matchContract(probeName, probes)) return;
   const expr = returnExpr(n);
 
   // 无大括号控制语句的单语句 return（如 `if (x) return null;`）：

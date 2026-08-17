@@ -1,6 +1,8 @@
 package instrument
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,7 +144,7 @@ func TestCollectGoFilesSkips(t *testing.T) {
 	// _test.go 也应跳过
 	os.WriteFile(filepath.Join(dir, "svc", "save_test.go"), []byte("package demo\n"), 0o644)
 
-	files := collectGoFiles(dir)
+	files := collectGoFiles(dir, nil)
 	for _, f := range files {
 		if strings.Contains(f, "node_modules") || strings.Contains(f, ".design-canvas") ||
 			strings.HasSuffix(f, "_test.go") {
@@ -188,4 +190,151 @@ func TestRestoreInstrumented(t *testing.T) {
 	if got := readFile(t, dir, "svc/save.go"); got != orig {
 		t.Error("还原后文件应与原版一致")
 	}
+}
+
+// Regression: Bug1——多函数插桩时排序降序+循环反向错配，导致后续注入点落在
+// 错误字节偏移上，破坏源代码语法。验证插桩产物仍能通过 go/parser 语法解析，
+// 且 import 行与探针标记位置正确，未错位截断原始代码。
+func TestMultiFunctionInjectSyntaxPreserved(t *testing.T) {
+	// 构造 3 个函数的文件（Save / MkdirAll / Cleanup），每个函数都有 enter/exit/IO
+	// 探针，注入点至少 8+。若循环方向与排序方向错配，AST 解析必然失败。
+	dir := t.TempDir()
+	// 写 go.mod 让 findProjectRoot 能定位项目根（测试不传 BackupRoot 的路径）
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module demoproj\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := `package demoproj
+
+import (
+	"os"
+	"fmt"
+)
+
+func Save(name string) error {
+	data := []byte(name)
+	if err := os.WriteFile("/tmp/x", data, 0644); err != nil {
+		return fmt.Errorf("save: %w", err)
+	}
+	return nil
+}
+
+func MkdirAll(path string) error {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return err
+	}
+	return nil
+}
+
+func Cleanup(path string) {
+	os.RemoveAll(path)
+}
+`
+	file := filepath.Join(dir, "ops.go")
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 关键：不传 BackupRoot，让 InstrumentFile 走 findProjectRoot 分支（同时覆盖 Bug2）
+	res, err := InstrumentFile(file, Options{Write: true})
+	if err != nil {
+		t.Fatalf("InstrumentFile 失败: %v", err)
+	}
+	if len(res.Sites) < 8 {
+		t.Fatalf("期望 ≥8 个注入点（3函数×enter+exit+IO），实得 %d", len(res.Sites))
+	}
+
+	content := readFile(t, dir, "ops.go")
+
+	// ① 最关键断言：插桩后产物必须能被 go/parser 解析（语法完整）
+	fset := token.NewFileSet()
+	if _, perr := parser.ParseFile(fset, file, content, parser.ParseComments); perr != nil {
+		t.Fatalf("Bug1 回归: 多函数插桩后 Go 语法解析失败（注入顺序错配导致代码错位）\n%v\n\n产物:\n%s", perr, content)
+	}
+
+	// ② 幂等标记与 import 顺序：camera:instrumented 在第 1 行，import camprobe 紧跟
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("产物行数不足: %d", len(lines))
+	}
+	if !strings.HasPrefix(lines[0], "// "+probeMarker) {
+		t.Errorf("第1行应为幂等标记，实得: %q", lines[0])
+	}
+	// 第3行（deep未开启，第2行应为 import camprobe）或第2行
+	hasImport := false
+	for i := 0; i < 5 && i < len(lines); i++ {
+		if strings.Contains(lines[i], "import "+probeAlias+" ") {
+			hasImport = true
+			break
+		}
+	}
+	if !hasImport {
+		t.Errorf("头部前5行内找不到 camprobe import 语句，可能 import 注入到了文件内部\n头几行: %v", lines[:min(5, len(lines))])
+	}
+
+	// ③ 每个函数的 enter 探针名应存在，说明 enter 探针没被错位截断
+	for _, want := range []string{"demoproj.Save.enter", "demoproj.MkdirAll.enter", "demoproj.Cleanup.enter"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("缺少函数入口探针 %q（注入错位可能导致探针名被截断）", want)
+		}
+	}
+}
+
+// Regression: Bug2——InstrumentFile 自动推断 BackupRoot 时多包了一层 filepath.Dir，
+// 导致备份写到项目根父目录，RestoreInstrumented 找不到备份=源代码无法还原。
+func TestBackupRootAutoInferAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	// 写 go.mod 让 findProjectRoot 返回 dir（项目根）
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module projx\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := `package projx
+
+import "os"
+
+func F() error {
+	return os.WriteFile("/tmp/y", []byte("x"), 0644)
+}
+`
+	file := filepath.Join(dir, "f.go")
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := string(src)
+
+	// 关键：不传 BackupRoot → 走 findProjectRoot 自动推断分支
+	if _, err := InstrumentFile(file, Options{Write: true}); err != nil {
+		t.Fatalf("InstrumentFile: %v", err)
+	}
+	instrumented := readFile(t, dir, "f.go")
+	if instrumented == orig {
+		t.Fatal("插桩未生效")
+	}
+
+	// 断言备份应落在 <dir>/.design-canvas/camera-backup/f.go（项目根内）
+	expectedBackup := filepath.Join(dir, backupDir, "f.go")
+	if _, err := os.Stat(expectedBackup); err != nil {
+		// 备份不在项目根 → Bug2复现：它被写到父目录去了
+		parentOfProject := filepath.Dir(dir)
+		orphanBackup := filepath.Join(parentOfProject, backupDir, filepath.Base(dir), "f.go")
+		if _, oerr := os.Stat(orphanBackup); oerr == nil {
+			t.Fatalf("Bug2 回归: 备份错位落到项目根父目录 %q，RestoreInstrumented 从项目根扫描时找不到，源代码无法还原", orphanBackup)
+		}
+		t.Fatalf("Bug2 回归: 备份既不在预期位置 %q，也未找到父目录错位项: %v", expectedBackup, err)
+	}
+
+	// 调用 RestoreInstrumented（从项目根扫）应能找到备份并还原
+	restored := RestoreInstrumented(dir)
+	if len(restored) != 1 {
+		t.Fatalf("RestoreInstrumented 应还原 1 个文件，实得 %d", len(restored))
+	}
+	got := readFile(t, dir, "f.go")
+	if got != orig {
+		t.Errorf("还原后内容不匹配原版\n期望:\n%s\n\n实得:\n%s", orig, got)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

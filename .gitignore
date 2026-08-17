@@ -18,6 +18,10 @@ scripts/*.tmp.mjs
 .design-canvas/
 # MCP server 运行时 DSL（项目根，随使用场景变化，不入库）
 design-canvas.json
+# Camera DSL 仓库（运行时生成：{projectRoot}/.agent/camera/dsl.json + history）
+.agent/
+# Go 编译产物
+*.exe
 
 # 测试覆盖率
 coverage/
