@@ -26,6 +26,8 @@ import path from 'node:path';
 import { getDSL, getStorageRoot, getDataHome } from '../storage.js';
 import { extractJsonObject } from './explain_gen.js';
 import { loadAgentConfig } from './llm_focus.js';
+import { openDb } from '../db/db.js';
+import type { Database } from '../db/db.js';
 import type { DesignDSL, FeatureTree } from '../dsl/types.js';
 import type { MindMap, MindMapNode, TeachStep } from '../dsl/mindmap.js';
 
@@ -216,6 +218,7 @@ function countFiles(n: MindMapNode): number {
 // ─────────────────────────────────────────────────────────────
 // teach 模式：科普教学导图（功能 + 实现原理分镜）
 // 叙事框架参考科普视频：项目是什么 → 有哪些功能 → 每个功能怎么实现的（分镜）
+// 材料三层：文件职责（静态）+ 函数签名（静态）+ 真实调用链（cache.db 动态证据）
 // ─────────────────────────────────────────────────────────────
 
 /** 给 LLM 的科普分镜产出 */
@@ -224,22 +227,85 @@ interface TeachScript {
   steps: TeachStep[];
 }
 
+/** 定位 feature 对应的 cache.db（与 overview/feature_tree 同一套候选逻辑） */
+function findCacheDb(feature: string, dsl: DesignDSL): string | null {
+  const candidates = [
+    path.join(getStorageRoot(), `import_cache_${feature}.db`),
+    dsl.source_root ? path.join(dsl.source_root, '.design-canvas', 'cache.db') : '',
+    path.join(process.cwd(), '.design-canvas', 'cache.db'),
+  ].filter(Boolean) as string[];
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
+
+/** 后缀匹配（≥2 段）判断 cache.db 路径是否属于功能文件集合（两套相对根可能前缀不同） */
+function makeFileMatcher(featureRels: string[]): (p: string) => boolean {
+  const exact = new Set(featureRels);
+  const suffixes = new Set<string>();
+  for (const f of featureRels) {
+    const segs = f.split('/');
+    for (let k = 0; k < segs.length - 1; k++) suffixes.add(segs.slice(k).join('/'));
+  }
+  return (p: string) => {
+    if (exact.has(p)) return true;
+    const segs = p.split('/');
+    for (let k = 0; k < segs.length - 1; k++) if (suffixes.has(segs.slice(k).join('/'))) return true;
+    return false;
+  };
+}
+
 /**
- * 科普编剧（teach 核心）：给 LLM 喂一个功能的全部实现材料
- * （文件职责 + 关键函数签名 + 协作模块锚点），产出科普视频式分镜。
- * 返回 null 表示失败/未配置（调用方降级规则描述）。
+ * 从 cache.db 取该功能的真实跨文件调用边（科普分镜的执行顺序证据）。
+ * 按调用频次取 top N，一屏可读；文件粒度去重（同一对文件最多 2 条，防 hub 函数刷屏）。
+ * 返回人读格式："a.ts:fnA → b.ts:fnB ×12"；db 不可用返回 []。
+ */
+function loadCallEdges(db: Database, featureRels: string[], maxEdges = 40): string[] {
+  const match = makeFileMatcher(featureRels);
+  const rows = db
+    .prepare(
+      `SELECT n1.file_path AS sf, n1.name AS sn, n2.file_path AS tf, n2.name AS tn, COUNT(*) AS w
+       FROM edges e
+       JOIN nodes n1 ON n1.id = e.source
+       JOIN nodes n2 ON n2.id = e.target
+       WHERE e.kind = 'call' AND n1.file_path != n2.file_path
+       GROUP BY n1.file_path, n1.name, n2.file_path, n2.name
+       ORDER BY w DESC`,
+    )
+    .all() as Array<{ sf: string; sn: string; tf: string; tn: string; w: number }>;
+  const perPair = new Map<string, number>();
+  const out: string[] = [];
+  for (const r of rows) {
+    if (!match(r.sf) || !match(r.tf)) continue;
+    const pairKey = [r.sf, r.tf].sort().join('⇔');
+    const cnt = perPair.get(pairKey) ?? 0;
+    if (cnt >= 2) continue;
+    perPair.set(pairKey, cnt + 1);
+    out.push(`${r.sf}:${r.sn} → ${r.tf}:${r.tn}（×${r.w}）`);
+    if (out.length >= maxEdges) break;
+  }
+  return out;
+}
+
+/** detail 中的技术噪声检测：函数调用/路径/驼峰标识（验收 LLM 是否守"零函数名"规矩） */
+const TECH_NOISE_RE = /[\w./-]+\(\s*\)|[\w-]+\.(ts|tsx|js|mjs|go|py|rs|java)\b|\b[a-z]+[A-Z][a-zA-Z]*\b/;
+
+/**
+ * 科普编剧 v2（teach 核心）。材料三区：职责清单 / 调用记录 / 函数签名。
+ * 硬规矩：what 必须痛点开场（不说"XX功能用于"）；detail 零技术标识，
+ * 锚点只进 involves；steps 顺序以调用记录为证据。
+ * 返回 null 表示失败/未配置（调用方降级）。
  */
 async function llmTeachFeature(material: string): Promise<TeachScript | null> {
   const cfg = loadAgentConfig();
   if (!cfg) return null;
   const system =
-    '你是技术科普编剧，擅长把软件功能讲成普通人爱看的科普视频。' +
-    '给定一个功能的所有实现材料（每个文件的职责说明、关键函数签名、协作模块），请为这个功能写科普分镜：\n' +
-    '1. what：这个功能是干嘛的、解决什么问题。1-2 句，说人话，假设观众完全不懂编程。\n' +
-    '2. steps：实现原理分镜，3-6 步，像视频镜头一样**按真实执行/数据流顺序**推进。每步：\n' +
-    '   title：≤12 字动宾短语（如「接收用户输入」「比对预期与实际」）；\n' +
-    '   detail：1-2 句，讲清这步发生什么、数据从哪来、送到哪去；说人话但必须准确；\n' +
-    '   involves：这步涉及的关键文件名数组（只能从材料里出现的文件中选）。\n' +
+    '你是技术科普编剧，擅长把软件功能讲成普通人爱看的科普视频（类似"3分钟看懂搜索引擎原理"）。\n' +
+    '给定一个功能的两份材料：【职责】每个文件是干嘛的；【调用记录】真实代码里谁调用谁、调用多少次（这是真实执行顺序的证据，材料区允许出现函数名供你理解，但你的输出不许照搬）。\n\n' +
+    '请为这个功能写科普分镜：\n' +
+    '1. what：从**痛点/场景**开场（"如果没它会怎样"或"它像生活中的什么"），1-2 句。禁止用"本功能用于/是一个…的功能"这类说明书腔。可以打生活类比（如"给程序装行车记录仪"）。\n' +
+    '2. steps：实现原理分镜 3-6 步，像视频镜头按**真实执行/数据流顺序**推进——顺序必须以【调用记录】为证据，不能凭目录名猜。每步：\n' +
+    '   - title：≤12 字动宾短语（如「埋下探针」「比对流水账」）；\n' +
+    '   - detail：1-2 句纯人话，讲清这步发生什么、数据从哪来到哪去。**严禁**出现函数名、文件名、路径、英文驼峰词——技术细节只许放进 involves；\n' +
+    '   - involves：这步依据的关键文件（只能从【职责】清单的文件里选，给想深挖的工程师看）。\n' +
     '只基于给定材料，不得编造。只输出 JSON（无其他文字）：\n' +
     '{"what":"...","steps":[{"title":"...","detail":"...","involves":["a.ts"]}]}';
   try {
@@ -267,8 +333,9 @@ async function llmTeachFeature(material: string): Promise<TeachScript | null> {
     for (const s of rawSteps) {
       const step = s as { title?: unknown; detail?: unknown; involves?: unknown };
       const t = typeof step.title === 'string' ? step.title.trim() : '';
+      // 零函数名规矩：detail 带技术噪声的步骤整步丢弃（宁缺毋滥，不污染科普）
       const d = typeof step.detail === 'string' ? step.detail.trim() : '';
-      if (!t || !d) continue;
+      if (!t || !d || TECH_NOISE_RE.test(d)) continue;
       const inv = Array.isArray(step.involves)
         ? step.involves.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 5)
         : undefined;
@@ -281,31 +348,37 @@ async function llmTeachFeature(material: string): Promise<TeachScript | null> {
   }
 }
 
-/** 组装单个功能的实现材料（喂给科普编剧）：文件职责 + 函数签名 + 协作锚点 */
+/** 组装单个功能的实现材料 v2：职责 + 调用记录（顺序证据）+ 函数签名 */
 function buildTeachMaterial(
   projectTitle: string,
   fName: string,
   communities: FeatureTree['features'][number]['communities'],
   fileIndex: ReturnType<typeof buildFileIndex>,
+  callEdges: string[],
 ): string {
   const anchors = communities.slice(0, 8).map((c) => c.name);
   const rels = [...new Set(communities.flatMap((c) => c.files))];
   const MAX = 25;
   const shown = rels.slice(0, MAX);
-  const lines: string[] = [
+  const parts: string[] = [
     `项目：${projectTitle}`,
     `功能：${fName}（${rels.length} 个文件${anchors.length ? `，协作模块：${anchors.join('、')}` : ''}）`,
-    '实现材料：',
+    '【职责】各文件是干嘛的：',
   ];
   for (const rel of shown) {
     const info = lookupFile(fileIndex, rel);
     if (!info) continue;
     const resp = info.responsibility || '（无职责说明）';
-    const apis = info.apis?.length ? `（关键函数：${info.apis.join(' / ')}）` : '';
-    lines.push(`- ${rel}：${resp}${apis}`);
+    parts.push(`- ${rel}：${resp}`);
   }
-  if (rels.length > shown.length) lines.push(`（材料截断，等共 ${rels.length} 个文件）`);
-  return lines.join('\n');
+  if (rels.length > shown.length) parts.push(`（职责清单截断，共 ${rels.length} 个文件）`);
+  if (callEdges.length > 0) {
+    parts.push('【调用记录】真实代码里的跨文件调用（按频次排序，是分镜顺序的证据）：');
+    parts.push(...callEdges.map((e) => `- ${e}`));
+  } else {
+    parts.push('【调用记录】无（该功能无跨文件调用数据，分镜顺序依据职责推断并在 detail 中说明）');
+  }
+  return parts.join('\n');
 }
 
 /**
@@ -353,9 +426,27 @@ async function buildTeachMindMap(
     return { feature, mode: 'rule', mind_map: mindMap, jsonFile, htmlFile: '', message: mindMap.note ?? '' };
   }
 
-  // LLM 科普编剧：各功能并行
+  // LLM 科普编剧：各功能并行（材料含真实调用链证据）
+  // db 打不开时 edges=[]，材料仍以职责清单为主（LLM 会标注顺序为推断）
+  let db: Database | null = null;
+  const dbFile = findCacheDb(feature, dsl);
+  if (dbFile) {
+    try {
+      db = openDb(dbFile);
+    } catch {
+      db = null;
+    }
+  }
+  const featureRels = ft.features.map((f) => [...new Set(f.communities.flatMap((c) => c.files))]);
+  const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
+  db?.close();
+
   const scripts = useLlm
-    ? await Promise.all(ft.features.map((f) => llmTeachFeature(buildTeachMaterial(title, f.name, f.communities, fileIndex))))
+    ? await Promise.all(
+        ft.features.map((f, i) =>
+          llmTeachFeature(buildTeachMaterial(title, f.name, f.communities, fileIndex, callEdgeLists[i])),
+        ),
+      )
     : ft.features.map(() => null as TeachScript | null);
   const anyLlm = scripts.some((s) => s !== null);
 
@@ -365,9 +456,9 @@ async function buildTeachMindMap(
     description: `项目总览：${ft.features.length} 个功能`,
     kind: 'root',
     children: ft.features.map((f, i) => {
-      const rels = [...new Set(f.communities.flatMap((c) => c.files))];
+      const rels = featureRels[i];
       const script = scripts[i];
-      const anchors = f.communities.slice(0, 6).map((c) => c.name).join('、');
+      const hasEdges = callEdgeLists[i].length > 0;
       return {
         id: `f${i}`,
         label: f.name,
@@ -375,8 +466,11 @@ async function buildTeachMindMap(
         description: script?.what ?? `由 ${f.communities.length} 个子模块协作完成的业务功能`,
         steps: script?.steps ?? [
           {
-            title: '协作总览',
-            detail: `主要由 ${anchors || '多个子模块'} 协作完成${rels.length ? `，涉及 ${rels.length} 个文件` : ''}。（AI 分镜生成中或不可用）`,
+            title: hasEdges ? 'AI 分镜暂不可用' : '材料不足，暂无法讲解',
+            detail: hasEdges
+              ? '本次 AI 讲解生成失败（可稍后重试），以下是该功能的静态概览。'
+              : '该功能缺少源码调用记录（早期导入的数据），无法生成原理讲解；重新导入项目后可获得完整分析。',
+            involves: rels.slice(0, 3),
           },
         ],
         meta: { files: rels.length },
