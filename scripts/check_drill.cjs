@@ -19,23 +19,35 @@ const pw = require('playwright');
     return r.user_nodes || [];
   });
 
-  // ① 下钻：功能节点应有关键文件子节点（📄 渲染 + 点击面板）——默认全展开，无需点 fold
-  const drill = await p.evaluate(() => {
-    const feats = [...document.querySelectorAll('#nodes g.mnode')].filter((n) => n.getAttribute('data-id').match(/^f\d+$/));
-    return feats.map((f) => f.getAttribute('data-id'));
+  // ① 真三层下钻：功能 → 🧩 子模块(社区) → 文件；分镜归 🎬 组——层级不混
+  const kinds = await p.evaluate(() => {
+    const ids = [...document.querySelectorAll('#nodes g.mnode')].map((n) => n.getAttribute('data-id') || '');
+    return {
+      feature: ids.filter((i) => /^f\d+$/.test(i)).length,
+      stepgroup: ids.filter((i) => /:sg$/.test(i)).length,
+      community: ids.filter((i) => /:c\d+$/.test(i)).length,
+      file: ids.filter((i) => i.startsWith('file_')).length,
+      step: ids.filter((i) => /^f\d+:\d+$/.test(i)).length,
+    };
   });
-  await p.waitForTimeout(400);
-  const files = await p.evaluate(() => {
-    const fs = [...document.querySelectorAll('#nodes g.mnode')].filter((n) => {
-      const id = n.getAttribute('data-id');
-      return id && id.startsWith('file_');
-    });
-    const first = fs[0];
-    if (first) first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    return { count: fs.length, detail: first ? document.getElementById('detail').textContent.replace(/\s+/g, ' ').slice(0, 140) : '' };
+  console.log('① 三层结构：', JSON.stringify(kinds));
+  const panels = await p.evaluate(() => {
+    const out = {};
+    const comm = [...document.querySelectorAll('#nodes g.mnode')].find((n) => /:c\d+$/.test(n.getAttribute('data-id') || ''));
+    if (comm) {
+      comm.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      out.community = document.getElementById('detail').textContent.replace(/\s+/g, ' ').slice(0, 130);
+    }
+    const sg = [...document.querySelectorAll('#nodes g.mnode')].find((n) => /:sg$/.test(n.getAttribute('data-id') || ''));
+    if (sg) {
+      sg.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      out.stepgroup = document.getElementById('detail').textContent.replace(/\s+/g, ' ').slice(0, 110);
+    }
+    return out;
   });
-  console.log('① 下钻：功能节点数=' + drill.length, '关键文件节点=' + files.count);
-  console.log('   首个文件面板:', files.detail);
+  console.log('   社区面板:', panels.community || '(未找到)');
+  console.log('   分镜组面板:', panels.stepgroup || '(未找到)');
+  const files = { count: kinds.file };
 
   // ② 加新功能全流程：根节点 → 工具栏 ＋ 新增分支 → 输入 → 保存 → AI 定位
   await p.evaluate(() => { window.getSelection && document.getElementById('root') ; });

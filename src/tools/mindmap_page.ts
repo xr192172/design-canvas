@@ -166,17 +166,27 @@ export function renderMindmapPage(feature: string): string {
     feats.forEach(function(f, i){
       var fn = { id: 'f' + i, label: f.label, kind: 'feature', children: [], raw: f };
       NODE_BY_ID[fn.id] = fn;
-      (f.steps || []).forEach(function(s, j){
-        var sn = { id: 'f' + i + ':' + j, label: s.title, kind: 'step', children: [], raw: s, owner: f };
-        NODE_BY_ID[sn.id] = sn;
-        fn.children.push(sn);
-      });
-      // 关键文件子层：功能内调用热度 top6——下钻一层直达实际功能单元（watch_project_tool 这种）
-      (f.children || []).forEach(function(c){
-        var cn = { id: c.id, label: c.label, kind: 'file', children: [], raw: c, _host: f };
-        NODE_BY_ID[cn.id] = cn;
-        fn.children.push(cn);
-      });
+      if(f.children && f.children.length){
+        // 真三层：功能 → [🎬 分镜组 | 🧩 子模块(社区)] → [步骤 | 文件]——结构层与讲解层分开
+        f.children.forEach(function(g){
+          var gn = { id: g.id, label: g.label, kind: g.kind, children: [], raw: g, owner: f };
+          NODE_BY_ID[gn.id] = gn;
+          (g.children || []).forEach(function(c){
+            var cn = { id: c.id, label: c.label, kind: c.kind, children: [], raw: c, owner: f,
+              _host: f, _comm: g.kind === 'community' ? g.label : null };
+            NODE_BY_ID[c.id] = cn;
+            gn.children.push(cn);
+          });
+          fn.children.push(gn);
+        });
+      } else {
+        // 旧 JSON 兜底：分镜平铺在功能下
+        (f.steps || []).forEach(function(s, j){
+          var sn = { id: 'f' + i + ':' + j, label: s.title, kind: 'step', children: [], raw: s, owner: f };
+          NODE_BY_ID[sn.id] = sn;
+          fn.children.push(sn);
+        });
+      }
       root.children.push(fn);
     });
     // 共享能力分支：被多个功能真实调用的"隐形地板"（聚类把它们吸进大功能里不可见，
@@ -438,6 +448,14 @@ export function renderMindmapPage(feature: string): string {
       }
     } else if(n.kind === 'step'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(16,42,70,.92)" stroke="#3d7ab5" stroke-width="1.4"/>';
+    } else if(n.kind === 'stepgroup'){
+      // 分镜组：把"怎么实现的"归成一组，与结构层（子模块/文件）分开
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(30,52,86,.95)" stroke="#8fb7e0" stroke-width="1.5"/>'
+        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a8c8ec">🎬 分镜</text>';
+    } else if(n.kind === 'community'){
+      // 子模块（聚类社区）：功能的真实构成单元，文件挂在它下面
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(20,47,66,.95)" stroke="#5fb3d4" stroke-width="1.5"/>'
+        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#8ed4ec">🧩 子模块</text>';
     } else if(n.kind === 'shared'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(13,60,68,.9)" stroke="#2dd4bf" stroke-width="1.6"/>'
         + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#5eead4">🔧 共享</text>';
@@ -580,12 +598,25 @@ export function renderMindmapPage(feature: string): string {
       }
       det.innerHTML = '<b>'+esc(n.label)+'</b><span class="tag">'+(isF ? '底座功能' : '功能')+'</span><p>'+esc(n.raw.description||'')+'</p>'+depHtml+myNoteHtml;
     } else if(n.kind === 'step'){
-      det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.detail||'')+'</p>'
-        + (n.raw.involves && n.raw.involves.length ? '<p class="files">'+n.raw.involves.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
+      var stInv = (n.raw.meta && n.raw.meta.involves) || n.raw.involves || [];
+      det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.description || n.raw.detail || '')+'</p>'
+        + (stInv.length ? '<p class="files">'+stInv.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
+    } else if(n.kind === 'stepgroup'){
+      det.innerHTML = '<b>'+esc(n.owner.label)+' › 🎬 '+esc(n.label)+'</b><span class="tag">分镜组</span>'
+        + '<p>'+esc(n.raw.description||'')+'</p>'
+        + (n.children.length ? '<p class="files">'+n.children.length+' 步：'+n.children.map(function(c){ return esc(c.label); }).join(' → ')+'</p>' : '')
+        + '<p style="font-size:11px;color:#7a93b8;">讲"怎么实现"的分镜归在这组；功能"由什么构成"看旁边的 🧩 子模块分支。</p>'
+        + myNoteHtml;
+    } else if(n.kind === 'community'){
+      det.innerHTML = '<b style="color:#8ed4ec;">🧩 '+esc(n.label)+'</b><span class="tag">子模块</span>'
+        + '<p>'+esc(n.raw.description||'')+'</p>'
+        + (n.children.length ? '<p class="files">关键文件：'+n.children.map(function(c){ return esc(c.label); }).join(' · ')+'</p>' : '')
+        + '<p style="font-size:11px;color:#7a93b8;">聚类真实产物：这些文件在调用关系上抱团，构成功能的这个部分。</p>'
+        + myNoteHtml;
     } else if(n.kind === 'file'){
       det.innerHTML = '<b style="color:#8ec8ef;">📄 ' + esc(n.label) + '</b><span class="tag">关键文件</span>'
         + '<p>' + esc(n.raw.description || '（暂无职责描述）') + '</p>'
-        + (n._host ? '<p class="files">属于功能：' + esc(n._host.label) + '</p>' : '')
+        + (n._host ? '<p class="files">属于功能：' + esc(n._host.label) + (n._comm ? ' · 子模块：' + esc(n._comm) : '') + '</p>' : '')
         + (n.raw.meta && n.raw.meta.lines ? '<p class="files">' + n.raw.meta.lines + ' 行</p>' : '')
         + '<p style="font-size:11px;color:#7a93b8;">功能内调用热度最高的实际功能单元——功能的原理分镜最终落到这些文件上执行。</p>'
         + myNoteHtml;

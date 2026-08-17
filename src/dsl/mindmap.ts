@@ -12,7 +12,7 @@
  */
 
 /** 思维导图节点类型 */
-export type MindMapKind = 'root' | 'feature' | 'community' | 'file' | 'note';
+export type MindMapKind = 'root' | 'feature' | 'community' | 'file' | 'note' | 'stepgroup' | 'step' | 'shared' | 'proposal';
 
 /** 科普分镜步骤（teach 模式 feature 节点专用，像科普视频的镜头脚本） */
 export interface TeachStep {
@@ -44,6 +44,8 @@ export interface MindMapNode {
     symbols?: number;
     /** 指向 L2 设计图层节点的显式引用（无法用 id 对齐时） */
     l2_ref?: string;
+    /** 该步涉及的关键文件（step 节点挂载，供面板展示技术锚点） */
+    involves?: string[];
   };
   /** 实现原理分镜（teach 模式功能节点：像科普视频一步步讲"这是怎么实现的"） */
   steps?: TeachStep[];

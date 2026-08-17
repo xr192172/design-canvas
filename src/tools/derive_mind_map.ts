@@ -746,36 +746,73 @@ async function buildTeachMindMap(
       const rels = featureRels[i];
       const script = scripts[i];
       const hasEdges = callEdgeLists[i].length > 0;
-      // 关键文件子层：按功能内跨文件调用热度 top6（下钻一层直达 watch_project_tool 这种
-      // 实际功能单元；全量平铺是星图的杂乱，这里只放最热的几块地板）
+      // 真三层下钻：功能 → 子模块（社区=聚类真实产物，按内部热度 top3）→ 关键文件（每社区热度 top4）。
+      // 分镜单独成组（🎬 stepgroup），不再与文件混在功能下一级——结构层与讲解层分开。
       const heat = fileHeat[i] ?? new Map<string, number>();
-      const keyFiles = [...new Set(rels)]
-        .map((p) => ({ p, w: heat.get(p) ?? 0, info: lookupFile(fileIndex, p) }))
-        .filter((x) => x.info && x.w > 0)
-        .sort((a, b) => b.w - a.w)
-        .slice(0, 6)
-        .map(({ p, info }) => ({
-          id: info!.id,
+      const usedFileIds = new Set<string>();
+      const fileNode = (p: string): MindMapNode | null => {
+        const info = lookupFile(fileIndex, p);
+        if (!info || usedFileIds.has(info.id)) return null;
+        usedFileIds.add(info.id);
+        return {
+          id: info.id,
           label: basename(p),
-          description: info!.responsibility || '',
-          kind: 'file' as const,
-          meta: { lines: info!.lines, l2_ref: info!.id },
-        }));
+          description: info.responsibility || '',
+          kind: 'file',
+          meta: { lines: info.lines, l2_ref: info.id },
+        };
+      };
+      const heatOf = (p: string) => heat.get(p) ?? 0;
+      const communityChildren: MindMapNode[] = f.communities
+        .map((c) => ({ c, h: c.files.reduce((s, p) => s + heatOf(p), 0) }))
+        .sort((a, b) => b.h - a.h)
+        .slice(0, 3)
+        .map(({ c }, k) => {
+          const kids = c.files
+            .map((p) => ({ p, w: heatOf(p) }))
+            .sort((a, b) => b.w - a.w)
+            .slice(0, 4)
+            .map(({ p }) => fileNode(p))
+            .filter((n): n is MindMapNode => !!n);
+          return {
+            id: `f${i}:c${k}`,
+            label: c.name,
+            description: `${c.files.length} 个文件${c.est_lines ? `，约 ${c.est_lines} 行` : ''}的子模块`,
+            kind: 'community' as const,
+            children: kids,
+            meta: { files: c.files.length, lines: c.est_lines, symbols: c.symbol_count },
+          };
+        })
+        .filter((c) => c.children.length > 0);
+      const steps: TeachStep[] = script?.steps ?? [
+        {
+          title: hasEdges ? 'AI 分镜暂不可用' : '材料不足，暂无法讲解',
+          detail: hasEdges
+            ? '本次 AI 讲解生成失败（可稍后重试），以下是该功能的静态概览。'
+            : '该功能缺少源码调用记录（早期导入的数据），无法生成原理讲解；重新导入项目后可获得完整分析。',
+          involves: rels.slice(0, 3),
+        },
+      ];
+      const stepGroup: MindMapNode = {
+        id: `f${i}:sg`,
+        label: '实现分镜',
+        description: `${steps.length} 步讲清这个功能怎么跑起来`,
+        kind: 'stepgroup',
+        children: steps.map((s, j) => ({
+          id: `f${i}:${j}`,
+          label: s.title,
+          description: s.detail,
+          kind: 'step' as const,
+          meta: { involves: s.involves },
+        })),
+      };
       return {
         id: `f${i}`,
         label: f.name,
         kind: 'feature' as const,
         description: script?.what ?? `由 ${f.communities.length} 个子模块协作完成的业务功能`,
-        steps: script?.steps ?? [
-          {
-            title: hasEdges ? 'AI 分镜暂不可用' : '材料不足，暂无法讲解',
-            detail: hasEdges
-              ? '本次 AI 讲解生成失败（可稍后重试），以下是该功能的静态概览。'
-              : '该功能缺少源码调用记录（早期导入的数据），无法生成原理讲解；重新导入项目后可获得完整分析。',
-            involves: rels.slice(0, 3),
-          },
-        ],
-        children: keyFiles,
+        steps,
+        children: [stepGroup, ...communityChildren],
         meta: { files: rels.length },
       };
     }),
