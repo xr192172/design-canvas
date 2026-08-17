@@ -154,7 +154,7 @@ function ruleFileDesc(f: FileInfo): string {
  * 返回 { 节点id → 描述 }（合并各批成功部分）；全部失败返回 null（调用方降级规则）。
  */
 async function llmEnrichDescriptions(
-  nodes: Array<{ id: string; label: string; kind: string; hint: string }>,
+  nodes: Array<{ id: string; label: string; kind: string; hint: string; owner?: string }>,
   projectTitle: string,
 ): Promise<Map<string, string> | null> {
   const cfg = loadAgentConfig();
@@ -164,13 +164,17 @@ async function llmEnrichDescriptions(
   for (let i = 0; i < nodes.length; i += BATCH) chunks.push(nodes.slice(i, i + BATCH));
   const system =
     '你是软件项目的"人话翻译官"。用户要把一个项目的结构做成给普通人看的思维导图。' +
-    '给定项目里的功能/子模块清单，请为每个条目写一句**通俗易懂的介绍**（2-3 句以内），' +
-    '讲清"这是什么、大概干嘛用"，避免只重复技术名词。基于给定事实，不要编造。' +
-    '只输出 JSON：{"descriptions":{"<id>":"<人话描述>", ...}}，id 必须来自给定清单。';
+    '给定项目里的功能/子模块/文件清单，请为每个条目写一句**通俗易懂且有针对性**的介绍（2-3 句以内），' +
+    '讲清"这是什么、大概干嘛用、在所属功能里承担什么角色"，避免只重复技术名词，' +
+    '也避免给不同条目写雷同的套话——每个条目的介绍必须体现它自己的特点。' +
+    '铁律：条目信息中给出的功能名/路径/职责是唯一事实来源，介绍里提到功能名时必须原样引用给定名称，' +
+    '严禁发明清单里没有的功能名或项目背景；信息不足就只描述文件本身，不要推测。' +
+    '只输出 JSON：{"descriptions":{"<id>":"<人话描述>", ...}}，id 必须来自给定清单，且必须覆盖清单中的每一个 id。';
+  const kindLabel = (k: string): string => (k === 'feature' ? '功能' : k === 'file' ? '文件' : '子模块');
   const results = await Promise.all(
     chunks.map(async (chunk) => {
       const list = chunk
-        .map((n) => `- id=${n.id} · ${n.kind === 'feature' ? '功能' : '子模块'}「${n.label}」· ${n.hint}`)
+        .map((n) => `- id=${n.id} · ${kindLabel(n.kind)}「${n.label}」（所属功能名只能用：${n.owner ?? '未提供'}）· ${n.hint}`)
         .join('\n');
       try {
         const res = await fetch(`${cfg.baseURL}/chat/completions`, {
@@ -706,6 +710,8 @@ async function buildTeachMindMap(
   const prevScripts = new Map<string, TeachScript>();
   // 社区名中文缓存（community_zh）：社区名是聚类算法从代码标识生成的英文，译成人话
   let communityZh: Record<string, string> = {};
+  // 节点专属描述缓存（desc_cache）：社区/文件层的人话介绍，key 为稳定锚点，避免"X 个文件"通用模板
+  let descCache: Record<string, string> = {};
   try {
     if (fs.existsSync(jsonFile)) {
       const old = JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap;
@@ -713,6 +719,7 @@ async function buildTeachMindMap(
         if (c.steps?.length && c.description) prevScripts.set(c.label, { what: c.description, steps: c.steps });
       }
       if (old.community_zh && typeof old.community_zh === 'object') communityZh = old.community_zh;
+      if (old.desc_cache && typeof old.desc_cache === 'object') descCache = old.desc_cache;
     }
   } catch {
     /* 旧文件损坏则忽略 */
@@ -781,6 +788,8 @@ async function buildTeachMindMap(
     ...ft.features.map((_, i) => i).filter((i) => !isFoundation(i)),
   ];
 
+  // 社区/文件专属描述生成目标：构建树时收集（带稳定 key + 材料 hint），树成型后统一补描述
+  const descTargets: Array<{ node: MindMapNode; key: string; kind: 'community' | 'file'; hint: string; owner: string }> = [];
   const root: MindMapNode = {
     id: 'root',
     label: title,
@@ -795,17 +804,26 @@ async function buildTeachMindMap(
       // 分镜单独成组（🎬 stepgroup），不再与文件混在功能下一级——结构层与讲解层分开。
       const heat = fileHeat[i] ?? new Map<string, number>();
       const usedFileIds = new Set<string>();
+      // 收集描述生成目标（key 稳定：文件用路径、社区用聚类原名，跨重建命中缓存）
       const fileNode = (p: string): MindMapNode | null => {
         const info = lookupFile(fileIndex, p);
         if (!info || usedFileIds.has(info.id)) return null;
         usedFileIds.add(info.id);
-        return {
+        const node: MindMapNode = {
           id: info.id,
           label: basename(p),
           description: info.responsibility || '',
           kind: 'file',
           meta: { lines: info.lines, l2_ref: info.id },
         };
+        descTargets.push({
+          node,
+          key: `f:${p}`,
+          kind: 'file',
+          owner: f.name,
+          hint: `路径 ${p} · 被调用 ${heatOf(p)} 次${info.responsibility ? ` · 现有职责描述：${info.responsibility.slice(0, 60)}` : ''}`,
+        });
+        return node;
       };
       const heatOf = (p: string) => heat.get(p) ?? 0;
       const communityChildren: MindMapNode[] = f.communities
@@ -820,7 +838,7 @@ async function buildTeachMindMap(
             .map(({ p }) => fileNode(p))
             .filter((n): n is MindMapNode => !!n);
           const zhName = communityZh[c.name];
-          return {
+          const cNode: MindMapNode & { kind: 'community' } = {
             id: `f${i}:c${k}`,
             label: zhName ?? c.name,
             description: `${c.files.length} 个文件${c.est_lines ? `，约 ${c.est_lines} 行` : ''}的子模块${zhName ? `（原名 ${c.name}）` : ''}`,
@@ -828,8 +846,24 @@ async function buildTeachMindMap(
             children: kids,
             meta: { files: c.files.length, lines: c.est_lines, symbols: c.symbol_count },
           };
+          // 社区描述材料：成员文件及其职责（讲清"这组文件合力做什么"，而非通用模板）
+          const memberHint = c.files
+            .slice(0, 5)
+            .map((p) => {
+              const r = lookupFile(fileIndex, p)?.responsibility ?? '';
+              return `${basename(p)}${r ? `（${r.slice(0, 30)}）` : ''}`;
+            })
+            .join('、');
+          descTargets.push({
+            node: cNode,
+            key: `c:${c.name}`,
+            kind: 'community',
+            owner: f.name,
+            hint: `共 ${c.files.length} 个文件，成员：${memberHint}`,
+          });
+          return cNode;
         })
-        .filter((c) => c.children.length > 0);
+        .filter((c) => (c.children?.length ?? 0) > 0);
       const steps: TeachStep[] = script?.steps ?? [
         {
           title: hasEdges ? 'AI 分镜暂不可用' : '材料不足，暂无法讲解',
@@ -864,6 +898,25 @@ async function buildTeachMindMap(
     }),
   };
 
+  // 社区/文件专属描述：缓存未命中的批量 LLM 生成，命中的直接复用——
+  // 通用模板（"X 个文件约 Y 行"/导入期批量职责）只作兜底，LLM 描述按各自材料定制
+  const needDesc = descTargets.filter((t) => !descCache[t.key]);
+  if (needDesc.length > 0) {
+    const got = await llmEnrichDescriptions(
+      needDesc.map((t) => ({ id: t.key, label: t.node.label, kind: t.kind, hint: t.hint, owner: t.owner })),
+      title,
+    );
+    if (got) for (const [k, v] of got) descCache[k] = v;
+  }
+  let descHit = 0;
+  for (const t of descTargets) {
+    const d = descCache[t.key];
+    if (d) {
+      t.node.description = d;
+      descHit++;
+    }
+  }
+
   // 旧 teach JSON 里 placeProposals 写入的构想分支：重建分镜不能抹掉主人的构想
   let prevProposals: MindMap['proposals'];
   try {
@@ -883,10 +936,11 @@ async function buildTeachMindMap(
     foundations: foundations.length > 0 ? foundations : undefined,
     shared: shared.length > 0 ? shared : undefined,
     community_zh: Object.keys(communityZh).length > 0 ? communityZh : undefined,
+    desc_cache: Object.keys(descCache).length > 0 ? descCache : undefined,
     proposals: prevProposals,
     generated_at: new Date().toISOString(),
     note: anyLlm
-      ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜`
+      ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜；子模块/文件专属描述 ${descHit}/${descTargets.length} 条`
       : 'LLM 分镜不可用（未配置或调用失败），已降级规则描述',
   };
   fs.mkdirSync(path.dirname(jsonFile), { recursive: true });

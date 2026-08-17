@@ -119,6 +119,11 @@ export interface MindMap {
   /** 社区名中文缓存：英文原名 → LLM 译中文名（重建复用，避免重复调用） */
   community_zh?: Record<string, string>;
 
+  /** 节点专属描述缓存（teach 视图社区/文件层）：
+   * key 为稳定锚点（"c:<社区原名>" / "f:<文件路径>"）→ LLM 生成的人话描述。
+   * 重建时命中直接复用，不再重复调用；避免"X 个文件约 Y 行"这类通用模板解释 */
+  desc_cache?: Record<string, string>;
+
   /** 用户的新功能构想（根级 user_nodes 经 LLM 定位融入）：🔮 虚线分支，与已实现功能区分 */
   proposals?: ProposalFeature[];
   /** 生成时间 */
