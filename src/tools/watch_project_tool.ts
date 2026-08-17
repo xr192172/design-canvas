@@ -20,6 +20,10 @@ import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
 import { diffImpact } from './diff_impact.js';
 import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
+import {
+  appendDeclaration, markConsumed, recoverPending, resolveViolation, listLedger, countOpenViolations,
+  type LedgerEntry,
+} from './impact_ledger_store.js';
 import { pushAlert } from './alert_inbox.js';
 import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../camera/probe.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
@@ -123,6 +127,8 @@ export function createRebuildThrottler(opts: RebuildThrottleOptions): RebuildThr
 
 /** 改前预告声明（Impact Ledger）：LLM 动手前登记"我打算改这些文件"，被匹配的影响报告消费 */
 interface ImpactDeclaration {
+  /** 对应 ledger.json 落盘条目 id（证据链锚点：resolve/审计都指向它） */
+  entry_id: string;
   /** 登记的打算修改文件（相对项目根 posix） */
   declared_files: string[];
   /** 预期波及面（declared + diffImpact both 两跳的全部文件，相对项目根 posix） */
@@ -178,8 +184,8 @@ function keyOf(projectDir: string): string {
 export interface WatchProjectToolInput {
   /** 被监听项目根目录（绝对路径或相对 cwd） */
   project_dir: string;
-  /** start（默认）| status | stop | impact（读影响报告全文）| declare（改前预告登记） */
-  action?: 'start' | 'status' | 'stop' | 'impact' | 'declare';
+  /** start（默认）| status | stop | impact（读影响报告全文）| declare（改前预告登记）| ledger（预告台账查询/违规处理） */
+  action?: 'start' | 'status' | 'stop' | 'impact' | 'declare' | 'ledger';
   /** 提供时，变更后按该 feature 重建实际 DSL 到 live/（不覆盖设计 DSL） */
   feature?: string;
   /** 事件合并窗口（ms），默认 150 */
@@ -207,6 +213,14 @@ export interface WatchProjectToolInput {
   seq?: number;
   /** action=declare 时必填：打算修改的文件（相对项目根或绝对路径）。登记后下一次影响报告自动对比，计划外波及报警 */
   files?: string[];
+  /** action=ledger 时筛选条目状态：缺省=待办视角（pending+violated）；all=全部 */
+  ledger_status?: 'pending' | 'ok' | 'violated' | 'resolved' | 'expired' | 'all';
+  /** action=ledger 时处理违规：要 resolve 的 ledger 条目 id（与 reason 搭配） */
+  resolve_id?: string;
+  /** action=ledger resolve 时的过门说明（必填）：计划外扩散的原因与处理方式 */
+  reason?: string;
+  /** action=ledger resolve 时的处理人标识，默认 llm */
+  reviewer?: string;
 }
 
 export interface WatchProjectToolResult {
@@ -235,6 +249,12 @@ export interface WatchProjectToolResult {
   last_impact_seq?: number;
   /** 未消费的改前预告条数（Impact Ledger 队列深度；>1 表示多条并行任务预告并存） */
   pending_declarations?: number;
+  /** 未处理违规数（violated 未 resolve；verification gate 债务，status 持续播报） */
+  unresolved_violations?: number;
+  /** declare 返回的 ledger 条目 id（resolve/审计的证据链锚点） */
+  ledger_entry_id?: string;
+  /** action=ledger 返回的条目清单（新→旧） */
+  ledger_entries?: LedgerEntry[];
   message: string;
   error?: string;
 }
@@ -341,7 +361,21 @@ async function doWork(entry: ActiveWatch): Promise<void> {
         };
         const actual = new Set<string>([...changedSet, ...s.impacted_file_paths]);
         const unexpected = [...actual].filter((f) => !decl.expected_files.has(f));
-        const spreadLine = `[计划外扩散#${s.seq}] 预告 ${decl.expected_files.size} 文件，实际波及 ${actual.size}，未预告 ${unexpected.length}${unexpected.length > 0 ? '：' + unexpected.join(', ') : ''}`;
+        // 逐条定损落盘（每条预告面对比实际波及，各自 ok/violated + 证据 seq）
+        markConsumed(
+          entry.project_dir,
+          consumed.map((d) => {
+            const unexpectedForEntry = [...actual].filter((f) => !d.expected_files.has(f));
+            return {
+              id: d.entry_id,
+              status: unexpectedForEntry.length > 0 ? ('violated' as const) : ('ok' as const),
+              unexpected: unexpectedForEntry,
+              actual: [...actual].sort(),
+              seq: s.seq,
+            };
+          }),
+        );
+        const spreadLine = `[计划外扩散#${s.seq}] 预告 ${decl.expected_files.size} 文件，实际波及 ${actual.size}，未预告 ${unexpected.length}${unexpected.length > 0 ? '：' + unexpected.join(', ') : ''}${unexpected.length > 0 ? ' · 待处理(watch action=ledger)' : ''}`;
         entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: spreadLine });
         if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
         captureProbe(
@@ -356,6 +390,7 @@ async function doWork(entry: ActiveWatch): Promise<void> {
             expected_count: decl.expected_files.size,
             actual_count: actual.size,
             unexpected_files: unexpected,
+            ledger_entry_ids: consumed.map((d) => d.entry_id),
             summary: spreadLine,
           },
           'runtime-invariant',
@@ -461,14 +496,31 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
 
   entry.handle = handle;
   active.set(key, entry);
+
+  // 跨会话恢复（Ledger 持久化的另一半）：磁盘上 TTL 内的 pending 预告回填内存，
+  // 重启前 declare 的任务在新会话里仍受"改后对比"保护
+  let recovered = 0;
+  if (impactOnChange) {
+    const rec = recoverPending(entry.project_dir, new Set());
+    for (const le of rec.entries) {
+      entry.declarations.push({
+        entry_id: le.id, declared_files: le.declared_files,
+        expected_files: new Set(le.expected_files), created_at: le.created_at,
+      });
+    }
+    recovered = rec.entries.length;
+  }
+
   return {
     action: 'start', project_dir: entry.project_dir, watching: true, running: true,
     feature, rebuild, diff_on_change: diffOnChange, impact_on_change: impactOnChange,
+    pending_declarations: entry.declarations.length,
     started_at: entry.started_at,
     message: `已开始监听 ${path.resolve(input.project_dir)}`
       + (rebuild && feature ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）')
       + (diffOnChange ? '，变更后自动 diff 对比' : '')
-      + (impactOnChange ? '，变更后自动影响报告（status 取摘要，action=impact 取全文）' : ''),
+      + (impactOnChange ? '，变更后自动影响报告（status 取摘要，action=impact 取全文）' : '')
+      + (recovered > 0 ? `；已恢复 ${recovered} 条跨会话改前预告` : ''),
   };
 }
 
@@ -505,11 +557,15 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     entry.declarations.length > 0
       ? `；${entry.declarations.length} 条改前预告待验证（声明文件: ${entry.declarations.map((d) => d.declared_files.join('+')).join(' | ')}）`
       : '';
+  // 违规债务（verification gate）：未 resolve 的 violated entry 持续播报直到过门
+  const openViolations = countOpenViolations(entry.project_dir);
+  const violationNote = openViolations > 0 ? `；⚠ ${openViolations} 条计划外扩散待处理（watch action=ledger）` : '';
   return {
     action: 'status', project_dir: entry.project_dir, watching: st.watching, running: st.watching,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
     impact_on_change: entry.impact_on_change,
     pending_declarations: entry.declarations.length,
+    unresolved_violations: openViolations,
     started_at: entry.started_at, last_change_at: entry.last_change_at,
     last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
@@ -517,8 +573,8 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     alerts: alerts.length > 0 ? alerts : undefined,
     last_impact_seq: entry.last_impact_seq,
     message: diffAlert
-      ? `监听运行中，${diffAlert}` + alertNote + declNote + (entry.error ? '；最近报错: ' + entry.error : '')
-      : '监听运行中' + alertNote + declNote + (entry.error ? '，但最近一次工作报错: ' + entry.error : ''),
+      ? `监听运行中，${diffAlert}` + alertNote + declNote + violationNote + (entry.error ? '；最近报错: ' + entry.error : '')
+      : '监听运行中' + alertNote + declNote + violationNote + (entry.error ? '，但最近一次工作报错: ' + entry.error : ''),
     error: entry.error,
   };
 }
@@ -594,14 +650,15 @@ function impactWatch(input: WatchProjectToolInput): WatchProjectToolResult {
 
 /**
  * action=declare（Impact Ledger 改前预告）：登记"我打算改这些文件"，立刻返回预期
- * 波及面（改前预告）。声明入队列并行并存（不覆盖既有预告）；声明的文件出现在
- * 变更里 → 该条被消费对比：实际波及 ⊆ 预告 → 安静；出现未预告文件 → impact.spread
- * 事件 + 计划外扩散报警。变更未命中任何预告时消费最旧一条（"改了没预告的文件"
- * 也触发对比）。
+ * 波及面（改前预告）。声明双写：内存队列（消费匹配）+ ledger.json（持久化审计），
+ * 多条并行并存（不覆盖既有预告）；声明的文件出现在变更里 → 该条被消费定损：
+ * 实际波及 ⊆ 预告 → ok；计划外扩散 → violated（证据 matched_seq → rp 全文）+
+ * impact.spread 事件报警。变更未命中任何预告时消费最旧一条（"改了没预告的文件"
+ * 也触发对比）。violated 需 action=ledger resolve 过门（reviewer + reason 留痕）。
  *
  * 语义保障：声明前置条件是"改完有人对比"——未监听自动 start（impact_on_change
- * 强制开），已监听但影响报告关着则顺手打开。声明存在内存（消费或进程重启即弃），
- * 预告本来就是短期意图，跨会话残留反而失真。
+ * 强制开），已监听但影响报告关着则顺手打开。跨会话：TTL（24h）内的 pending 声明
+ * 在新会话 start/declare 时自动恢复回填内存；超时 expired（陈旧预告不产噪音）。
  */
 async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectToolResult> {
   const files = (input.files ?? []).map((f) => f.trim()).filter(Boolean);
@@ -639,7 +696,21 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
     previewLine = `波及面计算失败（${(e as Error).message}）——仅登记声明文件本身为预告面。`;
   }
 
-  entry.declarations.push({ declared_files: declared, expected_files: expected, created_at: new Date().toISOString() });
+  // 恢复磁盘上未消费的孤儿预告（本进程重启/其他会话 declare 的），排除内存已有防重复
+  const have = new Set(entry.declarations.map((d) => d.entry_id));
+  const rec = recoverPending(entry.project_dir, have);
+  for (const le of rec.entries) {
+    entry.declarations.push({
+      entry_id: le.id, declared_files: le.declared_files,
+      expected_files: new Set(le.expected_files), created_at: le.created_at,
+    });
+  }
+
+  // 双写：内存队列（消费匹配用）+ ledger.json（持久化/审计/跨会话恢复）
+  const ledgerEntry = appendDeclaration(entry.project_dir, declared, [...expected]);
+  entry.declarations.push({
+    entry_id: ledgerEntry.id, declared_files: declared, expected_files: expected, created_at: ledgerEntry.created_at,
+  });
   ensureCameraSink(entry.project_dir);
   captureProbe(
     'impact.declare',
@@ -651,6 +722,7 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
       declared_files: declared,
       expected_count: expected.size,
       pending_count: entry.declarations.length,
+      ledger_entry_id: ledgerEntry.id,
       summary: `预告改 ${declared.length} 文件，预期波及 ${expected.size} 文件（队列 ${entry.declarations.length} 条）`,
     },
     'runtime-invariant',
@@ -660,13 +732,75 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
     entry.declarations.length > 1
       ? `当前共 ${entry.declarations.length} 条未验证预告并存（各自等自己声明的文件变更后对比）。`
       : '';
+  const recoveredNote = rec.entries.length > 0 ? `已恢复 ${rec.entries.length} 条此前会话的未验证预告。` : '';
   return {
     action: 'declare', project_dir: entry.project_dir, watching: true, running: true,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
     impact_on_change: true,
     pending_declarations: entry.declarations.length,
+    ledger_entry_id: ledgerEntry.id,
     started_at: entry.started_at,
-    message: `已登记改前预告（声明的文件变更后自动对比，计划外波及将报警）。${previewLine}${queueNote}`,
+    message: `已登记改前预告（${ledgerEntry.id}，声明的文件变更后自动对比，计划外波及将报警）。${previewLine}${recoveredNote}${queueNote}`,
+  };
+}
+
+/**
+ * action=ledger（Impact Ledger 台账）：查询预告生命周期条目 + 违规过门。
+ *   - 缺省列出待办视角（pending + violated）；ledger_status 可筛选或 all
+ *   - resolve_id + reason：violated → resolved（verification gate 过门，reviewer 留痕）
+ * 纯磁盘查询，watch 停止后仍可查（post-mortem 审计）。
+ */
+function ledgerWatch(input: WatchProjectToolInput): WatchProjectToolResult {
+  const root = path.resolve(input.project_dir);
+  const entry = active.get(keyOf(input.project_dir));
+  const base = {
+    action: 'ledger', project_dir: root, watching: entry?.handle ? true : false, running: false,
+    rebuild: entry?.rebuild ?? false, diff_on_change: entry?.diff_on_change ?? false,
+    impact_on_change: entry?.impact_on_change ?? false,
+  };
+
+  // resolve 分支：violated → resolved（reason 必填，store 内校验）
+  if (input.resolve_id) {
+    try {
+      const resolved = resolveViolation(root, input.resolve_id, input.reviewer ?? 'llm', input.reason ?? '');
+      return {
+        ...base,
+        ledger_entries: [resolved],
+        unresolved_violations: countOpenViolations(root),
+        message: `已处理违规 ${resolved.id}：${resolved.declared_files.join(', ')} 的改动曾计划外扩散 ${resolved.unexpected_files?.length ?? 0} 文件` +
+          `（证据 rp-#${resolved.matched_seq}）。处理人 ${resolved.resolution?.reviewer}，剩余待处理 ${countOpenViolations(root)} 条。`,
+      };
+    } catch (e) {
+      return { ...base, message: (e as Error).message, error: (e as Error).message };
+    }
+  }
+
+  const entries = listLedger(root, input.ledger_status);
+  const openViolations = countOpenViolations(root);
+  const icon: Record<string, string> = { pending: '⏳', ok: '✅', violated: '⚠', resolved: '🔒', expired: '⌛' };
+  const lines: string[] = [];
+  lines.push(`Impact Ledger（待验证 ${entries.filter((e) => e.status === 'pending').length} · 违规未处理 ${openViolations} · 本清单 ${entries.length} 条）`);
+  if (entries.length === 0) {
+    lines.push('  （空——action=declare 登记改前预告后出现）');
+  }
+  for (const e of entries) {
+    const head = `  ${icon[e.status] ?? '·'} [${e.status}] ${e.id} 声明 ${e.declared_files.join('+')}`;
+    if (e.status === 'violated') {
+      lines.push(`${head} → 计划外扩散：${e.unexpected_files?.join(', ')} · 证据 watch action=impact seq=${e.matched_seq} · resolve 需 reason`);
+    } else if (e.status === 'resolved') {
+      lines.push(`${head} · 已过门：${e.resolution?.reviewer}「${e.resolution?.reason}」`);
+    } else if (e.status === 'pending') {
+      lines.push(`${head} · 预告面 ${e.expected_files.length} 文件`);
+    } else {
+      lines.push(`${head} · 消费于 rp-#${e.matched_seq}`);
+    }
+  }
+  return {
+    ...base,
+    ledger_entries: entries,
+    unresolved_violations: openViolations,
+    pending_declarations: entry?.declarations.length,
+    message: lines.join('\n'),
   };
 }
 
@@ -675,6 +809,7 @@ export async function watchProjectTool(input: WatchProjectToolInput): Promise<Wa
   if (action === 'status') return statusWatch(input.project_dir);
   if (action === 'stop') return stopWatch(input.project_dir);
   if (action === 'impact') return impactWatch(input);
+  if (action === 'ledger') return ledgerWatch(input);
   if (action === 'declare') return declareWatch(input);
   return startWatch(input);
 }

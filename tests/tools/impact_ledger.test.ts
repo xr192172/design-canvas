@@ -18,6 +18,7 @@ import { openDb } from '../../src/db/db';
 import { setGlobalProbeSink, loadTSEvents } from '../../src/camera/probe';
 import { judgeEvent } from '../../src/camera/judge';
 import { clearAlertInbox, peekAlerts } from '../../src/tools/alert_inbox';
+import { loadLedger } from '../../src/tools/impact_ledger_store';
 
 const roots: string[] = [];
 
@@ -209,6 +210,129 @@ describe('Impact Ledger · 改前预告-改后验证闭环', () => {
       const v = judgeEvent(spreadFallback);
       expect(v.result).toBe('deviation');
       expect(v.rule).toBe('design:impact-unplanned-spread');
+
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+    },
+    30000,
+  );
+});
+
+describe('Impact Ledger · 持久化 + verification gate', () => {
+  it(
+    'declare 双写 ledger.json；预告面内变更 → ok 定损落盘（matched_seq 证据链）',
+    async () => {
+      const root = await makeProject();
+      const dec = await watchProjectTool({ project_dir: root, action: 'declare', files: ['src/b.ts'] });
+      expect(dec.ledger_entry_id).toMatch(/^decl-/);
+      let entries = loadLedger(root);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ id: dec.ledger_entry_id, status: 'pending', declared_files: ['src/b.ts'] });
+      expect(entries[0].expected_files.length).toBeGreaterThan(0);
+
+      // 改 b（预告面 {a,b,c,d} 内）→ 磁盘定损 ok + 证据 seq
+      put(root, 'src/b.ts', `export function b(x: number): number { return x * 9; }\n`);
+      await waitAlert(root, (l) => l.includes('[计划外扩散#'));
+      entries = loadLedger(root);
+      expect(entries[0]).toMatchObject({ id: dec.ledger_entry_id, status: 'ok' });
+      expect(entries[0].matched_seq).toBeGreaterThan(0);
+      expect(entries[0].unexpected_files).toBeUndefined();
+
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+    },
+    30000,
+  );
+
+  it(
+    'violated 定损落盘 → status 债务播报 → ledger 过门（缺 reason 拒绝，重复 resolve 拒绝）',
+    async () => {
+      const root = await makeProject();
+      const dec = await watchProjectTool({ project_dir: root, action: 'declare', files: ['src/d.ts'] });
+      // 改 c（未声明）→ 回退消费最旧 → c 计划外 → violated
+      put(root, 'src/c.ts', `import { a } from './a';\nexport function c(x: number): number { return a(x) + 5; }\n`);
+      await waitAlert(root, (l) => l.includes('[计划外扩散#') && l.includes('src/c.ts'));
+
+      let entries = loadLedger(root);
+      expect(entries[0]).toMatchObject({ id: dec.ledger_entry_id, status: 'violated', unexpected_files: ['src/c.ts'] });
+      expect(entries[0].matched_seq).toBeGreaterThan(0);
+      expect(entries[0].actual_files).toContain('src/a.ts'); // 审计快照
+
+      // status 播报违规债务（gate 未过）
+      const st = await watchProjectTool({ project_dir: root, action: 'status' });
+      expect(st.unresolved_violations).toBe(1);
+      expect(st.message).toContain('待处理');
+
+      // ledger 清单：默认待办视角，violation 带证据与 resolve 指引
+      const lg = await watchProjectTool({ project_dir: root, action: 'ledger' });
+      expect(lg.ledger_entries).toHaveLength(1);
+      expect(lg.ledger_entries![0].status).toBe('violated');
+      expect(lg.message).toContain(dec.ledger_entry_id!);
+      expect(lg.message).toContain('src/c.ts');
+      expect(lg.message).toContain('resolve');
+
+      // resolve 缺 reason → 拒绝过门
+      const bad = await watchProjectTool({ project_dir: root, action: 'ledger', resolve_id: dec.ledger_entry_id });
+      expect(bad.error).toContain('reason');
+
+      // resolve 过门：reviewer + reason 留痕
+      const ok = await watchProjectTool({
+        project_dir: root, action: 'ledger', resolve_id: dec.ledger_entry_id,
+        reason: 'c 属同一任务的连带修改，预告时遗漏', reviewer: 'llm',
+      });
+      expect(ok.unresolved_violations).toBe(0);
+      entries = loadLedger(root);
+      expect(entries[0].status).toBe('resolved');
+      expect(entries[0].resolution?.reason).toContain('遗漏');
+      expect(entries[0].resolution?.reviewer).toBe('llm');
+
+      // 已 resolved 再 resolve → 拒绝；status 债务清零
+      const again = await watchProjectTool({ project_dir: root, action: 'ledger', resolve_id: dec.ledger_entry_id, reason: 'x' });
+      expect(again.error).toContain('violated');
+      const st2 = await watchProjectTool({ project_dir: root, action: 'status' });
+      expect(st2.unresolved_violations).toBe(0);
+
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+    },
+    30000,
+  );
+
+  it(
+    '跨会话恢复：stop 丢内存 → start 从 ledger.json 恢复 pending → 变更仍受对比保护',
+    async () => {
+      const root = await makeProject();
+      const dec = await watchProjectTool({ project_dir: root, action: 'declare', files: ['src/b.ts'] });
+      await watchProjectTool({ project_dir: root, action: 'stop' }); // 模拟进程重启：内存队列清空，磁盘仍在
+
+      const start = await watchProjectTool({ project_dir: root, action: 'start', impact_on_change: true });
+      expect(start.message).toContain('已恢复 1 条跨会话改前预告');
+      expect(start.pending_declarations).toBe(1);
+
+      // 改 b → 恢复的预告被消费对比（b 预告面 {a,b,c,d} ⊇ 实际 → ok）
+      put(root, 'src/b.ts', `export function b(x: number): number { return x * 11; }\n`);
+      await waitAlert(root, (l) => l.includes('[计划外扩散#'));
+      const entries = loadLedger(root);
+      expect(entries[0]).toMatchObject({ id: dec.ledger_entry_id, status: 'ok' });
+
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+    },
+    30000,
+  );
+
+  it(
+    'TTL：pending 超 24h 在恢复时 expired，不再回填内存',
+    async () => {
+      const root = await makeProject();
+      await watchProjectTool({ project_dir: root, action: 'declare', files: ['src/b.ts'] });
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+      // 伪造 created_at 为 25h 前
+      const p = path.join(root, '.design-canvas', 'impact', 'ledger.json');
+      const f = JSON.parse(fs.readFileSync(p, 'utf-8')) as { entries: Array<{ created_at: string }> };
+      f.entries[0].created_at = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+      fs.writeFileSync(p, JSON.stringify(f), 'utf-8');
+
+      const start = await watchProjectTool({ project_dir: root, action: 'start', impact_on_change: true });
+      expect(start.pending_declarations).toBe(0); // 过期不回填
+      const all = await watchProjectTool({ project_dir: root, action: 'ledger', ledger_status: 'all' });
+      expect(all.ledger_entries![0].status).toBe('expired');
 
       await watchProjectTool({ project_dir: root, action: 'stop' });
     },

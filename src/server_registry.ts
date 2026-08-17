@@ -522,7 +522,8 @@ const TOOL_DEFS: ToolDef[] = [
       'watch 支持 impact_on_change=true：文件变更后自动生成影响报告（一行摘要入 alerts，' +
       'action=status 查看未读提醒，action=impact + seq 取全文；报告持久落盘 .design-canvas/impact/）。' +
       '改代码前建议 action=declare + files 登记预告（Impact Ledger）：改后自动对比实际波及，' +
-      '计划外扩散即时报警。',
+      '计划外扩散即时报警。预告持久化 ledger.json（跨会话恢复，24h 未消费过期）；' +
+      'action=ledger 查台账，violated 用 resolve_id + reason 过门处理（status 播报未处理数）。',
     inputSchema: {
       action: z.enum(EXPLORE_ACTIONS).describe('要执行的代码理解动作'),
       args: z.record(z.string(), z.unknown()).optional().describe('各 action 参数'),
