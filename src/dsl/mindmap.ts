@@ -59,6 +59,9 @@ export interface FeatureDep {
   to: string;
   /** 跨功能调用次数（真实调用边聚合） */
   weight: number;
+  /** 依赖主要打向的目标文件（top3，带次数）：功能粒度会失真——
+   * 调用方可能只用了被依赖功能里的一小块（如 ts_kernel 内核），文件证据揭示"踩的到底是哪块地板" */
+  via_files?: string[];
 }
 
 /** L3 思维导图 */

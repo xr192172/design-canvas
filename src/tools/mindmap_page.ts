@@ -261,12 +261,29 @@ export function renderMindmapPage(feature: string): string {
     var G = document.getElementById('deplayer');
     G.innerHTML = '';
     if(!DEPS.length || !TREE) return;
-    var cx = TREE._x - TREE._w / 2 - 74; // 弧顶控制点：根节点左侧外沿
-    DEPS.forEach(function(d){
+    // 贝塞尔取点（t∈[0,1]）：标签沿弧分布，避免堆在同一位置
+    function bezPoint(x1,y1,cx,y1c,x2,y2,t){
+      var mt = 1 - t;
+      return {
+        x: mt*mt*mt*x1 + 3*mt*mt*t*cx + 3*mt*t*t*cx + t*t*t*x2,
+        y: mt*mt*mt*y1 + 3*mt*mt*t*y1c + 3*mt*t*t*y2 + t*t*t*y2
+      };
+    }
+    // 标签碰撞规避：已放标签占用区，新标签在候选 t 序列中找不冲突位置
+    var placedPts = [];
+    function noClash(p){
+      for(var k = 0; k < placedPts.length; k++){
+        if(Math.abs(placedPts[k].x - p.x) < 46 && Math.abs(placedPts[k].y - p.y) < 15) return false;
+      }
+      return true;
+    }
+    DEPS.forEach(function(d, idx){
       var a = featureByLabel(d.from), b = featureByLabel(d.to);
       if(!a || !b || a === b) return;
       var x1 = a._x - a._w / 2 - 24, y1 = a._y;
       var x2 = b._x - b._w / 2 - 24, y2 = b._y;
+      // 扇形错开：每条弧的控制点逐条左移，弧线不互相叠压
+      var cx = TREE._x - TREE._w / 2 - 74 - (idx % 5) * 26;
       var sw = Math.min(1.3 + d.weight / 12, 3.6);
       var path = document.createElementNS('http://www.w3.org/2000/svg','path');
       path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+y1+', '+cx+' '+y2+', '+x2+' '+y2);
@@ -287,18 +304,33 @@ export function renderMindmapPage(feature: string): string {
       hit.removeAttribute('marker-end');
       hit.addEventListener('click', function(ev){ ev.stopPropagation(); showDep(d); });
       G.appendChild(hit);
-      // 频次小标签（弧中点附近）
+      // 频次小标签：候选 t 序列找不冲突位置（弧上全冲突则垂直强制偏移），保证互不压盖
+      var cands = [0.3 + (idx % 3) * 0.14, 0.5, 0.42, 0.58, 0.36, 0.64, 0.24];
+      var pt = null;
+      for (var ci = 0; ci < cands.length; ci++) {
+        var p = bezPoint(x1, y1, cx, y1, x2, y2, cands[ci]);
+        if (noClash(p)) { pt = p; break; }
+      }
+      if (!pt) {
+        pt = bezPoint(x1, y1, cx, y1, x2, y2, 0.3);
+        pt = { x: pt.x, y: pt.y - 16 * (1 + Math.floor(placedPts.length / 4)) };
+      }
+      placedPts.push(pt);
       var t = document.createElementNS('http://www.w3.org/2000/svg','text');
-      t.setAttribute('x', cx + 10); t.setAttribute('y', (y1 + y2) / 2);
-      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5'); t.setAttribute('fill','rgba(251,146,60,.85)');
+      t.setAttribute('x', pt.x); t.setAttribute('y', pt.y - 6);
+      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5'); t.setAttribute('fill','rgba(251,146,60,.9)');
+      t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#02040d'); t.setAttribute('stroke-width','3');
       t.textContent = '×' + d.weight;
       G.appendChild(t);
     });
   }
   function showDep(d){
     var det = document.getElementById('detail');
+    var via = (d.via_files && d.via_files.length)
+      ? '<p class="files">主要打向：' + d.via_files.map(esc).join(' · ') + '</p>' : '';
     det.innerHTML = '<b style="color:#fb923c;">🔗 功能依赖</b>'
       + '<p>' + esc(d.from) + ' <b style="color:#fb923c;">踩着</b> ' + esc(d.to) + '（真实调用 ×' + d.weight + ' 次）</p>'
+      + via
       + '<p style="font-size:11px;color:#7a93b8;">依赖不占树的层级（归属归归属、依赖归依赖），橙色虚线单独表达"什么撑着什么"。</p>';
     det.style.display = 'block';
   }
@@ -434,7 +466,10 @@ export function renderMindmapPage(feature: string): string {
       var depHtml = '';
       if(stoodOnBy.length){
         depHtml += '<p style="color:#fcd9a8;">🧱 谁踩着它：'
-          + stoodOnBy.map(function(d){ return esc(d.from)+'（×'+d.weight+'）'; }).join('、')
+          + stoodOnBy.map(function(d){
+              var top1 = (d.via_files && d.via_files[0]) ? '，主要打向 ' + esc(d.via_files[0]) : '';
+              return esc(d.from)+'（×'+d.weight+'）'+top1;
+            }).join('；')
           + (isF ? ' —— 这就是底座：自己几乎不叫别人，别人都来叫它。' : '') + '</p>';
       }
       if(standsOn.length){
@@ -532,7 +567,7 @@ export function renderMindmapPage(feature: string): string {
   function fitView(){
     if(!TREE) return;
     var b = treeBounds();
-    if(DEPS.length) b.minX -= 110; // 依赖弧绕根左侧，视口为其留位
+    if(DEPS.length) b.minX -= 110 + Math.min(DEPS.length, 5) * 26; // 依赖弧扇形绕根左侧，视口为其留位
     var w = window.innerWidth, h = window.innerHeight - 52;
     var pad = 40;
     var s = Math.min((w - pad*2) / (b.maxX - b.minX), (h - pad*2) / (b.maxY - b.minY), 1.15);

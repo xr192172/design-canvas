@@ -321,18 +321,27 @@ function loadFeatureDeps(
     )
     .all() as Array<{ sf: string; tf: string; w: number }>;
   const pairW = new Map<string, number>();
+  /** pairKey → 目标文件 → 次数：功能粒度会失真（调用方可能只用功能里一小块），文件证据揭示真正踩的地板 */
+  const pairFiles = new Map<string, Map<string, number>>();
   for (const r of rows) {
     const a = ownerOf(r.sf);
     const b = ownerOf(r.tf);
     if (a < 0 || b < 0 || a === b) continue;
     const key = `${a}→${b}`;
     pairW.set(key, (pairW.get(key) ?? 0) + r.w);
+    const fm = pairFiles.get(key) ?? new Map<string, number>();
+    fm.set(r.tf, (fm.get(r.tf) ?? 0) + r.w);
+    pairFiles.set(key, fm);
   }
-  const deps: Array<{ from: string; to: string; weight: number }> = [];
+  const deps: Array<{ from: string; to: string; weight: number; via_files?: string[] }> = [];
   for (const [key, w] of pairW) {
     if (w < 3) continue; // 噪声边：偶发引用不算依赖
     const [a, b] = key.split('→').map(Number);
-    deps.push({ from: featureNames[a], to: featureNames[b], weight: w });
+    const via = [...(pairFiles.get(key) ?? new Map())]
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, 3)
+      .map(([f, c]) => `${f}（×${c}）`);
+    deps.push({ from: featureNames[a], to: featureNames[b], weight: w, via_files: via });
   }
   deps.sort((x, y) => y.weight - x.weight);
   // 底座识别：入度（被依赖）≥2 个功能 且 调出 < 调入一半
