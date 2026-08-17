@@ -100,6 +100,7 @@ func usageDSL() {
   camera-dsl approve <id> [--reviewer <名字>]        验证门审批 → 定稿为设计 DSL 新版本
   camera-dsl reject <id> [--reviewer <名字>]         拒绝修订提案
   camera-dsl loop <events.jsonl>                    闭环：观测→偏差→未声明探针自动提案
+                                                    [--ledger <ledger.json>] 接入影响台账：偏差回流设计（方向 D）
   camera-dsl log <events.jsonl> [--file <path>]... [--all]  日志：按文件路径过滤（可多次），默认只列异常，--all 显示全部
   camera-dsl instrument <dir> [--dry-run] [--enable-deep] [--explore] [--restore]  Go 源码自动插桩（契约模式默认，--explore 全量）
 
@@ -398,17 +399,27 @@ func dslReject(args []string, dataDir string) bool {
 // dslLoop 执行一次闭环迭代：观测→偏差→（触发条件满足时）对未声明探针自动提案。
 // 支持 --min-deviation-rate <比例> / --min-undesigned <数量> 调节触发阈值，
 // --use-llm 对可疑/违反事件做 LLM 行为级复核。
+// --ledger <path> 接入影响台账（方向 D：偏差回流设计）——缺省自动探测
+// {projectRoot}/.design-canvas/impact/ledger.json（dataDir 上溯两级）。
 func dslLoop(args []string, dataDir string) bool {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl> [--min-deviation-rate 0.1] [--min-undesigned 1] [--use-llm]")
+		fmt.Fprintln(os.Stderr, "用法: camera-dsl loop <events.jsonl> [--min-deviation-rate 0.1] [--min-undesigned 1] [--use-llm] [--ledger <ledger.json>]")
 		return true
 	}
 	var eventsPath string
 	opt := LoopOptions{}
+	ledgerSet := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--use-llm":
 			opt.UseLLM = true
+		case args[i] == "--ledger" && i+1 < len(args):
+			opt.LedgerPath = args[i+1]
+			ledgerSet = true
+			i++
+		case strings.HasPrefix(args[i], "--ledger="):
+			opt.LedgerPath = strings.TrimPrefix(args[i], "--ledger=")
+			ledgerSet = true
 		case args[i] == "--min-deviation-rate" && i+1 < len(args):
 			v, err := strconv.ParseFloat(args[i+1], 64)
 			if err != nil {
@@ -433,12 +444,31 @@ func dslLoop(args []string, dataDir string) bool {
 			}
 		}
 	}
+	// 未显式指定 --ledger：自动探测默认位置。dataDir = {projectRoot}/.agent/camera
+	// → projectRoot = dataDir 上溯两级；台账在 {projectRoot}/.design-canvas/impact/。
+	if !ledgerSet {
+		candidate := filepath.Join(dataDir, "..", "..", ".design-canvas", "impact", "ledger.json")
+		if abs, err := filepath.Abs(candidate); err == nil {
+			candidate = abs
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			opt.LedgerPath = candidate
+		}
+	}
 	res, err := RunLoop(eventsPath, dataDir, opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "camera-dsl loop: %v\n", err)
 		return true
 	}
 	fmt.Print(RenderDiffReport(res.Report))
+	if res.Ledger != nil {
+		fmt.Printf("影响台账：%d 条目 · 已消费 %d · 违反 %d（偏差率 %.1f%%）· 累犯模式 %d\n",
+			res.Ledger.Total, res.Ledger.Consumed, res.Ledger.Violated,
+			res.Ledger.DeviationRate*100, len(res.Ledger.RepeatSpreads))
+		for _, p := range res.Ledger.RepeatSpreads {
+			fmt.Printf("  ▸ %s：%d 次计划外波及 %v\n", p.Source, p.Violations, p.Files)
+		}
+	}
 	if res.LLMRun {
 		if res.LLMDegraded {
 			fmt.Println("LLM 复核：判定服务不可用/调用失败，已降级为规则判定（不阻断）")
@@ -456,10 +486,10 @@ func dslLoop(args []string, dataDir string) bool {
 		return true
 	}
 	if len(res.Proposals) == 0 {
-		fmt.Println("闭环：偏差已触发但无未声明探针，无需补契约提案")
+		fmt.Println("闭环：偏差已触发但无可补契约项（未声明探针/累犯模式均无），无需提案")
 		return true
 	}
-	fmt.Printf("闭环：为 %d 个未声明探针生成修订提案（写盘权分离，待验证门审批）\n", len(res.Proposals))
+	fmt.Printf("闭环：生成 %d 份修订提案（写盘权分离，待验证门审批）\n", len(res.Proposals))
 	for _, p := range res.Proposals {
 		fmt.Printf("  %s rule=%s probe=%s\n", p.ID, p.Decls[0].Rule, p.Decls[0].Probe)
 	}

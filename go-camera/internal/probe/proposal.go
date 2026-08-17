@@ -193,7 +193,21 @@ func (s *ProposalStore) ApproveGated(ctx context.Context, id, reviewer string, d
 	p.VerifiedBy = regressionEvidence(reg, len(llmVerdicts))
 	p.Verification = reg.Describe()
 
-	ver, err := dsl.SaveWithMeta(final, p.Reason, p.Source, SaveMeta{
+	// 定稿声明集：人工/LLM 提案按文档语义整集替换（Decls = 完整新声明集）；
+	// loop 增量提案只带单条声明——整集替换会 wipe 掉其余全部契约（含种子），
+	// 故按键合并进当前集：同 rule+probe（known-spread 另加同 constraint.source）
+	// 替换（天然支持更新），新声明追加。
+	saveDecls := final
+	if p.Source == "loop" {
+		cur, err := dsl.Load()
+		if err == nil {
+			saveDecls = mergeLoopDecls(cur.Decls, final)
+		} else if !os.IsNotExist(err) {
+			return 0, err
+		}
+	}
+
+	ver, err := dsl.SaveWithMeta(saveDecls, p.Reason, p.Source, SaveMeta{
 		Action:       "approve",
 		Verification: p.VerifiedBy,
 	})
@@ -209,6 +223,33 @@ func (s *ProposalStore) ApproveGated(ctx context.Context, id, reviewer string, d
 		return 0, err
 	}
 	return ver, nil
+}
+
+// mergeLoopDecls 把 loop 增量提案的声明合并进当前权威集（不整集替换）。
+// 替换键：rule+probe；known-spread 声明（数据回流）另按 constraint.source
+// 精确替换——同源波及面更新天然覆盖旧声明，不同源共存。
+func mergeLoopDecls(cur, patch []DSLDecl) []DSLDecl {
+	out := append([]DSLDecl(nil), cur...)
+	key := func(d DSLDecl) string {
+		if c, ok := parseKnownSpread(d); ok {
+			return d.Rule + "|" + c.Source
+		}
+		return d.Rule + "|" + d.Probe
+	}
+	idx := map[string]int{}
+	for i, d := range out {
+		idx[key(d)] = i
+	}
+	for _, d := range patch {
+		k := key(d)
+		if i, ok := idx[k]; ok {
+			out[i] = d
+		} else {
+			idx[k] = len(out)
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // freeze 把未过验证门的提案标记为 rejected（定稿冻结），并返回解释性错误。

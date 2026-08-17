@@ -20,7 +20,7 @@ import (
 // 偏差不显著（低于阈值）时本轮不演进，避免每次观测都走提案/LLM。
 type LoopOptions struct {
 	// MinDeviationRate 违反事件偏差率阈值：violated 事件数/总事件数 达到该比例
-	// 才视为显著偏差（默认 0.1 = 10%）。
+	// 才视为显著偏差（默认 0.1 = 10%）。台账侧共用该阈值（violated 台账/已消费）。
 	MinDeviationRate float64
 	// MinUndesigned 未声明探针数量阈值：观测到的新探针达到该数才生成补契约提案
 	// （默认 1）。
@@ -28,6 +28,13 @@ type LoopOptions struct {
 	// UseLLM 对规则秒判为可疑/违反的事件做 LLM 行为级复核（走统一判定服务，
 	// POST use_llm=1）。LLM 不可用/失败时降级为规则判定，不阻断闭环。
 	UseLLM bool
+	// LedgerPath 影响 ledger（declare 预告-消费定损台账，TS 侧产物）路径。
+	// 空串 = 不接入台账数据源。提供时：台账偏差率或累犯波及模式参与触发，
+	// 并对累犯模式生成 design:impact-known-spread 提案（方向 D：偏差回流）。
+	LedgerPath string
+	// MinRepeatSpreads 累犯门槛：同一源文件出现 ≥ 该次数 violated 才生成
+	// known-spread 提案（默认 2——单次可能是失误，两次以上是结构耦合）。
+	MinRepeatSpreads int
 }
 
 // withDefaults 填充未设置项的默认值。
@@ -37,6 +44,9 @@ func (o LoopOptions) withDefaults() LoopOptions {
 	}
 	if o.MinUndesigned <= 0 {
 		o.MinUndesigned = 1
+	}
+	if o.MinRepeatSpreads <= 0 {
+		o.MinRepeatSpreads = 2
 	}
 	return o
 }
@@ -48,6 +58,9 @@ type LoopResult struct {
 	Triggered  bool       `json:"triggered"`               // 是否触发了演进（低于阈值则 false）
 	SkipReason string     `json:"skip_reason,omitempty"`   // 未触发时的原因（低频护栏）
 
+	// 影响台账统计（--ledger，方向 D）：nil = 未接入台账数据源。
+	Ledger *LedgerStats `json:"ledger,omitempty"`
+
 	// LLM 行为级复核（--use-llm）：
 	LLMRun      bool         `json:"llm_run,omitempty"`       // 是否请求了 LLM 复核
 	LLMDegraded bool         `json:"llm_degraded,omitempty"`  // LLM 不可用/失败，降级为规则判定
@@ -58,10 +71,18 @@ type LoopResult struct {
 // 自动提案。dataDir 为 camera 数据目录（含设计 DSL 与 proposals/）。写盘权
 // 分离：只写 proposals/，绝不触碰 dsl.json。
 //
-// 触发条件（低频演进护栏）：偏差率（violated 事件占比）≥ MinDeviationRate
-// 或未声明探针数 ≥ MinUndesigned，才生成修订提案；否则跳过演进并在报告标注。
+// 触发条件（低频演进护栏，任一显著即触发）：
+//   - 事件偏差率（violated 事件占比）≥ MinDeviationRate
+//   - 未声明探针数 ≥ MinUndesigned
+//   - 台账影响偏差率 ≥ MinDeviationRate 或存在累犯波及模式（--ledger，方向 D）
 func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error) {
 	var res LoopResult
+
+	opt := LoopOptions{}
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	opt = opt.withDefaults()
 
 	// 1. 读取观测事件
 	events, _, err := (&ActualDSLLoader{}).LoadFile(eventsPath)
@@ -86,14 +107,20 @@ func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error
 	// 4. 对比出三类偏差
 	res.Report = NewComparator().RegisterDefaultPredicates().Compare(design, actual)
 
+	// 4.2 影响台账（--ledger，方向 D）：declare 预告-消费定损台账折叠为
+	// 偏差率 + 累犯波及模式。文件缺失/损坏 → 跳过该数据源（可选输入，不阻断）。
+	if opt.LedgerPath != "" {
+		entries, lerr := LoadImpactLedger(opt.LedgerPath)
+		if lerr != nil {
+			return res, fmt.Errorf("loop: %v", lerr)
+		}
+		st := AnalyzeLedger(opt.LedgerPath, entries, opt.MinRepeatSpreads)
+		res.Ledger = &st
+	}
+
 	// 4.5 可选 LLM 行为级复核（--use-llm）：对规则秒判为可疑/违反的事件，交付
 	// 统一判定服务做 LLM 复核（POST use_llm=1，由服务侧调 LLM 记账）。LLM 只喂
 	// 「事件快照 + DSL 声明」，不接触项目文档。失败降级：保留规则判定，不阻断。
-	opt := LoopOptions{}
-	if len(opts) > 0 {
-		opt = opts[0]
-	}
-	opt = opt.withDefaults()
 	if opt.UseLLM {
 		res.LLMRun = true
 		judge := NewJudgeClient("")
@@ -114,22 +141,39 @@ func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error
 		}
 	}
 
-	// 5. 触发条件判定（低频演进护栏）
+	// 5. 触发条件判定（低频演进护栏）。三个维度任一显著即触发：
+	//   a. 事件偏差率（violated 事件占比）≥ MinDeviationRate
+	//   b. 未声明探针数 ≥ MinUndesigned
+	//   c. 台账（--ledger）：影响偏差率 ≥ MinDeviationRate 或存在累犯波及模式
+	//      （方向 D：实际改动反复超出预告 = 设计未承认的真实耦合，回流设计）
 	rate := 0.0
 	if res.Report.EventCount > 0 {
 		rate = float64(res.Report.Violated) / float64(res.Report.EventCount)
 	}
-	if res.Report.Undesigned < opt.MinUndesigned && rate < opt.MinDeviationRate {
+	ledgerRate := 0.0
+	ledgerSignificant := false
+	if res.Ledger != nil && res.Ledger.Consumed > 0 {
+		ledgerRate = res.Ledger.DeviationRate
+		ledgerSignificant = ledgerRate >= opt.MinDeviationRate || len(res.Ledger.RepeatSpreads) > 0
+	}
+	if res.Report.Undesigned < opt.MinUndesigned && rate < opt.MinDeviationRate && !ledgerSignificant {
 		res.Triggered = false
-		res.SkipReason = fmt.Sprintf(
-			"偏差低于触发阈值（violated 事件占比 %.1f%% < %.0f%% · 未声明探针 %d < %d），本轮不演进",
+		skip := fmt.Sprintf(
+			"偏差低于触发阈值（violated 事件占比 %.1f%% < %.0f%% · 未声明探针 %d < %d",
 			rate*100, opt.MinDeviationRate*100, res.Report.Undesigned, opt.MinUndesigned)
+		if res.Ledger != nil {
+			skip += fmt.Sprintf(" · 台账偏差率 %.1f%%（%d/%d）· 累犯模式 %d",
+				ledgerRate*100, res.Ledger.Violated, res.Ledger.Consumed, len(res.Ledger.RepeatSpreads))
+		}
+		skip += "），本轮不演进"
+		res.SkipReason = skip
 		return res, nil
 	}
 	res.Triggered = true
 
-	// 6. 对未声明探针生成修订提案
 	ps := NewProposalStore(dataDir)
+
+	// 6a. 对未声明探针生成修订提案
 	obs := probeObsByProbe(actual)
 	for _, dev := range res.Report.Deviations {
 		if dev.Kind != DevUndesigned {
@@ -147,6 +191,52 @@ func RunLoop(eventsPath, dataDir string, opts ...LoopOptions) (LoopResult, error
 			return res, fmt.Errorf("loop: 为 %s 生成提案: %v", dev.Probe, err)
 		}
 		res.Proposals = append(res.Proposals, p)
+	}
+
+	// 6b. 累犯波及模式 → design:impact-known-spread 提案（方向 D 核心回流）。
+	// 去重：设计已承认同一源文件且波及面相同 → 跳过；已有 pending 同源提案 →
+	// 跳过（不堆叠）；波及面增长（新模式更全）→ 提更新提案。
+	if res.Ledger != nil && len(res.Ledger.RepeatSpreads) > 0 {
+		approvedBySrc := map[string]knownSpreadConstraint{}
+		for _, d := range design.Decls {
+			if c, ok := parseKnownSpread(d); ok {
+				approvedBySrc[c.Source] = c // 同源多条时后者覆盖（Save 时应已收敛）
+			}
+		}
+		pending, err := ps.List()
+		if err != nil {
+			return res, fmt.Errorf("loop: 读提案清单: %v", err)
+		}
+		pendingSrc := map[string]bool{}
+		for _, p := range pending {
+			if p.Status != ProposalPending {
+				continue
+			}
+			for _, d := range p.Decls {
+				if c, ok := parseKnownSpread(d); ok {
+					pendingSrc[c.Source] = true
+				}
+			}
+		}
+		for _, pat := range res.Ledger.RepeatSpreads {
+			if existed, ok := approvedBySrc[pat.Source]; ok && sameSpreadSet(existed, pat) {
+				continue // 设计已承认该耦合（同波及面），无需再提
+			}
+			if pendingSrc[pat.Source] {
+				continue // 已有 pending 提案待审批，不堆叠
+			}
+			decl, err := knownSpreadDecl(pat)
+			if err != nil {
+				return res, fmt.Errorf("loop: 构造 known-spread 声明: %v", err)
+			}
+			p, err := ps.Create([]DSLDecl{decl},
+				fmt.Sprintf("loop: 改动 %s 连续 %d 次波及预告面外 %d 个文件，把该耦合回流设计契约", pat.Source, pat.Violations, len(pat.Files)),
+				"loop")
+			if err != nil {
+				return res, fmt.Errorf("loop: 为 %s 生成 known-spread 提案: %v", pat.Source, err)
+			}
+			res.Proposals = append(res.Proposals, p)
+		}
 	}
 	return res, nil
 }
