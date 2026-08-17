@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { Database } from '../../src/db/db';
-import { openDb, getProjectCacheDb, closeAllProjectCacheDbs } from '../../src/db/db';
+import { openDb, getProjectCacheDb, closeAllProjectCacheDbs, SCHEMA_VERSION } from '../../src/db/db';
 import {
   syncFile,
   syncProject,
@@ -361,25 +361,35 @@ describe('getProjectCacheDb - 项目缓存连接池', () => {
   });
 });
 
-describe('openDb - 版本迁移（v1→v2 清空重建）', () => {
+describe('openDb - 版本迁移（落后即清空重建）', () => {
   it('旧版本缓存被清空并登记新版本（缓存是派生物，不做保留式迁移）', async () => {
     const migDbFile = path.join(dir, 'mig', 'cache.db');
-    // 首轮：正常打开落 v2，同步一个文件造数据，然后伪装成 v1
+    // 首轮：正常打开落当前版本，同步两次（内容不同）造出 symbol_diffs 行，然后伪装成旧一版
     let mdb = openDb(migDbFile);
     await syncFile(mdb, dir, path.join(dir, 'a.ts'));
+    fs.writeFileSync(path.join(dir, 'a.ts'), FILE_A.replace('helperB(input)', 'helperB(input, 1)'), 'utf-8');
+    await syncFile(mdb, dir, path.join(dir, 'a.ts'));
+    const diffs = mdb.prepare('SELECT COUNT(*) c FROM symbol_diffs').get() as { c: number };
+    expect(diffs.c).toBe(1); // 第二次同步产出了符号级 diff
     mdb.exec('DELETE FROM schema_versions');
-    mdb.prepare('INSERT INTO schema_versions(version, applied_at, description) VALUES (1, ?, ?)').run(Date.now(), 'fake v1');
+    mdb.prepare('INSERT INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)').run(
+      SCHEMA_VERSION - 1,
+      Date.now(),
+      'fake 旧版本',
+    );
     mdb.close();
-    // 重新打开：检测到 MAX(version)=1 < 2 → 清空业务表强制重建
+    // 重新打开：检测到 MAX(version) < SCHEMA_VERSION → 清空业务表强制重建
     mdb = openDb(migDbFile);
     const files = mdb.prepare('SELECT COUNT(*) c FROM files').get() as { c: number };
     expect(files.c).toBe(0);
     const nodes = mdb.prepare('SELECT COUNT(*) c FROM nodes').get() as { c: number };
     expect(nodes.c).toBe(0);
+    const diffAfter = mdb.prepare('SELECT COUNT(*) c FROM symbol_diffs').get() as { c: number };
+    expect(diffAfter.c).toBe(0); // symbol_diffs 一并清空
     const vers = (mdb.prepare('SELECT version FROM schema_versions ORDER BY version').all() as Array<{ version: number }>).map(
       (v) => v.version,
     );
-    expect(vers).toEqual([1, 2]);
+    expect(vers).toEqual([SCHEMA_VERSION - 1, SCHEMA_VERSION]);
     mdb.close();
   });
 });

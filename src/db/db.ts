@@ -29,7 +29,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */
 export function getDbFile(): string {
@@ -51,13 +51,20 @@ export function openDb(dbFile: string = getDbFile()): Database {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA_SQL);
+  // v3 增列：旧库的 nodes 表已存在，CREATE TABLE IF NOT EXISTS 不会补 sym_hash 列，
+  // 显式 ALTER（新库建表已含该列，重复加列报错吞掉）
+  try {
+    db.exec('ALTER TABLE nodes ADD COLUMN sym_hash TEXT');
+  } catch {
+    /* 列已存在 */
+  }
   const v = db.prepare('SELECT MAX(version) v FROM schema_versions').get() as { v: number | null };
   if (v.v !== null && v.v < SCHEMA_VERSION) {
-    db.exec('DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM unresolved_refs;');
+    db.exec('DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM unresolved_refs; DELETE FROM symbol_diffs;');
   }
   db.prepare(
     'INSERT OR IGNORE INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)',
-  ).run(SCHEMA_VERSION, Date.now(), 'v2: +imports 表（原始 import 记录，import_project 缓存读取源）');
+  ).run(SCHEMA_VERSION, Date.now(), 'v3: nodes.sym_hash + symbol_diffs 表（符号级影响分析数据源）');
   return db;
 }
 

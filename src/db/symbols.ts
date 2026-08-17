@@ -30,6 +30,8 @@ export interface SyncFileResult {
   node_count: number;
   edge_count: number;
   call_count?: number;
+  /** 符号级 diff 计数（v3）：updated 且非首次导入时给出；undefined=无对比意义 */
+  symbol_diff?: { added: number; removed: number; changed: number };
   error?: string;
 }
 
@@ -82,6 +84,58 @@ function countLinesOf(content: string): number {
   let n = 1;
   for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) n++;
   return content.endsWith('\n') ? n - 1 : n;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 符号级 hash 与 diff（v3：符号级影响分析数据源）
+// ─────────────────────────────────────────────────────────────
+
+/** 符号状态：added=新增 / removed=删除 / changed=span hash 变（实质变更） */
+export type SymbolStatus = 'added' | 'removed' | 'changed';
+
+/** 净差异合并（链式）：同一文件连续多次编辑未消费时，把 vA→vB 与 vB→vC 合成 vA→vC */
+export function mergeSymbolStatus(
+  a: SymbolStatus | undefined,
+  b: SymbolStatus | undefined,
+): SymbolStatus | undefined {
+  if (!b) return a;
+  if (!a) return b;
+  if (a === 'added' && b === 'removed') return undefined; // 加了又删 → 净无
+  if (a === 'added' && b === 'changed') return 'added'; // 相对 vA 仍是新增
+  if (a === 'removed' && b === 'added') return 'changed'; // 删了又回 → 相对 vA 是变更
+  return b; // 其余组合后状态即最新状态
+}
+
+/**
+ * 符号 span 归一化 hash：取 [start_line, end_line] 文本，剔纯注释行后去除全部空白，sha1。
+ * 注释 / 空行 / 缩进 / 单行↔多行重排均不改变 hash → 不计为"实质变更"，改注释或格式化
+ * 不再虚报波及。v1 近似：整行块注释中间行（* 开头）剔除；py 仅剔 # 注释（docstring
+ * 保守保留）；行内块注释（/* ... *\/ 同行夹代码）仍会计入变更。
+ */
+export function symbolSpanHash(lines: string[], startLine: number, endLine: number, lang: string): string {
+  const isPy = lang === 'py' || lang === 'python';
+  const commentRe = isPy ? /^\s*#/ : /^\s*(\/\/|\/\*|\*)/;
+  const out: string[] = [];
+  for (let i = Math.max(0, startLine - 1); i < Math.min(lines.length, endLine); i++) {
+    const l = lines[i].trim();
+    if (!l || commentRe.test(l)) continue;
+    out.push(l);
+  }
+  return crypto.createHash('sha1').update(out.join('').replace(/\s+/g, ''), 'utf-8').digest('hex');
+}
+
+/** qualified_name → hash 集合（文件内重名如 TS 重载合并比较） */
+function hashSetsOf(rows: Array<{ qualified_name: string; sym_hash: string | null }>): Map<string, Set<string>> {
+  const m = new Map<string, Set<string>>();
+  for (const r of rows) {
+    let set = m.get(r.qualified_name);
+    if (!set) {
+      set = new Set();
+      m.set(r.qualified_name, set);
+    }
+    set.add(r.sym_hash ?? ''); // NULL（理论上 v3 后不再出现）按空串参与比较 → 判 changed
+  }
+  return m;
 }
 
 /** 解析相对导入到项目内文件（posix relPath）；解析不到返回 null */
@@ -141,6 +195,61 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
   const now = Date.now();
   const lineCount = countLinesOf(content);
   const fileNodeId = rel;
+  const lines = content.split('\n');
+
+  // ── 符号级 diff（v3，事务外 CPU 计算）──
+  // 删旧符号前读出旧 sym_hash 对比；与未消费的历史 diff 行链式合并（同一文件
+  // 一个节流窗口内多次编辑 → 净差异 vA→vNow）。首次导入（无 files 行）不产出。
+  const symHashList = parsed.symbols.map((s) => symbolSpanHash(lines, s.start_line, s.end_line, ext));
+  const symbolDiff = (() => {
+    if (!existing) return undefined;
+    const oldSets = hashSetsOf(
+      db
+        .prepare("SELECT qualified_name, sym_hash FROM nodes WHERE file_path = ? AND kind != 'file'")
+        .all(rel) as Array<{ qualified_name: string; sym_hash: string | null }>,
+    );
+    const newSets = new Map<string, Set<string>>();
+    parsed.symbols.forEach((s, i) => {
+      let set = newSets.get(s.qualified_name);
+      if (!set) {
+        set = new Set();
+        newSets.set(s.qualified_name, set);
+      }
+      set.add(symHashList[i]);
+    });
+    const cur = new Map<string, SymbolStatus>();
+    for (const [qn, hs] of newSets) {
+      const old = oldSets.get(qn);
+      if (!old) {
+        cur.set(qn, 'added');
+      } else if (old.size !== hs.size || [...hs].some((h) => !old.has(h))) {
+        cur.set(qn, 'changed');
+      }
+    }
+    for (const qn of oldSets.keys()) {
+      if (!newSets.has(qn)) cur.set(qn, 'removed');
+    }
+    // 链式合并：上一份 diff 的 to_hash == 本次旧 content_hash → 无消费直连，合成净差异
+    let from = existing.content_hash;
+    const stored = db
+      .prepare('SELECT from_hash, to_hash, added, removed, changed FROM symbol_diffs WHERE file_path = ?')
+      .get(rel) as { from_hash: string; to_hash: string; added: string; removed: string; changed: string } | undefined;
+    let net = cur;
+    if (stored && stored.to_hash === existing.content_hash) {
+      from = stored.from_hash;
+      const prev = new Map<string, SymbolStatus>();
+      for (const qn of JSON.parse(stored.added) as string[]) prev.set(qn, 'added');
+      for (const qn of JSON.parse(stored.removed) as string[]) prev.set(qn, 'removed');
+      for (const qn of JSON.parse(stored.changed) as string[]) prev.set(qn, 'changed');
+      net = new Map<string, SymbolStatus>();
+      for (const qn of new Set([...prev.keys(), ...cur.keys()])) {
+        const m = mergeSymbolStatus(prev.get(qn), cur.get(qn));
+        if (m) net.set(qn, m);
+      }
+    }
+    const by = (st: SymbolStatus) => [...net.entries()].filter(([, s]) => s === st).map(([qn]) => qn).sort();
+    return { from, added: by('added'), removed: by('removed'), changed: by('changed') };
+  })();
 
   db.exec('BEGIN');
   try {
@@ -164,17 +273,29 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; line: number; col: number | null; metadata: string | null }>;
     db.prepare("DELETE FROM nodes WHERE file_path = ? AND kind != 'file'").run(rel);
     const insNode = db.prepare(
-      `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, sym_hash, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
     );
     const seenIds = new Set<string>();
-    for (const s of parsed.symbols) {
+    parsed.symbols.forEach((s, i) => {
       let id = `${rel}#${s.qualified_name}`;
       if (seenIds.has(id)) id = `${id}:L${s.start_line}`; // 文件内重名（如 TS 重载）
       seenIds.add(id);
       insNode.run(
         id, s.kind, s.name, s.qualified_name, rel, ext,
-        s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, now,
+        s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, symHashList[i], now,
+      );
+    });
+
+    // 2.1 符号级 diff 落库（v3）：diffImpact 的波及源数据。首次导入 symbolDiff=undefined 不写
+    if (symbolDiff) {
+      db.prepare(
+        `INSERT OR REPLACE INTO symbol_diffs(file_path, from_hash, to_hash, added, removed, changed, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        rel, symbolDiff.from, hash,
+        JSON.stringify(symbolDiff.added), JSON.stringify(symbolDiff.removed), JSON.stringify(symbolDiff.changed),
+        now,
       );
     }
 
@@ -249,7 +370,12 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     ).run(rel, hash, ext, stat.size, Math.round(stat.mtimeMs), now, parsed.symbols.length);
 
     db.exec('COMMIT');
-    return { path: rel, status: 'updated', node_count: parsed.symbols.length, edge_count: edgeCount, call_count: callCount };
+    return {
+      path: rel, status: 'updated', node_count: parsed.symbols.length, edge_count: edgeCount, call_count: callCount,
+      symbol_diff: symbolDiff
+        ? { added: symbolDiff.added.length, removed: symbolDiff.removed.length, changed: symbolDiff.changed.length }
+        : undefined,
+    };
   } catch (e) {
     db.exec('ROLLBACK');
     return fail((e as Error).message);

@@ -10,6 +10,8 @@
  *     千级文件规模索引体积可接受
  *   - 暂缓：name_segment_vocab（序号 8 语义搜索再加；它是派生物化表，随时可重建）
  *   - v2：+imports 表（原始 import 记录，import_project 缓存路径的数据源）
+ *   - v3：nodes.sym_hash（符号 span 归一化 hash）+ symbol_diffs 表（sync 时新旧对比，
+ *     记录每个文件"真正改动了哪些符号"——符号级影响分析的数据源）
  *
  * 节点 id 约定：
  *   - 文件节点：id = 相对项目根的 posix 路径（如 "src/tools/serve.ts"），kind='file'
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     parent TEXT,
     signature TEXT,
     docstring TEXT,          -- 预留：kernel 暂未提取，列先占住
+    sym_hash TEXT,           -- v3：符号 span 归一化 hash（去注释/空白）——符号级 diff 依据
     updated_at INTEGER NOT NULL
 );
 
@@ -86,6 +89,21 @@ CREATE TABLE IF NOT EXISTS imports (
     kind TEXT NOT NULL       -- 'relative' | 'package'（与 ts_kernel ParsedImport.kind 一致）
 );
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
+
+-- 符号级变更记录（v3）：syncFile 重插符号前对比新旧 sym_hash，把"这个文件真正
+-- 改动了哪些符号"落成一行（按 file_path 最新一份，链式合并——同一文件连续多次
+-- 编辑未消费时累积成 vA→vNow 的净差异）。diffImpact 据此把波及源从"整文件所有
+-- 符号"收敛到"真正改动的符号"，改注释/格式不再虚报波及。
+-- 首次导入不写行（无旧版可比），diffImpact 对该文件回退文件级。
+CREATE TABLE IF NOT EXISTS symbol_diffs (
+    file_path TEXT PRIMARY KEY,
+    from_hash TEXT NOT NULL,       -- 对比起点文件 content_hash
+    to_hash TEXT NOT NULL,         -- 对比终点文件 content_hash（= 当前 files.content_hash）
+    added TEXT NOT NULL,           -- JSON array：新增符号 qualified_name
+    removed TEXT NOT NULL,         -- JSON array：删除符号 qualified_name
+    changed TEXT NOT NULL,         -- JSON array：实质变更符号 qualified_name（span hash 变）
+    updated_at INTEGER NOT NULL
+);
 
 -- 未决引用：序号 3 调用边提取的解析暂存（先占位，生命周期见 CodeGraph 同名表注释）
 CREATE TABLE IF NOT EXISTS unresolved_refs (

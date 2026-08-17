@@ -63,10 +63,27 @@ export interface DiffImpactResult {
   max_depth: number;
   impacted_files: ImpactedFile[];
   impacted_symbols: ImpactedSymbol[];
+  /** 每个变更文件的符号级变更明细（v3）：波及源粒度与收敛依据 */
+  symbol_diffs: SymbolDiffInfo[];
   /** 已知警告（如缓存无调用边 / changed 文件不在缓存） */
   warnings: string[];
   has_call_edges: boolean;
   message: string;
+}
+
+/** 符号级变更明细（v3）：
+ *  - granularity='symbol'：波及源=changed 符号（added 无既有调用方不做源；
+ *    全空=注释/格式变更，不计入波及）
+ *  - granularity='file'：回退整文件所有符号做源（note 说明原因）
+ */
+export interface SymbolDiffInfo {
+  /** 相对项目根路径（输入口径） */
+  path: string;
+  granularity: 'symbol' | 'file';
+  added: string[];
+  removed: string[];
+  changed: string[];
+  note?: string;
 }
 
 /** 空结果（无法打开缓存等场景） */
@@ -87,6 +104,7 @@ function emptyResult(
     max_depth,
     impacted_files: [],
     impacted_symbols: [],
+    symbol_diffs: [],
     warnings,
     has_call_edges: false,
     message,
@@ -170,27 +188,72 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     return { rel, sem, cachePath: probeCachePath(sem ?? rel) ?? sem ?? rel };
   });
 
-  // ── 直接受影响符号（changed 文件里的所有符号，depth=0）──
+  // ── 直接受影响符号（v3：优先符号级收敛，回退文件级）──
+  // 每个变更文件先查 symbol_diffs：changed 符号做波及源（depth=0）；
+  // added 不做源（新符号无既有调用方）；全空 = 注释/格式变更，不计入波及；
+  // 含 removed / 无 diff 行 → 保守回退整文件所有符号做源。
   const direct: ImpactedSymbol[] = [];
-  for (const { rel, cachePath } of changedSemantic) {
-    const rows = db
-      .prepare(
-        "SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id",
-      )
-      .all(cachePath) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
-    if (rows.length === 0) {
-      warnings.push(`变更文件 ${rel} 不在缓存中（可能未同步、删除了符号，或非受支持语言）。`);
-    }
+  const symbol_diffs: SymbolDiffInfo[] = [];
+  const collectRows = (rows: Array<{ id: string; name: string; qualified_name: string; start_line: number }>): void => {
     for (const r of rows) {
       direct.push({
         id: r.id,
         name: r.name,
         qualified_name: r.qualified_name,
-        file_path: r.id.split('#')[0] ?? cachePath,
+        file_path: r.id.split('#')[0],
         start_line: r.start_line,
         depth: 0,
         role: 'changed',
       });
+    }
+  };
+  const parseQnList = (j: string): string[] => {
+    try {
+      return JSON.parse(j) as string[];
+    } catch {
+      return [];
+    }
+  };
+  for (const { rel, cachePath } of changedSemantic) {
+    const diffRow = db
+      .prepare('SELECT from_hash, to_hash, added, removed, changed FROM symbol_diffs WHERE file_path = ?')
+      .get(cachePath) as { from_hash: string; to_hash: string; added: string; removed: string; changed: string } | undefined;
+    const filesRow = db.prepare('SELECT content_hash FROM files WHERE path = ?').get(cachePath) as
+      | { content_hash: string }
+      | undefined;
+
+    if (diffRow && filesRow && diffRow.to_hash === filesRow.content_hash) {
+      const added = parseQnList(diffRow.added);
+      const removed = parseQnList(diffRow.removed);
+      const changed = parseQnList(diffRow.changed);
+      if (removed.length > 0) {
+        // 删除符号的入边已随节点级联消失，无法定位受影响调用方 → 保守按整文件分析
+        symbol_diffs.push({ path: rel, granularity: 'file', added, removed, changed, note: `含删除符号（${removed.join(', ')}）——入边已消失，保守按文件级分析` });
+        const rows = db
+          .prepare("SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id")
+          .all(cachePath) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
+        if (rows.length === 0) warnings.push(`变更文件 ${rel} 不在缓存中（可能未同步、删除了符号，或非受支持语言）。`);
+        collectRows(rows);
+      } else if (changed.length > 0) {
+        symbol_diffs.push({ path: rel, granularity: 'symbol', added, removed, changed });
+        const ph = changed.map(() => '?').join(',');
+        const rows = db
+          .prepare(`SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' AND qualified_name IN (${ph}) ORDER BY start_line, id`)
+          .all(cachePath, ...changed) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
+        collectRows(rows);
+      } else {
+        symbol_diffs.push({
+          path: rel, granularity: 'symbol', added, removed, changed,
+          note: added.length > 0 ? `仅新增符号（${added.join(', ')}）——无既有调用方，不扩散` : '无实质符号变更（注释/空白/格式）——不计入波及',
+        });
+      }
+    } else {
+      symbol_diffs.push({ path: rel, granularity: 'file', added: [], removed: [], changed: [], note: '无符号级 diff（首次导入/旧缓存/未同步）——按文件级分析' });
+      const rows = db
+        .prepare("SELECT id, name, qualified_name, start_line FROM nodes WHERE file_path = ? AND kind != 'file' ORDER BY start_line, id")
+        .all(cachePath) as Array<{ id: string; name: string; qualified_name: string; start_line: number }>;
+      if (rows.length === 0) warnings.push(`变更文件 ${rel} 不在缓存中（可能未同步、删除了符号，或非受支持语言）。`);
+      collectRows(rows);
     }
   }
 
@@ -274,8 +337,13 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     m.count++;
     fileMeta.set(s.file_path, m);
   }
-  // 直接改动但无符号的文件（如空文件）也计入直接受影响
+  // 直接改动但无符号的文件（如空文件）也计入直接受影响——
+  // 除非符号级判定"无实质变更/仅新增"（注释格式调整不该出现在波及清单里）
+  const noRealChange = new Set(
+    symbol_diffs.filter((d) => d.granularity === 'symbol' && d.changed.length === 0).map((d) => d.path),
+  );
   for (const rel of changedRels) {
+    if (noRealChange.has(rel)) continue;
     if (!fileMeta.has(rel)) fileMeta.set(rel, { depth: 0, direct: true, count: 0 });
   }
 
@@ -306,6 +374,19 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   lines.push(`  变更文件 (${changedRels.length}): ${changedRels.join(', ')}`);
   lines.push(`  方向: ${dirLabel} | 最大深度: ${max_depth} | 调用边: ${allEdges.length} 条`);
   lines.push('');
+  if (symbol_diffs.length > 0) {
+    lines.push('【符号级变更】');
+    for (const d of symbol_diffs) {
+      const parts: string[] = [];
+      if (d.changed.length > 0) parts.push(`改 ${d.changed.join(',')}`);
+      if (d.added.length > 0) parts.push(`增 ${d.added.join(',')}`);
+      if (d.removed.length > 0) parts.push(`删 ${d.removed.join(',')}`);
+      const desc = parts.length > 0 ? parts.join('；') : (d.note ?? '无实质符号变更');
+      const noteSuffix = parts.length > 0 && d.note ? `（${d.note}）` : '';
+      lines.push(`  - ${d.path}: ${desc}${noteSuffix}`);
+    }
+    lines.push('');
+  }
   if (impacted_files.length === 0) {
     lines.push('未分析出受影响范围（无变更文件或缓存无调用边）。');
   } else {
@@ -345,6 +426,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     max_depth,
     impacted_files,
     impacted_symbols,
+    symbol_diffs,
     warnings,
     has_call_edges: callCount > 0,
     message: lines.join('\n'),

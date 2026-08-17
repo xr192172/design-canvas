@@ -37,6 +37,10 @@ export interface ImpactReportSummary {
   indirect_symbols: number;
   /** 波及文件清单（相对项目根 posix，direct+indirect；Impact Ledger 对比用） */
   impacted_file_paths: string[];
+  /** 符号级实际变更（v3）：changed 符号 qualified_name 去重（cap 20） */
+  changed_symbols: string[];
+  /** 全部变更文件均无实质符号变更（注释/空白/格式）——波及清单为空 */
+  no_real_change: boolean;
   /** 一行推送摘要 */
   summary_line: string;
 }
@@ -97,17 +101,28 @@ function hhmmss(iso: string): string {
 }
 
 /**
- * 一行推送摘要：`[影响#12] 14:32:05 改 src/b.ts(+1) → 直接2符号，波及2文件/4符号(both) · watch action=impact seq=12`
- * 单文件直接列名，多文件列首文件 + 剩余数。
+ * 一行推送摘要（v3 带符号级信息）：
+ *   - 无实质变更：`[影响#12] 14:32:05 改 src/b.ts → 无实质符号变更（注释/格式），未计入波及 · ...`
+ *   - 有实质变更：`[影响#12] 14:32:05 改 src/b.ts(b) → 直接1符号，波及2文件/4符号(both) · ...`
+ *     变更符号 ≤3 个时列名，>3 列 `+N符号`。
  */
 function buildSummaryLine(s: Omit<ImpactReportSummary, 'summary_line'>): string {
   const filesPart =
     s.changed_files.length <= 1
       ? (s.changed_files[0] ?? '无')
       : `${s.changed_files[0]}(+${s.changed_files.length - 1})`;
+  const symSuffix =
+    s.changed_symbols.length === 0
+      ? ''
+      : s.changed_symbols.length <= 3
+        ? `(${s.changed_symbols.join(',')})`
+        : `(+${s.changed_symbols.length}符号)`;
+  if (s.no_real_change) {
+    return `[影响#${s.seq}] ${hhmmss(s.created_at)} 改 ${filesPart} → 无实质符号变更（注释/格式），未计入波及 · watch action=impact seq=${s.seq}`;
+  }
   const indirectPart =
     s.indirect_files > 0 ? `波及${s.indirect_files}文件/${s.indirect_symbols}符号` : '无间接波及';
-  return `[影响#${s.seq}] ${hhmmss(s.created_at)} 改 ${filesPart} → 直接${s.direct_symbols}符号，${indirectPart}(${s.direction}) · watch action=impact seq=${s.seq}`;
+  return `[影响#${s.seq}] ${hhmmss(s.created_at)} 改 ${filesPart}${symSuffix} → 直接${s.direct_symbols}符号，${indirectPart}(${s.direction}) · watch action=impact seq=${s.seq}`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -131,6 +146,10 @@ export function runImpactReport(input: RunImpactReportInput): ImpactReportSummar
   const indirectSymbols = result.impacted_symbols.length - directSymbols;
 
   const seq = nextSeq(root);
+  const changedSymbols = [...new Set(result.symbol_diffs.flatMap((d) => d.changed))].slice(0, 20);
+  const noRealChange =
+    result.symbol_diffs.length > 0 &&
+    result.symbol_diffs.every((d) => d.granularity === 'symbol' && d.changed.length === 0 && d.removed.length === 0);
   const base = {
     seq,
     created_at: new Date().toISOString(),
@@ -142,6 +161,8 @@ export function runImpactReport(input: RunImpactReportInput): ImpactReportSummar
     direct_symbols: directSymbols,
     indirect_symbols: indirectSymbols,
     impacted_file_paths: result.impacted_files.map((f) => f.path),
+    changed_symbols: changedSymbols,
+    no_real_change: noRealChange,
   };
   const summary: ImpactReportSummary = { ...base, summary_line: buildSummaryLine(base) };
 
