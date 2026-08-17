@@ -285,8 +285,23 @@ function loadCallEdges(db: Database, featureRels: string[], maxEdges = 40): stri
   return out;
 }
 
-/** detail 中的技术噪声检测：函数调用/路径/驼峰标识（验收 LLM 是否守"零函数名"规矩） */
-const TECH_NOISE_RE = /[\w./-]+\(\s*\)|[\w-]+\.(ts|tsx|js|mjs|go|py|rs|java)\b|\b[a-z]+[A-Z][a-zA-Z]*\b/;
+/** detail 中的技术噪声检测：函数调用/路径/驼峰/snake_case 标识（验收"零函数名"规矩；放行普通英文单词） */
+const TECH_NOISE_RE =
+  /[\w./-]+\(\s*\)|[\w-]+\.(ts|tsx|js|mjs|go|py|rs|java)\b|\b[a-z]+[A-Z][a-zA-Z]*\b|\b[a-z]+(_[a-z0-9]+)+\b/;
+
+/** 限并发 map：每批最多 limit 个任务并发（避免全量并行打爆 LLM API 限流） */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * 科普编剧 v2（teach 核心）。材料三区：职责清单 / 调用记录 / 函数签名。
@@ -294,12 +309,12 @@ const TECH_NOISE_RE = /[\w./-]+\(\s*\)|[\w-]+\.(ts|tsx|js|mjs|go|py|rs|java)\b|\
  * 锚点只进 involves；steps 顺序以调用记录为证据。
  * 返回 null 表示失败/未配置（调用方降级）。
  */
-async function llmTeachFeature(material: string): Promise<TeachScript | null> {
+async function llmTeachFeature(material: string, featureName = ''): Promise<TeachScript | null> {
   const cfg = loadAgentConfig();
   if (!cfg) return null;
   const system =
     '你是技术科普编剧，擅长把软件功能讲成普通人爱看的科普视频（类似"3分钟看懂搜索引擎原理"）。\n' +
-    '给定一个功能的两份材料：【职责】每个文件是干嘛的；【调用记录】真实代码里谁调用谁、调用多少次（这是真实执行顺序的证据，材料区允许出现函数名供你理解，但你的输出不许照搬）。\n\n' +
+    '给定一个功能的材料：【职责】每个文件是干嘛的；【调用记录】真实代码里谁调用谁、调用多少次（这是真实执行顺序的证据，材料区允许出现函数名供你理解，但你的输出不许照搬）；【主人批注】项目主人在导图上写的理解/纠正（如有，优先级最高，人的说法与材料冲突时以人为准）。\n\n' +
     '请为这个功能写科普分镜：\n' +
     '1. what：从**痛点/场景**开场（"如果没它会怎样"或"它像生活中的什么"），1-2 句。禁止用"本功能用于/是一个…的功能"这类说明书腔。可以打生活类比（如"给程序装行车记录仪"）。\n' +
     '2. steps：实现原理分镜 3-6 步，像视频镜头按**真实执行/数据流顺序**推进——顺序必须以【调用记录】为证据，不能凭目录名猜。每步：\n' +
@@ -308,53 +323,123 @@ async function llmTeachFeature(material: string): Promise<TeachScript | null> {
     '   - involves：这步依据的关键文件（只能从【职责】清单的文件里选，给想深挖的工程师看）。\n' +
     '只基于给定材料，不得编造。只输出 JSON（无其他文字）：\n' +
     '{"what":"...","steps":[{"title":"...","detail":"...","involves":["a.ts"]}]}';
-  try {
-    const res = await fetch(`${cfg.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: material },
-        ],
-        temperature: 0.4,
-        response_format: { type: 'json_object' },
-      }),
-      signal: AbortSignal.timeout(90_000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const parsed = extractJsonObject(data.choices?.[0]?.message?.content ?? '');
-    if (!parsed) return null;
+  const callOnce = async (
+    userContent: string,
+  ): Promise<{ ok: boolean; status: number; content: string; finishReason: string; retryable: boolean; err?: string }> => {
+    try {
+      const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.4,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(150_000),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        return { ok: false, status: res.status, content: body.slice(0, 300), finishReason: '', retryable: res.status === 429 || res.status >= 500, err: `HTTP ${res.status}` };
+      }
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      };
+      const choice = data.choices?.[0];
+      return { ok: true, status: res.status, content: choice?.message?.content ?? '', finishReason: choice?.finish_reason ?? '', retryable: false };
+    } catch (e) {
+      const err = e as Error;
+      // 超时/网络中断可重试；配置类错误重试也没用
+      const retryable = err.name === 'TimeoutError' || err.name === 'AbortError' || err.name === 'TypeError';
+      return { ok: false, status: 0, content: '', finishReason: '', retryable, err: `${err.name}: ${err.message}` };
+    }
+  };
+
+  /** 解析 + 零函数名过滤。返回放行后的 script（可能为 null）与被拦截步骤的违规明细（供重写） */
+  const parseAndFilter = (content: string): { script: TeachScript | null; violations: string[] } => {
+    const parsed = extractJsonObject(content);
+    if (!parsed) return { script: null, violations: [] };
     const what = typeof parsed.what === 'string' ? parsed.what.trim() : '';
     const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
     const steps: TeachStep[] = [];
+    const violations: string[] = [];
     for (const s of rawSteps) {
       const step = s as { title?: unknown; detail?: unknown; involves?: unknown };
       const t = typeof step.title === 'string' ? step.title.trim() : '';
-      // 零函数名规矩：detail 带技术噪声的步骤整步丢弃（宁缺毋滥，不污染科普）
       const d = typeof step.detail === 'string' ? step.detail.trim() : '';
-      if (!t || !d || TECH_NOISE_RE.test(d)) continue;
+      if (!t || !d) continue;
+      // 零函数名规矩：detail 带技术噪声的步骤先记违规；重写失败才整步丢弃（宁缺毋滥，不污染科普）
+      if (TECH_NOISE_RE.test(d)) {
+        violations.push(`「${t}」：${d}`);
+        continue;
+      }
       const inv = Array.isArray(step.involves)
         ? step.involves.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 5)
         : undefined;
       steps.push({ title: t.slice(0, 24), detail: d.slice(0, 300), involves: inv });
     }
-    if (!what || steps.length === 0) return null;
-    return { what: what.slice(0, 200), steps: steps.slice(0, 8) };
-  } catch {
+    if (!what || steps.length === 0) return { script: null, violations };
+    return { script: { what: what.slice(0, 200), steps: steps.slice(0, 8) }, violations };
+  };
+
+  try {
+    // 首遍调用：空 content（模型偶发返回空）/超时/限流 → 退避重试，最多 3 次尝试
+    type CallResult = Awaited<ReturnType<typeof callOnce>>;
+    const needRetry = (x: CallResult): boolean => (!x.ok && x.retryable) || (x.ok && x.content.trim() === '');
+    let r = await callOnce(material);
+    for (let attempt = 2; attempt <= 3 && needRetry(r); attempt++) {
+      console.error(`[teach] 功能「${featureName}」第 ${attempt - 1} 次尝试失败（${r.err || r.content.slice(0, 100) || '空 content'}），${attempt * 2}s 后重试`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      r = await callOnce(material);
+    }
+    if (!r.ok) {
+      console.error(`[teach] 功能「${featureName}」LLM 调用失败：${r.err ?? ''} ${r.content}`);
+      return null;
+    }
+    let { script, violations } = parseAndFilter(r.content);
+    if (!script && r.content.trim() === '') {
+      console.error(`[teach] 功能「${featureName}」LLM 返回空 content（finish_reason=${r.finishReason}）`);
+    }
+    // 违规重写回路：≥2 步带技术标识（或全灭）时，把违规明细发回 LLM 重写一次——
+    // LLM 常照搬材料里的 snake_case 模块名，丢弃会导致整个功能无分镜，重写才能两全（零噪声 + 有分镜）
+    if (violations.length >= 2 && (script === null || script.steps.length < 3)) {
+      console.error(`[teach] 功能「${featureName}」${violations.length} 步含技术标识，触发重写回路`);
+      const rewriteUser =
+        material +
+        '\n\n【重写要求】你上一遍输出的以下步骤 detail 含函数名/文件名/英文驼峰或下划线标识，已全部作废：\n' +
+        violations.map((v) => `- ${v}`).join('\n') +
+        '\n请重新输出完整 JSON（what + 全部 steps）：违规步骤用纯生活化语言重写（如「总指挥模块」「翻译官」这类角色化说法替代具体标识），未违规的步骤保持原样。involves 字段仍可写真实文件名。';
+      const r2 = await callOnce(rewriteUser);
+      if (r2.ok) {
+        const second = parseAndFilter(r2.content);
+        if (second.script && (script === null || second.script.steps.length > script.steps.length)) {
+          console.error(`[teach] 功能「${featureName}」重写成功：${second.script.steps.length} 步全部合规`);
+          script = second.script;
+        }
+      }
+    }
+    if (!script) {
+      console.error(`[teach] 功能「${featureName}」无有效分镜（违规 ${violations.length} 步重写后仍不合规）`);
+      return null;
+    }
+    return script;
+  } catch (e) {
+    console.error(`[teach] 功能「${featureName}」意外异常：`, (e as Error).message);
     return null;
   }
 }
 
-/** 组装单个功能的实现材料 v2：职责 + 调用记录（顺序证据）+ 函数签名 */
+/** 组装单个功能的实现材料 v2：职责 + 调用记录（顺序证据）+ 主人批注 */
 function buildTeachMaterial(
   projectTitle: string,
   fName: string,
   communities: FeatureTree['features'][number]['communities'],
   fileIndex: ReturnType<typeof buildFileIndex>,
   callEdges: string[],
+  ownerNotes: string[],
 ): string {
   const anchors = communities.slice(0, 8).map((c) => c.name);
   const rels = [...new Set(communities.flatMap((c) => c.files))];
@@ -377,6 +462,10 @@ function buildTeachMaterial(
     parts.push(...callEdges.map((e) => `- ${e}`));
   } else {
     parts.push('【调用记录】无（该功能无跨文件调用数据，分镜顺序依据职责推断并在 detail 中说明）');
+  }
+  if (ownerNotes.length > 0) {
+    parts.push('【主人批注】项目主人在这张导图上写的批注（人的理解和纠正，优先级最高，必须融入 what/steps）：');
+    parts.push(...ownerNotes.map((n) => `- ${n}`));
   }
   return parts.join('\n');
 }
@@ -441,11 +530,26 @@ async function buildTeachMindMap(
   const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
   db?.close();
 
-  const scripts = useLlm
-    ? await Promise.all(
-        ft.features.map((f, i) =>
-          llmTeachFeature(buildTeachMaterial(title, f.name, f.communities, fileIndex, callEdgeLists[i])),
-        ),
+  // 主人批注分拣：导图节点 id f{i}（功能）/ f{i}:{j}（步骤），target_id 前缀匹配
+  const humanNotes = (dsl.annotations ?? []).filter((a) => a.author === 'human' && !a.resolved && a.text);
+  const notesPerFeature = ft.features.map((_, i) => {
+    const prefix = `f${i}:`;
+    return humanNotes
+      .filter((a) => a.target_id === `f${i}` || a.target_id?.startsWith(prefix))
+      .map((a) => a.text)
+      .slice(0, 10);
+  });
+
+  // 限并发调用（3 个一批）：全量 Promise.all 并行易触发 API 限流（429），导致整批"AI 分镜暂不可用"
+  const scripts: (TeachScript | null)[] = useLlm
+    ? await mapLimit(
+        ft.features,
+        3,
+        (f, i) =>
+          llmTeachFeature(
+            buildTeachMaterial(title, f.name, f.communities, fileIndex, callEdgeLists[i], notesPerFeature[i]),
+            f.name,
+          ),
       )
     : ft.features.map(() => null as TeachScript | null);
   const anyLlm = scripts.some((s) => s !== null);

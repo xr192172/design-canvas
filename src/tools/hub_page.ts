@@ -12,7 +12,7 @@
  */
 
 /** 公共壳：统一深空蓝视觉 */
-function shell(title: string, body: string, script: string): string {
+export function shell(title: string, body: string, script: string): string {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -188,9 +188,14 @@ export function renderProjectPage(feature: string): string {
       <h1 style="font-size:24px;margin-bottom:4px;">${safeFeature}</h1>
       <p id="proj-meta" style="font-size:13px;opacity:.6;"></p>
     </div>
-    <a id="dev-view" href="/${safeFeature}.html" target="_blank" rel="noopener" style="display:none;
-      font-size:13px;color:#8fb7e8;border:1px solid rgba(125,211,252,.35);border-radius:10px;padding:7px 14px;">
-      🔓 开发者视图（文件星图）→</a>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <a id="mm-view" href="/mindmap/${safeFeature}" target="_blank" rel="noopener"
+        style="font-size:13px;font-weight:700;color:#0b1226;background:linear-gradient(135deg,#7dd3fc,#5ba3d9);border-radius:10px;padding:8px 16px;box-shadow:0 4px 14px rgba(125,211,252,.25);">
+        🧠 思维导图（可批注）→</a>
+      <a id="dev-view" href="/${safeFeature}.html" target="_blank" rel="noopener" style="display:none;
+        font-size:13px;color:#8fb7e8;border:1px solid rgba(125,211,252,.35);border-radius:10px;padding:7px 14px;">
+        🔓 开发者视图（文件星图）→</a>
+    </div>
   </div>
 
   <!-- ❶ 这是什么软件 -->

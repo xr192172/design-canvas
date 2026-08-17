@@ -236,16 +236,12 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
     } else if (!dsl.source_root && wasFlat) {
       note = '该项目缺少源码快照（早期导入数据），无法聚类功能树；重新导入可获得完整功能视图';
     }
-  } else if (
-    refresh_llm &&
-    (mindMap.view !== 'teach' || mindMap.mode !== 'llm') &&
-    (dsl.feature_tree?.features?.length ?? 0) > 0
-  ) {
-    // 树已是 LLM 人话版，但 teach 分镜缺失/未升级 → 补生成（慢路径专用）
+  } else if (refresh_llm && (dsl.feature_tree?.features?.length ?? 0) > 0) {
+    // refresh_llm 总是重建 teach：批注（DSL.annotations）可能已变，LLM 需读到最新的人的理解
     const result = await deriveMindMap({ feature, view: 'teach', gen_descriptions: true });
     if (result.mode === 'llm') {
       mindMap = result.mind_map;
-      note = '已生成 AI 科普分镜';
+      note = '已生成 AI 科普分镜（含最新批注）';
     }
   }
 

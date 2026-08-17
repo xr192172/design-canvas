@@ -40,6 +40,7 @@ import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { renderDsl } from './render_dsl.js';
 import { renderHomePage, renderProjectPage } from './hub_page.js';
+import { renderMindmapPage } from './mindmap_page.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
@@ -849,6 +850,69 @@ async function handleApiMmdChat(req: http.IncomingMessage, res: http.ServerRespo
     const history = Array.isArray(params.history) ? params.history : [];
     const result = await runMindmapAgent({ feature, message, history });
     sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET/POST /api/annotations：思维导图人工批注（写回 DSL.annotations，author=human）
+ *  GET ?feature=X —— 返回该 feature 全部 annotations（前端只渲染 human 便签）
+ *  POST {feature, notes:[{id,target_id,text,pos}]} —— 全量替换 human 注解
+ *  （llm/系统注解保留不动）；saveDSL 推 rev 并 SSE 广播，LLM 再生成 teach 分镜时读到 */
+async function handleApiAnnotations(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  method: string,
+): Promise<void> {
+  try {
+    let feature = '';
+    if (method === 'GET') {
+      const url = new URL(req.url || '/', 'http://localhost');
+      feature = (url.searchParams.get('feature') || '').trim();
+      if (!feature) {
+        sendError(res, 400, '缺少 feature 参数');
+        return;
+      }
+      const dsl = getDSL(feature);
+      if (!dsl) {
+        sendError(res, 404, `feature "${feature}" 不存在`);
+        return;
+      }
+      sendJson(res, 200, { success: true, annotations: dsl.annotations ?? [] });
+      return;
+    }
+    // POST：全量替换 human 注解
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    feature = String(params.feature || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    const notes = Array.isArray(params.notes) ? params.notes : [];
+    const now = new Date().toISOString();
+    const humanized = notes
+      .filter((n: { target_id?: unknown; text?: unknown }) => n && typeof n.text === 'string' && typeof n.target_id === 'string' && n.text.trim())
+      .map((n: { id?: unknown; target_id: string; text: string; pos?: unknown }) => ({
+        id: typeof n.id === 'string' && n.id ? n.id : `note_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        target_id: n.target_id,
+        text: n.text.trim().slice(0, 500),
+        type: 'comment' as const,
+        author: 'human',
+        created: now,
+        pos:
+          n.pos && typeof (n.pos as { x?: unknown }).x === 'number' && typeof (n.pos as { y?: unknown }).y === 'number'
+            ? { x: (n.pos as { x: number }).x, y: (n.pos as { y: number }).y }
+            : undefined,
+      }));
+    dsl.annotations = [...(dsl.annotations ?? []).filter((a) => a.author !== 'human'), ...humanized];
+    saveDSL(dsl, 'browser');
+    sendJson(res, 200, { success: true, count: humanized.length });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1908,6 +1972,11 @@ export async function startServer(port?: number): Promise<void> {
       void handleApiOverview(req, res, method);
       return;
     }
+
+    if (url.startsWith('/api/annotations') && (method === 'GET' || method === 'POST')) {
+      void handleApiAnnotations(req, res, method);
+      return;
+    }
     if (url.startsWith('/api/mind-map') && method === 'GET') {
       handleApiMindMapGet(req, res);
       return;
@@ -2005,6 +2074,18 @@ export async function startServer(port?: number): Promise<void> {
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderProjectPage(feature));
+      return;
+    }
+
+    if (url.startsWith('/mindmap/') && method === 'GET') {
+      // 思维导图画布页：放射导图 + 人工批注（人机共笔主视图）
+      const feature = decodeURIComponent(url.slice('/mindmap/'.length).split('?')[0]).replace(/[/\\]/g, '');
+      if (!feature) {
+        sendError(res, 400, '缺少项目名');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderMindmapPage(feature));
       return;
     }
 

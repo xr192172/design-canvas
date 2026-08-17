@@ -46,4 +46,6 @@ export interface Annotation {
   assignee?: string;
   /** 标签（自定义分类） */
   tags?: string[];
+  /** 思维导图画布坐标（便签位置，用户拖动后持久化） */
+  pos?: { x: number; y: number };
 }
