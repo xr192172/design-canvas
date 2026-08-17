@@ -1125,6 +1125,9 @@ ${nodesXml}
 ${edgesXml}
 ${simEdgesXml}
       </svg>
+      <button id="sidebar-toggle" class="sidebar-toggle" type="button" title="切换右侧面板（动画/仿真/语义层）的收放，收起后画布占满全宽">
+        <span class="sb-icon">▤</span><span class="sb-label" data-i18n="sidebar_toggle">面板</span>
+      </button>
       ${buildFeatureCards(dsl)}
     </div>
     <aside class="sidebar">

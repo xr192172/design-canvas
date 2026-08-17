@@ -61,6 +61,7 @@ export const UI_DICT: Record<string, { zh: string; en: string }> = {
   'zoom_fit': { zh: '⤢ 适应', en: '⤢ Fit' },
   'zoom_reset': { zh: '⟲ 重置', en: '⟲ Reset' },
   'feature_overview': { zh: '🏷 功能概览', en: '🏷 Features' },
+  'sidebar_toggle': { zh: '面板', en: 'Panel' },
 
   // ── 右键菜单 / 多选 ──
   'edit_label': { zh: '✏️ 编辑标签', en: '✏️ Edit label' },

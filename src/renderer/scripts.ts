@@ -5097,6 +5097,29 @@ ${I18N_SOURCE}
     });
   }
 
+  // ==== 侧栏折叠抽屉：收起右侧面板让画布占满全宽（localStorage 记忆） ====
+  function setupSidebarToggle() {
+    const btn = document.getElementById('sidebar-toggle');
+    const mainEl = document.querySelector('main');
+    if (!btn || !mainEl) return;
+    const icon = btn.querySelector('.sb-icon');
+    const label = btn.querySelector('.sb-label');
+    const KEY = 'dc-sidebar-hidden';
+    let hidden = false;
+    try { hidden = localStorage.getItem(KEY) === '1'; } catch { /* ignore */ }
+    const apply = (h) => {
+      mainEl.classList.toggle('sidebar-hidden', h);
+      if (icon) icon.textContent = h ? '▥' : '▤';
+      if (label) {
+        // 中性词：面板/展开，折叠状态用图标箭头区分，避免与 i18n 文案冲突
+        label.textContent = h ? '展开' : '面板';
+      }
+      try { localStorage.setItem(KEY, h ? '1' : '0'); } catch { /* ignore */ }
+    };
+    btn.addEventListener('click', () => { hidden = !hidden; apply(hidden); });
+    apply(hidden);
+  }
+
   // ==== 多语言切换 ====
   function setupLanguage() {
     let lang = detectLang();
@@ -6054,6 +6077,7 @@ ${I18N_SOURCE}
   setupReportPanel();
   setupToolbarAdvanced();
   setupThemeSwitcher();
+  setupSidebarToggle();
   setupLanguage();
   setupNodeSearch();
   setupFilters();

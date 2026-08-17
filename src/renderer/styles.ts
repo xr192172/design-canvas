@@ -243,6 +243,46 @@ main {
   overflow: auto;
   padding: 24px;
   background: var(--theme-background);
+  position: relative;
+}
+/* 侧栏折叠抽屉开关：贴在画布右上角，不占工具栏空间 */
+.sidebar-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--theme-text-sub);
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.sidebar-toggle:hover {
+  color: var(--theme-text);
+  border-color: var(--theme-primary);
+}
+.sidebar-toggle .sb-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+/* 收起侧栏：画布独占全宽，侧栏隐藏 */
+main.sidebar-hidden {
+  grid-template-columns: 1fr;
+}
+main.sidebar-hidden .sidebar {
+  display: none;
+}
+/* 收起时把开关挪回画布右边缘，避免悬空 */
+main.sidebar-hidden .sidebar-toggle {
+  right: 100%;
+  margin-right: 12px;
 }
 .canvas-wrap svg {
   background: var(--theme-secondary);
