@@ -22,7 +22,7 @@ import { queryCameraLog } from '../camera/log_query.js';
 import { judgeEvents, judgeEventsWithLLM, normalizeEvents, renderJudgeReport } from '../camera/judge_service.js';
 import { judgeGuardLog } from '../camera/judge_guard.js';
 import { importProject } from './import_project.js';
-import { getProjectCacheDb } from '../db/db.js';
+import { getProjectCacheDb, openDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
 import { dagLayout, forceLayout, gridAlign } from './dag_layout.js';
 import { scaffold } from './scaffold.js';
@@ -38,6 +38,8 @@ import { languageConcepts } from './language_concepts.js';
 import { buildDictionaryView, getGlobalDictFile, getProjectDictFile, loadGlobalDict, loadProjectDict, saveGlobalEntry, saveProjectEntry, splitHighlights, validateProjectRoot, type DictEntry } from './dictionary.js';
 import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
+import { renderDsl } from './render_dsl.js';
+import { renderHomePage, renderProjectPage } from './hub_page.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
@@ -88,6 +90,7 @@ const MIME_TYPES: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
 };
@@ -168,11 +171,31 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
       return;
     }
     const files = fs.readdirSync(featuresDir).filter((f) => f.endsWith('.json'));
-    const features = files.map((f) => {
-      const content = fs.readFileSync(path.join(featuresDir, f), 'utf-8');
-      const dsl = JSON.parse(content);
-      return { feature: dsl.feature, title: dsl.title || dsl.feature };
-    });
+    const features = files.flatMap((f) => {
+      try {
+        const fp = path.join(featuresDir, f);
+        const dsl = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+        // 主导语言：semantic.files 里出现最多的扩展名
+        const langCount = new Map<string, number>();
+        for (const sf of dsl.semantic?.files ?? []) {
+          const ext = path.extname(sf.path ?? '').slice(1).toLowerCase();
+          if (ext) langCount.set(ext, (langCount.get(ext) ?? 0) + 1);
+        }
+        let language = '';
+        let bestN = 0;
+        for (const [l, n] of langCount) if (n > bestN) { bestN = n; language = l; }
+        return [{
+          feature: dsl.feature,
+          title: dsl.title || dsl.feature,
+          files: dsl.semantic?.files?.length ?? 0,
+          nodes: Array.isArray(dsl.geometry?.nodes) ? dsl.geometry.nodes.length : 0,
+          language,
+          updated_at: fs.statSync(fp).mtime.toISOString(),
+        }];
+      } catch {
+        return []; // 单个 DSL 损坏不影响列表
+      }
+    }).sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
     sendJson(res, 200, { features });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
@@ -282,78 +305,73 @@ async function handleApiLiveRebuild(req: http.IncomingMessage, res: http.ServerR
   }
 }
 
-/** 递归扫描目录下源文件：最新 mtime + 晚于 since 的变更数 */
-function scanSrcMtime(dir: string, since: number): { latest: number; changed: number } {
-  let latest = 0;
-  let changed = 0;
-  const walk = (d: string): void => {
-    for (const name of fs.readdirSync(d)) {
-      if (name === 'node_modules' || name.startsWith('.')) continue;
-      const p = path.join(d, name);
-      const st = fs.statSync(p);
-      if (st.isDirectory()) {
-        walk(p);
-        continue;
-      }
-      if (!/\.(ts|tsx|js|mjs|py|go|vue)$/.test(name)) continue;
-      latest = Math.max(latest, st.mtimeMs);
-      if (st.mtimeMs > since) changed++;
-    }
-  };
-  walk(dir);
-  return { latest, changed };
-}
-
-/** GET /api/report_status：报告保鲜检测（Hub 主页生成时间 vs src/ 最新变更） */
-function handleApiReportStatus(_req: http.IncomingMessage, res: http.ServerResponse): void {
+/** POST /api/import：浏览器目录上传导入项目
+ * body: { files: [{ path, content }], feature? } —— 前端用 webkitdirectory 选目录后
+ * 逐文件读文本（已过滤 node_modules/二进制）。服务端把源码持久化到
+ * .design-canvas/projects/<feature>/ → importProject 解析（DSL 记 source_root）→
+ * renderDsl 渲染项目地图并注册产物。 */
+const IMPORT_BODY_LIMIT = 200 * 1024 * 1024; // 目录上传远超通用 5MB 上限
+async function handleApiImport(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
-    const hubFile = path.join(PUBLIC_DIR, 'index.html');
-    if (!fs.existsSync(hubFile)) {
-      sendJson(res, 200, { exists: false, stale: false });
+    const body = await readBody(req, IMPORT_BODY_LIMIT);
+    let parsed: { files?: { path: string; content: string }[]; feature?: string };
+    try {
+      parsed = JSON.parse(body.toString('utf-8') || '{}');
+    } catch {
+      sendError(res, 400, '请求体需为合法 JSON：{ "files": [{ "path", "content" }] }');
       return;
     }
-    const generatedMs = fs.statSync(hubFile).mtimeMs;
-    const srcDir = path.join(process.cwd(), 'src');
-    const { latest, changed } = fs.existsSync(srcDir) ? scanSrcMtime(srcDir, generatedMs) : { latest: 0, changed: 0 };
-    sendJson(res, 200, {
-      exists: true,
-      generated_at: new Date(generatedMs).toISOString(),
-      src_latest: latest ? new Date(latest).toISOString() : null,
-      stale: changed > 0,
-      changed_files: changed,
-    });
-  } catch (e) {
-    sendError(res, 500, (e as Error).message);
-  }
-}
+    const files = (parsed.files || []).filter((f) => f && typeof f.path === 'string' && typeof f.content === 'string');
+    if (!files.length) {
+      sendError(res, 400, '没有可导入的文件');
+      return;
+    }
+    // feature 名：显式指定 > 首文件顶层目录名 > 首文件名
+    const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/^_+|_+$/g, '') || 'project';
+    let feature = parsed.feature ? sanitize(parsed.feature) : '';
+    if (!feature) {
+      const segs = files[0].path.split('/').filter(Boolean);
+      feature = sanitize(segs.length > 1 ? segs[0] : (segs[0] || 'project').replace(/\.[^.]+$/, ''));
+    }
 
-/** POST /api/regenerate：重新生成自我分析报告（跑 scripts/self_analyze.mjs，完成后 SSE 广播） */
-let regenerating = false;
-async function handleApiRegenerate(_req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const script = path.join(process.cwd(), 'scripts', 'self_analyze.mjs');
-  if (!fs.existsSync(script)) {
-    sendError(res, 400, 'scripts/self_analyze.mjs 不存在，当前项目不支持重新生成');
-    return;
-  }
-  if (regenerating) {
-    sendJson(res, 409, { error: '正在重新生成中，请稍候' });
-    return;
-  }
-  regenerating = true;
-  const t0 = Date.now();
-  try {
-    const { spawn } = await import('node:child_process');
-    await new Promise<void>((resolve, reject) => {
-      const p = spawn('node', [script], { stdio: 'inherit' });
-      p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`self_analyze 退出码 ${code}`))));
-      p.on('error', reject);
-    });
-    broadcastSSE('report-regenerated', { at: new Date().toISOString() });
-    sendJson(res, 200, { success: true, duration_ms: Date.now() - t0 });
+    // 源码持久化到 .design-canvas/projects/<feature>/（重复导入整体替换旧快照）。
+    // DSL.source_root 指向这里，巨石体检/影响面/一致性等读源功能据此定位文件。
+    // 上传路径首段是用户所选文件夹名（webkitdirectory 特性），与 feature 命名重复，剥掉。
+    const projDir = path.join(process.cwd(), '.design-canvas', 'projects', feature);
+    if (fs.existsSync(projDir)) fs.rmSync(projDir, { recursive: true, force: true });
+    for (const f of files) {
+      const segs = f.path.split('/').filter(Boolean);
+      const rel = segs.length > 1 ? segs.slice(1).join('/') : segs.join('/');
+      if (!rel) continue;
+      // 防路径穿越：规范化后必须落在项目目录内
+      const dest = path.join(projDir, rel);
+      if (path.relative(projDir, path.resolve(dest)).startsWith('..')) continue;
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, f.content, 'utf-8');
+    }
+
+    // 缓存 db 固定位置（跨重复导入增量复用），与项目目录生命周期解耦
+    const cacheDb = openDb(path.join(process.cwd(), '.design-canvas', `import_cache_${feature}.db`));
+    let imp;
+    try {
+      imp = await importProject({
+        project_dir: projDir,
+        feature,
+        cache_db: cacheDb,
+        gen_roles: true,
+        source_root: projDir,
+      });
+    } finally {
+      cacheDb.close();
+    }
+
+    // 导入即渲染项目地图（renderDsl 自动注册产物到 registry）
+    const dsl = getDSL(feature);
+    const rendered = renderDsl({ dsl_json: JSON.stringify(dsl) });
+    broadcastSSE('project-imported', { feature, at: new Date().toISOString() });
+    sendJson(res, 200, { success: true, feature, html: path.basename(rendered.htmlFile), message: imp.message });
   } catch (e) {
-    sendError(res, 500, (e as Error).message);
-  } finally {
-    regenerating = false;
+    sendError(res, 500, `导入失败：${(e as Error).message}`);
   }
 }
 
@@ -454,6 +472,51 @@ async function handleApiSplitPlan(req: http.IncomingMessage, res: http.ServerRes
       filename: 'split_' + relPath.replace(/[^a-zA-Z0-9_-]/g, '_') + '.md',
       lines: report.lines,
       communities: report.communities.length,
+    });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/monolith：全项目巨石体检（只读分析，不改任何文件）
+ * body 三选一：{ feature } | { project_dir } | { files: [...] }，可选 warn_lines/crit_lines/max_files。
+ * feature 模式：从该 DSL 的 semantic.files 取文件清单，base_dir 用 serve 项目根——
+ * 项目页「深入分析 → 巨石体检」即用此模式，导入的任意项目都能体检。
+ * 返回 { total_files, oversized, reports: [{ path, lines, status, decl_count, communities, suggestion }] }。 */
+async function handleApiMonolith(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    const input: import('./monolith.js').CheckMonolithInput = {
+      warn_lines: typeof params.warn_lines === 'number' ? params.warn_lines : undefined,
+      crit_lines: typeof params.crit_lines === 'number' ? params.crit_lines : undefined,
+      max_files: typeof params.max_files === 'number' ? params.max_files : undefined,
+    };
+    if (params.feature) {
+      const dsl = getDSL(String(params.feature));
+      if (!dsl) {
+        sendError(res, 404, `feature "${params.feature}" 不存在`);
+        return;
+      }
+      input.feature = String(params.feature);
+      // DSL 记录了 source_root（导入项目）→ checkMonolith 自动用它；
+      // 否则（本仓库自身 feature）回退 serve 项目根
+      if (!dsl.source_root) input.base_dir = getServeProjectRoot();
+    } else if (params.project_dir) {
+      input.project_dir = validateProjectRoot(String(params.project_dir), '/api/monolith project_dir');
+    } else if (Array.isArray(params.files) && params.files.length > 0) {
+      input.files = params.files.map(String);
+    } else {
+      sendError(res, 400, '缺少参数：feature / project_dir / files 三选一');
+      return;
+    }
+    const result = await checkMonolith(input);
+    sendJson(res, 200, {
+      success: true,
+      message: result.message,
+      total_files: result.total_files,
+      oversized: result.oversized,
+      reports: result.reports,
     });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
@@ -1075,7 +1138,7 @@ const EXPLAIN_SCRIPT: Array<{ title: string; n: Narrations; nodeId: string }> = 
     n: {
       newbie: '我们用这个工具分析它自己——把我们自己的代码文件夹扫描一遍，生成一张像星空一样的图，每个点代表一个文件。你现在看的就是这张图。',
       pm: '这是"吃自己的狗粮"：用工具分析自身代码库，把 68 个文件、660 个符号、100 条依赖关系可视化。既验证工具能力，又让新人一眼看懂项目结构——这是最好的产品演示。',
-      senior: 'importProject 用 TreeSitterKernel 解析 src/ 全量文件，产出符号 + 依赖边 + 目录容器节点，渲染成 self_analyze 星图（349 节点）。支持 max_files 截断（默认200）、缓存增量（content_hash）、删除侦测。',
+      senior: 'importProject 用 TreeSitterKernel 解析 src/ 全量文件，产出符号 + 依赖边 + 目录容器节点，渲染成项目地图。支持 max_files 截断（默认200）、缓存增量（content_hash）、删除侦测。',
     },
     nodeId: 'file_tools_import_project_ts',
   },
@@ -1305,7 +1368,7 @@ function handleTourPage(res: http.ServerResponse): void {
 </head>
 <body>
   <div class="head">
-    <a href="./index.html">← 主页</a>
+    <a href="/">← 主页</a>
     <span class="ftitle" id="ftitle"></span>
     <span class="fchip" id="fchip"></span>
     <span class="prog" id="prog"></span>
@@ -1377,10 +1440,14 @@ function handleTourPage(res: http.ServerResponse): void {
 
 /**
  * GET /explain.html：科普式讲解导览播放器。
- * 左侧嵌入 self_analyze.html 星图，右侧字幕条逐模块讲解。
+ * 左侧嵌入项目地图（URL ?map= 指定，默认注册表最新地图），右侧字幕条逐模块讲解。
  * 每步通过 postMessage({ source:'dc-tour', action:'fly', nodeId }) 让星图定位高亮。
  */
 function handleExplainPage(res: http.ServerResponse): void {
+  // 嵌入哪张地图：URL ?map=xxx.html 优先，否则注册表里最新的 feature_diagram 产物
+  const latestMap = readRegistry()
+    .filter((a) => a.type === 'feature_diagram' && a.path.endsWith('.html'))
+    .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))[0];
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1421,9 +1488,9 @@ function handleExplainPage(res: http.ServerResponse): void {
   .gen-btn:disabled { opacity: .4; cursor: default; }
 </style>
 </head>
-<body>
+<body data-map="${latestMap ? latestMap.path.replace(/"/g, '') : ''}">
   <div class="head">
-    <a href="./index.html">← 主页</a>
+    <a href="/">← 主页</a>
     <span class="ftitle">科普式讲解导览 · design-canvas 主链路</span>
     <span class="prog" id="prog"></span>
   </div>
@@ -1460,7 +1527,7 @@ function handleExplainPage(res: http.ServerResponse): void {
   var loading = document.getElementById('loading');
   var cTitle = document.getElementById('c-title');
   var cBody = document.getElementById('c-body');
-  var STAR = 'self_analyze.html';
+  var STAR = new URLSearchParams(location.search).get('map') || document.body.getAttribute('data-map') || 'conveyor.html';
   function go(k){
     if(!steps.length) return;
     i = Math.max(0, Math.min(steps.length-1, k));
@@ -1568,8 +1635,8 @@ function handleStaticFile(req: http.IncomingMessage, res: http.ServerResponse): 
   const qIdx = filePath.indexOf('?');
   if (qIdx !== -1) filePath = filePath.substring(0, qIdx);
   if (filePath === '/') {
-    // Hub 主页优先（self-analyze 等流水线生成的项目入口），否则回退示例画布
-    filePath = fs.existsSync(path.join(PUBLIC_DIR, 'index.html')) ? '/index.html' : '/conveyor.html';
+    // 兜底：/ 路由已在主路由渲染 Hub 主页；走到这里说明非 GET，回退示例画布
+    filePath = '/conveyor.html';
   }
 
   // 活态 DSL 别名：浏览器设计视图 fetch 相对路径 design-canvas.json，
@@ -1686,11 +1753,10 @@ export async function startServer(port?: number): Promise<void> {
     const isWriteApi =
       method === 'POST' &&
       (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
-        url.startsWith('/api/registry') ||
+        url.startsWith('/api/registry') || url.startsWith('/api/import') ||
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
         url.startsWith('/api/mmd/chat') ||
-        url.startsWith('/api/mind-map') ||
-        url.startsWith('/api/regenerate'));
+        url.startsWith('/api/mind-map'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
@@ -1741,23 +1807,23 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/import') && method === 'POST') {
+      void handleApiImport(req, res);
+      return;
+    }
+
     if (url.startsWith('/api/live') && method === 'GET') {
       handleApiLive(req, res);
       return;
     }
 
-    if (url.startsWith('/api/report_status') && method === 'GET') {
-      handleApiReportStatus(req, res);
-      return;
-    }
-
-    if (url.startsWith('/api/regenerate') && method === 'POST') {
-      handleApiRegenerate(req, res);
-      return;
-    }
-
     if (url.startsWith('/api/split_plan') && method === 'POST') {
       handleApiSplitPlan(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/monolith') && method === 'POST') {
+      void handleApiMonolith(req, res);
       return;
     }
 
@@ -1881,6 +1947,25 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url === '/' || url.startsWith('/?')) {
+      // Hub 主页：项目选择器（动态渲染，无预生成文件）
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderHomePage());
+      return;
+    }
+
+    if (url.startsWith('/project/') && method === 'GET') {
+      // 项目专属页：主视图 + 递进分组入口
+      const feature = decodeURIComponent(url.slice('/project/'.length).split('?')[0]).replace(/[/\\]/g, '');
+      if (!feature) {
+        sendError(res, 400, '缺少项目名');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderProjectPage(feature));
+      return;
+    }
+
     if (url.startsWith('/api/trace-exec') && method === 'POST') {
       handleApiTraceExec(req, res);
       return;
@@ -1904,13 +1989,15 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 代码生成 API: POST /api/scaffold`);
       console.log(`  - 一致性检查 API: POST /api/consistency`);
       console.log(`  - 变更影响分析 API: POST /api/diff-impact`);
+      console.log(`  - 巨石体检/拆分任务单 API: POST /api/monolith, POST /api/split_plan`);
       console.log(`  - 架构分层分析 API: POST /api/arch-layer`);
       console.log(`  - 导览路径 API: POST /api/guided-tour`);
       console.log(`  - 语言概念 API: POST /api/language-concepts`);
       console.log(`  - git 改动清单 API: GET /api/git-diff`);
       console.log(`  - 产物注册表 API: GET/POST /api/registry`);
+      console.log(`  - 项目导入 API: POST /api/import（浏览器目录上传）`);
       console.log(`  - SSE 实时推送: GET /api/events`);
-      console.log(`  - 访问 http://localhost:${listenPort} 打开设计画布`);
+      console.log(`  - 访问 http://localhost:${listenPort} 打开 Hub（项目选择器 → 项目专属页）`);
 
       // 常驻 watch（最后一英里实时推送）：DC_AUTO_WATCH=1 + DC_WATCH_FEATURE=X 时，
       // 监听 cwd 代码变更 → 重建实际 DSL（live/）→ SSE 推送 dsl-changed(source=watch)，

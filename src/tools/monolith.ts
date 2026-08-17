@@ -689,7 +689,8 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
   } else if (input.feature) {
     const dsl = getDSL(input.feature);
     if (!dsl) throw new Error(`feature 不存在: ${input.feature}`);
-    const baseDir = path.resolve(input.base_dir ?? process.cwd());
+    // 源码根回退链：显式 base_dir > DSL.source_root（导入时持久化的源码快照）> cwd
+    const baseDir = path.resolve(input.base_dir ?? dsl.source_root ?? process.cwd());
     const files = (dsl.semantic?.files ?? []).slice(0, maxFiles);
     for (const sf of files) {
       const abs = path.resolve(baseDir, sf.path);

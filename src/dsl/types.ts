@@ -175,6 +175,9 @@ export interface DesignDSL {
   version?: string;
   /** 人类可读标题 */
   title?: string;
+  /** 导入源码的持久根目录（绝对路径）。semantic.files 的相对路径以此为基；
+   * 巨石体检/影响面/一致性等需读源文件的功能据此定位源码。 */
+  source_root?: string;
   /** 乐观锁修订号（daemon 写权威用：写前携带 base _dsl_rev，冲突则拒绝，防多会话丢改动） */
   _dsl_rev?: number;
   status?: DiagramStatus;

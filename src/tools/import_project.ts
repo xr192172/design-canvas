@@ -68,6 +68,12 @@ export interface ImportProjectInput {
    */
   gen_roles?: boolean;
   /**
+   * 可选：导入源码的持久根目录（绝对路径）。提供时写入 DSL.source_root，
+   * 供巨石体检/影响面/一致性等需读源文件的功能定位源码。
+   * 浏览器上传导入时由 serve 指定为 .design-canvas/projects/<feature>/。
+   */
+  source_root?: string;
+  /**
    * 可选：设计模式 — 聚合文件到目录层级，只输出高层模块节点，不输出每个文件。
    * 用于从现有代码快速生成设计意图 DSL（草图供人后续调整）。默认 false=保留每个文件。
    * true 时：同一目录下的所有文件聚合为一个模块容器节点，符号和 API 汇总到语义层。
@@ -1072,7 +1078,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       type: 'feature_diagram',
       feature,
       version: '1.0.0',
-      title: input.title || `${feature}（import_project 生成${input.design_mode ? ' - 设计模式' : input.functional_mode ? ' - 功能模式' : ''}）`,
+      title: input.title || feature,
+      source_root: input.source_root,
       status: 'done',
       geometry: {
         layout: 'free',
