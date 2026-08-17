@@ -121,7 +121,7 @@ export function createRebuildThrottler(opts: RebuildThrottleOptions): RebuildThr
 // 注册表（MCP 长进程内按 project_dir 复用）
 // ─────────────────────────────────────────────────────────────
 
-/** 改前预告声明（Impact Ledger）：LLM 动手前登记"我打算改这些文件"，一次声明被下一次报告消费 */
+/** 改前预告声明（Impact Ledger）：LLM 动手前登记"我打算改这些文件"，被匹配的影响报告消费 */
 interface ImpactDeclaration {
   /** 登记的打算修改文件（相对项目根 posix） */
   declared_files: string[];
@@ -137,8 +137,12 @@ interface ActiveWatch {
   diff_on_change: boolean;
   /** 变更后自动生成影响报告（Step 2）：摘要行入 alerts 队列，全文落盘 impact/ 目录 */
   impact_on_change: boolean;
-  /** 未消费的改前预告声明（Impact Ledger，doWork 报告后对比即清） */
-  declaration?: ImpactDeclaration;
+  /**
+   * 未消费的改前预告声明队列（Impact Ledger）。多条并存（并行任务的预告互不覆盖），
+   * doWork 按声明的 declared_files ∩ 本次变更文件 匹配消费（可多条并集对比）；
+   * 无匹配时回退消费最旧一条（保持会话级对比语义：改了没预告的文件也要报警）。
+   */
+  declarations: ImpactDeclaration[];
   started_at: string;
   last_change_at?: string;
   last_rebuild_at?: string;
@@ -229,6 +233,8 @@ export interface WatchProjectToolResult {
   alerts?: string[];
   /** 最近一份影响报告序号 */
   last_impact_seq?: number;
+  /** 未消费的改前预告条数（Impact Ledger 队列深度；>1 表示多条并行任务预告并存） */
+  pending_declarations?: number;
   message: string;
   error?: string;
 }
@@ -320,11 +326,20 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       pushAlert({ project_dir: entry.project_dir, seq: s.seq, line: s.summary_line, created_at: s.created_at });
       ensureCameraSink(entry.project_dir); // 先建 sink，下方 spread/report 事件才能落流
 
-      // Impact Ledger 对比：有未消费的改前预告 → 实际波及 vs 预告，计划外扩散报警（一次消费）
-      if (entry.declaration) {
-        const decl = entry.declaration;
-        entry.declaration = undefined; // 消费即清（下一次报告不再对比旧声明）
-        const actual = new Set<string>([...files.map((f) => relOf(entry.project_dir, f)), ...s.impacted_file_paths]);
+      // Impact Ledger 对比：未消费预告按变更文件匹配消费（可多条并集），无匹配回退消费最旧
+      if (entry.declarations.length > 0) {
+        const changedSet = new Set(files.map((f) => relOf(entry.project_dir, f)));
+        let consumed = entry.declarations.filter((d) => d.declared_files.some((f) => changedSet.has(f)));
+        if (consumed.length === 0) {
+          // 回退：变更文件未命中任何预告 → 消费最旧一条对比（"改了没预告的文件"也要报警）
+          consumed = [entry.declarations[0]];
+        }
+        entry.declarations = entry.declarations.filter((d) => !consumed.includes(d));
+        const decl = {
+          declared_files: [...new Set(consumed.flatMap((d) => d.declared_files))],
+          expected_files: new Set(consumed.flatMap((d) => [...d.expected_files])),
+        };
+        const actual = new Set<string>([...changedSet, ...s.impacted_file_paths]);
         const unexpected = [...actual].filter((f) => !decl.expected_files.has(f));
         const spreadLine = `[计划外扩散#${s.seq}] 预告 ${decl.expected_files.size} 文件，实际波及 ${actual.size}，未预告 ${unexpected.length}${unexpected.length > 0 ? '：' + unexpected.join(', ') : ''}`;
         entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: spreadLine });
@@ -410,6 +425,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     rebuild,
     diff_on_change: diffOnChange,
     impact_on_change: impactOnChange,
+    declarations: [],
     started_at: new Date().toISOString(),
     pending_files: new Set(),
     alerts: [],
@@ -485,10 +501,15 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
 
   const alerts = entry.alerts.slice(0, 10).map((a) => a.line);
   const alertNote = alerts.length > 0 ? `；${alerts.length} 条未读影响提醒（最新: ${alerts[0]}）` : '';
+  const declNote =
+    entry.declarations.length > 0
+      ? `；${entry.declarations.length} 条改前预告待验证（声明文件: ${entry.declarations.map((d) => d.declared_files.join('+')).join(' | ')}）`
+      : '';
   return {
     action: 'status', project_dir: entry.project_dir, watching: st.watching, running: st.watching,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
     impact_on_change: entry.impact_on_change,
+    pending_declarations: entry.declarations.length,
     started_at: entry.started_at, last_change_at: entry.last_change_at,
     last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
@@ -496,8 +517,8 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     alerts: alerts.length > 0 ? alerts : undefined,
     last_impact_seq: entry.last_impact_seq,
     message: diffAlert
-      ? `监听运行中，${diffAlert}` + alertNote + (entry.error ? '；最近报错: ' + entry.error : '')
-      : '监听运行中' + alertNote + (entry.error ? '，但最近一次工作报错: ' + entry.error : ''),
+      ? `监听运行中，${diffAlert}` + alertNote + declNote + (entry.error ? '；最近报错: ' + entry.error : '')
+      : '监听运行中' + alertNote + declNote + (entry.error ? '，但最近一次工作报错: ' + entry.error : ''),
     error: entry.error,
   };
 }
@@ -573,12 +594,14 @@ function impactWatch(input: WatchProjectToolInput): WatchProjectToolResult {
 
 /**
  * action=declare（Impact Ledger 改前预告）：登记"我打算改这些文件"，立刻返回预期
- * 波及面（改前预告）。一次声明被下一次影响报告消费：实际波及 ⊆ 预告 → 安静；
- * 出现未预告文件 → impact.spread 事件 + 计划外扩散报警。
+ * 波及面（改前预告）。声明入队列并行并存（不覆盖既有预告）；声明的文件出现在
+ * 变更里 → 该条被消费对比：实际波及 ⊆ 预告 → 安静；出现未预告文件 → impact.spread
+ * 事件 + 计划外扩散报警。变更未命中任何预告时消费最旧一条（"改了没预告的文件"
+ * 也触发对比）。
  *
  * 语义保障：声明前置条件是"改完有人对比"——未监听自动 start（impact_on_change
- * 强制开），已监听但影响报告关着则顺手打开。声明存在内存（一次消费），MCP 进程
- * 重启即弃——预告本来就是短期意图，跨会话残留反而失真。
+ * 强制开），已监听但影响报告关着则顺手打开。声明存在内存（消费或进程重启即弃），
+ * 预告本来就是短期意图，跨会话残留反而失真。
  */
 async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectToolResult> {
   const files = (input.files ?? []).map((f) => f.trim()).filter(Boolean);
@@ -616,7 +639,7 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
     previewLine = `波及面计算失败（${(e as Error).message}）——仅登记声明文件本身为预告面。`;
   }
 
-  entry.declaration = { declared_files: declared, expected_files: expected, created_at: new Date().toISOString() };
+  entry.declarations.push({ declared_files: declared, expected_files: expected, created_at: new Date().toISOString() });
   ensureCameraSink(entry.project_dir);
   captureProbe(
     'impact.declare',
@@ -627,17 +650,23 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
       level: 'event',
       declared_files: declared,
       expected_count: expected.size,
-      summary: `预告改 ${declared.length} 文件，预期波及 ${expected.size} 文件`,
+      pending_count: entry.declarations.length,
+      summary: `预告改 ${declared.length} 文件，预期波及 ${expected.size} 文件（队列 ${entry.declarations.length} 条）`,
     },
     'runtime-invariant',
   );
 
+  const queueNote =
+    entry.declarations.length > 1
+      ? `当前共 ${entry.declarations.length} 条未验证预告并存（各自等自己声明的文件变更后对比）。`
+      : '';
   return {
     action: 'declare', project_dir: entry.project_dir, watching: true, running: true,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
     impact_on_change: true,
+    pending_declarations: entry.declarations.length,
     started_at: entry.started_at,
-    message: `已登记改前预告（下一次影响报告自动对比，计划外波及将报警）。${previewLine}`,
+    message: `已登记改前预告（声明的文件变更后自动对比，计划外波及将报警）。${previewLine}${queueNote}`,
   };
 }
 
