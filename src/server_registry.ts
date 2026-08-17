@@ -14,6 +14,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { appendPendingAlerts } from './tools/alert_inbox.js';
 import { renderDsl } from './tools/render_dsl.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { queryFeature } from './tools/query_feature.js';
@@ -613,7 +614,8 @@ export function registerAllTools(server: McpServer): void {
   for (const def of TOOL_DEFS) {
     server.registerTool(def.name, { title: def.title, description: def.description, inputSchema: def.inputSchema }, async (args) => {
       const r = await def.handler((args ?? {}) as Record<string, unknown>);
-      return textOut(r.text, r.isError);
+      // 响应注入：watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）
+      return textOut(appendPendingAlerts(r.text, def.name), r.isError);
     });
   }
 }

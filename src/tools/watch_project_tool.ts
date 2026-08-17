@@ -19,6 +19,7 @@ import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
 import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
+import { pushAlert } from './alert_inbox.js';
 import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../camera/probe.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
 
@@ -295,6 +296,8 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: s.summary_line });
       if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
       entry.last_impact_seq = s.seq;
+      // 响应注入通道：任何 MCP 工具的下一次响应自动附带此提醒（一次投递即消费）
+      pushAlert({ project_dir: entry.project_dir, seq: s.seq, line: s.summary_line, created_at: s.created_at });
       // 成功事件：err 空 + 波及统计。radius 超阈值时被 impactBlastRadius 判 deviation
       ensureCameraSink(entry.project_dir);
       captureProbe(
