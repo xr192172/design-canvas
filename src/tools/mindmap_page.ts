@@ -34,9 +34,13 @@ export function renderMindmapPage(feature: string): string {
       <defs>
         <radialGradient id="gRoot" cx="35%" cy="30%"><stop offset="0%" stop-color="#1e4e86"/><stop offset="100%" stop-color="#0d2140"/></radialGradient>
         <radialGradient id="gFeat" cx="35%" cy="30%"><stop offset="0%" stop-color="#16406b"/><stop offset="100%" stop-color="#0b1e38"/></radialGradient>
+        <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9 z" fill="rgba(251,146,60,.9)"/>
+        </marker>
       </defs>
       <g id="vp">
         <g id="edges"></g>
+        <g id="deplayer"></g>
         <g id="nodes"></g>
         <g id="notes"></g>
       </g>
@@ -96,7 +100,7 @@ export function renderMindmapPage(feature: string): string {
 
   const script = `
   var FEATURE = ${JSON.stringify(feature)};
-  var OV = null, ANNS = [], UNODES = [];
+  var OV = null, ANNS = [], UNODES = [], DEPS = [], FOUNDATIONS = [];
   var TREE = null, NODE_BY_ID = {}, SEL = null, DIRTY = false;
   var VIEW = { tx: 0, ty: 0, s: 1 };
   var COLLAPSED = {};   // 会话级折叠状态：id -> true
@@ -112,6 +116,8 @@ export function renderMindmapPage(feature: string): string {
     OV = rs[0];
     ANNS = (rs[1].annotations || []).filter(function(a){ return a.author === 'human'; });
     UNODES = rs[2].user_nodes || [];
+    DEPS = (OV.mind_map && OV.mind_map.deps) || [];
+    FOUNDATIONS = (OV.mind_map && OV.mind_map.foundations) || [];
     rebuild(); fitView();
   });
 
@@ -217,6 +223,7 @@ export function renderMindmapPage(feature: string): string {
       visChildren(n).forEach(function(c){ walk(c, n); });
     })(TREE, null);
     E.innerHTML = edges; N.innerHTML = nodes;
+    renderDeps();
     // 便签：锚定目标节点右侧偏下堆叠（有 pos 用 pos）
     var perTarget = {};
     ANNS.forEach(function(a){ (perTarget[a.target_id] = perTarget[a.target_id] || []).push(a); });
@@ -245,6 +252,56 @@ export function renderMindmapPage(feature: string): string {
     });
     bindNodeEvents();
   }
+  // ── 依赖叠加层：树管归属、线管依赖（正交关系不挤一棵树）──
+  // 功能间真实调用（DEPS）画为橙色虚线弧，从依赖方左缘绕过根节点外侧连到底座；粗细=调用频次
+  function featureByLabel(lb){
+    return (TREE.children || []).filter(function(c){ return c.kind === 'feature'; }).filter(function(c){ return c.label === lb; })[0] || null;
+  }
+  function renderDeps(){
+    var G = document.getElementById('deplayer');
+    G.innerHTML = '';
+    if(!DEPS.length || !TREE) return;
+    var cx = TREE._x - TREE._w / 2 - 74; // 弧顶控制点：根节点左侧外沿
+    DEPS.forEach(function(d){
+      var a = featureByLabel(d.from), b = featureByLabel(d.to);
+      if(!a || !b || a === b) return;
+      var x1 = a._x - a._w / 2 - 24, y1 = a._y;
+      var x2 = b._x - b._w / 2 - 24, y2 = b._y;
+      var sw = Math.min(1.3 + d.weight / 12, 3.6);
+      var path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+y1+', '+cx+' '+y2+', '+x2+' '+y2);
+      path.setAttribute('fill','none');
+      path.setAttribute('stroke','rgba(251,146,60,.6)');
+      path.setAttribute('stroke-width', sw);
+      path.setAttribute('stroke-dasharray','7 5');
+      path.setAttribute('marker-end','url(#arrowDep)');
+      path.setAttribute('data-dep', d.from + '→' + d.to);
+      path.style.cursor = 'pointer';
+      path.addEventListener('click', function(ev){ ev.stopPropagation(); showDep(d); });
+      G.appendChild(path);
+      // 透明宽 hit-area：弧线细难点中，复制一条 14px 宽透明路径捕获点击
+      var hit = path.cloneNode();
+      hit.setAttribute('stroke-width', '14');
+      hit.setAttribute('stroke', 'transparent');
+      hit.setAttribute('stroke-dasharray', 'none');
+      hit.removeAttribute('marker-end');
+      hit.addEventListener('click', function(ev){ ev.stopPropagation(); showDep(d); });
+      G.appendChild(hit);
+      // 频次小标签（弧中点附近）
+      var t = document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x', cx + 10); t.setAttribute('y', (y1 + y2) / 2);
+      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5'); t.setAttribute('fill','rgba(251,146,60,.85)');
+      t.textContent = '×' + d.weight;
+      G.appendChild(t);
+    });
+  }
+  function showDep(d){
+    var det = document.getElementById('detail');
+    det.innerHTML = '<b style="color:#fb923c;">🔗 功能依赖</b>'
+      + '<p>' + esc(d.from) + ' <b style="color:#fb923c;">踩着</b> ' + esc(d.to) + '（真实调用 ×' + d.weight + ' 次）</p>'
+      + '<p style="font-size:11px;color:#7a93b8;">依赖不占树的层级（归属归归属、依赖归依赖），橙色虚线单独表达"什么撑着什么"。</p>';
+    det.style.display = 'block';
+  }
   function renderNode(n){
     var ls = nodeLines(n), w = n._w, h = nodeH(n), x = n._x - w/2, y = n._y - h/2;
     var s = '<g class="mnode'+(SEL===n.id?' sel':'')+'" data-id="'+esc(n.id)+'" transform="translate('+n._x+','+n._y+')">';
@@ -252,6 +309,11 @@ export function renderMindmapPage(feature: string): string {
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="url(#gRoot)" stroke="#8ab6e8" stroke-width="2.4"/>';
     } else if(n.kind === 'feature'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="url(#gFeat)" stroke="#5ba3d9" stroke-width="2"/>';
+      if(FOUNDATIONS.indexOf(n.label) >= 0){ // 底座徽章：基建不占兄弟名目，但一眼可见
+        s += '<g transform="translate('+(-w/2+2)+','+(-h/2-9)+')">'
+          + '<rect x="0" y="-10" width="62" height="18" rx="9" fill="rgba(251,146,60,.16)" stroke="rgba(251,146,60,.85)" stroke-width="1.2"/>'
+          + '<text x="31" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#fb923c">🧱 底座</text></g>';
+      }
     } else if(n.kind === 'step'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(16,42,70,.92)" stroke="#3d7ab5" stroke-width="1.4"/>';
     } else { // user：暖色贴纸感（虚线边框 + 折角）
@@ -365,7 +427,20 @@ export function renderMindmapPage(feature: string): string {
     var notes = ANNS.filter(function(a){ return a.target_id === id; });
     var myNoteHtml = notes.length ? '<p class="mynote">✍️ 我的批注：'+notes.map(function(x){ return esc(x.text); }).join(' ／ ')+'</p>' : '';
     if(n.kind === 'feature'){
-      det.innerHTML = '<b>'+esc(n.label)+'</b><span class="tag">功能</span><p>'+esc(n.raw.description||'')+'</p>'+myNoteHtml;
+      // 依赖叠加层信息：谁踩着它（被依赖）/ 它踩着谁（依赖别人）
+      var stoodOnBy = DEPS.filter(function(d){ return d.to === n.label; });
+      var standsOn = DEPS.filter(function(d){ return d.from === n.label; });
+      var isF = FOUNDATIONS.indexOf(n.label) >= 0;
+      var depHtml = '';
+      if(stoodOnBy.length){
+        depHtml += '<p style="color:#fcd9a8;">🧱 谁踩着它：'
+          + stoodOnBy.map(function(d){ return esc(d.from)+'（×'+d.weight+'）'; }).join('、')
+          + (isF ? ' —— 这就是底座：自己几乎不叫别人，别人都来叫它。' : '') + '</p>';
+      }
+      if(standsOn.length){
+        depHtml += '<p style="color:#fcd9a8;">🧱 它踩着谁：' + standsOn.map(function(d){ return esc(d.to)+'（×'+d.weight+'）'; }).join('、') + '</p>';
+      }
+      det.innerHTML = '<b>'+esc(n.label)+'</b><span class="tag">'+(isF ? '底座功能' : '功能')+'</span><p>'+esc(n.raw.description||'')+'</p>'+depHtml+myNoteHtml;
     } else if(n.kind === 'step'){
       det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.detail||'')+'</p>'
         + (n.raw.involves && n.raw.involves.length ? '<p class="files">'+n.raw.involves.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
@@ -457,6 +532,7 @@ export function renderMindmapPage(feature: string): string {
   function fitView(){
     if(!TREE) return;
     var b = treeBounds();
+    if(DEPS.length) b.minX -= 110; // 依赖弧绕根左侧，视口为其留位
     var w = window.innerWidth, h = window.innerHeight - 52;
     var pad = 40;
     var s = Math.min((w - pad*2) / (b.maxX - b.minX), (h - pad*2) / (b.maxY - b.minY), 1.15);

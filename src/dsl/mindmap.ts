@@ -51,6 +51,16 @@ export interface MindMapNode {
   children?: MindMapNode[];
 }
 
+/** 功能间依赖（叠加层）：树管归属（is-part-of），线管依赖（depends-on），两种正交关系不互相挤占 */
+export interface FeatureDep {
+  /** 依赖方功能名（它踩着别人） */
+  from: string;
+  /** 被依赖功能名（底座，别人踩着它） */
+  to: string;
+  /** 跨功能调用次数（真实调用边聚合） */
+  weight: number;
+}
+
 /** L3 思维导图 */
 export interface MindMap {
   /** feature 名 */
@@ -61,6 +71,10 @@ export interface MindMap {
   view?: 'structure' | 'teach';
   /** 根节点 */
   root: MindMapNode;
+  /** 功能间依赖叠加层（teach：从 cache.db 真实调用边聚合；画布渲染为虚线弧） */
+  deps?: FeatureDep[];
+  /** 底座功能名列表（被 ≥2 个功能调用且几乎不调用别人的基建，树内排首位 + 🧱 徽章） */
+  foundations?: string[];
   /** 生成时间 */
   generated_at: string;
   /** 说明（生成方式/降级原因） */

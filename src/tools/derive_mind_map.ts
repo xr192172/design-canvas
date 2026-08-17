@@ -285,6 +285,73 @@ function loadCallEdges(db: Database, featureRels: string[], maxEdges = 40): stri
   return out;
 }
 
+/**
+ * 跨功能依赖聚合：从 cache.db 真实调用边算"功能 A 的文件调用功能 B 的文件"总次数。
+ * 树管归属（is-part-of）、线管依赖（depends-on）——底座功能不占兄弟名目，用叠加层表达。
+ * 同时识别底座：被 ≥2 个功能调用、且调出量不到调入量一半（入度 >> 出度）的基建。
+ */
+function loadFeatureDeps(
+  db: Database,
+  featureNames: string[],
+  featureRels: string[][],
+): { deps: Array<{ from: string; to: string; weight: number }>; foundations: string[] } {
+  const matchers = featureRels.map((rels) => makeFileMatcher(rels));
+  /** 文件 → 功能索引（首次匹配）；一个文件只归一个功能（与分拣口径一致） */
+  const fileOwner = new Map<string, number>();
+  const ownerOf = (p: string): number => {
+    if (fileOwner.has(p)) return fileOwner.get(p) as number;
+    let hit = -1;
+    for (let i = 0; i < matchers.length; i++) {
+      if (matchers[i](p)) {
+        hit = i;
+        break;
+      }
+    }
+    fileOwner.set(p, hit);
+    return hit;
+  };
+  const rows = db
+    .prepare(
+      `SELECT n1.file_path AS sf, n2.file_path AS tf, COUNT(*) AS w
+       FROM edges e
+       JOIN nodes n1 ON n1.id = e.source
+       JOIN nodes n2 ON n2.id = e.target
+       WHERE e.kind = 'call' AND n1.file_path != n2.file_path
+       GROUP BY n1.file_path, n2.file_path`,
+    )
+    .all() as Array<{ sf: string; tf: string; w: number }>;
+  const pairW = new Map<string, number>();
+  for (const r of rows) {
+    const a = ownerOf(r.sf);
+    const b = ownerOf(r.tf);
+    if (a < 0 || b < 0 || a === b) continue;
+    const key = `${a}→${b}`;
+    pairW.set(key, (pairW.get(key) ?? 0) + r.w);
+  }
+  const deps: Array<{ from: string; to: string; weight: number }> = [];
+  for (const [key, w] of pairW) {
+    if (w < 3) continue; // 噪声边：偶发引用不算依赖
+    const [a, b] = key.split('→').map(Number);
+    deps.push({ from: featureNames[a], to: featureNames[b], weight: w });
+  }
+  deps.sort((x, y) => y.weight - x.weight);
+  // 底座识别：入度（被依赖）≥2 个功能 且 调出 < 调入一半
+  const inW = new Array(featureNames.length).fill(0);
+  const inFans: Set<number>[] = featureNames.map(() => new Set<number>());
+  const outW = new Array(featureNames.length).fill(0);
+  for (const [key, w] of pairW) {
+    const [a, b] = key.split('→').map(Number);
+    inW[b] += w;
+    inFans[b].add(a);
+    outW[a] += w;
+  }
+  const foundations: string[] = [];
+  for (let i = 0; i < featureNames.length; i++) {
+    if (inFans[i].size >= 2 && inW[i] >= 8 && outW[i] < inW[i] / 2) foundations.push(featureNames[i]);
+  }
+  return { deps: deps.slice(0, 14), foundations };
+}
+
 /** detail 中的技术噪声检测：函数调用/路径/驼峰/snake_case 标识（验收"零函数名"规矩；放行普通英文单词） */
 const TECH_NOISE_RE =
   /[\w./-]+\(\s*\)|[\w-]+\.(ts|tsx|js|mjs|go|py|rs|java)\b|\b[a-z]+[A-Z][a-zA-Z]*\b|\b[a-z]+(_[a-z0-9]+)+\b/;
@@ -528,6 +595,10 @@ async function buildTeachMindMap(
   }
   const featureRels = ft.features.map((f) => [...new Set(f.communities.flatMap((c) => c.files))]);
   const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
+  // 跨功能依赖叠加层（树管归属、线管依赖）：真实调用边聚合 + 底座识别
+  const { deps, foundations } = db
+    ? loadFeatureDeps(db, ft.features.map((f) => f.name), featureRels)
+    : { deps: [], foundations: [] as string[] };
   db?.close();
 
   // 主人批注分拣：导图节点 id f{i}（功能）/ f{i}:{j}（步骤），target_id 前缀匹配
@@ -583,12 +654,20 @@ async function buildTeachMindMap(
     : ft.features.map(() => null as TeachScript | null);
   const anyLlm = scripts.some((s) => s !== null);
 
+  // 展示顺序：底座功能排根下首位（承认其"地板"身份），但 f{i} id 保持原始索引——批注/用户节点锚点不漂移
+  const isFoundation = (i: number) => foundations.includes(ft.features[i].name);
+  const order = [
+    ...ft.features.map((_, i) => i).filter((i) => isFoundation(i)),
+    ...ft.features.map((_, i) => i).filter((i) => !isFoundation(i)),
+  ];
+
   const root: MindMapNode = {
     id: 'root',
     label: title,
     description: `项目总览：${ft.features.length} 个功能`,
     kind: 'root',
-    children: ft.features.map((f, i) => {
+    children: order.map((i) => {
+      const f = ft.features[i];
       const rels = featureRels[i];
       const script = scripts[i];
       const hasEdges = callEdgeLists[i].length > 0;
@@ -616,6 +695,8 @@ async function buildTeachMindMap(
     mode: anyLlm ? 'llm' : 'rule',
     view: 'teach',
     root,
+    deps: deps.length > 0 ? deps : undefined,
+    foundations: foundations.length > 0 ? foundations : undefined,
     generated_at: new Date().toISOString(),
     note: anyLlm
       ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜`
