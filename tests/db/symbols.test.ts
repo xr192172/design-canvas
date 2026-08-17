@@ -158,6 +158,37 @@ describe('调用边入库（路线图序号 3）', () => {
   });
 });
 
+describe('syncFile - 入边级联保护（FK CASCADE 备份还原）', () => {
+  const crossEdgeCount = () =>
+    (db
+      .prepare("SELECT COUNT(*) AS c FROM edges WHERE kind='call' AND source='a.ts#parseConfig' AND target='b.ts#helperB'")
+      .get() as { c: number }).c;
+
+  it('目标文件重同步后，外部指向其符号的 call 边存活', async () => {
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
+    expect(crossEdgeCount()).toBe(1);
+
+    // 修改 b.ts（内容变化触发重解析）：a#parseConfig → b#helperB 不因级联丢失
+    writeProjectFile('b.ts', FILE_B.replace('return { x };', 'return { x, v: 1 };'));
+    await syncFile(db, dir, path.join(dir, 'b.ts'));
+    expect(crossEdgeCount()).toBe(1);
+  });
+
+  it('符号改名后入边正确消失（不还原指向已删符号的边）', async () => {
+    await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);
+    expect(crossEdgeCount()).toBe(1);
+
+    // helperB 改名 helperC：b#helperB 节点不复存在，入边应消失而非还原
+    writeProjectFile('b.ts', FILE_B.replace('helperB', 'helperC'));
+    await syncFile(db, dir, path.join(dir, 'b.ts'));
+    expect(crossEdgeCount()).toBe(0);
+    const renamed = (db
+      .prepare("SELECT COUNT(*) AS c FROM edges WHERE kind='call' AND target='b.ts#helperC'")
+      .get() as { c: number }).c;
+    expect(renamed).toBe(0); // 新符号的入边需对端重新解析才有（对端 ref 已 resolved，符合现状语义）
+  });
+});
+
 describe('searchSymbols - FTS5 trigram', () => {
   beforeEach(async () => {
     await syncProject(db, dir, [path.join(dir, 'a.ts'), path.join(dir, 'b.ts')]);

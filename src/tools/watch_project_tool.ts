@@ -18,6 +18,7 @@ import path from 'node:path';
 import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
+import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -122,6 +123,8 @@ interface ActiveWatch {
   feature?: string;
   rebuild: boolean;
   diff_on_change: boolean;
+  /** 变更后自动生成影响报告（Step 2）：摘要行入 alerts 队列，全文落盘 impact/ 目录 */
+  impact_on_change: boolean;
   started_at: string;
   last_change_at?: string;
   last_rebuild_at?: string;
@@ -130,12 +133,20 @@ interface ActiveWatch {
   last_reconcile?: ReconcileSummary;
   /** rebuild 后自动 diff 的结果（仅 diff_on_change=true 时有） */
   last_diff?: DiffViewsResult;
+  /** 冷却窗口内积累的待分析变更文件（相对项目根），doWork 时取走清空 */
+  pending_files: Set<string>;
+  /** 未读影响提醒（一行摘要 × 报告序号），新→旧，cap 20；watch status 时 piggyback 带回 */
+  alerts: { seq: number; created_at: string; line: string }[];
+  last_impact_seq?: number;
   error?: string;
   handle?: WatchHandle;
   throttle?: RebuildThrottler;
 }
 
 const active = new Map<string, ActiveWatch>();
+
+/** alerts 队列上限：超出丢最旧（全文已落盘，摘要行只是提醒） */
+const ALERTS_CAP = 20;
 
 /** 归一化 project_dir 作注册表键 */
 function keyOf(projectDir: string): string {
@@ -149,8 +160,8 @@ function keyOf(projectDir: string): string {
 export interface WatchProjectToolInput {
   /** 被监听项目根目录（绝对路径或相对 cwd） */
   project_dir: string;
-  /** start（默认）| status | stop */
-  action?: 'start' | 'status' | 'stop';
+  /** start（默认）| status | stop | impact（读影响报告全文） */
+  action?: 'start' | 'status' | 'stop' | 'impact';
   /** 提供时，变更后按该 feature 重建实际 DSL 到 live/（不覆盖设计 DSL） */
   feature?: string;
   /** 事件合并窗口（ms），默认 150 */
@@ -167,6 +178,15 @@ export interface WatchProjectToolInput {
    * 可通过 status 查询 last_diff 查看。
    */
   diff_on_change?: boolean;
+  /**
+   * 变更后是否自动生成影响报告（Step 2，默认 false）。
+   * 开启后每次变更（节流合并）自动跑 diffImpact：一行摘要入 alerts 队列
+   * （watch status 时带回），全文落盘 .design-canvas/impact/rp-<seq>.json，
+   * action=impact 按序号取全文。feature 可选（缺省纯缓存分析）。
+   */
+  impact_on_change?: boolean;
+  /** action=impact 时指定报告序号；缺省取最近一份 */
+  seq?: number;
 }
 
 export interface WatchProjectToolResult {
@@ -187,6 +207,12 @@ export interface WatchProjectToolResult {
   diff_alert?: string;
   /** diff 有无变更（true = 有变更，false = 无变更或尚未 diff） */
   has_diff_changes?: boolean;
+  /** 影响报告是否开启 */
+  impact_on_change?: boolean;
+  /** 未读影响提醒（一行摘要，新→旧，最多 10 条；全文用 action=impact 取） */
+  alerts?: string[];
+  /** 最近一份影响报告序号 */
+  last_impact_seq?: number;
   message: string;
   error?: string;
 }
@@ -195,36 +221,66 @@ export interface WatchProjectToolResult {
 // 实现
 // ─────────────────────────────────────────────────────────────
 
-/** 变更回调：增量同步后，若开 rebuild 则触发节流后的实际 DSL 重建（live/，不覆盖设计 DSL） */
+/** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + 影响报告） */
 async function onBatchChange(entry: ActiveWatch, summary: WatchBatchSummary): Promise<void> {
   entry.last_change_at = new Date().toISOString();
   entry.last_summary = summary;
-  if (!entry.rebuild || !entry.feature || !entry.throttle) return;
+  if (entry.impact_on_change) {
+    for (const f of summary.files) entry.pending_files.add(f);
+  }
+  if (!entry.throttle) return;
+  if (!entry.rebuild && !entry.impact_on_change) return;
   entry.throttle.trigger();
 }
 
-/** 单次实际 DSL 重建（live/，不覆盖设计 DSL）；成功/失败都记录到 entry */
-async function doRebuild(entry: ActiveWatch): Promise<void> {
-  if (!entry.feature) return;
-  try {
-    const db = getProjectCacheDb(entry.project_dir);
-    await importProject({ project_dir: entry.project_dir, feature: entry.feature, cache_db: db, live_only: true, live_dir: entry.project_dir });
-    entry.last_rebuild_at = new Date().toISOString();
-    entry.error = undefined; // 上次失败已修复
+/**
+ * 节流后的单次工作：① rebuild 实际 DSL（可选）② 影响报告（可选）。
+ * 两阶段独立成败：rebuild 失败不影响 impact（缓存已在 watch 增量同步过）。
+ */
+async function doWork(entry: ActiveWatch): Promise<void> {
+  // ① rebuild（live/，不覆盖设计 DSL）
+  if (entry.rebuild && entry.feature) {
+    try {
+      const db = getProjectCacheDb(entry.project_dir);
+      await importProject({ project_dir: entry.project_dir, feature: entry.feature, cache_db: db, live_only: true, live_dir: entry.project_dir });
+      entry.last_rebuild_at = new Date().toISOString();
+      entry.error = undefined; // 上次失败已修复
 
-    // rebuild 后若有 diff_on_change 标记，自动对比设计视图 vs live 视图
-    if (entry.diff_on_change) {
-      try {
-        const diffResult = diffViews({ feature: entry.feature, live_dir: entry.project_dir });
-        entry.last_diff = diffResult;
-        entry.last_diff_at = new Date().toISOString();
-      } catch (diffErr) {
-        // diff 失败不阻塞 watch，仅记录
-        entry.error = 'diff 失败: ' + (diffErr as Error).message;
+      // rebuild 后若有 diff_on_change 标记，自动对比设计视图 vs live 视图
+      if (entry.diff_on_change) {
+        try {
+          const diffResult = diffViews({ feature: entry.feature, live_dir: entry.project_dir });
+          entry.last_diff = diffResult;
+          entry.last_diff_at = new Date().toISOString();
+        } catch (diffErr) {
+          // diff 失败不阻塞 watch，仅记录
+          entry.error = 'diff 失败: ' + (diffErr as Error).message;
+        }
       }
+    } catch (e) {
+      entry.error = (e as Error).message;
     }
-  } catch (e) {
-    entry.error = (e as Error).message;
+  }
+
+  // ② 影响报告：取走冷却窗口内积累的变更文件，全文落盘 + 摘要入 alerts
+  if (entry.impact_on_change && entry.pending_files.size > 0) {
+    const files = [...entry.pending_files];
+    entry.pending_files.clear();
+    try {
+      const s = runImpactReport({
+        project_dir: entry.project_dir,
+        feature: entry.feature,
+        changed: files,
+        direction: 'both',
+        max_depth: 2,
+      });
+      entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: s.summary_line });
+      if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
+      entry.last_impact_seq = s.seq;
+    } catch (e) {
+      // 影响报告失败不阻断监听（如 cache 未建），记录到 error
+      entry.error = '影响报告失败: ' + (e as Error).message;
+    }
   }
 }
 
@@ -233,6 +289,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   const feature = input.feature?.trim() || undefined;
   const rebuild = input.rebuild_on_change ?? Boolean(feature);
   const diffOnChange = input.diff_on_change ?? false;
+  const impactOnChange = input.impact_on_change ?? false;
   const debounceMs = input.debounce_ms ?? 150;
 
   const existing = active.get(key);
@@ -240,10 +297,10 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     return {
       action: 'start', project_dir: path.resolve(input.project_dir),
       watching: true, running: true, feature: existing.feature, rebuild: existing.rebuild,
-      diff_on_change: existing.diff_on_change,
+      diff_on_change: existing.diff_on_change, impact_on_change: existing.impact_on_change,
       started_at: existing.started_at, last_change_at: existing.last_change_at,
-      last_summary: existing.last_summary,
-      message: '已在监听（幂等复用既有句柄）' + (existing.error ? '；上次 rebuild 出错: ' + existing.error : ''),
+      last_summary: existing.last_summary, last_impact_seq: existing.last_impact_seq,
+      message: '已在监听（幂等复用既有句柄）' + (existing.error ? '；上次出错: ' + existing.error : ''),
       error: existing.error,
     };
   }
@@ -253,14 +310,17 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     feature,
     rebuild,
     diff_on_change: diffOnChange,
+    impact_on_change: impactOnChange,
     started_at: new Date().toISOString(),
+    pending_files: new Set(),
+    alerts: [],
   };
 
-  // rebuild 节流：改到冷却窗口末尾一次全量重建，避免编辑风暴触发频繁全量重扫
-  if (rebuild && feature) {
+  // 节流：rebuild 或影响报告任一开启即建（冷却窗口内编辑风暴合并为一次工作）
+  if ((rebuild && feature) || impactOnChange) {
     entry.throttle = createRebuildThrottler({
       windowMs: input.rebuild_window_ms ?? 2000,
-      run: () => doRebuild(entry),
+      run: () => doWork(entry),
     });
   }
 
@@ -288,8 +348,12 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   active.set(key, entry);
   return {
     action: 'start', project_dir: entry.project_dir, watching: true, running: true,
-    feature, rebuild, diff_on_change: diffOnChange, started_at: entry.started_at,
-    message: `已开始监听 ${path.resolve(input.project_dir)}` + (rebuild ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）') + (diffOnChange ? '，变更后自动 diff 对比' : ''),
+    feature, rebuild, diff_on_change: diffOnChange, impact_on_change: impactOnChange,
+    started_at: entry.started_at,
+    message: `已开始监听 ${path.resolve(input.project_dir)}`
+      + (rebuild && feature ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）')
+      + (diffOnChange ? '，变更后自动 diff 对比' : '')
+      + (impactOnChange ? '，变更后自动影响报告（status 取摘要，action=impact 取全文）' : ''),
   };
 }
 
@@ -300,7 +364,7 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     return {
       action: 'status', project_dir: path.resolve(projectDir), watching: false, running: false,
       rebuild: false, diff_on_change: false,
-      message: '该项目未在监听中。', 
+      message: '该项目未在监听中。',
     };
   }
   const st = entry.handle.status();
@@ -320,16 +384,21 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     }
   }
 
+  const alerts = entry.alerts.slice(0, 10).map((a) => a.line);
+  const alertNote = alerts.length > 0 ? `；${alerts.length} 条未读影响提醒（最新: ${alerts[0]}）` : '';
   return {
     action: 'status', project_dir: entry.project_dir, watching: st.watching, running: st.watching,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
+    impact_on_change: entry.impact_on_change,
     started_at: entry.started_at, last_change_at: entry.last_change_at,
     last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
     diff_alert: diffAlert, has_diff_changes: hasDiffChanges,
+    alerts: alerts.length > 0 ? alerts : undefined,
+    last_impact_seq: entry.last_impact_seq,
     message: diffAlert
-      ? `监听运行中，${diffAlert}` + (entry.error ? '；最近报错: ' + entry.error : '')
-      : '监听运行中' + (entry.error ? '，但最近一次 rebuild 报错: ' + entry.error : ''),
+      ? `监听运行中，${diffAlert}` + alertNote + (entry.error ? '；最近报错: ' + entry.error : '')
+      : '监听运行中' + alertNote + (entry.error ? '，但最近一次工作报错: ' + entry.error : ''),
     error: entry.error,
   };
 }
@@ -345,17 +414,21 @@ async function stopWatch(projectDir: string): Promise<WatchProjectToolResult> {
     };
   }
   entry.handle.stop();
-  // 冲刷未落库的变更（stop 时若还有排队 rebuild，立即执行一次）
+  // 冲刷未落库的变更（stop 时若还有排队 rebuild/影响报告，立即执行一次）
   if (entry.throttle) {
     await entry.throttle.flush().catch(() => { /* flush 失败忽略 */ });
   }
+  const alerts = entry.alerts.slice(0, 10).map((a) => a.line);
   active.delete(key);
   return {
     action: 'stop', project_dir: entry.project_dir, watching: false, running: false,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
+    impact_on_change: entry.impact_on_change,
     started_at: entry.started_at, last_change_at: entry.last_change_at,
     last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
+    alerts: alerts.length > 0 ? alerts : undefined,
+    last_impact_seq: entry.last_impact_seq,
     diff_alert: entry.last_diff
       ? `设计 vs 实际差异: +${entry.last_diff.data.summary.added_files} -${entry.last_diff.data.summary.removed_files} ~${entry.last_diff.data.summary.modified_files} 文件`
       : undefined,
@@ -366,10 +439,44 @@ async function stopWatch(projectDir: string): Promise<WatchProjectToolResult> {
   };
 }
 
+/** action=impact：按序号读影响报告全文。报告落盘持久，监听停止后仍可读 */
+function impactWatch(input: WatchProjectToolInput): WatchProjectToolResult {
+  const root = path.resolve(input.project_dir);
+  const entry = active.get(keyOf(input.project_dir));
+  // 序号解析：显式 seq > 活跃监听最近一份 > 磁盘最新一份
+  const seq = input.seq ?? entry?.last_impact_seq ?? listImpactReports(root, 1)[0]?.seq;
+  if (!seq) {
+    return {
+      action: 'impact', project_dir: root, watching: entry?.handle ? true : false, running: false,
+      rebuild: entry?.rebuild ?? false, diff_on_change: entry?.diff_on_change ?? false,
+      impact_on_change: entry?.impact_on_change ?? false,
+      message: '暂无影响报告。开启 impact_on_change=true 监听并修改文件后自动生成。',
+    };
+  }
+  try {
+    const report = readImpactReport(root, seq);
+    return {
+      action: 'impact', project_dir: root, watching: entry?.handle ? true : false, running: false,
+      rebuild: entry?.rebuild ?? false, diff_on_change: entry?.diff_on_change ?? false,
+      impact_on_change: entry?.impact_on_change ?? false,
+      last_impact_seq: seq,
+      alerts: [report.summary.summary_line],
+      message: report.message,
+    };
+  } catch (e) {
+    return {
+      action: 'impact', project_dir: root, watching: entry?.handle ? true : false, running: false,
+      rebuild: entry?.rebuild ?? false, diff_on_change: entry?.diff_on_change ?? false,
+      message: (e as Error).message, error: (e as Error).message,
+    };
+  }
+}
+
 export async function watchProjectTool(input: WatchProjectToolInput): Promise<WatchProjectToolResult> {
   const action = input.action ?? 'start';
   if (action === 'status') return statusWatch(input.project_dir);
   if (action === 'stop') return stopWatch(input.project_dir);
+  if (action === 'impact') return impactWatch(input);
   return startWatch(input);
 }
 

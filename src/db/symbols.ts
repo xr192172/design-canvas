@@ -153,7 +153,15 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
          start_line = 1, end_line = excluded.end_line, updated_at = excluded.updated_at`,
     ).run(fileNodeId, path.posix.basename(rel), rel, rel, ext, lineCount, now);
 
-    // 2. 符号节点：整批删除重插
+    // 2. 符号节点：整批删除重插。
+    //    删除会经 edges.target 的 FK ON DELETE CASCADE 清掉【指向本文件符号的入边】
+    //    （其他文件调用本文件，source 在外部文件）——这些边无法由本文件重解析恢复
+    //    （对端的 unresolved_refs 已是 resolved，不会重试）。先备份，重插后还原。
+    const backupInEdges = db
+      .prepare(
+        "SELECT source, target, line, col, metadata FROM edges WHERE kind='call' AND target LIKE ? AND source NOT LIKE ?",
+      )
+      .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; line: number; col: number | null; metadata: string | null }>;
     db.prepare("DELETE FROM nodes WHERE file_path = ? AND kind != 'file'").run(rel);
     const insNode = db.prepare(
       `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, updated_at)
@@ -168,6 +176,20 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
         id, s.kind, s.name, s.qualified_name, rel, ext,
         s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, now,
       );
+    }
+
+    // 2.5 还原入边：只还原 target 仍存在的（符号被删/改名的边任其正确消失）。
+    //     FK 开启下 INSERT 会校验 target 存在性，必须先过滤否则整事务回滚。
+    if (backupInEdges.length > 0) {
+      const currentIds = new Set(
+        (db.prepare("SELECT id FROM nodes WHERE file_path = ? AND kind != 'file'").all(rel) as Array<{ id: string }>).map((r) => r.id),
+      );
+      const insIn = db.prepare(
+        "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'call', ?, ?, ?)",
+      );
+      for (const e of backupInEdges) {
+        if (currentIds.has(e.target)) insIn.run(e.source, e.target, e.line, e.col, e.metadata);
+      }
     }
 
     // 3. import 边：按 source 整批重插；目标未同步时建桩节点

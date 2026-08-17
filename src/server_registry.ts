@@ -517,7 +517,9 @@ const TOOL_DEFS: ToolDef[] = [
       '代码理解统一入口：通过 action 参数化执行各类分析。' +
       `action: ${EXPLORE_ACTIONS.join(' / ')}。` +
       '语义搜索/影响分析/架构分层/导览/巨石分析/拆分/变形链/动画流/算法/注入回放/仿真/文件监听。' +
-      'args 为各 action 的具体参数。',
+      'args 为各 action 的具体参数。' +
+      'watch 支持 impact_on_change=true：文件变更后自动生成影响报告（一行摘要入 alerts，' +
+      'action=status 查看未读提醒，action=impact + seq 取全文；报告持久落盘 .design-canvas/impact/）。',
     inputSchema: {
       action: z.enum(EXPLORE_ACTIONS).describe('要执行的代码理解动作'),
       args: z.record(z.string(), z.unknown()).optional().describe('各 action 参数'),

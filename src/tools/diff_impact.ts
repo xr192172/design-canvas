@@ -22,7 +22,8 @@ import { getProjectCacheDb, type Database } from '../db/db.js';
 export type ImpactDirection = 'callers' | 'callees' | 'both';
 
 export interface DiffImpactInput {
-  feature: string;
+  /** 可选：提供时用于 DSL 文件节点映射（dsl_node_id）与语义路径基准；缺省纯缓存分析 */
+  feature?: string;
   /** 被分析项目的根目录（其下 .design-canvas/cache.db 是符号缓存） */
   project_dir: string;
   /** 已变更文件（相对项目根的路径，或绝对路径） */
@@ -108,14 +109,15 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   const root = path.resolve(project_dir);
   const warnings: string[] = [];
 
-  const dsl = getDSL(feature);
-  if (!dsl) {
+  const dsl = feature ? getDSL(feature) : undefined;
+  if (feature && !dsl) {
     throw new Error(`feature "${feature}" 不存在`);
   }
 
   // 语义文件路径 → DSL 文件节点 id 的权威映射（来自 feature 的 semantic.files）。
   // 不用字符串拼接 file_<rel>：feature 生成时 rel 基准可能不是项目根（如 self_analyze 以 src/ 为根）。
-  const semanticFiles = dsl.semantic?.files ?? [];
+  // feature 缺省时跳过 DSL 映射，纯缓存分析（dsl_node_id 缺失）。
+  const semanticFiles = dsl?.semantic?.files ?? [];
   const semanticPathToNodeId = new Map<string, string>();
   for (const f of semanticFiles) {
     if (f.path) semanticPathToNodeId.set(f.path, f.id);
@@ -141,7 +143,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     db = getProjectCacheDb(root);
   } catch (e) {
     return emptyResult(
-      feature, root, changedRels, direction, max_depth,
+      feature ?? path.basename(root), root, changedRels, direction, max_depth,
       [`无法打开缓存 ${path.join(root, '.design-canvas', 'cache.db')}：${(e as Error).message}。请先对该项目运行 import_project 建缓存。`],
       `变更影响分析失败：无法打开符号缓存。请先对该项目运行 import_project。`,
     );
@@ -277,7 +279,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     if (!fileMeta.has(rel)) fileMeta.set(rel, { depth: 0, direct: true, count: 0 });
   }
 
-  const dslNodeIds = new Set((dsl.geometry.nodes || []).map((n) => n.id));
+  const dslNodeIds = new Set((dsl?.geometry.nodes || []).map((n) => n.id));
   const impacted_files: ImpactedFile[] = [...fileMeta.entries()]
     .map(([file, m]) => {
       // 优先用语义映射（缓存 file_path == 语义 path）；无 semantic 时回退字符串拼接
@@ -299,7 +301,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   // ── 文本报告 ──
   const dirLabel = direction === 'callers' ? '谁调用受影响' : direction === 'callees' ? '受影响调用了谁' : '双向调用';
   const lines: string[] = [];
-  lines.push(`=== 变更影响分析 - ${feature} ===`);
+  lines.push(`=== 变更影响分析 - ${feature ?? path.basename(root)} ===`);
   lines.push(`  项目: ${root}`);
   lines.push(`  变更文件 (${changedRels.length}): ${changedRels.join(', ')}`);
   lines.push(`  方向: ${dirLabel} | 最大深度: ${max_depth} | 调用边: ${allEdges.length} 条`);
@@ -336,7 +338,7 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   }
 
   return {
-    feature,
+    feature: feature ?? path.basename(root),
     project_dir: root,
     changed: changedRels,
     direction,

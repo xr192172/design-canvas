@@ -165,13 +165,15 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
     case 'watch': {
       const r = await watchProjectTool({
         project_dir: requireStr(args, 'project_dir'),
-        action: str(args, 'action') as 'start' | 'status' | 'stop' | undefined,
+        action: str(args, 'action') as 'start' | 'status' | 'stop' | 'impact' | undefined,
         feature: str(args, 'feature'),
         debounce_ms: num(args, 'debounce_ms'),
         rebuild_on_change: bool(args, 'rebuild_on_change'),
         rebuild_window_ms: num(args, 'rebuild_window_ms'),
         reconcile_interval_ms: num(args, 'reconcile_interval_ms'),
         diff_on_change: bool(args, 'diff_on_change'),
+        impact_on_change: bool(args, 'impact_on_change'),
+        seq: num(args, 'seq'),
       });
       return toResult(r, true);
     }
