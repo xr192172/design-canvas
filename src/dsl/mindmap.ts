@@ -116,6 +116,9 @@ export interface MindMap {
   /** 共享能力文件（跨功能被调 ≥3 次的"隐形地板"，树内 🧰 分支，排在功能之前） */
   shared?: SharedCapability[];
 
+  /** 社区名中文缓存：英文原名 → LLM 译中文名（重建复用，避免重复调用） */
+  community_zh?: Record<string, string>;
+
   /** 用户的新功能构想（根级 user_nodes 经 LLM 定位融入）：🔮 虚线分支，与已实现功能区分 */
   proposals?: ProposalFeature[];
   /** 生成时间 */

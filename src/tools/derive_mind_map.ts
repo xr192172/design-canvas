@@ -704,15 +704,60 @@ async function buildTeachMindMap(
   // 旧 teach JSON 的分镜缓存：功能名没变 + 本次不强制 LLM 时直接复用，
   // 避免规则重建（gen_descriptions=false）把已有 LLM 分镜覆盖成降级文案
   const prevScripts = new Map<string, TeachScript>();
+  // 社区名中文缓存（community_zh）：社区名是聚类算法从代码标识生成的英文，译成人话
+  let communityZh: Record<string, string> = {};
   try {
     if (fs.existsSync(jsonFile)) {
       const old = JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap;
       for (const c of old.root?.children ?? []) {
         if (c.steps?.length && c.description) prevScripts.set(c.label, { what: c.description, steps: c.steps });
       }
+      if (old.community_zh && typeof old.community_zh === 'object') communityZh = old.community_zh;
     }
   } catch {
     /* 旧文件损坏则忽略 */
+  }
+  // 缺译名的社区 → LLM 批量翻译（一次性，之后走缓存；开销与分镜无关独立判断）
+  const allCommNames = [...new Set(ft.features.flatMap((f) => f.communities.map((c) => c.name)))];
+  const needZh = allCommNames.filter((n) => !communityZh[n]);
+  if (needZh.length > 0) {
+    const cfg = loadAgentConfig();
+    if (cfg) {
+      try {
+        const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  '把代码模块名翻译成简短中文名（≤6字，说明这组文件在做什么，如 TSProbeCapture→探针捕获、LLMJudge→AI判读）。' +
+                  '专有技术词可保留（如 PDF、API）。只输出 JSON：{"zh":{"<原名>":"<中文名>"}}，键必须来自给定清单。',
+              },
+              { role: 'user', content: needZh.join('\n') },
+            ],
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+          const parsed = extractJsonObject(data.choices?.[0]?.message?.content ?? '');
+          const zh = parsed?.zh as Record<string, unknown> | undefined;
+          if (zh && typeof zh === 'object') {
+            for (const n of needZh) {
+              const v = zh[n];
+              if (typeof v === 'string' && v.trim()) communityZh[n] = v.trim().slice(0, 12);
+            }
+          }
+        }
+      } catch {
+        /* 翻译失败保持英文原名，下次重建再试 */
+      }
+    }
   }
 
   // 限并发调用（3 个一批）：全量 Promise.all 并行易触发 API 限流（429），导致整批"AI 分镜暂不可用"
@@ -774,10 +819,11 @@ async function buildTeachMindMap(
             .slice(0, 4)
             .map(({ p }) => fileNode(p))
             .filter((n): n is MindMapNode => !!n);
+          const zhName = communityZh[c.name];
           return {
             id: `f${i}:c${k}`,
-            label: c.name,
-            description: `${c.files.length} 个文件${c.est_lines ? `，约 ${c.est_lines} 行` : ''}的子模块`,
+            label: zhName ?? c.name,
+            description: `${c.files.length} 个文件${c.est_lines ? `，约 ${c.est_lines} 行` : ''}的子模块${zhName ? `（原名 ${c.name}）` : ''}`,
             kind: 'community' as const,
             children: kids,
             meta: { files: c.files.length, lines: c.est_lines, symbols: c.symbol_count },
@@ -795,7 +841,7 @@ async function buildTeachMindMap(
       ];
       const stepGroup: MindMapNode = {
         id: `f${i}:sg`,
-        label: '实现分镜',
+        label: '工作步骤',
         description: `${steps.length} 步讲清这个功能怎么跑起来`,
         kind: 'stepgroup',
         children: steps.map((s, j) => ({
@@ -836,6 +882,7 @@ async function buildTeachMindMap(
     deps: deps.length > 0 ? deps : undefined,
     foundations: foundations.length > 0 ? foundations : undefined,
     shared: shared.length > 0 ? shared : undefined,
+    community_zh: Object.keys(communityZh).length > 0 ? communityZh : undefined,
     proposals: prevProposals,
     generated_at: new Date().toISOString(),
     note: anyLlm

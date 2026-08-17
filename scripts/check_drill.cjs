@@ -46,7 +46,21 @@ const pw = require('playwright');
     return out;
   });
   console.log('   社区面板:', panels.community || '(未找到)');
-  console.log('   分镜组面板:', panels.stepgroup || '(未找到)');
+  console.log('   步骤组面板:', panels.stepgroup || '(未找到)');
+  const zhOk = await p.evaluate(() => {
+    const comm = [...document.querySelectorAll('#nodes g.mnode')].filter((n) => /:c\d+$/.test(n.getAttribute('data-id') || ''));
+    const zh = comm.filter((c) => /[\u4e00-\u9fff]/.test(c.textContent || '')).length;
+    return { total: comm.length, zh };
+  });
+  console.log('② 社区名中文化:', zhOk.zh + '/' + zhOk.total);
+  // ③ 层级收纳：功能档=只见功能；子模块档=展开到社区/步骤组；全部=全展开
+  const lv = {};
+  for (const [name, sel] of [['功能', '.lv-btn[data-lv="1"]'], ['子模块', '.lv-btn[data-lv="2"]'], ['全部', '.lv-btn[data-lv="3"]']]) {
+    await p.click(sel);
+    await p.waitForTimeout(150);
+    lv[name] = await p.evaluate(() => document.querySelectorAll('#nodes g.mnode').length);
+  }
+  console.log('③ 层级收纳 节点数：功能档=' + lv['功能'], '子模块档=' + lv['子模块'], '全部档=' + lv['全部']);
   const files = { count: kinds.file };
 
   // ② 加新功能全流程：根节点 → 工具栏 ＋ 新增分支 → 输入 → 保存 → AI 定位
@@ -100,5 +114,6 @@ const pw = require('playwright');
   }, backup);
   console.log('JS错误:', errs.length ? errs.join(' | ') : '无');
   await b.close();
-  process.exit(placed && files.count > 0 && errs.length === 0 ? 0 : 1);
+  const lvOk = lv['功能'] < lv['子模块'] && lv['子模块'] < lv['全部'];
+  process.exit(placed && files.count > 0 && zhOk.zh > 0 && lvOk && errs.length === 0 ? 0 : 1);
 })().catch((e) => { console.error('E2E 失败:', e.message); process.exit(1); });

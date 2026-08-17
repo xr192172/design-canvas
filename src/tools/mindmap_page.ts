@@ -22,6 +22,12 @@ export function renderMindmapPage(feature: string): string {
   <div class="mm-top">
     <a href="/project/${safeFeature}" class="back">← ${safeFeature}</a>
     <div class="tools">
+      <span class="lv-group" title="层级收纳：控制树展开到哪一层（单个节点的圆点仍可单独折叠）">
+        <span class="lv-label">层级</span>
+        <button class="lv-btn" data-lv="1">功能</button>
+        <button class="lv-btn" data-lv="2">子模块</button>
+        <button class="lv-btn lv-on" data-lv="3">全部</button>
+      </span>
       <button id="btn-add-branch" title="给选中节点（未选中则给根节点）新增一个分支">＋ 新增分支</button>
       <button id="btn-save" title="把新增节点与便签批注写回项目数据（AI 再生成时会读到）">💾 保存</button>
       <button id="btn-reset" title="重置视图">↺ 复位</button>
@@ -63,6 +69,10 @@ export function renderMindmapPage(feature: string): string {
     .mm-top .back { font-size: 14px; font-weight: 700; }
     .mm-top .tools { display: flex; gap: 10px; align-items: center; }
     .mm-top button { background: rgba(6,11,31,.7); color: #7dd3fc; font-size: 12.5px; border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+    .lv-group { display: inline-flex; align-items: center; gap: 4px; background: rgba(6,11,31,.7); border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 2px 8px 2px 10px; }
+    .lv-label { font-size: 11px; color: #5b7ba6; margin-right: 2px; }
+    .lv-btn { border: none !important; padding: 4px 10px !important; border-radius: 6px !important; background: transparent !important; color: #5b7ba6 !important; }
+    .lv-btn.lv-on { background: rgba(125,211,252,.18) !important; color: #7dd3fc !important; font-weight: 700; }
     .mm-top button:hover:not(:disabled) { background: rgba(125,211,252,.14); }
     .mm-top button:disabled { opacity: .4; cursor: not-allowed; }
     #save-state { font-size: 12px; color: #fbbf24; min-width: 60px; }
@@ -449,9 +459,9 @@ export function renderMindmapPage(feature: string): string {
     } else if(n.kind === 'step'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(16,42,70,.92)" stroke="#3d7ab5" stroke-width="1.4"/>';
     } else if(n.kind === 'stepgroup'){
-      // 分镜组：把"怎么实现的"归成一组，与结构层（子模块/文件）分开
+      // 工作步骤组：把"怎么实现的"归成一组，与结构层（子模块/文件）分开
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(30,52,86,.95)" stroke="#8fb7e0" stroke-width="1.5"/>'
-        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a8c8ec">🎬 分镜</text>';
+        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a8c8ec">⚙️ 步骤</text>';
     } else if(n.kind === 'community'){
       // 子模块（聚类社区）：功能的真实构成单元，文件挂在它下面
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(20,47,66,.95)" stroke="#5fb3d4" stroke-width="1.5"/>'
@@ -525,6 +535,24 @@ export function renderMindmapPage(feature: string): string {
     });
   }
   function toggleFold(id){ if(COLLAPSED[id]) delete COLLAPSED[id]; else COLLAPSED[id] = true; layoutTree(); renderAll(); }
+  // ── 层级收纳预设：功能=只看功能层 / 子模块=展开到社区+步骤组 / 全部=展开到文件+步骤 ──
+  //    单节点圆点折叠仍可用；预设是批量的"展开到第几层"，二者互不冲突（后者覆盖前者状态）
+  function setDepthLevel(lv){
+    COLLAPSED = {};
+    if(lv === 1){
+      for(var k in NODE_BY_ID){ var n = NODE_BY_ID[k]; if(n.kind === 'feature' && n.children.length) COLLAPSED[k] = true; }
+    } else if(lv === 2){
+      for(var k2 in NODE_BY_ID){ var n2 = NODE_BY_ID[k2];
+        if((n2.kind === 'community' || n2.kind === 'stepgroup') && n2.children.length) COLLAPSED[k2] = true; }
+    }
+    layoutTree(); renderAll(); fitView();
+    document.querySelectorAll('.lv-btn').forEach(function(b){
+      b.classList.toggle('lv-on', b.getAttribute('data-lv') === String(lv));
+    });
+  }
+  document.querySelectorAll('.lv-btn').forEach(function(b){
+    b.addEventListener('click', function(){ setDepthLevel(parseInt(b.getAttribute('data-lv'), 10) || 3); });
+  });
   function delUserNode(id){
     var doomed = {};
     (function mark(i){ doomed[i] = true; (NODE_BY_ID[i] ? NODE_BY_ID[i].children : []).forEach(mark); })(id);
@@ -602,10 +630,10 @@ export function renderMindmapPage(feature: string): string {
       det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.description || n.raw.detail || '')+'</p>'
         + (stInv.length ? '<p class="files">'+stInv.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
     } else if(n.kind === 'stepgroup'){
-      det.innerHTML = '<b>'+esc(n.owner.label)+' › 🎬 '+esc(n.label)+'</b><span class="tag">分镜组</span>'
+      det.innerHTML = '<b>'+esc(n.owner.label)+' › ⚙️ '+esc(n.label)+'</b><span class="tag">步骤组</span>'
         + '<p>'+esc(n.raw.description||'')+'</p>'
         + (n.children.length ? '<p class="files">'+n.children.length+' 步：'+n.children.map(function(c){ return esc(c.label); }).join(' → ')+'</p>' : '')
-        + '<p style="font-size:11px;color:#7a93b8;">讲"怎么实现"的分镜归在这组；功能"由什么构成"看旁边的 🧩 子模块分支。</p>'
+        + '<p style="font-size:11px;color:#7a93b8;">讲"怎么一步步跑起来"；功能"由什么构成"看旁边的 🧩 子模块分支。</p>'
         + myNoteHtml;
     } else if(n.kind === 'community'){
       det.innerHTML = '<b style="color:#8ed4ec;">🧩 '+esc(n.label)+'</b><span class="tag">子模块</span>'
@@ -628,7 +656,7 @@ export function renderMindmapPage(feature: string): string {
       var depP = (pp.depends_on && pp.depends_on.length)
         ? '<p style="color:#d8b4fe;">🔮 预判要踩：' + pp.depends_on.map(esc).join('、') + '（紫色虚线弧）</p>' : '';
       var stepsHtml = (pp.steps && pp.steps.length)
-        ? '<p style="margin-top:6px;"><b style="color:#c084fc;">实现分镜（AI 预判）：</b></p>' + pp.steps.map(function(s, i){
+        ? '<p style="margin-top:6px;"><b style="color:#c084fc;">实现步骤（AI 预判）：</b></p>' + pp.steps.map(function(s, i){
             return '<p>' + (i+1) + '. <b>' + esc(s.title) + '</b> — ' + esc(s.detail) + '</p>';
           }).join('')
         : '';
@@ -770,7 +798,7 @@ export function renderMindmapPage(feature: string): string {
     applyView();
   }
   document.getElementById('btn-reset').onclick = fitView;
-  document.getElementById('btn-expand').onclick = function(){ COLLAPSED = {}; layoutTree(); renderAll(); fitView(); };
+  document.getElementById('btn-expand').onclick = function(){ setDepthLevel(3); };
   svg.addEventListener('wheel', function(ev){
     ev.preventDefault();
     var k = ev.deltaY < 0 ? 1.12 : 0.89;
