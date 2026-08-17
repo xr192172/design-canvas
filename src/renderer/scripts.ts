@@ -373,12 +373,19 @@ ${I18N_SOURCE}
           if (r.status === 409) {
             return r.json().then(data => {
               var cur = data && typeof data.current_rev === 'number' ? data.current_rev : null;
-              // 有冲突：不覆盖服务器端他人的改动。标记待同步 + 提示拉取最新。
+              // 有冲突：不覆盖服务器端他人的改动。
+              // ①先把本地未同步改动落 localStorage（刷新后 applyLocalOverrides 会自动
+              //   把本地几何/新增边/标注合并回服务器最新版 —— 即自动 rebase，本地不丢）
+              // ②提示冲突，并提供「拉取最新」入口触发刷新引导 rebase。
+              if (saveLocal) { try { saveLocal(); } catch (e) { console.warn('冲突暂存本地改动失败', e); } }
               var hint = '检测到 DSL 冲突：' + (data && data.message ? data.message : '设计已被其他会话更新');
               if (cur !== null && typeof window.__DSL__._dsl_rev === 'number' && window.__DSL__._dsl_rev <= cur) {
                 hint += '（本地基于 ' + window.__DSL__._dsl_rev + '，服务器最新 ' + cur + '）';
               }
+              hint += '。本地改动已保留，点击「拉取最新」自动合并并重存';
               showToast(hint.trim(), 'error');
+              // 冲突介入点（悬浮窗）：让用户选择是拉取最新合并，还是保留本地强推
+              ensureConflictBar(cur, window.__DSL__ && window.__DSL__._dsl_rev);
               console.warn('DSL 冲突，未覆盖服务器改动：', data);
             });
           }
@@ -400,6 +407,44 @@ ${I18N_SOURCE}
     }, 500);
   }
 
+  // 冲突介入悬浮窗：乐观锁 409 时引导 rebase。
+  // 「拉取最新并合并」→ 刷新页面，applyLocalOverrides 会把暂存的本地几何/新增边/标注
+  //   合并回服务器最新 DSL（本地不丢），随后以新 rev 重存即完成 rebase。
+  // 「关闭」→ 保持现状，本地改动仍在 localStorage，后续仍可手动刷新合并。
+  function ensureConflictBar(currentRev, baseRev) {
+    var existing = document.getElementById('conflict-bar');
+    if (existing) existing.remove();
+    var bar = document.createElement('div');
+    bar.id = 'conflict-bar';
+    bar.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2500;' +
+      'display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:8px;' +
+      'background:rgba(244,67,54,0.95);color:#fff;font-size:13px;box-shadow:0 6px 18px rgba(0,0,0,0.35);' +
+      'max-width:80%;flex-wrap:wrap;';
+    var msg = document.createElement('span');
+    msg.textContent = 'DSL 冲突：' +
+      (baseRev !== undefined ? '本地基于 rev ' + baseRev + '，' : '') +
+      '服务器最新 rev ' + (currentRev !== undefined ? currentRev : '?') + '。拉取最新将保留并合并你的本地改动';
+    bar.appendChild(msg);
+
+    var btnPull = document.createElement('button');
+    btnPull.textContent = '拉取最新并合并';
+    btnPull.style.cssText = 'padding:4px 12px;border:none;border-radius:5px;background:#fff;color:#d32f2f;font-size:13px;cursor:pointer;font-weight:600;';
+    btnPull.addEventListener('click', function () {
+      // 先确保本地改动已暂存（前面 saveToServer 已调 saveLocal），再刷新触发自动合并
+      if (saveLocal) { try { saveLocal(); } catch (e) {} }
+      location.reload();
+    });
+    bar.appendChild(btnPull);
+
+    var btnClose = document.createElement('button');
+    btnClose.textContent = '关闭';
+    btnClose.style.cssText = 'padding:4px 10px;border:none;border-radius:5px;background:rgba(255,255,255,0.2);color:#fff;font-size:13px;cursor:pointer;';
+    btnClose.addEventListener('click', function () { bar.remove(); });
+    bar.appendChild(btnClose);
+
+    document.body.appendChild(bar);
+  }
+
   function loadLocal() {
     try {
       const key = 'design-canvas:' + (dsl.feature || 'unknown');
@@ -411,19 +456,23 @@ ${I18N_SOURCE}
     }
   }
 
-  // 应用 localStorage 中的坐标（如果存在）
+  // 应用 localStorage 中的坐标（如果存在）；返回是否发生了合并（供 rebase 后触发重存）
   function applyLocalOverrides() {
     const local = loadLocal();
-    if (!local || !local.geometry || !local.geometry.nodes) return;
+    if (!local || !local.geometry || !local.geometry.nodes) return false;
+    let merged = false;
     const localById = {};
     local.geometry.nodes.forEach(n => { localById[n.id] = n; });
 
-    // 覆盖内存中的节点坐标
+    // 覆盖内存中的节点坐标（仅当与服务器值不同才视为改动，避免每次加载都触发无谓重存）
     (dsl.geometry.nodes || []).forEach(n => {
       const localNode = localById[n.id];
       if (localNode && localNode.x !== undefined && localNode.y !== undefined) {
-        n.x = localNode.x;
-        n.y = localNode.y;
+        if (n.x !== localNode.x || n.y !== localNode.y) {
+          n.x = localNode.x;
+          n.y = localNode.y;
+          merged = true;
+        }
       }
     });
 
@@ -434,6 +483,7 @@ ${I18N_SOURCE}
         if (!existingIds.has(e.id)) {
           if (!dsl.geometry.edges) dsl.geometry.edges = [];
           dsl.geometry.edges.push(e);
+          merged = true;
         }
       });
     }
@@ -445,12 +495,21 @@ ${I18N_SOURCE}
         if (!existingAnnoIds.has(a.id)) {
           if (!dsl.annotations) dsl.annotations = [];
           dsl.annotations.push(a);
+          merged = true;
         }
       });
     }
+    return merged;
   }
 
-  applyLocalOverrides();
+  // 冲突后「拉取最新」刷新：applyLocalOverrides 把暂存的本地改动合并回服务器最新 DSL。
+  // 合并成立后立即以服务器权威 rev 触发重存 —— 完成 rebase 闭环，后续编辑不再因旧 base 冲突。
+  if (applyLocalOverrides()) {
+    saveToServer();
+  }
+  // 若本无本地覆盖，上面的 applyLocalOverrides() 已返回 false；但页面首次加载也需应用覆盖，
+  // 因此无论如何再调用一次以同步 DOM（无合并时 no-op，成本极低）
+  applyLocalOverridesToDom();
 
   // 将 localStorage 覆盖的坐标应用到 DOM（applyLocalOverrides 只改了内存 dsl，
   // 但 DOM 节点是 HTML 内嵌 __DSL__ 渲染的，需要同步更新 rect/text/edge 位置）
