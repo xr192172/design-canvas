@@ -14,7 +14,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { collectPendingAlertText } from './daemon/dispatch.js';
+import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDsl } from './tools/render_dsl.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { queryFeature } from './tools/query_feature.js';
@@ -139,7 +139,10 @@ const editDslHandler = wrap(async (a) => {
   if (!v.ok) {
     throw new Error(`变更原因校验未通过（L${v.layer}）：${v.error}`);
   }
-  return updateFeature(a as never);
+  // 写收敛（方向 E）：daemon 可用则转发单写者队列执行（乐观锁 + 读改写互斥），
+  // 否则本地 updateFeature（现状降级）。冲突时抛错，LLM 据此 rebase，绝不静默覆盖。
+  const { result } = await dispatchDslEdit(a as unknown as Record<string, unknown>, (input) => updateFeature(input as never));
+  return result;
 });
 
 /** manage_feature：生命周期 */

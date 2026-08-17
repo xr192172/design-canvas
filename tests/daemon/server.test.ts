@@ -13,6 +13,7 @@ import http from 'node:http';
 import { describe, it, expect, afterAll } from 'vitest';
 import { createDaemonServer } from '../../src/daemon/server';
 import { pushAlert, clearAlertInbox, alertsSince } from '../../src/tools/alert_inbox';
+import type { DslWriteRequest, DslWriteResult } from '../../src/daemon/server';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const servers: Array<{ stop: () => Promise<void>; baseUrl: () => string; broadcast: (e: string, d: unknown) => void }> = [];
@@ -194,4 +195,132 @@ describe('daemon server · SSE 事件流', () => {
     },
     10000,
   );
+});
+
+describe('daemon server · /api/dsl 单写者 + 乐观锁', () => {
+  it('缺 payload → 400；缺 handler → 501', async () => {
+    const srv = createDaemonServer(
+      {
+        health: () => ({ ok: true }),
+        watch: async () => ({}),
+        alertsSince: () => ({ alerts: [], cursor: 0 }),
+        shutdown: async () => {},
+      },
+      { port: 0 },
+    );
+    const { port } = await srv.start();
+    cleanups.push(() => srv.stop());
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const r400 = await fetch(`${baseUrl}/api/dsl`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ feature: 'x' }),
+    });
+    expect(r400.status).toBe(400);
+    const r501 = await fetch(`${baseUrl}/api/dsl`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ feature: 'x', dsl: { feature: 'x' } }),
+    });
+    expect(r501.status).toBe(501);
+  });
+
+  it('乐观锁冲突 → 409 + current_rev；一致 → 200 + rev', async () => {
+    let currentRev = 4;
+    const mockWrite = async (req: DslWriteRequest): Promise<DslWriteResult> => {
+      const base = req.base_dsl_rev ?? currentRev;
+      if (base !== currentRev) {
+        return { ok: false, rev: currentRev, conflict: true, current_rev: currentRev, message: 'DSL 冲突' };
+      }
+      currentRev += 1;
+      return { ok: true, rev: currentRev };
+    };
+    const { baseUrl } = await startTestServer({
+      health: () => ({ ok: true }),
+      watch: async () => ({}),
+      dslWrite: mockWrite,
+      alertsSince: () => ({ alerts: [], cursor: 0 }),
+    });
+
+    // base 落后 → 冲突
+    const conflict = await fetch(`${baseUrl}/api/dsl`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ feature: 'f', ops: {}, base_dsl_rev: 3 }),
+    });
+    expect(conflict.status).toBe(409);
+    const cbody = (await conflict.json()) as { conflict?: boolean; current_rev?: number };
+    expect(cbody.conflict).toBe(true);
+    expect(cbody.current_rev).toBe(4);
+
+    // base 匹配 → 成功
+    const ok = await fetch(`${baseUrl}/api/dsl`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ feature: 'f', ops: {}, base_dsl_rev: 4 }),
+    });
+    expect(ok.status).toBe(200);
+    const obody = (await ok.json()) as { ok: boolean; rev: number };
+    expect(obody.ok).toBe(true);
+    expect(obody.rev).toBe(5);
+  });
+
+  it('并发提交串行排队：handler 执行次数与顺序一致（无丢写）', async () => {
+    const executed: number[] = [];
+    let currentRev = 0;
+    const slow = async (req: DslWriteRequest): Promise<DslWriteResult> => {
+      // 模拟耗时写（网络/落盘）
+      await new Promise((r) => setTimeout(r, 10));
+      executed.push(req.base_dsl_rev ?? currentRev);
+      const base = req.base_dsl_rev ?? currentRev;
+      if (base !== currentRev) return { ok: false, rev: currentRev, conflict: true, current_rev: currentRev, message: '冲突' };
+      currentRev += 1;
+      return { ok: true, rev: currentRev };
+    };
+    const { baseUrl } = await startTestServer({
+      health: () => ({ ok: true }),
+      watch: async () => ({}),
+      dslWrite: slow,
+      alertsSince: () => ({ alerts: [], cursor: 0 }),
+    });
+    // 三条并发，全带 base=0（都以为站在 rev0）——串行队列下只有第一条能成功，
+    // 后两条因乐观锁冲突返回 409；executed 证明 handler 确实被串行调用（非并发交错）
+    const results = await Promise.all(
+      [0, 0, 0].map(async (base) => {
+        const r = await fetch(`${baseUrl}/api/dsl`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ feature: 'f', ops: {}, base_dsl_rev: base }),
+        });
+        return r.status;
+      }),
+    );
+    // 三条都执行了（串行不丢）
+    expect(executed).toEqual([0, 0, 0]);
+    // 只有第一条成功
+    expect(results.filter((s) => s === 200).length).toBe(1);
+    expect(results.filter((s) => s === 409).length).toBe(2);
+    // rev 最终 = 1
+    expect(currentRev).toBe(1);
+  });
+
+  it('异 feature 分桶并行：不同依赖区域互不阻塞（同进同出）', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const mock = async (req: DslWriteRequest): Promise<DslWriteResult> => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 30)); // 模拟耗时写
+      inFlight--;
+      return { ok: true, rev: 1, touched: req.ops ? [] : undefined };
+    };
+    const { baseUrl } = await startTestServer({
+      health: () => ({ ok: true }),
+      watch: async () => ({}),
+      dslWrite: mock,
+      alertsSince: () => ({ alerts: [], cursor: 0 }),
+    });
+    // 两个不同 feature 并发提交——分桶后应并行执行（峰值并发 in-flight = 2）
+    const body = (feature: string) => ({ feature, ops: { feature }, base_dsl_rev: 0 });
+    await Promise.all([
+      fetch(`${baseUrl}/api/dsl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body('feature-a')) }),
+      fetch(`${baseUrl}/api/dsl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body('feature-b')) }),
+    ]);
+    // 若被全局单队列串行卡住，maxInFlight 只会是 1；分桶后应为 2（并行）
+    expect(maxInFlight).toBe(2);
+  });
 });

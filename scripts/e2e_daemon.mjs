@@ -46,8 +46,10 @@ db.close();
 console.log(`项目就绪：${proj}（cache.db 已建）`);
 
 // ── 2. daemon 启动（随机测试端口）────────────────────────────
+// DESIGN_CANVAS_HOME 隔离到独立 dataHome：写权威段（/api/dsl）的落盘不进仓库根
+const dataHome = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-daemon-data-'));
 const daemon = spawn(process.execPath, [daemonJs], {
-  env: { ...process.env, DC_DAEMON_PORT: String(PORT) },
+  env: { ...process.env, DC_DAEMON_PORT: String(PORT), DESIGN_CANVAS_HOME: dataHome },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -135,6 +137,69 @@ if (!alerts.some((a) => a.line.includes('计划外扩散'))) {
   }
 }
 
+// ── 5.5 写权威：两会话并发改同一 feature，后写者获冲突而非静默覆盖 ──
+// 会话 A、B 都站在同一基准 rev=0，各自提交完整 DSL（模拟两窗口同时改设计图）。
+// 单写者串行队列下，A 成功（rev 1），B 因 base 已过期被 409 拒 + current_rev 提示 rebase。
+const hasConflict = await (async () => {
+  const mk = (t) => ({ feature: 'e2e_collab', dsl: { feature: 'e2e_collab', title: t, geometry: { nodes: [], edges: [] } }, base_dsl_rev: 0, source: 'mcp' });
+  const [a, b] = await Promise.all([
+    fetch(`${BASE}/api/dsl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(mk('A 的改动')) }),
+    fetch(`${BASE}/api/dsl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(mk('B 的改动')) }),
+  ]);
+  const statuses = [a.status, b.status];
+  const aBody = await a.json();
+  const bBody = await b.json();
+  // 恰好一个 200 一个 409，且 409 带 current_rev=1
+  return {
+    pass: statuses.filter((s) => s === 200).length === 1 && statuses.filter((s) => s === 409).length === 1,
+    detail: `并发两写 → [${statuses.join(', ')}] · 成功者 rev=${(aBody.ok ? aBody : bBody).rev} · 冲突者 current_rev=${(aBody.ok ? bBody : aBody).current_rev}`,
+  };
+})();
+step('写权威：并发两会话 → 一成功一冲突(409)+rebase', hasConflict.pass, hasConflict.detail);
+
+// ── 5.6 依赖区域重叠 prompt：同区重叠→强冲突+待办注入；异区不重叠→可在最新安全 rebase ──
+// 用 edit_dsl 的 ops 形态（带 operations[{type,id}]）提交，daemon 据此提取 touched
+// 依赖区域元素。先预置 feature（含 node n1/n2），A 改 n1 成功并记录 lastTouched；
+//   - B 改 n1（同区重叠）→ 409 且消息标「依赖区域重叠」+ 冲突待办入 alert 通道
+//   - C 改 n2（异区不重叠）→ 仍 409（乐观锁永远拦），但消息标「依赖区域不重叠」
+const depNote = await (async () => {
+  // 预置 feature：直接写 live 目录（daemon 的 getDSL 优先读活态文件，feature 需一致）
+  const liveFile = path.join(dataHome, 'design-canvas.json');
+  const mkNode = (nid) => ({ id: nid, label: nid, type: 'class', x: 0, y: 0, content: { text: nid } });
+  fs.writeFileSync(liveFile, JSON.stringify({
+    feature: 'e2e_touched', version: '1.0', title: 'touched', _dsl_rev: 0,
+    geometry: { nodes: [mkNode('n1'), mkNode('n2')], edges: [] }, semantic: { files: [] }, annotations: [],
+  }, null, 2), 'utf-8');
+
+  const opsGet = (nid) => ({ feature: 'e2e_touched', ops: { feature: 'e2e_touched', operations: [{ op: 'update', type: 'node', id: nid, data: { label: `${nid}-改` } }] }, base_dsl_rev: 0, source: 'mcp' });
+  const put = (body, tag) => (async () => {
+    const r = await fetch(`${BASE}/api/dsl`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    return { status: r.status, ok: j.ok, conflict: j.conflict, message: String(j.message ?? ''), touched: (j.touched ?? []).join(','), rev: j.rev, tag };
+  })();
+  // A 改 n1 成功（touched=[node:n1]，lastTouched 记录）；B 同基改 n1 冲突；C 同基改 n2 冲突
+  const a = await put(opsGet('n1'), 'A');
+  const conflictsBefore = (await (await fetch(`${BASE}/api/alerts?since=0`)).json()).alerts.filter((al) => al.line.includes('DSL 写冲突')).length;
+  const b = await put(opsGet('n1'), 'B');
+  const c = await put(opsGet('n2'), 'C');
+  const alertsAfter = (await (await fetch(`${BASE}/api/alerts?since=0`)).json()).alerts;
+  const overlapMsg = b.message;
+  const noOverlapMsg = c.message;
+  const conflictAlert = alertsAfter.filter((al) => al.line.includes('DSL 写冲突'));
+  const newConflicts = conflictAlert.length > conflictsBefore;
+  const bNote = overlapMsg.includes('依赖区域重叠') ? '重叠' : overlapMsg.includes('依赖区域不重叠') ? '不重叠' : `未标[${overlapMsg.slice(0, 50)}]`;
+  const cNote = noOverlapMsg.includes('依赖区域不重叠') ? '不重叠' : noOverlapMsg.includes('依赖区域重叠') ? '重叠' : `未标[${noOverlapMsg.slice(0, 50)}]`;
+  return {
+    pass:
+      a.status === 200 &&
+      b.status === 409 && overlapMsg.includes('依赖区域重叠') &&
+      c.status === 409 && noOverlapMsg.includes('依赖区域不重叠') &&
+      newConflicts,
+    detail: `A=${a.status} · B=${b.status}「${bNote}」· C=${c.status}「${cNote}」· 冲突待办=${newConflicts ? `注入(${conflictAlert.length}条)` : `缺失(${conflictAlert.length}条)`} · A.touched=[${a.touched}]`,
+  };
+})();
+step('依赖区域 prompt：重叠→409强冲突；不重叠→可安全 rebase；冲突待办注入上下文', depNote.pass, depNote.detail);
+
 // ── 6. loop 自动回流：violated → 防抖 10s → spawn camera-dsl ──
 // （findCameraDslBin 探测仓库内 go-camera/build/camera-dsl.exe）
 let loopProposalOrDone = false;
@@ -166,9 +231,13 @@ step('pidfile 已清理', !fs.existsSync(pidfile));
 ctrl.abort();
 
 // ── 收尾 ─────────────────────────────────────────────────────
-if (failed === 0) {
-  console.log('\nE2E 全链通过（9 步）');
+const cleanup = () => {
   try { fs.rmSync(proj, { recursive: true, force: true }); } catch { /* Windows 占用 */ }
+  try { fs.rmSync(dataHome, { recursive: true, force: true }); } catch { /* Windows 占用 */ }
+};
+if (failed === 0) {
+  console.log('\nE2E 全链通过（11 步）');
+  cleanup();
   process.exit(0);
 }
 console.log(`\nE2E 失败 ${failed} 步`);
@@ -176,5 +245,5 @@ console.log('--- daemon log ---\n' + daemonLog);
 try {
   console.log('--- ledger.json ---\n' + fs.readFileSync(path.join(proj, '.design-canvas', 'impact', 'ledger.json'), 'utf-8'));
 } catch { /* 无 ledger */ }
-try { fs.rmSync(proj, { recursive: true, force: true }); } catch { /* Windows 占用 */ }
+cleanup();
 process.exit(1);

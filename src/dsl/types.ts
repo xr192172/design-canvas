@@ -175,6 +175,8 @@ export interface DesignDSL {
   version?: string;
   /** 人类可读标题 */
   title?: string;
+  /** 乐观锁修订号（daemon 写权威用：写前携带 base _dsl_rev，冲突则拒绝，防多会话丢改动） */
+  _dsl_rev?: number;
   status?: DiagramStatus;
   /** 主题 ID（默认 blue） */
   theme?: ThemeId;

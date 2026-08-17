@@ -25,8 +25,118 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { watchProjectTool, listActiveWatches, setWatchToolEventListener } from '../tools/watch_project_tool.js';
 import { setAlertListener, alertsSince, pushAlert } from '../tools/alert_inbox.js';
-import { createDaemonServer } from './server.js';
+import { saveDSL, getDSL, onDslChange } from '../storage.js';
+import { updateFeature } from '../tools/update_feature.js';
+import { createDaemonServer, type DslWriteRequest, type DslWriteResult } from './server.js';
 import { probeDaemon, daemonPort } from './client.js';
+
+// ─────────────────────────────────────────────────────────────
+// 依赖区域感知：写冲突的"细粒度"判据
+//
+// 从 edit_dsl 的 ops（FeatureOperation[]）提取本次提交实际影响的目标元素
+// （`type:id`），作为该提交的"依赖区域"。daemon 用各 feature 最近一次成功写
+// 的影响元素集做重叠判断：
+//   - 本次提交与在途/最新提交的元素无交集 → 属于不同依赖区域，可放心 rebase
+//   - 有交集 → 同一块依赖区域被并发改写，强冲突提示，须人工/LLM 决策
+// feature 级操作（annotation/approval/snapshot/layout/simulation 无 id）视为
+// 影响整个 feature，与任何写都重叠（保守安全）。
+// ─────────────────────────────────────────────────────────────
+
+/** 从 ops 提取依赖区域元素集（`type:id`）；feature 级操作折叠为全局哨兵 */
+function extractTouchedElements(ops?: Record<string, unknown>): string[] {
+  const operations = ops?.operations;
+  if (!Array.isArray(operations)) return [];
+  const touched: string[] = [];
+  for (const op of operations as Array<{ type?: string; id?: string }>) {
+    if (!op.type) continue;
+    touched.push(op.id ? `${op.type}:${op.id}` : `__feature__:${op.type}`);
+  }
+  return touched;
+}
+
+/** 各 feature 最近一次成功写的影响元素集（供下一次提交做依赖重叠判断） */
+const lastTouchedByFeature = new Map<string, string[]>();
+
+/**
+ * 判断依赖区域是否重叠：本次提交 touched 与给定集合（该 feature 最后一次成功写）
+ * 是否有交集。任一为空数组视为未知域——保守判定为冲突（防止静默覆盖）。
+ */
+function regionsOverlap(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return true; // 未知域，保守重叠
+  return a.some((x) => b.includes(x));
+}
+
+/**
+ * 单写者应用对设计 DSL 的编辑（方向 E 写权威，经 daemon 串行队列）
+ *
+ * 两种提交形态（req.input 决定）：
+ *  - 带 ops（edit_dsl 原始入参）：daemon 在串行队列内读最新 DSL → 执行 updateFeature
+ *    （结果落盘，rev 自增底层处理）→ SSE 广播 dsl-changed。由于读改写全部发生在
+ *    daemon 同一进程的串行队列内，进程内绝不并发直写 —— 「最后写者胜」被结构性消除。
+ *  - 不带 ops（bdsl 完整提交）：以 base_dsl_rev 乐观锁校验后 saveDSL。
+ *
+ * 乐观锁：客户端（LLM）先从 get_dsl 拿到 base_rev，编辑后带同一 base_rev 提交。
+ *  daemon 在执行前比对磁盘当前 rev，不一致即冲突拒绝（返回 current_rev 供 rebase），
+ *  避免多会话/多窗口并发改同一 feature 时静默丢改动。
+ */
+function dslWriteHandler(req: DslWriteRequest): Promise<DslWriteResult> {
+  const feature = req.feature as string;
+  const ops = req.ops as Record<string, unknown> | undefined;
+  const expectRev = req.base_dsl_rev;
+  const currentRev = getDSL(feature)?._dsl_rev ?? 0;
+  // 本次提交的依赖区域元素集（读改写形态才有；完整提交形态取不到 → 视为全局域）
+  const touched = extractTouchedElements(ops);
+  // 显式带 base_rev 时做乐观锁；缺省则按"无条件写"（兼容历史直写路径）
+  if (expectRev !== undefined && expectRev !== currentRev) {
+    // 依赖重叠判断：与最后一次成功写的元素是否有交集
+    const lastTouched = lastTouchedByFeature.get(feature) ?? [];
+    const overlap = regionsOverlap(touched, lastTouched);
+    const overlapNote = overlap
+      ? '且依赖区域重叠（与最新提交改到同一批元素），须拉取最新合并后重做。'
+      : '但依赖区域不重叠（改动为不同元素），可在最新基础上安全 rebase。';
+    // 冲突待办注入：复用 alert 通道（daemon 侧 alertLog + SSE），
+    // MCP 侧 collectPendingAlertText 会随下一次工具响应自动带到 LLM 上下文
+    pushAlert({
+      project_dir: `dsl:${feature}`,
+      seq: 0,
+      line: `DSL 写冲突：feature "${feature}" 提交了 ${touched.length > 0 ? touched.length : '新'} 处依赖区域改动被拒绝（基础 rev ${expectRev} → 当前 ${currentRev}）${overlap ? '，依赖区域重叠' : '，依赖区域不重叠'}。edit_dsl base_dsl_rev=${currentRev} 重试。`,
+      created_at: new Date().toISOString(),
+    });
+    return Promise.resolve({
+      ok: false,
+      rev: currentRev,
+      conflict: true,
+      current_rev: currentRev,
+      touched,
+      message:
+        `DSL 冲突：feature "${feature}" 已被他人更新（当前 rev ${currentRev}，你的 base rev ${expectRev}）${overlapNote}` +
+        `请重新 get_dsl 拉取最新后重做。`,
+    });
+  }
+  try {
+    if (ops && typeof ops === 'object') {
+      // edit_dsl 原始入参：在 daemon 进程内执行读改写（updateFeature 内部 saveDSL 落盘）
+      const r = updateFeature(ops as never);
+      // 写成功后记录该 feature 的最新依赖区域（供后续提交重叠判断）
+      lastTouchedByFeature.set(feature, touched);
+      return Promise.resolve({ ok: true, rev: getDSL(feature)?._dsl_rev ?? currentRev + 1, touched, message: r.message });
+    }
+    // 完整提交形态：乐观锁已校验，saveDSL 带 currentRev 保证落盘 rev 匹配；
+    // 该形态影响面未知，记录为全局域（后续任何写都视为重叠，保守）
+    saveDSL(req.dsl as never, req.source ?? 'daemon', currentRev);
+    lastTouchedByFeature.set(feature, []);
+    return Promise.resolve({ ok: true, rev: currentRev + 1, touched, message: `已保存 ${feature}（rev ${currentRev + 1}）` });
+  } catch (e) {
+    return Promise.resolve({
+      ok: false,
+      rev: currentRev,
+      conflict: true,
+      current_rev: currentRev,
+      touched,
+      message: (e as Error).message,
+    });
+  }
+}
 
 const startedAt = new Date().toISOString();
 
@@ -156,6 +266,7 @@ async function main(): Promise<void> {
       watches: listActiveWatches(),
     }),
     watch: (input) => watchProjectTool(input as unknown as Parameters<typeof watchProjectTool>[0]) as unknown as Promise<Record<string, unknown>>,
+    dslWrite: dslWriteHandler,
     alertsSince: (cursor) => alertsSince(cursor),
     shutdown: () => doShutdown?.() ?? Promise.resolve(),
   }, { port });

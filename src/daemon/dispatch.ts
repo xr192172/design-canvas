@@ -12,8 +12,9 @@
  *     daemon 游标拉取（权威路径）合并，daemon alert 也能借 MCP 响应送达
  */
 
-import { probeDaemon, postWatch, fetchAlertsSince } from './client.js';
+import { probeDaemon, postWatch, postDsl, fetchAlertsSince } from './client.js';
 import { takeAlerts } from '../tools/alert_inbox.js';
+import { getDSL } from '../storage.js';
 import type { WatchProjectToolInput, WatchProjectToolResult } from '../tools/watch_project_tool.js';
 import { watchProjectTool } from '../tools/watch_project_tool.js';
 
@@ -47,6 +48,47 @@ export async function dispatchWatch(input: WatchProjectToolInput): Promise<Watch
     }
   }
   return watchProjectTool(input);
+}
+
+// ─────────────────────────────────────────────────────────────
+// edit_dsl 写转发：daemon 单写者 + 乐观锁（方向 E 写权威收敛）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 设计 DSL 编辑的统一写入口（MCP 侧唯一调用点：edit_dsl handler）
+ *
+ * daemon 可用（探测 TTL 内）→ 转发 daemon 进程串行队列执行 updateFeature：
+ *   - 单写者：所有会话的读改写都进同一进程队列，结构性消除「最后写者胜」
+ *   - 乐观锁：暂不支持 base_rev 时由 daemon 内部比对当前 rev 一致即写
+ *   - 冲突返回 conflict=true → 抛错（含当前 rev），LLM 据此重新 get_dsl rebase
+ * daemon 不可用 → 本地 updateFeature（现状降级）。
+ *
+ * 返回 { result, viaDaemon }，调用方决定是否追加标记。
+ */
+export async function dispatchDslEdit(
+  input: Record<string, unknown>,
+  localRun: (input: Record<string, unknown>) => unknown,
+): Promise<{ result: { message: string; feature: string; [k: string]: unknown }; viaDaemon: boolean }> {
+  const feature = String(input.feature ?? '');
+  if (!feature.trim()) throw new Error('edit_dsl 需要 feature');
+  if (await isDaemonAvailable()) {
+    try {
+      const r = await postDsl({ feature, ops: input, source: 'mcp' });
+      if (r.conflict) {
+        throw new Error(r.message ?? `DSL 冲突：feature "${feature}" 已被他人更新。`);
+      }
+      return { result: { message: r.message ?? `已更新 ${feature}（rev ${r.rev}）`, feature }, viaDaemon: true };
+    } catch (e) {
+      // 显式冲突（乐观锁拒绝）不降级——必须让 LLM rebase，绝不静默覆盖
+      if (isDslConflictError(e)) throw e;
+      // 网络/daemon 瞬时故障 → 降级本地（最好能读到最新 rev，但本地直写无并发保护）
+    }
+  }
+  return { result: localRun(input) as { message: string; feature: string }, viaDaemon: false };
+}
+
+function isDslConflictError(e: unknown): boolean {
+  return e instanceof Error && e.message.includes('DSL 冲突');
 }
 
 // ─────────────────────────────────────────────────────────────

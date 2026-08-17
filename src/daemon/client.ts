@@ -75,6 +75,34 @@ export async function postWatch(input: Record<string, unknown>, timeoutMs = 10_0
   }
 }
 
+/** 单写者提交设计 DSL（经 daemon /api/dsl 串行队列）。返回结果；冲突时 result.conflict=true + current_rev */
+export async function postDsl(
+  req: {
+    feature: string;
+    ops?: Record<string, unknown>;
+    dsl?: Record<string, unknown>;
+    base_dsl_rev?: number;
+    source?: string;
+  },
+  timeoutMs = 10_000,
+): Promise<{ ok: boolean; rev: number; conflict?: boolean; current_rev?: number; message?: string }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${daemonBaseUrl()}/api/dsl`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: ctrl.signal,
+    });
+    // 409 = 乐观锁冲突，仍返回解析结果（带 conflict+current_rev），不抛
+    const body = (await res.json()) as { ok: boolean; rev: number; conflict?: boolean; current_rev?: number; message?: string };
+    return body; // 冲突(409)也带 conflict+current_rev 返回，由调用方决定 rebase
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 按游标拉取 daemon 侧未读提醒（返回新条目 + 最新游标；失败抛错） */
 export async function fetchAlertsSince(
   cursor: number,

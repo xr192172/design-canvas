@@ -106,9 +106,25 @@ export function onDslChange(cb: DslChangeCallback): void {
 /** 保存 DSL（覆盖），同时同步到活态文件
  *  source: 'mcp'（LLM 工具调用）| 'browser'（浏览器端保存）
  *  传入 source 决定 SSE 广播的来源标记，浏览器据此跳过自身触发的刷新
+ *  base_dsl_rev 可选乐观锁：非 undefined 时要求磁盘当前 rev === base_dsl_rev，
+ *  否则视为并发冲突抛错（最后写者胜 → 拒绝，防多会话丢改动）。
+ *  省略则不做校验（保留旧直写语义，兼容既有 30 处调用）。
  */
-export function saveDSL(dsl: DesignDSL, source: string = 'mcp'): string {
+export function saveDSL(dsl: DesignDSL, source: string = 'mcp', base_dsl_rev?: number): string {
   ensureFeaturesDir();
+  // 乐观锁：读当前 rev 对比 base
+  if (base_dsl_rev !== undefined) {
+    const cur = currentDslRev(dsl.feature);
+    if (cur !== base_dsl_rev) {
+      throw new Error(
+        `DSL 冲突：feature "${dsl.feature}" 已被他人更新（当前 rev ${cur}，你的 base rev ${base_dsl_rev}）。` +
+          `请重新 get_dsl 拉取最新，在最新基础上重做你的改动，勿直接覆盖。`,
+      );
+    }
+  }
+  // 自增 rev（权威写经此落盘）
+  const nextRev = (base_dsl_rev ?? currentDslRev(dsl.feature)) + 1;
+  dsl._dsl_rev = nextRev;
   const file = getFeatureFile(dsl.feature);
   fs.writeFileSync(file, JSON.stringify(dsl, null, 2), 'utf-8');
 
@@ -130,6 +146,11 @@ export function saveDSL(dsl: DesignDSL, source: string = 'mcp'): string {
   }
 
   return file;
+}
+
+/** 当前磁盘 rev：优先活态文件，回退 feature 存档，缺失为 0 */
+function currentDslRev(feature: string): number {
+  return getDSL(feature)?._dsl_rev ?? 0;
 }
 
 /** 读取 DSL，不存在返回 null。优先读取活态文件 */

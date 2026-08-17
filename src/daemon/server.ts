@@ -17,11 +17,55 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+// ─────────────────────────────────────────────────────────────
+// 按依赖区域分桶的串行队列：同一 feature（同一块依赖区域）串行，
+// 不同 feature（不同区域）并行，写吞吐不因无关区域互相阻塞
+// ─────────────────────────────────────────────────────────────
+const dslWriteTails = new Map<string, Promise<unknown>>();
+
+/**
+ * 入队：以 key（依赖区域标识，当前取 feature）分桶，桶内链式串行、桶间并行。
+ * key 相同的后续写在前序完成后才执行，杜绝同区域并发直写导致「最后写者胜」。
+ */
+function enqueueDslWrite<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const tail = dslWriteTails.get(key) ?? Promise.resolve();
+  const run = tail.then(fn, fn); // 无论前序成败都执行本次
+  // 链住尾，但吞掉自身错误避免整条链断 —— 错误由调用方 await 捕获
+  dslWriteTails.set(key, run.catch(() => undefined));
+  return run;
+}
+
+/** POST /api/dsl 的入参（单写者提交 DSL，base_dsl_rev 乐观锁）
+ *  两种形态：ops（edit_dsl 原始入参，daemon 内执行读改写）或 dsl（完整提交）二选一
+ */
+export interface DslWriteRequest {
+  feature: string;
+  /** edit_dsl 原始入参（含 action/feature/各 op 参数），daemon 内执行 updateFeature */
+  ops?: Record<string, unknown>;
+  /** 完整 DSL 提交形态 */
+  dsl?: Record<string, unknown>;
+  base_dsl_rev?: number;
+  source?: string;
+}
+
+/** POST /api/dsl 的返回；冲突时 error 携带 current_rev 供客户端 rebase */
+export interface DslWriteResult {
+  ok: boolean;
+  rev: number;
+  conflict?: boolean;
+  current_rev?: number;
+  message?: string;
+  /** 本次提交影响的目标元素（用于依赖重叠判断），随结果回带 */
+  touched?: string[];
+}
+
 export interface DaemonServerHandlers {
   /** GET /api/health 的负载（进程存活信息 + watch 汇总） */
   health: () => Record<string, unknown>;
   /** POST /api/watch：执行 watch action，返回结果 JSON（抛错 → 500 + error 字段） */
   watch: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** POST /api/dsl：单写者提交设计 DSL（串行队列 + 乐观锁 + 写后 SSE 广播）。缺省则返回 501 */
+  dslWrite?: (req: DslWriteRequest) => Promise<DslWriteResult>;
   /** GET /api/alerts?since=N：游标拉取 */
   alertsSince: (cursor: number) => { alerts: unknown[]; cursor: number };
   /** POST /api/shutdown：优雅退出（Windows 无 POSIX 信号，HTTP 触发 shutdown 流程） */
@@ -80,6 +124,46 @@ export function createDaemonServer(handlers: DaemonServerHandlers, opts: { port?
       const since = Number(url.searchParams.get('since') || 0) || 0;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(handlers.alertsSince(since)));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/dsl') {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 5_000_000) req.destroy(); // 防御性上限：DSL 不会这么大
+      });
+      req.on('end', () => {
+        void (async () => {
+          try {
+            const input = body ? (JSON.parse(body) as DslWriteRequest) : ({} as DslWriteRequest);
+            const hasPayload = (typeof input.dsl === 'object' && input.dsl) || (typeof input.ops === 'object' && input.ops);
+            if (typeof input.feature !== 'string' || !input.feature.trim() || !hasPayload) {
+              res.writeHead(400, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'feature 与 (dsl 或 ops) 必填' }));
+              return;
+            }
+            if (!handlers.dslWrite) {
+              res.writeHead(501, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'dsl write 未启用', conflict: false, ok: false }));
+              return;
+            }
+            // 关键：按依赖区域分桶串行——同 feature 的写请求在同一进程内按序排队，
+            // 杜绝多会话并发直写导致「最后写者胜」的丢改动；异 feature 互不阻塞
+            const result = await enqueueDslWrite(input.feature, () => handlers.dslWrite!(input));
+            if (result.conflict) {
+              res.writeHead(409, { 'content-type': 'application/json' });
+              res.end(JSON.stringify(result));
+              return;
+            }
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (e) {
+            res.writeHead(500, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: (e as Error).message, conflict: false, ok: false }));
+          }
+        })();
+      });
       return;
     }
 
