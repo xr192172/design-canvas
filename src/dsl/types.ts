@@ -202,4 +202,18 @@ export interface DesignDSL {
   layers?: ArchLayer[];
   /** 功能树（项目 → 功能 → 社区 → 文件）：逐级下钻导航数据 */
   feature_tree?: FeatureTree;
+  /** 思维导图上用户手写的节点（人机共笔：人在 AI 生成的树上新增分支） */
+  user_nodes?: UserNode[];
+}
+
+/** 用户在思维导图上新增的节点（挂在 AI 生成树的任意节点下，可嵌套） */
+export interface UserNode {
+  id: string;
+  /** 挂载目标：'root' | 'f{i}' | 'f{i}:{j}' | 其他 user node id */
+  parent_id: string;
+  /** 挂载时的目标文字（分镜再生成后 f 索引漂移时按文字兜底匹配） */
+  parent_label?: string;
+  /** 节点文字 */
+  text: string;
+  created?: string;
 }

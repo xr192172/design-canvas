@@ -532,12 +532,41 @@ async function buildTeachMindMap(
 
   // 主人批注分拣：导图节点 id f{i}（功能）/ f{i}:{j}（步骤），target_id 前缀匹配
   const humanNotes = (dsl.annotations ?? []).filter((a) => a.author === 'human' && !a.resolved && a.text);
+  // 用户手写节点（人机共笔）：挂功能/步骤下的整棵子树（含嵌套）作为该功能的理解补充；
+  // 挂 root 的作为项目级理解，进所有功能材料。parent_id 索引漂移时按 parent_label 匹配功能名兜底。
+  const userNodes = dsl.user_nodes ?? [];
+  const uChildren = new Map<string, string[]>();
+  for (const u of userNodes) {
+    const arr = uChildren.get(u.parent_id) ?? [];
+    arr.push(u.id);
+    uChildren.set(u.parent_id, arr);
+  }
+  const uById = new Map(userNodes.map((u) => [u.id, u]));
+  /** 展开用户子树为 "根 → 子 → 孙" 路径文本 */
+  const uTreeText = (id: string): string => {
+    const u = uById.get(id);
+    if (!u) return '';
+    const kids = (uChildren.get(id) ?? []).map(uTreeText).filter(Boolean);
+    return u.text + (kids.length ? `（延伸：${kids.join('；')}）` : '');
+  };
+  const belongsToFeature = (u: { parent_id: string; parent_label?: string }, i: number): boolean => {
+    if (u.parent_id === `f${i}` || u.parent_id.startsWith(`f${i}:`)) return true;
+    return !!u.parent_label && u.parent_label === ft.features[i].name;
+  };
+  const rootLevelNotes = userNodes
+    .filter((u) => u.parent_id === 'root')
+    .map((u) => uTreeText(u.id))
+    .filter(Boolean);
   const notesPerFeature = ft.features.map((_, i) => {
     const prefix = `f${i}:`;
-    return humanNotes
+    const annTexts = humanNotes
       .filter((a) => a.target_id === `f${i}` || a.target_id?.startsWith(prefix))
-      .map((a) => a.text)
-      .slice(0, 10);
+      .map((a) => a.text);
+    // 只取直挂本功能子树的顶层节点（嵌套已由 uTreeText 展开），避免重复
+    const nodeTexts = userNodes
+      .filter((u) => belongsToFeature(u, i) && !u.parent_id.startsWith('u_'))
+      .map((u) => `主人新增的笔记节点「${uTreeText(u.id)}」`);
+    return [...annTexts, ...nodeTexts, ...rootLevelNotes.map((t) => `（项目级理解）${t}`)].slice(0, 14);
   });
 
   // 限并发调用（3 个一批）：全量 Promise.all 并行易触发 API 限流（429），导致整批"AI 分镜暂不可用"

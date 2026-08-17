@@ -918,6 +918,64 @@ async function handleApiAnnotations(
   }
 }
 
+/** GET/POST /api/user_nodes：思维导图上用户手写的节点（人机共笔的结构性扩展）
+ *  GET ?feature=X —— 返回该 feature 全部 user_nodes
+ *  POST {feature, nodes:[{id,parent_id,parent_label,text}]} —— 全量替换；
+ *  saveDSL 推 rev 并 SSE 广播，LLM 再生成 teach 分镜时作为【主人批注】材料读入 */
+async function handleApiUserNodes(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  method: string,
+): Promise<void> {
+  try {
+    let feature = '';
+    if (method === 'GET') {
+      const url = new URL(req.url || '/', 'http://localhost');
+      feature = (url.searchParams.get('feature') || '').trim();
+      if (!feature) {
+        sendError(res, 400, '缺少 feature 参数');
+        return;
+      }
+      const dsl = getDSL(feature);
+      if (!dsl) {
+        sendError(res, 404, `feature "${feature}" 不存在`);
+        return;
+      }
+      sendJson(res, 200, { success: true, user_nodes: dsl.user_nodes ?? [] });
+      return;
+    }
+    // POST：全量替换
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    feature = String(params.feature || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    const nodes = Array.isArray(params.nodes) ? params.nodes : [];
+    const now = new Date().toISOString();
+    const cleaned = nodes
+      .filter((n: { parent_id?: unknown; text?: unknown }) => n && typeof n.text === 'string' && typeof n.parent_id === 'string' && n.text.trim())
+      .map((n: { id?: unknown; parent_id: string; parent_label?: unknown; text: string }) => ({
+        id: typeof n.id === 'string' && n.id ? n.id : `u_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        parent_id: n.parent_id,
+        parent_label: typeof n.parent_label === 'string' ? n.parent_label.slice(0, 200) : undefined,
+        text: n.text.trim().slice(0, 300),
+        created: now,
+      }));
+    dsl.user_nodes = cleaned;
+    saveDSL(dsl, 'browser');
+    sendJson(res, 200, { success: true, count: cleaned.length });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
 /** POST /api/diff-views：设计视图 vs 实际代码快照 图级对比（最后一英里） */
 async function handleApiDiffViews(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
@@ -1973,6 +2031,10 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    if (url.startsWith('/api/user_nodes') && (method === 'GET' || method === 'POST')) {
+      void handleApiUserNodes(req, res, method);
+      return;
+    }
     if (url.startsWith('/api/annotations') && (method === 'GET' || method === 'POST')) {
       void handleApiAnnotations(req, res, method);
       return;
