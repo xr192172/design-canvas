@@ -179,6 +179,151 @@ export interface GetOverviewInput {
   first_steps?: number;
 }
 
+/** 自动生成的统计型 responsibility（如 "src/tools — 9 个 API（导入自 5 个模块）"）不是人话，视为缺失 */
+const STATISTICAL_DESC_RE = / — \d+ 个| — 聚合 /;
+
+/** 共享能力描述缓存：<storageRoot>/overview/<feature>.shared_desc.json（按 dsl_rev 失效） */
+function sharedDescCacheFile(feature: string): string {
+  return path.join(getStorageRoot(), 'overview', `${feature}.shared_desc.json`);
+}
+
+/** LLM 批量为共享能力文件写一句"它是干嘛的"。材料全部是已有事实：调用方×次数 + 导出 API 签名 */
+async function llmSharedDesc(
+  shared: NonNullable<MindMap['shared']>,
+  dsl: NonNullable<ReturnType<typeof getDSL>>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const cfg = loadAgentConfig();
+  if (!cfg) return out;
+  // API 签名材料：精确 → 后缀匹配 semantic.actual_apis（cache.db 与 DSL 路径前缀可能不一致）
+  const apiExact = new Map<string, string[]>();
+  const apiSuffix = new Map<string, string>();
+  for (const f of dsl.semantic?.files ?? []) {
+    const sigs = (f.actual_apis ?? []).slice(0, 5).map((a) => a.signature).filter(Boolean);
+    if (!f.path || sigs.length === 0) continue;
+    apiExact.set(f.path, sigs);
+    const segs = f.path.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const key = segs.slice(k).join('/');
+      if (!apiSuffix.has(key)) apiSuffix.set(key, sigs.join('; '));
+    }
+  }
+  const apisOf = (file: string): string => {
+    if (apiExact.has(file)) return apiExact.get(file)!.join('; ');
+    const segs = file.split('/');
+    for (let k = 0; k < segs.length; k++) {
+      const hit = apiSuffix.get(segs.slice(k).join('/'));
+      if (hit) return hit;
+    }
+    return '';
+  };
+  const items = shared
+    .slice(0, 16)
+    .map((s) => {
+      const callers = s.used_by.map((u) => `${u.feature}×${u.count}`).join('、');
+      return `- ${s.file}｜被调用：${callers}｜导出API：${apisOf(s.file) || '（无记录）'}`;
+    })
+    .join('\n');
+  try {
+    const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你是代码库讲解员。给定项目里被多个功能共用的"共享能力"文件清单（含真实调用方与导出API），' +
+              '为每个文件写一句通俗易懂的"它是干嘛的"（15~40 字，讲它为整个项目提供了什么能力，不罗列函数名）。' +
+              '只输出 JSON：{"descs":{"<文件路径>":"<一句话>"}}，路径必须来自给定清单。',
+          },
+          { role: 'user', content: `项目：${dsl.title || ''}\n清单：\n${items}` },
+        ],
+        temperature: 0.3,
+        response_format: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) return out;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const parsed = extractJsonObject(data.choices?.[0]?.message?.content ?? '');
+    const raw = parsed?.descs as Record<string, unknown> | undefined;
+    if (!raw || typeof raw !== 'object') return out;
+    for (const [f, v] of Object.entries(raw)) {
+      const s = typeof v === 'string' ? v.trim() : '';
+      if (s) out.set(f, s);
+    }
+  } catch {
+    // LLM 失败静默降级：面板只少一行介绍，不影响其余数据
+  }
+  return out;
+}
+
+/** 共享能力补"它是干嘛的"三级填充：语义层人话职责 → 描述缓存 → LLM 后台生成（wait=false 时不阻塞响应） */
+const sharedDescInflight = new Map<string, Promise<void>>();
+async function enrichSharedDesc(
+  mindMap: MindMap,
+  dsl: NonNullable<ReturnType<typeof getDSL>>,
+  feature: string,
+  dslRev: number,
+  wait: boolean,
+): Promise<void> {
+  const shared = mindMap.shared;
+  if (!shared?.length) return;
+  // 1) 语义层直取（统计型兜底文案视为缺失）
+  const exact = new Map<string, string>();
+  const bySuffix = new Map<string, string>();
+  for (const f of dsl.semantic?.files ?? []) {
+    if (!f.path || !f.responsibility || STATISTICAL_DESC_RE.test(f.responsibility)) continue;
+    exact.set(f.path, f.responsibility);
+    const segs = f.path.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const key = segs.slice(k).join('/');
+      if (!bySuffix.has(key)) bySuffix.set(key, f.responsibility);
+    }
+  }
+  for (const s of shared) {
+    if (s.desc) continue;
+    let hit = exact.get(s.file);
+    const segs = s.file.split('/');
+    for (let k = 0; k < segs.length - 1 && !hit; k++) hit = bySuffix.get(segs.slice(k).join('/'));
+    if (hit) s.desc = hit;
+  }
+  const missing = () => shared.filter((s) => !s.desc);
+  if (missing().length === 0) return;
+  // 2) 描述缓存（按 dsl_rev 失效）
+  let cached: Record<string, string> = {};
+  try {
+    const j = JSON.parse(fs.readFileSync(sharedDescCacheFile(feature), 'utf-8')) as { dsl_rev?: number; descs?: Record<string, string> };
+    if (j.dsl_rev === dslRev && j.descs) cached = j.descs;
+  } catch {
+    cached = {};
+  }
+  for (const s of missing()) if (cached[s.file]) s.desc = cached[s.file];
+  if (missing().length === 0) return;
+  // 3) LLM 生成（wait=false 时后台执行，本次响应不带介绍，下次刷新可见）
+  const run = (async () => {
+    const descs = await llmSharedDesc(missing(), dsl);
+    const all = { ...cached };
+    for (const s of shared) {
+      if (descs.get(s.file)) s.desc = descs.get(s.file);
+      if (s.desc) all[s.file] = s.desc;
+    }
+    try {
+      fs.mkdirSync(path.dirname(sharedDescCacheFile(feature)), { recursive: true });
+      fs.writeFileSync(sharedDescCacheFile(feature), JSON.stringify({ dsl_rev: dslRev, descs: all }, null, 2), 'utf-8');
+    } catch {
+      // 缓存写失败不影响当次结果
+    }
+  })().finally(() => sharedDescInflight.delete(feature));
+  if (wait) {
+    await run;
+  } else if (!sharedDescInflight.has(feature)) {
+    sharedDescInflight.set(feature, run);
+  }
+}
+
 export async function getOverview(input: GetOverviewInput): Promise<OverviewResult> {
   const { feature, refresh = false, refresh_llm = false, first_steps = 3 } = input;
   const dsl = getDSL(feature);
@@ -244,6 +389,8 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
       note = '已生成 AI 科普分镜（含最新批注）';
     }
   }
+
+  enrichSharedDesc(mindMap, dsl, feature, dslRev, refresh_llm);
 
   // 2. 摘要：缓存 → LLM（允许时）→ 规则兜底
   let summary: OverviewSummary | null = refresh ? null : readCachedSummary(feature, dslRev);

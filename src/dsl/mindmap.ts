@@ -69,6 +69,8 @@ export interface FeatureDep {
 export interface SharedCapability {
   /** 文件路径 */
   file: string;
+  /** 它是干嘛的（人话一句话：语义层职责描述，或 LLM 按调用方+API 证据生成） */
+  desc?: string;
   /** 被哪些功能调用（调用方功能 + 次数） */
   used_by: Array<{ feature: string; count: number }>;
   /** 跨功能被调总次数 */

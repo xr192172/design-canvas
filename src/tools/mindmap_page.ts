@@ -119,7 +119,33 @@ export function renderMindmapPage(feature: string): string {
     DEPS = (OV.mind_map && OV.mind_map.deps) || [];
     FOUNDATIONS = (OV.mind_map && OV.mind_map.foundations) || [];
     rebuild(); fitView();
+    pollSharedDesc();
   });
+
+  // ── 共享能力介绍回填：首次请求触发后台 LLM 生成（页面秒开），这里轮询取结果 ——
+  //    详情面板先显示"生成中"，缓存写盘后自动补上，用户无感等待
+  var SH_POLL = 0, SH_GAVEUP = false;
+  function pollSharedDesc(){
+    var SH = (OV && OV.mind_map && OV.mind_map.shared) || [];
+    if(!SH.length || SH.every(function(s){ return s.desc; })) return;
+    if(SH_POLL >= 20){ SH_GAVEUP = true; refreshOpenShared(); return; } // ~60s 仍无结果：AI 未配置或生成失败
+    SH_POLL++;
+    setTimeout(function(){
+      fetch('/api/overview?feature=' + encodeURIComponent(FEATURE)).then(function(r){ return r.json(); }).then(function(j){
+        if(j.success && j.mind_map && j.mind_map.shared){
+          j.mind_map.shared.forEach(function(s){
+            var n = NODE_BY_ID['sf:' + s.file];
+            if(n && s.desc && !n.raw.desc) n.raw.desc = s.desc;
+          });
+          refreshOpenShared();
+          pollSharedDesc();
+        }
+      }).catch(function(){ pollSharedDesc(); });
+    }, 3000);
+  }
+  function refreshOpenShared(){
+    if(SEL && NODE_BY_ID[SEL] && NODE_BY_ID[SEL].kind === 'shared') select(SEL);
+  }
 
   // ── 合成树：AI 树（root→功能→步骤）+ 用户节点（含嵌套、索引漂移按 label 兜底） ──
   function rebuild(){
@@ -501,6 +527,11 @@ export function renderMindmapPage(feature: string): string {
       var ub = n.raw.used_by || [];
       det.innerHTML = '<b style="color:#2dd4bf;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
         + '<p class="files">' + esc(n.raw.file) + '</p>'
+        + (n.raw.desc
+            ? '<p style="color:#bae6fd;">' + esc(n.raw.desc) + '</p>'
+            : (SH_GAVEUP
+                ? '<p style="font-size:11px;color:#7a93b8;">介绍暂不可用（AI 未配置或生成失败），调用证据不受影响。</p>'
+                : '<p style="color:#fbbf24;">⏳ AI 正在写介绍，生成后这里自动补上…</p>'))
         + '<p style="color:#99f6e4;">谁在用它：' + ub.map(function(u){ return esc(u.feature) + '（×' + u.count + '）'; }).join('、') + '</p>'
         + '<p style="font-size:11px;color:#7a93b8;">被多个功能真实调用的隐形地板——聚类会把它吸进某个大功能里，这里是按调用证据挖出来的。</p>'
         + myNoteHtml;
