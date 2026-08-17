@@ -117,14 +117,30 @@ async function handleApiSave(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
 
-    // 传入 'browser' source，saveDSL 内部会以此 source 触发 SSE 回调，
-    // 浏览器端 SSE 监听器据此跳过自身触发的刷新（避免循环 reload）
-    saveDSL(result.dsl, 'browser');
+    // 乐观锁（方向 F）：浏览器提交的 DSL 携带其基于的 _dsl_rev。
+    // 磁盘当前 rev 若已被他人（MCP/其他会话）推进，则拒绝本次覆盖，
+    // 返回 409 + current_rev 供浏览器拿到最新 base 后 rebase，杜绝「最后写者胜」。
+    // 传入 'browser' source：冲突分支在 saveDSL 抛错前不会触发 SSE reload，
+    // 且 saveDSL 内部成功后以 'browser' source 回调，浏览器据此跳过自身刷新。
+    const baseRev = result.dsl._dsl_rev;
+    try {
+      saveDSL(result.dsl, 'browser', baseRev);
+    } catch (e) {
+      const cur = getDSL(result.dsl.feature)?._dsl_rev ?? 0;
+      sendJson(res, 409, {
+        success: false,
+        conflict: true,
+        current_rev: cur,
+        message: (e as Error).message,
+      });
+      return;
+    }
     sendJson(res, 200, {
       success: true,
       message: 'DSL 已保存',
       feature: result.dsl.feature,
       saved_at: new Date().toISOString(),
+      rev: result.dsl._dsl_rev,
     });
   } catch (e) {
     sendError(res, 500, (e as Error).message);

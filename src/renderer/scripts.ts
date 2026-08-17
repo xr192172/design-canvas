@@ -361,16 +361,36 @@ ${I18N_SOURCE}
     if (saveTimeout) clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
       if (window.location.protocol === 'file:') return;
+      // 提交携带当前基版本 _dsl_rev：若服务端已被人（MCP/其他会话）推进，
+      // 返回 409+conflict，浏览器据此提示 rebase 而非静默覆盖，防「最后写者胜」
+      var payload = JSON.parse(JSON.stringify(window.__DSL__ || {}));
       fetch('/api/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(window.__DSL__),
+        body: JSON.stringify(payload),
       })
-        .then(r => r.json())
+        .then(r => {
+          if (r.status === 409) {
+            return r.json().then(data => {
+              var cur = data && typeof data.current_rev === 'number' ? data.current_rev : null;
+              // 有冲突：不覆盖服务器端他人的改动。标记待同步 + 提示拉取最新。
+              var hint = '检测到 DSL 冲突：' + (data && data.message ? data.message : '设计已被其他会话更新');
+              if (cur !== null && typeof window.__DSL__._dsl_rev === 'number' && window.__DSL__._dsl_rev <= cur) {
+                hint += '（本地基于 ' + window.__DSL__._dsl_rev + '，服务器最新 ' + cur + '）';
+              }
+              showToast(hint.trim(), 'error');
+              console.warn('DSL 冲突，未覆盖服务器改动：', data);
+            });
+          }
+          return r.json();
+        })
         .then(data => {
-          if (data.success) {
-            console.log('DSL 已同步到服务器');
-          } else {
+          if (data && data.success) {
+            var newRev = data.rev;
+            // 成功后把服务端权威 rev 回写本地，保持乐观锁基准，避免下一次保存重复冲突
+            if (typeof newRev === 'number' && window.__DSL__) window.__DSL__._dsl_rev = newRev;
+            console.log('DSL 已同步到服务器 rev=' + newRev);
+          } else if (data && !data.conflict) {
             console.warn('服务器保存失败:', data.error);
           }
         })
