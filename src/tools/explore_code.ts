@@ -22,7 +22,7 @@ import { guidedTour } from './guided_tour.js';
 import { assessLines, buildSplitPreviewDsl } from './monolith.js';
 import { injectReplay } from './inject_replay.js';
 import { runSimulation, resetSimulation } from './simulation.js';
-import { watchProjectTool } from './watch_project_tool.js';
+import { dispatchWatch } from '../daemon/dispatch.js';
 import { buildCallGraph } from './derive_chain.js';
 import { deriveMindMap } from './derive_mind_map.js';
 
@@ -163,7 +163,8 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
       return toResult(r);
     }
     case 'watch': {
-      const r = await watchProjectTool({
+      // daemon 感知分流：daemon 在则转发（注册表权威在 daemon 进程），不在降级本地（方向 E）
+      const r = await dispatchWatch({
         project_dir: requireStr(args, 'project_dir'),
         action: str(args, 'action') as 'start' | 'status' | 'stop' | 'impact' | 'declare' | 'ledger' | undefined,
         feature: str(args, 'feature'),

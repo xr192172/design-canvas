@@ -172,6 +172,51 @@ const active = new Map<string, ActiveWatch>();
 /** alerts 队列上限：超出丢最旧（全文已落盘，摘要行只是提醒） */
 const ALERTS_CAP = 20;
 
+// ─────────────────────────────────────────────────────────────
+// daemon 事件钩子（方向 E）：watch 进程内关键节点向宿主（daemon）发通知
+// ─────────────────────────────────────────────────────────────
+
+/** watch 工具对外播报的事件（daemon 借此触发 loop 回流 / SSE 广播） */
+export type WatchToolEvent =
+  | {
+      /** Impact Ledger 消费定损出现 violated（计划外扩散）——daemon 触发 camera-dsl loop 的信号 */
+      type: 'ledger-violated';
+      project_dir: string;
+      entry_ids: string[];
+      unexpected_files: string[];
+      seq: number;
+    };
+
+let watchToolEventListener: ((e: WatchToolEvent) => void) | null = null;
+
+/** 注册 watch 工具事件监听器（daemon 启动时挂；传 null 注销） */
+export function setWatchToolEventListener(fn: ((e: WatchToolEvent) => void) | null): void {
+  watchToolEventListener = fn;
+}
+
+/** 活跃监听注册表只读视图（daemon /api/health 汇总用） */
+export function listActiveWatches(): Array<{
+  project_dir: string;
+  feature?: string;
+  rebuild: boolean;
+  impact_on_change: boolean;
+  started_at: string;
+  last_change_at?: string;
+  last_impact_seq?: number;
+  pending_declarations: number;
+}> {
+  return [...active.values()].map((e) => ({
+    project_dir: e.project_dir,
+    feature: e.feature,
+    rebuild: e.rebuild,
+    impact_on_change: e.impact_on_change,
+    started_at: e.started_at,
+    last_change_at: e.last_change_at,
+    last_impact_seq: e.last_impact_seq,
+    pending_declarations: e.declarations.length,
+  }));
+}
+
 /** 归一化 project_dir 作注册表键 */
 function keyOf(projectDir: string): string {
   return path.resolve(projectDir);
@@ -362,19 +407,32 @@ async function doWork(entry: ActiveWatch): Promise<void> {
         const actual = new Set<string>([...changedSet, ...s.impacted_file_paths]);
         const unexpected = [...actual].filter((f) => !decl.expected_files.has(f));
         // 逐条定损落盘（每条预告面对比实际波及，各自 ok/violated + 证据 seq）
-        markConsumed(
-          entry.project_dir,
-          consumed.map((d) => {
-            const unexpectedForEntry = [...actual].filter((f) => !d.expected_files.has(f));
-            return {
-              id: d.entry_id,
-              status: unexpectedForEntry.length > 0 ? ('violated' as const) : ('ok' as const),
-              unexpected: unexpectedForEntry,
-              actual: [...actual].sort(),
+        const verdicts = consumed.map((d) => {
+          const unexpectedForEntry = [...actual].filter((f) => !d.expected_files.has(f));
+          return {
+            id: d.entry_id,
+            status: unexpectedForEntry.length > 0 ? ('violated' as const) : ('ok' as const),
+            unexpected: unexpectedForEntry,
+            actual: [...actual].sort(),
+            seq: s.seq,
+          };
+        });
+        markConsumed(entry.project_dir, verdicts);
+        // daemon 事件钩子（方向 E）：出现 violated → daemon 防抖触发 camera-dsl loop 回流
+        const violatedIds = verdicts.filter((v) => v.status === 'violated').map((v) => v.id);
+        if (violatedIds.length > 0 && watchToolEventListener) {
+          try {
+            watchToolEventListener({
+              type: 'ledger-violated',
+              project_dir: entry.project_dir,
+              entry_ids: violatedIds,
+              unexpected_files: unexpected,
               seq: s.seq,
-            };
-          }),
-        );
+            });
+          } catch {
+            /* 监听器故障不影响 doWork */
+          }
+        }
         const spreadLine = `[计划外扩散#${s.seq}] 预告 ${decl.expected_files.size} 文件，实际波及 ${actual.size}，未预告 ${unexpected.length}${unexpected.length > 0 ? '：' + unexpected.join(', ') : ''}${unexpected.length > 0 ? ' · 待处理(watch action=ledger)' : ''}`;
         entry.alerts.unshift({ seq: s.seq, created_at: s.created_at, line: spreadLine });
         if (entry.alerts.length > ALERTS_CAP) entry.alerts.length = ALERTS_CAP;
