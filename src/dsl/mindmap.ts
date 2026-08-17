@@ -64,6 +64,17 @@ export interface FeatureDep {
   via_files?: string[];
 }
 
+/** 共享能力文件：被多个功能真实调用的"隐形地板"（如 storage、dictionary、watch 工具）——
+ * 聚类会把它们吸进某个大功能里变得不可见，这里按跨功能调用证据显式挖出来 */
+export interface SharedCapability {
+  /** 文件路径 */
+  file: string;
+  /** 被哪些功能调用（调用方功能 + 次数） */
+  used_by: Array<{ feature: string; count: number }>;
+  /** 跨功能被调总次数 */
+  total: number;
+}
+
 /** L3 思维导图 */
 export interface MindMap {
   /** feature 名 */
@@ -78,6 +89,8 @@ export interface MindMap {
   deps?: FeatureDep[];
   /** 底座功能名列表（被 ≥2 个功能调用且几乎不调用别人的基建，树内排首位 + 🧱 徽章） */
   foundations?: string[];
+  /** 共享能力文件（跨功能被调 ≥3 次的"隐形地板"，树内 🧰 分支，排在功能之前） */
+  shared?: SharedCapability[];
   /** 生成时间 */
   generated_at: string;
   /** 说明（生成方式/降级原因） */

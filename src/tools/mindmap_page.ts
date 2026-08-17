@@ -137,6 +137,21 @@ export function renderMindmapPage(feature: string): string {
       });
       root.children.push(fn);
     });
+    // 共享能力分支：被多个功能真实调用的"隐形地板"（聚类把它们吸进大功能里不可见，
+    // 这里按跨功能调用证据挖出来）。id 用文件路径，跨再生成稳定——批注锚点不漂移。
+    var SH = (OV.mind_map && OV.mind_map.shared) || [];
+    if(SH.length){
+      var shn = { id: 'shared', label: '🧰 共享能力', kind: 'feature', children: [],
+        raw: { description: '被多个功能共用的能力文件——项目真正的隐形地板，谁都要踩，但不属于任何一个功能。' } };
+      NODE_BY_ID['shared'] = shn;
+      SH.forEach(function(s){
+        var base = s.file.split('/').pop();
+        var sn = { id: 'sf:' + s.file, label: base, kind: 'shared', children: [], raw: s };
+        NODE_BY_ID[sn.id] = sn;
+        shn.children.push(sn);
+      });
+      root.children.unshift(shn); // 地板最先铺：共享能力 → 底座功能 → 业务功能
+    }
     // 用户节点：重复扫描挂载（支持嵌套：父节点也是本轮新挂的 user node）
     TREE = root; // 先指向新树：resolveTarget('root') 才能挂到本轮树，而不是上一轮旧树
     var uNodeById = {};
@@ -168,7 +183,7 @@ export function renderMindmapPage(feature: string): string {
   // ── 水平树布局（tidy tree：叶子行高累加，父垂直居中于子块） ──
   var LEAF_H = 36, MIN_H = 40, GAP = 14, BRANCH_GAP = 48;
   function nodeLines(n){
-    var per = n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : 11);
+    var per = n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : (n.kind === 'shared' ? 16 : 11));
     return wrap(n.label || '', per);
   }
   function nodeH(n){ var ls = nodeLines(n); return Math.max(MIN_H, 22 + ls.length * 15); }
@@ -348,6 +363,9 @@ export function renderMindmapPage(feature: string): string {
       }
     } else if(n.kind === 'step'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(16,42,70,.92)" stroke="#3d7ab5" stroke-width="1.4"/>';
+    } else if(n.kind === 'shared'){
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(13,60,68,.9)" stroke="#2dd4bf" stroke-width="1.6"/>'
+        + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#5eead4">🔧 共享</text>';
     } else { // user：暖色贴纸感（虚线边框 + 折角）
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="9" fill="rgba(251,191,36,.10)" stroke="rgba(251,191,36,.75)" stroke-width="1.6" stroke-dasharray="7 4"/>';
     }
@@ -479,6 +497,13 @@ export function renderMindmapPage(feature: string): string {
     } else if(n.kind === 'step'){
       det.innerHTML = '<b>'+esc(n.owner.label)+' › '+esc(n.label)+'</b><span class="tag">原理步</span><p>'+esc(n.raw.detail||'')+'</p>'
         + (n.raw.involves && n.raw.involves.length ? '<p class="files">'+n.raw.involves.map(esc).join(' · ')+'</p>' : '') + myNoteHtml;
+    } else if(n.kind === 'shared'){
+      var ub = n.raw.used_by || [];
+      det.innerHTML = '<b style="color:#2dd4bf;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
+        + '<p class="files">' + esc(n.raw.file) + '</p>'
+        + '<p style="color:#99f6e4;">谁在用它：' + ub.map(function(u){ return esc(u.feature) + '（×' + u.count + '）'; }).join('、') + '</p>'
+        + '<p style="font-size:11px;color:#7a93b8;">被多个功能真实调用的隐形地板——聚类会把它吸进某个大功能里，这里是按调用证据挖出来的。</p>'
+        + myNoteHtml;
     } else if(n.kind === 'user'){
       det.innerHTML = '<b style="color:#fbbf24;">✍️ 我写的节点</b><span class="tag">'+esc(n._anchor ? n._anchor.label : '')+'</span><p>'+esc(n.label)+'</p>'
         + '<p style="font-size:11px;color:#7a93b8;">双击可修改文字；保存后 AI 再生成时会作为你的理解读入。</p>';

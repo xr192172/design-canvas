@@ -294,7 +294,11 @@ function loadFeatureDeps(
   db: Database,
   featureNames: string[],
   featureRels: string[][],
-): { deps: Array<{ from: string; to: string; weight: number }>; foundations: string[] } {
+): {
+  deps: Array<{ from: string; to: string; weight: number; via_files?: string[] }>;
+  foundations: string[];
+  shared: Array<{ file: string; used_by: Array<{ feature: string; count: number }>; total: number }>;
+} {
   const matchers = featureRels.map((rels) => makeFileMatcher(rels));
   /** 文件 → 功能索引（首次匹配）；一个文件只归一个功能（与分拣口径一致） */
   const fileOwner = new Map<string, number>();
@@ -358,7 +362,29 @@ function loadFeatureDeps(
   for (let i = 0; i < featureNames.length; i++) {
     if (inFans[i].size >= 2 && inW[i] >= 8 && outW[i] < inW[i] / 2) foundations.push(featureNames[i]);
   }
-  return { deps: deps.slice(0, 14), foundations };
+  // 共享能力文件：跨功能被调总次数 ≥3（含单功能高频调用，如 watch 工具被某功能 ×6）。
+  // 聚类会把这类"隐形地板"吸进某个大功能变得不可见，这里按调用证据显式挖出来。
+  const fileFans = new Map<string, Map<number, number>>(); // 目标文件 → (调用方功能 → 次数)
+  for (const r of rows) {
+    const a = ownerOf(r.sf);
+    const b = ownerOf(r.tf);
+    if (a < 0 || b < 0 || a === b) continue;
+    const m = fileFans.get(r.tf) ?? new Map<number, number>();
+    m.set(a, (m.get(a) ?? 0) + r.w);
+    fileFans.set(r.tf, m);
+  }
+  const shared = [...fileFans.entries()]
+    .map(([file, m]) => ({
+      file,
+      used_by: [...m.entries()]
+        .sort((x, y) => y[1] - x[1])
+        .map(([i, c]) => ({ feature: featureNames[i], count: c })),
+      total: [...m.values()].reduce((x, y) => x + y, 0),
+    }))
+    .filter((s) => s.total >= 3)
+    .sort((x, y) => y.total - x.total)
+    .slice(0, 12);
+  return { deps: deps.slice(0, 14), foundations, shared };
 }
 
 /** detail 中的技术噪声检测：函数调用/路径/驼峰/snake_case 标识（验收"零函数名"规矩；放行普通英文单词） */
@@ -605,9 +631,9 @@ async function buildTeachMindMap(
   const featureRels = ft.features.map((f) => [...new Set(f.communities.flatMap((c) => c.files))]);
   const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
   // 跨功能依赖叠加层（树管归属、线管依赖）：真实调用边聚合 + 底座识别
-  const { deps, foundations } = db
+  const { deps, foundations, shared } = db
     ? loadFeatureDeps(db, ft.features.map((f) => f.name), featureRels)
-    : { deps: [], foundations: [] as string[] };
+    : { deps: [], foundations: [] as string[], shared: [] as Array<{ file: string; used_by: Array<{ feature: string; count: number }>; total: number }> };
   db?.close();
 
   // 主人批注分拣：导图节点 id f{i}（功能）/ f{i}:{j}（步骤），target_id 前缀匹配
@@ -706,6 +732,7 @@ async function buildTeachMindMap(
     root,
     deps: deps.length > 0 ? deps : undefined,
     foundations: foundations.length > 0 ? foundations : undefined,
+    shared: shared.length > 0 ? shared : undefined,
     generated_at: new Date().toISOString(),
     note: anyLlm
       ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜`
