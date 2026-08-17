@@ -43,7 +43,41 @@ export function renderMindmapPage(feature: string): string {
     <textarea id="ed-text" placeholder="写你的理解、纠正、问题……&#10;例如：这一步其实先查缓存；这个功能应该叫配置中心"></textarea>
     <div class="ed-btns"><button id="ed-cancel">取消</button><button id="ed-ok" class="primary">确定</button></div>
   </div>
-  <div id="hint">拖拽平移 · 滚轮缩放 · 点节点看详情 · 双击节点写批注</div>`;
+  <div id="hint">拖拽平移 · 滚轮缩放 · 点节点看详情 · 双击节点写批注</div>
+  <style>
+    html, body { height: 100%; overflow: hidden; }
+    .wrap { max-width: none; margin: 0; padding: 0; }
+    .mm-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.85); }
+    .mm-top .back { font-size: 14px; font-weight: 700; }
+    .mm-top .tools { display: flex; gap: 10px; align-items: center; }
+    .mm-top button { background: rgba(6,11,31,.7); color: #7dd3fc; font-size: 12.5px; border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+    .mm-top button:hover:not(:disabled) { background: rgba(125,211,252,.14); }
+    .mm-top button:disabled { opacity: .4; cursor: not-allowed; }
+    #save-state { font-size: 12px; color: #fbbf24; min-width: 60px; }
+    #canvas-wrap { position: absolute; inset: 52px 0 0 0; cursor: grab; }
+    #canvas-wrap:active { cursor: grabbing; }
+    #mm { width: 100%; height: 100%; display: block; }
+    .mnode { cursor: pointer; }
+    .mnode.sel circle, .mnode.sel rect { stroke: #7dd3fc !important; stroke-width: 3 !important; filter: drop-shadow(0 0 8px rgba(125,211,252,.5)); }
+    .note { cursor: move; }
+    .note:hover rect { stroke: #fbbf24; filter: drop-shadow(0 0 8px rgba(251,191,36,.35)); }
+    #detail { position: fixed; left: 20px; bottom: 20px; max-width: 520px; background: rgba(6,11,31,.94); border: 1px solid rgba(125,211,252,.3); border-left: 3px solid #7dd3fc; border-radius: 12px; padding: 14px 18px; font-size: 13px; line-height: 1.7; z-index: 20; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+    #detail b { font-size: 14.5px; color: #e8f1ff; }
+    #detail .tag { font-size: 11px; color: #7dd3fc; border: 1px solid rgba(125,211,252,.4); border-radius: 10px; padding: 1px 9px; margin-left: 10px; vertical-align: 2px; }
+    #detail p { margin-top: 8px; color: #c9dcf5; }
+    #detail .mynote { color: #fde9c0; }
+    #detail .files { font-size: 11px; color: #7a93b8; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+    #detail .danger { margin-top: 10px; background: rgba(120,20,40,.35); color: #fda4af; font-size: 12px; border: 1px solid rgba(244,63,94,.4); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+    #editor { position: fixed; inset: 0; background: rgba(2,4,13,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 50; }
+    #editor > div { width: 400px; background: rgba(10,18,42,.98); border: 1px solid rgba(125,211,252,.35); border-radius: 14px; padding: 18px 20px; }
+    .ed-title { font-size: 14px; font-weight: 700; color: #e8f1ff; margin-bottom: 10px; }
+    .ed-title em { font-style: normal; font-size: 12px; color: #fbbf24; margin-left: 8px; }
+    #ed-text { width: 100%; height: 90px; background: rgba(6,11,31,.9); color: #e8f1ff; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; resize: vertical; }
+    .ed-btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+    .ed-btns button { background: rgba(6,11,31,.8); color: #c9dcf5; font-size: 13px; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 6px 16px; cursor: pointer; }
+    .ed-btns .primary { background: rgba(125,211,252,.18); color: #7dd3fc; font-weight: 700; }
+    #hint { position: fixed; right: 20px; bottom: 20px; font-size: 11.5px; color: #7a93b8; opacity: .8; background: rgba(6,11,31,.7); border-radius: 8px; padding: 5px 12px; z-index: 15; }
+  </style>`;
 
   const script = `
   var FEATURE = ${JSON.stringify(feature)};
@@ -319,39 +353,5 @@ export function renderMindmapPage(feature: string): string {
   });
   `;
 
-  return shell(`${safeFeature} · 思维导图`, body, `
-  <style>
-    html, body { height: 100%; overflow: hidden; }
-    .mm-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.85); }
-    .mm-top .back { font-size: 14px; font-weight: 700; }
-    .mm-top .tools { display: flex; gap: 10px; align-items: center; }
-    .mm-top button { background: rgba(6,11,31,.7); color: #7dd3fc; font-size: 12.5px; border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
-    .mm-top button:hover:not(:disabled) { background: rgba(125,211,252,.14); }
-    .mm-top button:disabled { opacity: .4; cursor: not-allowed; }
-    #save-state { font-size: 12px; color: #fbbf24; min-width: 60px; }
-    #canvas-wrap { position: absolute; inset: 52px 0 0 0; cursor: grab; }
-    #canvas-wrap:active { cursor: grabbing; }
-    #mm { width: 100%; height: 100%; display: block; }
-    .mnode { cursor: pointer; }
-    .mnode.sel circle, .mnode.sel rect { stroke: #7dd3fc !important; stroke-width: 3 !important; filter: drop-shadow(0 0 8px rgba(125,211,252,.5)); }
-    .note { cursor: move; }
-    .note:hover rect { stroke: #fbbf24; filter: drop-shadow(0 0 8px rgba(251,191,36,.35)); }
-    #detail { position: fixed; left: 20px; bottom: 20px; max-width: 520px; background: rgba(6,11,31,.94); border: 1px solid rgba(125,211,252,.3); border-left: 3px solid #7dd3fc; border-radius: 12px; padding: 14px 18px; font-size: 13px; line-height: 1.7; z-index: 20; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
-    #detail b { font-size: 14.5px; color: #e8f1ff; }
-    #detail .tag { font-size: 11px; color: #7dd3fc; border: 1px solid rgba(125,211,252,.4); border-radius: 10px; padding: 1px 9px; margin-left: 10px; vertical-align: 2px; }
-    #detail p { margin-top: 8px; color: #c9dcf5; }
-    #detail .mynote { color: #fde9c0; }
-    #detail .files { font-size: 11px; color: #7a93b8; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
-    #detail .danger { margin-top: 10px; background: rgba(120,20,40,.35); color: #fda4af; font-size: 12px; border: 1px solid rgba(244,63,94,.4); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
-    #editor { position: fixed; inset: 0; background: rgba(2,4,13,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 50; }
-    #editor > div { width: 400px; background: rgba(10,18,42,.98); border: 1px solid rgba(125,211,252,.35); border-radius: 14px; padding: 18px 20px; }
-    .ed-title { font-size: 14px; font-weight: 700; color: #e8f1ff; margin-bottom: 10px; }
-    .ed-title em { font-style: normal; font-size: 12px; color: #fbbf24; margin-left: 8px; }
-    #ed-text { width: 100%; height: 90px; background: rgba(6,11,31,.9); color: #e8f1ff; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; resize: vertical; }
-    .ed-btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
-    .ed-btns button { background: rgba(6,11,31,.8); color: #c9dcf5; font-size: 13px; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 6px 16px; cursor: pointer; }
-    .ed-btns .primary { background: rgba(125,211,252,.18); color: #7dd3fc; font-weight: 700; }
-    #hint { position: fixed; right: 20px; bottom: 20px; font-size: 11.5px; color: #7a93b8; opacity: .8; background: rgba(6,11,31,.7); border-radius: 8px; padding: 5px 12px; z-index: 15; }
-  </style>
-  <script>${script}</script>`);
+  return shell(`${safeFeature} · 思维导图`, body, script);
 }
