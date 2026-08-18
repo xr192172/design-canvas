@@ -120,10 +120,23 @@ Comparator:
 |---|---|---|---|---|
 | Go | ✅ `internal/instrument`（go/ast 全量无脑插桩） | `go-camera` probe 包 | `JudgeClient` 走 HTTP 调 TS 判定服务，未配置时降级本地 | ✅ 已落地 |
 | TypeScript | ✅ `instrument.ts`（tree-sitter 全量无脑插桩，含 deep 级） | `probe.ts` | TS 判定服务（`/api/camera/judge`，判定权威） | ✅ 已落地 |
-| Python | 待做 | `probe.py` | POST `/api/camera/judge` | 待做 |
-| Java | 待做 | `probe.java` | POST `/api/camera/judge` | 待做 |
+| Python | 待做（LLM 按 SPEC 自动开发） | `probe.py` | POST `/api/camera/judge` | 待做 |
+| Java | 待做（LLM 按 SPEC 自动开发） | `probe.java` | POST `/api/camera/judge` | 待做 |
 
 > **判定端口已实际下沉为独立服务**（`/api/camera/judge`，2026-08-15 PR 偏差3 落地）：各语言探针只需产出符合 `Event` schema 的事件，POST 上来即可判定，无需复刻判定规则。Go 侧 `JudgeClient` 读 `CAMERA_JUDGE_URL` 环境变量指向该服务；未设置时降级为本地 `SilentErrorDiscard` 谓词（语义与 TS 逐条对齐），保证离线/单测可用。
+
+### 4.0 新语言接入 = LLM 自动开发 + 一致性验收（2026-08-18 落地）
+
+新语言的插桩器**不再人工开发**：LLM 按 [`camera-conformance/SPEC.md`](../camera-conformance/SPEC.md)
+（实现规范 + CLI 契约）参考 TS/Go 两份参考实现自动写出，再用统一 CLI 跑一致性验收：
+
+```bash
+node camera-conformance/verify.mjs --lang <lang>   # 静态清单/幂等/还原 三断言全绿即接入
+```
+
+- 统一 CLI 契约：Go `go-camera/cmd/instrument`、TS `camera-conformance/ts-instrument.mjs`
+- 黄金样例：`camera-conformance/samples/`（TS/Go 同语义对 + expected-probes 固化基准）
+- 参考实现对拍状态：TS 12 探针点 / Go 14 探针点，ALL GREEN（差异来自语言惯用，如 TS 有 catch、Go 需辅助函数）
 
 ### 4.1 插桩覆盖策略：全量无脑插桩 + 事件分级标签（2026-08-14 补记）
 

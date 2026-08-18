@@ -1,0 +1,16 @@
+[
+  "sample.AddTwo.enter|enter|core",
+  "sample.AddTwo.exit|exit|core",
+  "sample.Clamp.enter|enter|core",
+  "sample.Clamp.exit|exit|core",
+  "sample.Log.enter|enter|core",
+  "sample.Log.exit|exit|core",
+  "sample.Log.writefile|io|event",
+  "sample.Main.enter|enter|core",
+  "sample.Main.exit|exit|core",
+  "sample.SaveQuiet.enter|enter|core",
+  "sample.SaveQuiet.exit|exit|core",
+  "sample.SaveQuiet.writefile|io|event",
+  "sample.intToString.enter|enter|core",
+  "sample.intToString.exit|exit|core"
+]
