@@ -12,6 +12,7 @@
 
 import fs from 'node:fs';
 import type { TSEvent, ExtraFields } from './probe.js';
+import { matchChainDecl, type TSChainObs } from './chain.js';
 
 /** TS 侧 DSL 声明，与 schema definitions.DSLDecl 对齐。 */
 export interface TSDLDecl {
@@ -19,6 +20,9 @@ export interface TSDLDecl {
   probe?: string; // 空 = 全局声明
   expect?: string;
   constraint?: string;
+  /** 链路契约（P2）：声明的调用序（探针名）。非空时走链路判定——声明的
+   * 调用序必须是某条实测链的子序列（未声明的中间帧不算偏差）。 */
+  chain?: string[];
 }
 
 /** TS 侧设计 DSL 文档（dsl.json）。 */
@@ -28,14 +32,18 @@ export interface TSDesignDSLDoc {
   decls: TSDLDecl[];
 }
 
-/** 偏差类别，与 schema Deviation.kind 对齐。 */
-export type DeviationKind = 'unobserved' | 'violated' | 'undesigned';
+/** 偏差类别，与 schema Deviation.kind 对齐（chain-broken 为 P2 链路契约断裂）。 */
+export type DeviationKind = 'unobserved' | 'violated' | 'undesigned' | 'chain-broken';
 
 /** TS 侧偏差，与 schema definitions.Deviation 对齐。 */
 export interface TSDeviation {
   kind: DeviationKind;
   rule?: string;
   probe?: string;
+  /** 链路级偏差：关联的实测链 trace id。 */
+  trace_id?: string;
+  /** 链路级偏差：实测链调用序列窗口。 */
+  window?: string[];
   detail: string;
 }
 
@@ -47,6 +55,8 @@ export interface TSDiffReport {
   unobserved: number;
   violated: number;
   undesigned: number;
+  /** 链路契约断裂数（P2）。 */
+  chain_broken: number;
 }
 
 /** 违反判定谓词：event → {result, reason}。 */
@@ -106,7 +116,9 @@ export class TSComparator {
   }
 
   /** 对比 design vs actual，产出三类偏差。语义与 Go Comparator 对齐。 */
-  compare(design: TSDesignDSLDoc, actualObs: TSProbeObs[]): TSDiffReport {
+/** 对比 design vs actual，产出四类偏差（含链路契约）。语义与 Go Comparator 逐段对齐。
+   * chains：rebuildChains 重建的实测调用链（链路契约判定用；缺省 [] = 无链可判）。 */
+  compare(design: TSDesignDSLDoc, actualObs: TSProbeObs[], chains: TSChainObs[] = []): TSDiffReport {
     const report: TSDiffReport = {
       generated_at: new Date().toISOString(),
       event_count: actualObs.reduce((n, p) => n + p.count, 0),
@@ -114,6 +126,7 @@ export class TSComparator {
       unobserved: 0,
       violated: 0,
       undesigned: 0,
+      chain_broken: 0,
     };
 
     const obsEvents = new Map<string, TSEvent[]>();
@@ -121,6 +134,7 @@ export class TSComparator {
 
     // 1. 设计声明的覆盖 + 违反检查
     for (const d of design.decls) {
+      if (d.chain && d.chain.length > 0) continue; // 链路契约走第 3 段，不参与探针级判定
       const matched: TSEvent[] = [];
       if (!d.probe) {
         for (const evs of obsEvents.values()) matched.push(...evs);
@@ -148,9 +162,11 @@ export class TSComparator {
       }
     }
 
-    // 2. 未声明探针
+    // 2. 未声明探针（链路声明也算覆盖——根探针被声明即非末声明行为）
     for (const p of actualObs) {
-      const covered = design.decls.some((d) => !d.probe || d.probe === p.probe);
+      const covered = design.decls.some(
+        (d) => !d.probe || d.probe === p.probe || (d.chain && d.chain.includes(p.probe)),
+      );
       if (!covered) {
         report.undesigned++;
         report.deviations.push({
@@ -161,8 +177,36 @@ export class TSComparator {
       }
     }
 
-    // 稳定排序：unobserved → violated → undesigned
-    const rank = (k: DeviationKind) => (k === 'unobserved' ? 0 : k === 'violated' ? 1 : 2);
+    // 3. 链路契约（decl.chain 非空）：声明的调用序必须是某条实测链的子序列。
+    //    根探针从未出现在任何链上 → 未观测；出现但序列不满足 → 链路断裂。
+    for (const d of design.decls) {
+      if (!d.chain || d.chain.length === 0) continue;
+      const { satisfied, best } = matchChainDecl(d.chain, chains);
+      if (satisfied) continue;
+      if (!best) {
+        report.unobserved++;
+        report.deviations.push({
+          kind: 'unobserved',
+          rule: d.rule,
+          probe: d.chain[0],
+          detail: '链路契约的根探针从未在任何调用链上被观测到（该链路无任何调用）',
+        });
+        continue;
+      }
+      const missing = d.chain[best.matched];
+      report.chain_broken++;
+      report.deviations.push({
+        kind: 'chain-broken',
+        rule: d.rule,
+        probe: d.chain[0],
+        trace_id: best.chain.trace_id,
+        window: best.chain.sequence,
+        detail: `链路断裂：声明序 [${d.chain.join(' → ')}] 未被满足，自 "${missing}" 起缺失/乱序（前缀匹配 ${best.matched}/${d.chain.length}）`,
+      });
+    }
+
+    // 稳定排序：未观测 → 违反/链路断裂 → 未声明（与 Go deviationRank 一致）
+    const rank = (k: DeviationKind) => (k === 'unobserved' ? 0 : k === 'undesigned' ? 2 : 1);
     report.deviations.sort((a, b) => rank(a.kind) - rank(b.kind));
     return report;
   }
@@ -192,10 +236,11 @@ export function silentErrorDiscardTS(ev: TSEvent): { result: 'ok' | 'deviation';
 }
 
 /** 渲染人类可读的偏差报告（与 Go RenderDiffReport 对齐）。 */
+/** 渲染人类可读的偏差报告（与 Go RenderDiffReport 对齐，含链路断裂段）。 */
 export function renderTSDiffReport(r: TSDiffReport): string {
   const lines: string[] = [
     `TS 哨兵偏差报告（actual vs design）：${r.event_count} 事件`,
-    `  未观测 ${r.unobserved} · 违反 ${r.violated} · 未声明 ${r.undesigned}`,
+    `  未观测 ${r.unobserved} · 违反 ${r.violated} · 未声明 ${r.undesigned} · 链路断裂 ${r.chain_broken}`,
   ];
   if (r.deviations.length === 0) {
     lines.push('  ✓ 设计声明与观测画像一致');
@@ -204,10 +249,14 @@ export function renderTSDiffReport(r: TSDiffReport): string {
   lines.push('');
   lines.push('▎偏差明细');
   for (const d of r.deviations) {
-    if (d.kind === 'unobserved') lines.push(`  [未观测] rule=${d.rule} probe=${d.probe}`);
-    else if (d.kind === 'violated') lines.push(`  [违反]   rule=${d.rule} probe=${d.probe}`);
-    else lines.push(`  [未声明] probe=${d.probe}`);
+    if (d.kind === 'unobserved') lines.push(`  [未观测]   rule=${d.rule} probe=${d.probe}`);
+    else if (d.kind === 'violated') lines.push(`  [违反]     rule=${d.rule} probe=${d.probe}`);
+    else if (d.kind === 'chain-broken') lines.push(`  [链路断裂] rule=${d.rule} 根=${d.probe} trace=${d.trace_id}`);
+    else lines.push(`  [未声明]   probe=${d.probe}`);
     lines.push(`      ${d.detail}`);
+    if (d.kind === 'chain-broken' && d.window && d.window.length > 0) {
+      lines.push(`      实测链窗口: ${d.window.join(' → ')}`);
+    }
   }
   return lines.join('\n');
 }

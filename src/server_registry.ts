@@ -36,6 +36,8 @@ import { getDSLByView, getLiveDir } from './storage.js';
 import { getProjectCacheDb } from './db/db.js';
 import { queryCameraLog } from './camera/log_query.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
+import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './camera/contract.js';
+import { rebuildChains } from './camera/chain.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -297,7 +299,9 @@ const cameraLogHandler = wrap(async (a) => {
   return { message: lines.join('\n'), data: r.entries };
 });
 
-/** camera_judge：对一批事件执行偏差判定（复用 normalizeEvents + judgeEvents） */
+/** camera_judge：对一批事件执行偏差判定。decls（可选）提供时额外执行 P2 链路契约判定——
+ * 重建实测调用链（trace 三元组）+ Comparator 全量对比（探针级 + 链路级），
+ * 链路断裂（chain-broken）带 trace_id 与实测窗口。不传 decls 保持逐事件判定。 */
 const cameraJudgeHandler = wrap(async (a) => {
   const events = a.events;
   if (!Array.isArray(events) || events.length === 0) {
@@ -307,8 +311,27 @@ const cameraJudgeHandler = wrap(async (a) => {
   if (error) throw new Error(error);
   const useLlm = a.use_llm === true || a.use_llm === 'true' || a.use_llm === '1';
   const report = useLlm ? await judgeEventsWithLLM(norm, true) : judgeEvents(norm);
-  const text = a.text === true || a.text === '1' ? renderJudgeReport(report) : JSON.stringify(report);
-  return { message: text, data: report };
+
+  // P2 链路契约：decls 提供时重建实测链 + Comparator 全量对比（探针级 + 链路级）
+  let diff: TSDiffReport | undefined;
+  let chainsNote = '';
+  const decls = Array.isArray(a.decls) ? (a.decls as TSDLDecl[]) : undefined;
+  if (decls && decls.length > 0) {
+    const { chains, dropped } = rebuildChains(norm);
+    const comp = new TSComparator().registerDefaultPredicates();
+    diff = comp.compare(
+      { version: 1, updated_at: new Date().toISOString(), decls },
+      TSComparator.aggregate(norm),
+      chains,
+    );
+    chainsNote = `\n链路重建: ${chains.length} 条链${dropped > 0 ? `（超预算丢弃 ${dropped} 条）` : ''}`;
+  }
+
+  const merged = diff ? { ...report, diff } : report;
+  const text = a.text === true || a.text === '1'
+    ? renderJudgeReport(report) + (diff ? `\n\n${renderTSDiffReport(diff)}${chainsNote}` : '')
+    : JSON.stringify(merged);
+  return { message: text, data: merged };
 });
 
 /** camera_instrument：对目标项目全自动插桩 / 还原（复用 instrumentProject/restoreInstrumented） */
@@ -630,13 +653,19 @@ const TOOL_DEFS: ToolDef[] = [
     name: 'camera_judge',
     title: 'Judge a batch of Camera events',
     description:
-      '对一批 Camera 事件执行偏差判定（语言无关）。传 events 数组（符合 TSEvent 形状：probe/fields[err/op/benign]）。' +
+      '对一批 Camera 事件执行偏差判定（语言无关）。传 events 数组（符合 TSEvent 形状：probe/fields[err/op/benign]，可含 trace_id/frame_id）。' +
       '返回逐条判定 + 汇总（total/ok/deviation）。text=true 返回人类可读报告，否则返回 JSON。' +
+      '传 decls（设计声明数组）时额外执行链路契约判定（P2）：从事件 trace 三元组重建实测调用链，' +
+      '声明的调用序（decl.chain）必须是某条实测链的子序列，断裂报 chain-broken（含 trace_id 与实测窗口）。' +
       '适用于：探针语言任意，统一收敛到这一处判定，不随语言复刻规则。',
     inputSchema: {
       events: z
         .array(z.record(z.string(), z.unknown()))
-        .describe('要判定的事件数组（TSEvent 形状：probe 必填，fields 含 err/op/benign）'),
+        .describe('要判定的事件数组（TSEvent 形状：probe 必填，fields 含 err/op/benign；链路判定需 trace_id/frame_id）'),
+      decls: z
+        .array(z.record(z.string(), z.unknown()))
+        .optional()
+        .describe('设计声明数组（dsl.json 的 decls 形状：rule/probe/expect/constraint/chain）。chain=["a","b","c"] 声明调用序，触发链路判定；不传则仅逐事件判定'),
       text: z.boolean().optional().describe('true=返回人类可读报告；false=返回 JSON（默认 JSON）'),
       use_llm: z.boolean().optional().describe('true=对可疑事件做 LLM 行为级复核（默认 false 纯规则秒判）'),
     },

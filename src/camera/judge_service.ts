@@ -41,6 +41,8 @@ export interface JudgeResult {
 }
 
 /** 校验入参是否为合法 TSEvent 数组，返回规范化后的事件或错误信息。 */
+/** 校验入参是否为合法 TSEvent 数组，返回规范化后的事件或错误信息。
+ * v2 trace 字段（trace_id/frame_id）原样保留——链路重建（rebuildChains）依赖它们。 */
 export function normalizeEvents(input: unknown): { events: TSEvent[]; error?: string } {
   if (!Array.isArray(input)) {
     return { events: [], error: '请求体需为 { events: [...] }' };
@@ -55,6 +57,8 @@ export function normalizeEvents(input: unknown): { events: TSEvent[]; error?: st
       time: typeof r['time'] === 'string' ? (r['time'] as string) : new Date().toISOString(),
       source: typeof r['source'] === 'string' ? (r['source'] as string) : 'llm-design',
       fields: r['fields'] as Record<string, unknown>,
+      trace_id: typeof r['trace_id'] === 'string' ? (r['trace_id'] as string) : undefined,
+      frame_id: typeof r['frame_id'] === 'number' ? (r['frame_id'] as number) : undefined,
     });
   }
   return { events };
