@@ -34,6 +34,7 @@ import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
 import { getDSLByView, getLiveDir } from './storage.js';
 import { getProjectCacheDb } from './db/db.js';
+import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryCameraLog } from './camera/log_query.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './camera/contract.js';
@@ -729,7 +730,22 @@ const TOOL_DEFS: ToolDef[] = [
 export function registerAllTools(server: McpServer): void {
   for (const def of TOOL_DEFS) {
     server.registerTool(def.name, { title: def.title, description: def.description, inputSchema: def.inputSchema }, async (args) => {
-      const r = await def.handler((args ?? {}) as Record<string, unknown>);
+      const a = (args ?? {}) as Record<string, unknown>;
+      // 狗食正式统计：记录每次工具调用的成败与子动作（失败静默，不阻断主流程）
+      const t0 = Date.now();
+      const r = await def.handler(a);
+      recordDogfoodUsage({
+        ts: new Date().toISOString(),
+        tool: def.name,
+        action: def.name === 'explore_code'
+          ? (typeof a.action === 'string' ? a.action : undefined)
+          : def.name === 'edit_code'
+            ? (typeof a.op === 'string' ? a.op : undefined)
+            : undefined,
+        ok: !r.isError,
+        ms: Date.now() - t0,
+        err: r.isError ? (r.text ?? '').slice(0, 200) : undefined,
+      });
       // 响应注入：watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）。
       // 方向 E：本地 inbox（降级路径）+ daemon 游标拉取（权威路径）合并注入
       return textOut(r.text + await collectPendingAlertText(def.name), r.isError);

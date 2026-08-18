@@ -13,6 +13,7 @@
     "serve": "node dist/src/tools/serve.js",
     "daemon": "node dist/src/daemon/daemon.js",
     "instrument": "node dist/src/camera/instrument_cli.js",
+    "dogfood": "node dist/src/tools/dogfood_stats.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "hub": "node scripts/hub.mjs"
