@@ -575,6 +575,8 @@ const TOOL_DEFS: ToolDef[] = [
       `action: ${EXPLORE_ACTIONS.join(' / ')}。` +
       '语义搜索/影响分析/架构分层/导览/巨石分析/拆分/变形链/动画流/算法/注入回放/仿真/文件监听。' +
       'args 为各 action 的具体参数。' +
+      'search 三层路由：标识符查询（如 normalizeCode / Calc.reset）→ 精确符号索引（provider=exact，零向量开销）；' +
+      '自然语言意图 → 语义向量相似度；无 embedding 配置/失败 → FTS trigram 降级。' +
       'search 必填 args.project_dir（目标项目根目录，缺省报错）+ args.query，可选 top_k；' +
       'arch_layer/diff_impact 等同样需要 project_dir。' +
       'watch 支持 impact_on_change=true：文件变更后自动生成影响报告（一行摘要入 alerts，' +

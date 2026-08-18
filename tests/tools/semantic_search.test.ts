@@ -108,17 +108,39 @@ describe('semantic_search FTS 降级（无 embedding 配置）', () => {
     delete process.env.EMBEDDING_DIM;
   });
 
-  it('未配置 embedding → 降级 FTS（provider=fts）', async () => {
+  it('标识符未命中 exact + 无 embedding 配置 → fts 兜底（provider=fts）', async () => {
     const root = await makeProject('sem_a');
-    // FTS 是 trigram 子串匹配，对符号名/签名有效；中文抽象描述不适用（这正是语义搜索的价值）
-    const r = await semanticSearch({ project_dir: root, query: 'login', limit: 5 });
+    const r = await semanticSearch({ project_dir: root, query: 'zzzNoSuchSymbol', limit: 5 });
     expect(r.provider).toBe('fts');
     expect(r.indexed).toBeGreaterThan(0);
-    // FTS 命中 auth.ts 里的 login
-    const files = new Set(r.hits.map((h) => h.file_path));
-    expect(files.has('src/auth.ts')).toBe(true);
-    const names = r.hits.map((h) => h.name);
-    expect(names).toContain('login');
+    expect(r.hits).toEqual([]); // 未命中 exact → 落 fts；无配置 → 无向量；FTS 也无此串 → 空
+  });
+
+  it('精确层：标识符查询命中 → provider=exact，带签名，零向量', async () => {
+    const root = await makeProject('sem_exact');
+    const r = await semanticSearch({ project_dir: root, query: 'login', limit: 5 });
+    // exact 层不依赖 embedding 配置——即使配了 key 也不该走向量（此处无配置亦成立）
+    expect(r.provider).toBe('exact');
+    expect(r.message).toContain('零 embedding');
+    const hit = r.hits.find((h) => h.name === 'login');
+    expect(hit).toBeDefined();
+    expect(hit!.file_path).toBe('src/auth.ts');
+    expect(hit!.start_line).toBe(1);
+    expect(hit!.signature).toContain('login(user: string, pass: string)'); // 签名从 nodes 表回填
+    expect(hit!.score).toBe(1);
+  });
+
+  it('精确层：点限定名（Calc.reset 形态）也走 exact', async () => {
+    const root = await makeProject('sem_exact_qn');
+    const r = await semanticSearch({ project_dir: root, query: 'renderHTML' });
+    expect(r.provider).toBe('exact');
+    expect(r.hits[0].file_path).toBe('src/render.ts');
+  });
+
+  it('精确层：自然语言查询不进 exact（无配置 → fts）', async () => {
+    const root = await makeProject('sem_nl');
+    const r = await semanticSearch({ project_dir: root, query: '用户登录校验逻辑在哪里' });
+    expect(r.provider).toBe('fts'); // 中文短语不是标识符 → 跳过 exact；无 embedding 配置 → fts
   });
 
   it('查询为空 → 空结果', async () => {

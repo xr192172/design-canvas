@@ -200,18 +200,26 @@ export interface SemanticSearchInput {
 
 export interface SemanticSearchResult {
   query: string;
-  provider: 'semantic' | 'fts';
+  /** exact=标识符查询命中精确符号索引（零向量）；semantic=向量相似度；fts=无配置/失败降级 */
+  provider: 'exact' | 'semantic' | 'fts';
   indexed: number;
   hits: SemanticHit[];
   message: string;
 }
+
+/** query 形如符号名（标识符 / 点限定名如 Calc.reset）→ 精确符号索引可解，无需向量 */
+const SYMBOL_QUERY_RE = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
 
 /** 单符号检索文本：符号名 + 限定名 + 签名 + 所属文件。 */
 function symbolText(row: { name: string; qualified_name: string; file_path: string; signature: string | null }): string {
   return [row.name, row.qualified_name, row.signature ?? '', row.file_path].filter(Boolean).join('\n');
 }
 
-/** 全项目符号语义搜索。embedding 不可用时自动降级为 FTS trigram。 */
+/** 全项目符号语义搜索。三层路由：
+ *   1. exact——标识符查询（如 normalizeCode / Calc.reset）直接走 FTS 符号索引，
+ *      命中即返回，零 embedding 开销（AI 查代码绝大多数是"知道符号名要定位"）；
+ *   2. semantic——自然语言意图或标识符未命中（拼错名时语义相近符号仍有价值）→ 向量相似度；
+ *   3. fts——无 embedding 配置 / API 失败自动降级 trigram 全文检索。 */
 export async function semanticSearch(input: SemanticSearchInput): Promise<SemanticSearchResult> {
   const query = input.query.trim();
   const limit = input.limit ?? 20;
@@ -257,6 +265,24 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     throw new Error(
       `项目 "${input.project_dir}" 的符号缓存为空（尚未建立索引）。请先运行 import_project 导入该项目后再搜索。`,
     );
+  }
+
+  // 精确层前置：标识符查询走符号索引（零向量开销，省 embedding 费用与首查延迟）。
+  // 未命中不返回——落到向量层，拼错名时语义相近符号仍有价值。
+  if (SYMBOL_QUERY_RE.test(query)) {
+    const sigByKey = new Map(rows.map((r) => [`${r.qualified_name}:${r.start_line}`, r.signature]));
+    const fts = searchSymbols(db, query, limit);
+    if (fts.length > 0) {
+      const hits: SemanticHit[] = fts.map((s) => ({
+        ...s,
+        signature: sigByKey.get(`${s.qualified_name}:${s.start_line}`) ?? null,
+        score: 1,
+      }));
+      return {
+        query, provider: 'exact', indexed: rows.length, hits,
+        message: `精确符号命中 ${hits.length} 个（标识符查询未走向量，零 embedding 开销）。`,
+      };
+    }
   }
 
   // 取配置；无配置走降级
