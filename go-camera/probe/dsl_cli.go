@@ -695,7 +695,7 @@ func dslInstrument(args []string, dataDir string) bool {
 	}
 
 	if probeImport == "" {
-		probeImport = "go-camera/internal/probe"
+		probeImport = "go-camera/probe"
 	}
 
 	// 模式：默认契约模式（读 DSL 声明探针），--explore 全量无脑插桩。

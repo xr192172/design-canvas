@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"go-camera/internal/probe"
+	"go-camera/probe"
 )
 
 func main() {

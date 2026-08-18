@@ -10,7 +10,7 @@
 //   - event ：IO 写盘（op）
 //   - deep  ：函数内部变量赋值（默认关闭，enableDeep 放大）
 //
-// 依赖：被测项目须能 import 本探针包（默认 go-camera/internal/probe）。
+// 依赖：被测项目须能 import 本探针包（默认 go-camera/probe）。
 package instrument
 
 import (
@@ -52,7 +52,7 @@ type Result struct {
 
 // Options 是插桩配置。
 type Options struct {
-	// ProbeImport 是被插桩代码 import 的探针包路径（默认 go-camera/internal/probe）。
+	// ProbeImport 是被插桩代码 import 的探针包路径（默认 go-camera/probe）。
 	ProbeImport string
 	// Write 是否实际写盘；false 只做 dry-run 报告（默认 true）。
 	Write bool
@@ -209,7 +209,7 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 
 	probeImport := opts.ProbeImport
 	if probeImport == "" {
-		probeImport = "go-camera/internal/probe"
+		probeImport = "go-camera/probe"
 	}
 
 	fileRel := filepath.ToSlash(relPath(backupRoot, file))

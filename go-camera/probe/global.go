@@ -15,6 +15,9 @@ var (
 	globalMu   sync.RWMutex
 	globalSink *Sink
 	globalTier *Tiered
+
+	globalLLMMu    sync.RWMutex
+	globalLLMJudge *LLMJudge
 )
 
 // SetGlobalSink configures the legacy JSONL sink. Pass nil to disable.
@@ -37,6 +40,25 @@ func globalTieredFor() *Tiered {
 	globalMu.RLock()
 	defer globalMu.RUnlock()
 	return globalTier
+}
+
+// SetGlobalLLMJudge installs the global slow-path LLM judge. Bootstrap wires
+// it after the Router is created (main.go creates the Sink earlier, before the
+// Router exists); Sink.llmJudgeFor falls back to this when no judge was
+// explicitly attached. Pass nil to disable.
+func SetGlobalLLMJudge(j *LLMJudge) {
+	globalLLMMu.Lock()
+	globalLLMJudge = j
+	globalLLMMu.Unlock()
+}
+
+// GetGlobalLLMJudge returns the currently installed global LLM judge (nil if
+// none). Reads are lock-guarded; the returned pointer is never mutated after
+// installation.
+func GetGlobalLLMJudge() *LLMJudge {
+	globalLLMMu.RLock()
+	defer globalLLMMu.RUnlock()
+	return globalLLMJudge
 }
 
 // Capture emits an event to the global runtime (if set).

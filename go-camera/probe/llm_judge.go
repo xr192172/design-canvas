@@ -99,6 +99,11 @@ func (j *LLMJudge) LoadDSL(store *DesignDSLStore) error {
 	return nil
 }
 
+// DSLCount 返回当前生效的 DSL 声明数量（装配日志/测试断言用）。
+func (j *LLMJudge) DSLCount() int {
+	return len(j.decls)
+}
+
 // SilentErrorDiscardDSL 把静默错误丢弃契约表达成 DSL 声明，供 LLM 行为级判定
 // 使用。与规则判定 SilentErrorDiscard 共用同一契约语义（单一事实来源：Go 谓词
 // 判确定性，DSL 声明喂语义）。

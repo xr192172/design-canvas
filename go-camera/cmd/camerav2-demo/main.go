@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"go-camera/internal/probe"
+	"go-camera/probe"
 )
 
 const (

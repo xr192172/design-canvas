@@ -2,6 +2,7 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,20 +52,29 @@ func (j *Judge) JudgeEvent(ev Event) Verdict {
 // JudgeLog reads events from a JSONL reader and produces a verdict for each.
 func (j *Judge) JudgeLog(r io.Reader) ([]Verdict, error) {
 	var verdicts []Verdict
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	// 2026-08-16 超长行修复（回迁自 agent-shell）：ReadBytes 逐行读取，
+	// Scanner 1MB 行上限会在超长事件行（探针捕获整段流式消息可达 10MB+）
+	// 处 ErrTooLong 中止整个判定。
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimSpace(line)
+			if len(line) > 0 {
+				var ev Event
+				if uerr := json.Unmarshal(line, &ev); uerr != nil {
+					return nil, fmt.Errorf("parse event line %q: %w", string(line), uerr)
+				}
+				verdicts = append(verdicts, j.JudgeEvent(ev))
+			}
 		}
-		var ev Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			return nil, fmt.Errorf("parse event line %q: %w", line, err)
+		if err != nil {
+			if err == io.EOF {
+				return verdicts, nil
+			}
+			return nil, err
 		}
-		verdicts = append(verdicts, j.JudgeEvent(ev))
 	}
-	return verdicts, sc.Err()
 }
 
 // SilentErrorDiscard is the minimal camera contract. The expectation comes
@@ -139,20 +149,27 @@ func (j *Judge) JudgeLogFile(path string) ([]Verdict, error) {
 }
 
 // loadEvents 从 JSONL 读取器解析全部 Event（供 JudgeClient 批量远程判定）。
+// 同 JudgeLog 用 ReadBytes 逐行读取（超长行安全）。
 func loadEvents(r io.Reader) ([]Event, error) {
 	var events []Event
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimSpace(line)
+			if len(line) > 0 {
+				var ev Event
+				if uerr := json.Unmarshal(line, &ev); uerr != nil {
+					return nil, fmt.Errorf("parse event line %q: %w", string(line), uerr)
+				}
+				events = append(events, ev)
+			}
 		}
-		var ev Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			return nil, fmt.Errorf("parse event line %q: %w", line, err)
+		if err != nil {
+			if err == io.EOF {
+				return events, nil
+			}
+			return nil, err
 		}
-		events = append(events, ev)
 	}
-	return events, sc.Err()
 }

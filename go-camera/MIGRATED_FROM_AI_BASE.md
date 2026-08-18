@@ -14,7 +14,9 @@
 ## 迁移后位置
 
 - 模块根：`d:\project_develop\design-canvas\go-camera/`
-- 探针包：`go-camera/internal/probe/`
+- 探针包：`go-camera/probe/`（2026-08-18 从 `internal/probe` 提升为公开包：
+  Go 禁止跨模块导入 internal 包，agent-shell 通过 go.mod replace 以
+  `go-camera/probe` 导入本包，插桩唯一归属地不变）
 - CLI 入口：`go-camera/cmd/camera-dsl/main.go`
 - 数据仓库：`{projectRoot}/.agent/camera/`（设计 DSL + 观测画像）
 
@@ -24,6 +26,10 @@
    `LLMMessage`/`LLMResponse` 类型（接口不变，由装配层适配）。
 2. 删除依赖 ai-base 的 e2e 测试（`camera_demo_test.go`、`camera_llm_e2e_test.go`）。
 3. 模块路径 `go-camera`，仅依赖标准库。
+4. 2026-08-18 回迁收尾：agent-shell 删除本地 `internal/probe` 旧包，100 个文件
+   import 统一切到 `go-camera/probe`（require go-camera + replace 本地路径）；
+   依赖 agent-shell 环境的 e2e 测试保留在被插桩目标侧
+   `agent-shell/internal/cameradogfood/`。
 
 ## 后续方向
 
