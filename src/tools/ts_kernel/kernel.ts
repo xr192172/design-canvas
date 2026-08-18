@@ -109,6 +109,8 @@ interface SyntaxNodeLike {
   endIndex?: number;
   /** 命名节点标记（匿名关键字/标点为 false——'else'/'if' 等关键字 type 也是纯字母，\w 正则无法区分） */
   isNamed?: boolean;
+  /** 子树含 ERROR/MISSING 节点（tree-sitter 容错解析不抛错，靠此标记识别语法破坏） */
+  hasError?: boolean;
   childForFieldName(name: string): SyntaxNodeLike | null;
   child(index: number): SyntaxNodeLike | null;
   childCount: number;

@@ -24,6 +24,7 @@ import { checkStatus } from './tools/status_tools.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { checkConsistency } from './tools/consistency.js';
 import { exploreCode, EXPLORE_ACTIONS } from './tools/explore_code.js';
+import { editCode } from './tools/edit_code.js';
 import { importProject } from './tools/import_project.js';
 import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
@@ -662,6 +663,30 @@ const TOOL_DEFS: ToolDef[] = [
       project_root: z.string().optional().describe('design-canvas 根（探针实现 src/camera/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
     },
     handler: cameraInstrumentHandler,
+  },
+  {
+    name: 'edit_code',
+    title: 'Symbol-level code editing (AST-located)',
+    description:
+      '符号级语义编辑：按 文件+符号名 定位函数/方法/类/接口，AST 确定边界后整体替换/插入/删除。' +
+      '这是 Agent 第一性编辑路径——不依赖行号与 old_string 文本匹配，杜绝改错行/改错函数。' +
+      '安全设计：编辑后 re-parse 整个文件，解析失败自动放弃（不写盘）；' +
+      'replace 要求新代码解析出同名符号（防粘贴错函数）；同名多候选时报错列出签名行号，传 parent 消歧。' +
+      '写盘后自动重建该文件索引（新鲜度闭环）。' +
+      'op: replace（symbol 必填 + code 完整新定义）| insert（code 新符号，symbol 可选=锚点其后插入，缺省文件末尾；新文件也走 insert）| delete（symbol 必填）。' +
+      '定位优先 qualified_name（如 Class.method），短名兜底；Go 方法用短名 + parent（receiver 类型）消歧。',
+    inputSchema: {
+      project_dir: z.string().describe('项目根目录（索引归属；编辑后重建该文件索引）'),
+      file: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
+      op: z.enum(['replace', 'insert', 'delete']).describe('replace=替换符号；insert=插入新符号；delete=删除符号'),
+      symbol: z
+        .string()
+        .optional()
+        .describe('目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选（锚点符号，其后插入；缺省=文件末尾）'),
+      parent: z.string().optional().describe('符号父级（类名 / Go receiver 类型名），同名消歧'),
+      code: z.string().optional().describe('replace/insert 的新代码（完整符号定义，含声明；insert 到新文件=全文）'),
+    },
+    handler: wrap(async (a) => editCode(a as never)),
   },
 ];
 
