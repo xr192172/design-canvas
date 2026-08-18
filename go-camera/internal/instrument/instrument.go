@@ -36,11 +36,12 @@ const (
 
 // Site 是单个插桩点。
 type Site struct {
-	Kind   ProbeKind
-	Level  string // core | event | deep
-	Line   int    // 1-based
-	Offset int    // 注入字节偏移
-	Code   string // 注入的探针源码
+	Kind      ProbeKind
+	Level     string // core | event | deep
+	Line      int    // 1-based
+	Offset    int    // 注入字节偏移
+	EndOffset int    // >0 时替换 [Offset, EndOffset) 区间（用于改写 return 语句）
+	Code      string // 注入的探针源码
 }
 
 // Result 是单文件插桩结果。
@@ -244,7 +245,12 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	// 注：sortSites 已按 Offset 降序排列，此处正向遍历 = 从最大Offset（文件末尾）开始。
 	for i := 0; i < len(sites); i++ {
 		s := sites[i]
-		out = out[:s.Offset] + s.Code + out[s.Offset:]
+		if s.EndOffset > 0 {
+			// 区间替换（改写 return 语句为：临时变量声明 + 探针 + 新 return）。
+			out = out[:s.Offset] + s.Code + out[s.EndOffset:]
+		} else {
+			out = out[:s.Offset] + s.Code + out[s.Offset:]
+		}
 	}
 	// 头部标记 + import（避免重复补 import）
 	if !hasCore {
@@ -450,6 +456,11 @@ func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) str
 		case *ast.ReturnStmt:
 			// return 出口（core）：在 return 前注入。取值捕获仅当无副作用。
 			if MatchProbe(probeName("exit"), probes) {
+				// 含 <-ch（阻塞 + 消费，二次求值死锁）→ 临时变量替换路径。
+				if tmpCode, ok := blockingReturnCapture(s, lineOf(s.Pos()), probeName("exit"), fileRel); ok {
+					*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(s.Pos()), Offset: offsetOf(s.Pos()), EndOffset: offsetOf(s.End()), Code: tmpCode})
+					break
+				}
 				fields := returnCapture(s)
 				// fields 可能为空（return 无值或有副作用表达式），此时不拼 "ret:" 字段，
 				// 否则会出现 map 字面量里的 "level": "core", 空字段 trailing comma，Go 语法错误。
@@ -556,6 +567,9 @@ func returnCapture(s *ast.ReturnStmt) string {
 }
 
 // isSideEffectFree 判断表达式是否无副作用（可安全地再次求值）。
+// 注意：<-ch（channel 接收）不算无副作用——它阻塞且消费一个值，二次求值
+// 会死锁/取错值（graph_writer.SubmitSync 案例）。含 <-ch 的 return 走
+// blockingReturnCapture 的临时变量路径，不走内联捕获。
 func isSideEffectFree(e ast.Expr) bool {
 	switch t := e.(type) {
 	case *ast.Ident, *ast.BasicLit:
@@ -563,6 +577,9 @@ func isSideEffectFree(e ast.Expr) bool {
 	case *ast.ParenExpr:
 		return isSideEffectFree(t.X)
 	case *ast.UnaryExpr:
+		if t.Op == token.ARROW {
+			return false // <-ch：阻塞 + 消费，不可重复求值
+		}
 		return isSideEffectFree(t.X)
 	case *ast.BinaryExpr:
 		return isSideEffectFree(t.X) && isSideEffectFree(t.Y)
@@ -580,6 +597,95 @@ func isSideEffectFree(e ast.Expr) bool {
 	default:
 		return false
 	}
+}
+
+// isSideEffectFreeOrRecv 同 isSideEffectFree，但允许 <-ch（channel 接收）。
+// 用于 blockingReturnCapture：接收表达式可先落临时变量（单次求值）再捕获。
+func isSideEffectFreeOrRecv(e ast.Expr) bool {
+	switch t := e.(type) {
+	case *ast.Ident, *ast.BasicLit:
+		return true
+	case *ast.ParenExpr:
+		return isSideEffectFreeOrRecv(t.X)
+	case *ast.UnaryExpr:
+		return isSideEffectFreeOrRecv(t.X) // 含 ARROW（<-ch 允许）
+	case *ast.BinaryExpr:
+		return isSideEffectFreeOrRecv(t.X) && isSideEffectFreeOrRecv(t.Y)
+	case *ast.SelectorExpr:
+		return isSideEffectFreeOrRecv(t.X)
+	case *ast.IndexExpr:
+		return isSideEffectFreeOrRecv(t.X) && isSideEffectFreeOrRecv(t.Index)
+	case *ast.CompositeLit:
+		for _, el := range t.Elts {
+			if !isSideEffectFreeOrRecv(el) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// hasBlockingRecv 检测表达式树内是否含 <-ch（channel 接收）。
+func hasBlockingRecv(e ast.Expr) bool {
+	switch t := e.(type) {
+	case *ast.ParenExpr:
+		return hasBlockingRecv(t.X)
+	case *ast.UnaryExpr:
+		if t.Op == token.ARROW {
+			return true
+		}
+		return hasBlockingRecv(t.X)
+	case *ast.BinaryExpr:
+		return hasBlockingRecv(t.X) || hasBlockingRecv(t.Y)
+	case *ast.SelectorExpr:
+		return hasBlockingRecv(t.X)
+	case *ast.IndexExpr:
+		return hasBlockingRecv(t.X) || hasBlockingRecv(t.Index)
+	default:
+		return false
+	}
+}
+
+// blockingReturnCapture 处理返回值含 <-ch 的 return：改写为
+//
+//	__camRetL{line}_{i}... := 原表达式...   // 单次求值落变量
+//	camprobe.Capture(..., "ret": {...变量}) // 捕获变量
+//	return __camRetL{line}_0, ...           // 返回变量
+//
+// 调用方须用 Site{EndOffset: offsetOf(s.End())} 替换原 return 语句。
+// 返回 ok=false 表示不适用（无接收表达式，或有接收之外的副作用）。
+func blockingReturnCapture(s *ast.ReturnStmt, line int, probeExit, fileRel string) (string, bool) {
+	if len(s.Results) == 0 {
+		return "", false
+	}
+	hasRecv := false
+	for _, r := range s.Results {
+		if !isSideEffectFreeOrRecv(r) {
+			return "", false // 有 <-ch 之外的副作用（函数调用等）→ 走放弃捕获路径
+		}
+		if hasBlockingRecv(r) {
+			hasRecv = true
+		}
+	}
+	if !hasRecv {
+		return "", false // 无阻塞表达式 → 走内联路径
+	}
+	names := make([]string, len(s.Results))
+	exprs := make([]string, len(s.Results))
+	for i, r := range s.Results {
+		names[i] = fmt.Sprintf("__camRet%d_%d", line, i)
+		exprs[i] = exprString(r)
+	}
+	retParts := make([]string, len(names))
+	for i, n := range names {
+		retParts[i] = fmt.Sprintf("%q: %s", fmt.Sprintf("%d", i), n)
+	}
+	capture := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "core", "ret": map[string]any{%s}});`,
+		probeExit, fileRel, strings.Join(retParts, ", "))
+	return strings.Join(names, ", ") + " := " + strings.Join(exprs, ", ") + "\n" +
+		capture + "\nreturn " + strings.Join(names, ", ") + "\n", true
 }
 
 // exprString 渲染表达式源码（用于注入；不接受错误，仅简单表达式可渲染）。

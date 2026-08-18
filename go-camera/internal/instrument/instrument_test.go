@@ -1,6 +1,7 @@
 package instrument
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -85,6 +86,75 @@ func TestInstrumentFile_EnterExitIO(t *testing.T) {
 	if !strings.Contains(content, "demo.MkdirAll.mkdirall") {
 		t.Errorf("缺少 MkdirAll 的 IO 探针")
 	}
+}
+
+// TestBlockingReturnSingleRecv 回归 graph_writer.SubmitSync 死锁：
+// return <-ch 的返回值曾被内联进 Capture 参数 map（"ret": <-ch），
+// 第二次 return <-ch 永久阻塞。修复后应改写为临时变量单次求值：
+//
+//	__camRetN_0 := <-ch
+//	camprobe.Capture(..., "ret": map[string]any{"0": __camRetN_0})
+//	return __camRetN_0
+func TestBlockingReturnSingleRecv(t *testing.T) {
+	dir := t.TempDir()
+	src := `package demo
+
+func WaitReply(ch chan error) error {
+	return <-ch
+}
+
+func WaitTwo(ch chan int, ok chan bool) (int, bool) {
+	return <-ch, <-ok
+}
+`
+	if err := os.MkdirAll(filepath.Join(dir, "svc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "svc", "recv.go")
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := InstrumentFile(file, Options{Write: true, BackupRoot: dir})
+	if err != nil {
+		t.Fatalf("InstrumentFile: %v", err)
+	}
+	content := readFile(t, dir, "svc/recv.go")
+
+	// 1. 临时变量路径生效
+	if !strings.Contains(content, "__camRet") {
+		t.Fatalf("含 <-ch 的 return 应走临时变量路径，实际输出:\n%s", content)
+	}
+	// 2. 无副作用 return（无 <-ch）不受影响，保持内联（第二个函数全阻塞、
+	//    但整体应仍然生成两个 exit 探针）
+	exitCount := strings.Count(content, ".exit")
+	if exitCount < 2 {
+		t.Fatalf("应有 ≥2 个 exit 探针，实际 %d:\n%s", exitCount, content)
+	}
+
+	// 3. 语义硬断言：解析生成代码，每个函数体中 <-ch（ARROW）只出现一次
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatalf("生成代码不可解析（语法错误）: %v\n%s", err, content)
+	}
+	arrowCount := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		if u, ok := n.(*ast.UnaryExpr); ok && u.Op.String() == "<-" {
+			arrowCount++
+		}
+		return true
+	})
+	// 源码 3 处（WaitReply 1 + WaitTwo 2），生成的临时变量声明各求值一次，
+	// 不应有任何第二次求值 → 仍应恰为 3。
+	if arrowCount != 3 {
+		t.Fatalf("生成代码含 %d 处 <-（应为 3，多了即双次求值）:\n%s", arrowCount, content)
+	}
+
+	// 4. 生成代码中不再有内联进 Capture 的接收表达式
+	if strings.Contains(content, `"0": <-`) || strings.Contains(content, `"1": <-`) {
+		t.Fatalf("Capture 参数 map 不得内联 <-ch（双次求值死锁）:\n%s", content)
+	}
+	_ = res
 }
 
 func TestIdempotent(t *testing.T) {
