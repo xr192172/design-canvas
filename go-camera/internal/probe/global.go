@@ -1,28 +1,56 @@
 package probe
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
-// Package-level global sink for zero-dependency instrumentation.
-// Probes check this before emitting; if nil, the call is a no-op.
+// Package-level globals for zero-dependency instrumentation.
+// Probes check these before emitting; if nil, the call is a no-op.
 // This avoids importing probe into every package for compile-time coupling.
+//
+// v2 路由优先级：Tiered（分级采集）→ legacy Sink（JSONL 全量）→ no-op。
+// 旧插桩代码（Capture/CaptureErr）零改动自动进入 v2 runtime。
 var (
 	globalMu   sync.RWMutex
 	globalSink *Sink
+	globalTier *Tiered
 )
 
-// SetGlobalSink configures the global sink. Pass nil to disable.
+// SetGlobalSink configures the legacy JSONL sink. Pass nil to disable.
+// （兼容保留：v1 全量落盘模式，conformance/调试用。）
 func SetGlobalSink(s *Sink) {
 	globalMu.Lock()
 	globalSink = s
 	globalMu.Unlock()
 }
 
-// Capture emits an event to the global sink (if set).
+// SetGlobalTiered 配置 v2 分级采集 runtime。设置后 Capture 全部路由到它。
+func SetGlobalTiered(t *Tiered) {
+	globalMu.Lock()
+	globalTier = t
+	globalMu.Unlock()
+}
+
+// globalTieredFor 返回全局 Tiered（trace.go 的 Enter 使用）。
+func globalTieredFor() *Tiered {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalTier
+}
+
+// Capture emits an event to the global runtime (if set).
 // A no-op when no sink is configured — safe to call unconditionally.
+// v2：优先走 Tiered（计数器+环形缓冲+可选开箱导出）。
 func Capture(probeName, source string, fields map[string]any) {
 	globalMu.RLock()
+	t := globalTier
 	s := globalSink
 	globalMu.RUnlock()
+	if t != nil {
+		t.Emit(Event{Probe: probeName, Time: time.Now(), Source: source, Fields: fields})
+		return
+	}
 	if s == nil {
 		return
 	}

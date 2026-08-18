@@ -19,10 +19,13 @@ import (
 
 // Event is one data snapshot captured at a probe point.
 type Event struct {
-	Probe  string         `json:"probe"`  // probe point id, e.g. "save.writefile"
-	Time   time.Time      `json:"time"`   // capture timestamp
-	Source string         `json:"source"` // where the expectation comes from: static-rule / llm-design / runtime-invariant
-	Fields map[string]any `json:"fields"` // captured values (err, path, bytes, benign...)
+	Probe  string         `json:"probe"`             // probe point id, e.g. "save.writefile"
+	Time   time.Time      `json:"time"`              // capture timestamp
+	Source string         `json:"source"`            // where the expectation comes from: static-rule / llm-design / runtime-invariant
+	Fields map[string]any `json:"fields"`            // captured values (err, path, bytes, benign...)
+	TraceID string        `json:"trace_id,omitempty"`  // c7: 整条调用链共享的 trace id
+	FrameID uint64        `json:"frame_id,omitempty"`  // c7: 本帧唯一 id（每次调用一个）
+	ParentID uint64       `json:"parent_id,omitempty"` // c7: 父调用帧 id（0=根）
 }
 
 // Sink appends probe events to a JSONL file. Append-only, so no locking
