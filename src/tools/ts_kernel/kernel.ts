@@ -28,7 +28,7 @@ import { getParser, clearLoaderCache } from './loader.js';
 
 export interface ParsedSymbol {
   name: string;
-  kind: 'function' | 'method' | 'class' | 'interface' | 'type';
+  kind: 'function' | 'method' | 'class' | 'interface' | 'type' | 'const';
   start_line: number;
   end_line: number;
   qualified_name: string;
@@ -205,12 +205,47 @@ function traverseAndExtract(
 ): void {
   if (depth > 100) return; // 防止无限递归
 
+  // 顶层 const/let/var（TS/JS）：具名值绑定也算符号——handler 形态
+  // （const xxxHandler = wrap(...)）是 server_registry 等文件的主体结构。
+  // 只索引顶层（parent===undefined）：局部 const 同名多、噪音大且定位价值低；
+  // 解构（object_pattern）与多声明器跳过（符号名无法稳定表达）。不进 body 递归
+  // ——初始化器内的局部 function 不提升为顶层符号（闭包私有，本就不该独立可见）。
+  if (
+    parent === undefined &&
+    (node.type === 'lexical_declaration' || node.type === 'variable_declaration')
+  ) {
+    const declarators: SyntaxNodeLike[] = [];
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c && c.type === 'variable_declarator') declarators.push(c);
+    }
+    if (declarators.length === 1) {
+      const nameNode = declarators[0].childForFieldName('name');
+      if (nameNode && nameNode.type === 'identifier' && isValidIdentifier(nameNode.text)) {
+        const valueNode = declarators[0].childForFieldName('value');
+        // 值摘要（≤60 字符，单行化）：wrap(async (a) => {...}) → “wrap(async (a) => {…”
+        const rawValue = (valueNode?.text ?? '').replace(/\s+/g, ' ');
+        const valueBrief = rawValue.length > 60 ? rawValue.slice(0, 57) + '…' : rawValue;
+        symbols.push({
+          name: nameNode.text,
+          kind: 'const',
+          start_line: node.startPosition.row + 1,
+          end_line: node.endPosition.row + 1,
+          qualified_name: nameNode.text,
+          signature: `const ${nameNode.text} = ${valueBrief}`,
+          parent: undefined,
+        });
+      }
+    }
+    return;
+  }
+
   if (lang.symbol_nodes.includes(node.type)) {
     const name = extractName(node, lang.field_map);
     if (name) {
       const kind = nodeTypeToKind(node.type, parent);
       const signature = buildSignature(node, lang.field_map, lang);
-      // Go 方法：receiver 类型即"所属类型"。只填 parent（供社区按类型聚合），
+      // Go 方法：receiver 类型即“所属类型”。只填 parent（供社区按类型聚合），
       // 不改 qualified_name（保留 "Method" 短名，避免破坏既有调用边解析契约）。
       let symbolParent = parent;
       if (lang.name === 'go' && !symbolParent) {

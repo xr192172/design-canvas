@@ -378,13 +378,21 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   //   - 仅新增 / 纯注释格式：无波及
   //   - 符号级全空但 norm_changed（常量值/字符串等符号外变更）：唯一启用 import
   //     层的场景——无符号可指，import 依赖是仅剩的波及通道
+  //   - 变更符号含顶层 const：常量不是函数调用也不是类型引用，天然没有
+  //     call/type_ref 边；导入方的 import 语句本身就是使用它的唯一证据
+  //     ——启用 import 层兜底（粗粒度宁多勿漏，与 import 层定位一致）
   const diffByPath = new Map(symbol_diffs.map((d) => [d.path, d]));
+  const stmtKinds = db.prepare('SELECT kind FROM nodes WHERE file_path = ? AND name = ?');
   const importSources = new Set<string>();
   for (const { rel, cachePath } of changedSemantic) {
     const d = diffByPath.get(rel);
-    if (d && d.granularity === 'symbol' && d.changed.length === 0 && d.added.length === 0 && d.norm_changed) {
-      importSources.add(cachePath);
-    }
+    if (!d || d.granularity !== 'symbol') continue;
+    const noSymbolChange = d.changed.length === 0 && d.added.length === 0 && d.norm_changed;
+    const hasConstChange = d.changed.some((name) => {
+      const row = stmtKinds.get(rel, name) as { kind: string } | undefined;
+      return row?.kind === 'const';
+    });
+    if (noSymbolChange || hasConstChange) importSources.add(cachePath);
   }
   const importReached = new Map<string, number>(); // file → depth（via='import'）
   let importFrontier: string[] = [];

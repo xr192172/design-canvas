@@ -258,6 +258,20 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
           reparsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n'),
       );
     }
+    // 重复顶层符号防御（狗食缺陷：replace 大符号时新 code 带入了旧定义的副本，
+    // 新旧并存导致编译错 + 手工清理）。TS/JS 顶层同名声明本就是编译错误，直接拦。
+    const dupByQn = new Map<string, number>();
+    for (const s of reparsed.symbols) {
+      if (s.parent === undefined) dupByQn.set(s.qualified_name, (dupByQn.get(s.qualified_name) ?? 0) + 1);
+    }
+    const dups = [...dupByQn.entries()].filter(([, n]) => n > 1);
+    if (dups.length > 0) {
+      throw new Error(
+        `编辑后出现重复的顶层符号（疑似新 code 带入了既有定义的副本），已放弃（未写盘）:\n` +
+          dups.map(([qn, n]) => `  ${qn} × ${n}`).join('\n') +
+          '\n请从 code 中移除重复定义后重试。',
+      );
+    }
   }
 
   // ── 写盘 + 索引重建（新鲜度闭环） ──

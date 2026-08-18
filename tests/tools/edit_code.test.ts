@@ -56,6 +56,92 @@ export function helper(): string {
 }
 `;
 
+describe('顶层 const 符号（狗食缺陷修复：handler 形态）', () => {
+  const HANDLER_SAMPLE = `import { wrap } from './wrap.js';
+
+/** handler：wrap 装配形态 */
+const cameraJudgeHandler = wrap(async (a) => {
+  return { message: 'ok' };
+});
+
+const A = 1;
+let count = 0;
+const { x, y } = obj;
+const p = 1, q = 2;
+
+export function real() {
+  const inner = 2;
+  return inner;
+}
+`;
+
+  it('parseFileFull 提取顶层 const/let 为 kind=const，局部/解构/多声明器跳过', async () => {
+    const p = write('handlers.ts', HANDLER_SAMPLE);
+    const parsed = await parseFileFull(p, HANDLER_SAMPLE);
+    const consts = parsed.symbols.filter((s) => s.kind === 'const');
+    const names = consts.map((s) => s.name);
+    expect(names).toContain('cameraJudgeHandler');
+    expect(names).toContain('A');
+    expect(names).toContain('count');
+    expect(names).not.toContain('inner'); // 局部 const 不索引
+    expect(names).not.toContain('x'); // 解构跳过
+    expect(names).not.toContain('p'); // 多声明器跳过
+    const h = consts.find((s) => s.name === 'cameraJudgeHandler')!;
+    expect(h.signature).toContain('wrap(async (a) =>');
+    expect(h.qualified_name).toBe('cameraJudgeHandler');
+  });
+
+  it('edit_code 可 replace 顶层 const handler（此前符号未找到）', async () => {
+    const p = write('handlers.ts', HANDLER_SAMPLE);
+    const r = await editCode({
+      project_dir: dir,
+      file: p,
+      op: 'replace',
+      symbol: 'cameraJudgeHandler',
+      code: `const cameraJudgeHandler = wrap(async (a) => {
+  return { message: 'v2' };
+});`,
+    });
+    expect(r.message).toContain('已替换');
+    const after = fs.readFileSync(p, 'utf8');
+    expect(after).toContain("'v2'");
+    expect(after).toContain('export function real()');
+  });
+});
+
+describe('重复顶层符号防御（狗食缺陷修复）', () => {
+  it('replace 引入与既有符号重名的定义 → 拒绝不写盘', async () => {
+    const src = `export interface Box {
+  size: number;
+}
+
+export function make(): Box {
+  return { size: 1 };
+}
+`;
+    const p = write('box.ts', src);
+    await expect(
+      editCode({
+        project_dir: dir,
+        file: p,
+        op: 'replace',
+        symbol: 'make',
+        // 粘贴的 code 里带入了 Box 的副本——旧 Box 还在，新旧并存
+        code: `export interface Box {
+  size: number;
+  weight?: number;
+}
+
+export function make(): Box {
+  return { size: 2 };
+}`,
+      }),
+    ).rejects.toThrow(/重复的顶层符号[\s\S]*Box × 2/);
+    // 未写盘：文件内容不变
+    expect(fs.readFileSync(p, 'utf8')).toBe(src);
+  });
+});
+
 describe('replace', () => {
   it('替换顶层函数（短名）', async () => {
     write('src/math.ts', TS_SAMPLE);
