@@ -133,6 +133,30 @@ export interface Node {
   arch_layer?: string;
   /** 数据形状卡（D1）：进/出该节点的数据形状（人话版 JSON Schema 渲染，纯展示） */
   shapes?: NodeShapes;
+  /**
+   * 决策卡·参数表（2026-08-18）：类型化 key-value，承载设计参数（如 budget_mb: 64）。
+   * 与 description 纯文本的区别：参数是字段，机器可对拍（未来 camera 参数级对拍的地基）。
+   */
+  attributes?: Record<string, string | number | boolean>;
+  /**
+   * 决策卡·决策记录（2026-08-18）：结论/理由/替代方案/后果/验收标准。
+   * LLM 运化时填写，人抽查；DSL 只运化可机器执行部分，rationale 永留卡上。
+   */
+  decision?: NodeDecision;
+}
+
+/** 节点决策记录（决策卡的核心结构） */
+export interface NodeDecision {
+  /** 结论：这个设计是什么（一句话） */
+  summary: string;
+  /** 理由：为什么这么定（含定量依据） */
+  rationale?: string;
+  /** 被否掉的替代方案及否决原因 */
+  alternatives?: { option: string; rejected_because: string }[];
+  /** 后果/风险：这么定的代价 */
+  consequences?: string;
+  /** 验收标准：怎么算做好了（可观测） */
+  acceptance?: string;
 }
 
 /** 边 SVG 样式 */

@@ -2,7 +2,7 @@
  * 节点操作：add_node / update_node / delete_node
  */
 
-import type { DesignDSL, Node, NodeStyle, NodeContent, DiagramStatus, NodeLayer, NodeShapes, AnimationValueSchema } from '../dsl/types.js';
+import type { DesignDSL, Node, NodeStyle, NodeContent, DiagramStatus, NodeLayer, NodeShapes, NodeDecision, AnimationValueSchema } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 import type { EditResult } from './edit_result.js';
 
@@ -53,10 +53,14 @@ export interface AddNodeInput {
   layer?: NodeLayer;
   host?: string;
   shapes?: NodeShapes;
+  /** 决策卡·参数表：类型化 key-value（如 budget_mb: 64） */
+  attributes?: Record<string, string | number | boolean>;
+  /** 决策卡·决策记录：结论/理由/替代方案/后果/验收 */
+  decision?: NodeDecision;
 }
 
 export function addNode(input: AddNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -97,6 +101,8 @@ export function addNode(input: AddNodeInput): EditResult {
     layer,
     host,
     shapes,
+    attributes,
+    decision,
   };
 
   dsl.geometry.nodes.push(node);
@@ -146,10 +152,14 @@ export interface UpdateNodeInput {
   layer?: NodeLayer | null;
   host?: string | null;
   shapes?: NodeShapes | null;
+  /** 决策卡·参数表：类型化 key-value；null 清除 */
+  attributes?: Record<string, string | number | boolean> | null;
+  /** 决策卡·决策记录；null 清除 */
+  decision?: NodeDecision | null;
 }
 
 export function updateNode(input: UpdateNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -193,6 +203,15 @@ export function updateNode(input: UpdateNodeInput): EditResult {
       assertValidShapes(shapes);
       node.shapes = shapes;
     }
+  }
+  // attributes/decision：null 表示清除（决策卡整体移除）；空对象/空 summary 允许渐进填写
+  if (attributes !== undefined) {
+    if (attributes === null) delete node.attributes;
+    else node.attributes = attributes;
+  }
+  if (decision !== undefined) {
+    if (decision === null) delete node.decision;
+    else node.decision = decision;
   }
 
   if (!node.style) node.style = {};

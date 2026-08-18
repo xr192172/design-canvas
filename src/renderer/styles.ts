@@ -1072,6 +1072,57 @@ main.sidebar-hidden .sidebar-toggle {
 .anno-badge { cursor: pointer; }
 .anno-badge:hover circle { filter: brightness(1.2); }
 
+/* 决策卡（2026-08-18 设计文档层）：左上「卡」角标 + 点击弹层 */
+.decision-badge { cursor: pointer; }
+.decision-badge:hover rect { filter: brightness(1.25); }
+#decision-panel {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  width: 360px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--theme-card-bg, #fff);
+  color: var(--theme-text, #222);
+  border: 1px solid rgba(124, 92, 255, 0.45);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(20, 10, 60, 0.35);
+  padding: 14px 16px;
+  z-index: 9500;
+  font-size: 13px;
+  line-height: 1.55;
+}
+#decision-panel .decision-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+#decision-panel .decision-id { font-weight: 400; font-size: 11px; opacity: 0.55; }
+#decision-panel .decision-sec {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #7c5cff;
+  margin: 10px 0 4px;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.25);
+  padding-bottom: 2px;
+}
+#decision-panel table.decision-attrs { width: 100%; border-collapse: collapse; }
+#decision-panel table.decision-attrs td {
+  padding: 2px 6px 2px 0;
+  vertical-align: top;
+  border: none;
+}
+#decision-panel table.decision-attrs td:first-child { color: #7c5cff; white-space: nowrap; padding-right: 12px; }
+#decision-panel .decision-row { display: flex; gap: 8px; margin: 4px 0; }
+#decision-panel .decision-row b {
+  flex: none;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--theme-text-sub, #888);
+  width: 30px;
+}
+#decision-panel .decision-row span { flex: 1; }
+#decision-panel .decision-row.alt span { opacity: 0.75; }
+#decision-panel .decision-row.acc b, #decision-panel .decision-row.acc span { color: #1f8a4c; }
+#decision-panel .decision-close { margin-top: 10px; font-size: 10px; opacity: 0.45; text-align: right; }
+
 .sidebar .invariants {
   margin-top: 16px;
 }

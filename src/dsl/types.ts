@@ -23,6 +23,7 @@ export type {
   ContentBlock,
   NodeContent,
   Node,
+  NodeDecision,
   EdgeStyle,
   Edge,
   Swimlane,

@@ -293,11 +293,26 @@ function renderNode(n: Node, parentIds?: Set<string>, annotations?: Annotation[]
     }
   }
 
+  // 决策卡角标（2026-08-18 设计文档层）：节点带 decision/attributes 时左上角显示「卡」，
+  // data-decision 编码完整卡片（转义 JSON，与 sim-edge data-detail 同手法），点击由内联 JS 弹出
+  let decisionBadge = '';
+  if (n.decision || (n.attributes && Object.keys(n.attributes).length > 0)) {
+    const card = { id: n.id, label: label, attributes: n.attributes ?? null, decision: n.decision ?? null };
+    const cardJson = esc(JSON.stringify(card));
+    const bx = b.x + 14;
+    const by = b.y + 8;
+    decisionBadge = `<g class="decision-badge" data-node-id="${esc(n.id)}" data-decision="${cardJson}" transform="translate(${bx},${by})">
+        <rect x="-8" y="-8" width="16" height="16" rx="3" fill="#7c5cff" stroke="#ffffff" stroke-width="1"/>
+        <text text-anchor="middle" dy="0.35em" fill="#ffffff" font-size="10" font-weight="bold">卡</text>
+      </g>`;
+  }
+
   return `    <g class="${nodeClass}" data-id="${esc(n.id)}" data-label="${esc(label)}"${n.title ? ` data-title="${esc(n.title)}"` : ''} data-has-sub-dsl="${hasSubDsl}" data-status="${status}"${archAttr}${layerAttr}${hostAttr}${hiddenAttr}>
       ${shapeSvg}
       ${contentSvg}
       <circle cx="${dotX}" cy="${dotY}" r="4" fill="${dotColor}" stroke="#ffffff" stroke-width="0.5"/>
       ${annoBadge}
+      ${decisionBadge}
     </g>`;
 }
 

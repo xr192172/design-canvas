@@ -359,6 +359,25 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
         node.sub_dsl ? `  子图: ${node.sub_dsl.feature ?? '（内联 DSL）'}` : '',
       ].filter(Boolean);
 
+      // 决策卡：参数表 + 决策记录（2026-08-18 设计文档层）
+      if (node.attributes && Object.keys(node.attributes).length > 0) {
+        lines.push('  ─ 决策卡·参数表 ─');
+        for (const [k, v] of Object.entries(node.attributes)) {
+          lines.push(`    ${k}: ${v}`);
+        }
+      }
+      if (node.decision) {
+        const d = node.decision;
+        lines.push('  ─ 决策卡·决策记录 ─');
+        lines.push(`    结论: ${d.summary}`);
+        if (d.rationale) lines.push(`    理由: ${d.rationale}`);
+        for (const alt of d.alternatives ?? []) {
+          lines.push(`    替代「${alt.option}」被否: ${alt.rejected_because}`);
+        }
+        if (d.consequences) lines.push(`    后果: ${d.consequences}`);
+        if (d.acceptance) lines.push(`    验收: ${d.acceptance}`);
+      }
+
       // 如有内容块，展示摘要
       if (node.content) {
         lines.push(`  内容类型: ${node.content.type}`);

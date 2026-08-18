@@ -2921,6 +2921,46 @@ ${I18N_SOURCE}
     });
   }
 
+  // ── 决策卡（2026-08-18 设计文档层）─────────────────────────
+  // 点击「卡」角标弹出该节点的设计决策卡：参数表 + 决策记录。
+  function esc2(s) { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; }
+  function setupDecisionBadgeClick() {
+    document.querySelectorAll('.decision-badge').forEach(badge => {
+      badge.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        let card = null;
+        try { card = JSON.parse(badge.getAttribute('data-decision') || '{}'); } catch (e) { return; }
+        closeDecisionPanel();
+        const panel = document.createElement('div');
+        panel.id = 'decision-panel';
+        const parts = [];
+        parts.push('<div class="decision-title">🗂 ' + esc2(card.label) + ' <span class="decision-id">#' + esc2(card.id) + '</span></div>');
+        if (card.attributes && Object.keys(card.attributes).length) {
+          parts.push('<div class="decision-sec">参数表</div><table class="decision-attrs">');
+          for (const [k, v] of Object.entries(card.attributes)) parts.push('<tr><td>' + esc2(k) + '</td><td>' + esc2(v) + '</td></tr>');
+          parts.push('</table>');
+        }
+        const d = card.decision;
+        if (d) {
+          parts.push('<div class="decision-sec">决策记录</div>');
+          if (d.summary) parts.push('<div class="decision-row"><b>结论</b><span>' + esc2(d.summary) + '</span></div>');
+          if (d.rationale) parts.push('<div class="decision-row"><b>理由</b><span>' + esc2(d.rationale) + '</span></div>');
+          (d.alternatives || []).forEach(a => parts.push('<div class="decision-row alt"><b>否决</b><span>' + esc2(a.option) + '：' + esc2(a.rejected_because) + '</span></div>'));
+          if (d.consequences) parts.push('<div class="decision-row"><b>后果</b><span>' + esc2(d.consequences) + '</span></div>');
+          if (d.acceptance) parts.push('<div class="decision-row acc"><b>验收</b><span>' + esc2(d.acceptance) + '</span></div>');
+        }
+        panel.innerHTML = parts.join('') + '<div class="decision-close">点击空白处关闭</div>';
+        document.body.appendChild(panel);
+        panel.addEventListener('click', (e2) => e2.stopPropagation());
+      });
+    });
+    document.addEventListener('click', () => closeDecisionPanel());
+  }
+  function closeDecisionPanel() {
+    const old = document.getElementById('decision-panel');
+    if (old) old.remove();
+  }
+
   function setupAnnotationTriggers() {
     let toggleBtn = document.getElementById('anno-toggle-btn');
     if (!toggleBtn) {
@@ -6091,6 +6131,7 @@ ${I18N_SOURCE}
   setupAnnotationTriggers();
   setupAnnoWall();
   setupAnnoBadgeClick();
+  setupDecisionBadgeClick();
   setupNodeEditor();
   setupSimulation();
 
