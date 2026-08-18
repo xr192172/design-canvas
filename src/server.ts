@@ -46,6 +46,10 @@ const server = new McpServer(
       '\n   仿真器是事件驱动状态机，不是动画播放器。用于验证"数据流入 → 规则触发 → 状态变化"是否符合预期。' +
       '\n\n8. 项目导入：import_project 扫描代码项目生成 DSL（文件节点+调用边+符号语义层），design_mode/functional_mode 聚合为设计草图。' +
       '\n\n9. 单文件体检：explore_code(action=check_monolith) 扫描文件行数，超阈值文件自动做 Louvain 社区发现，给出功能内聚拆分建议（仅建议不改代码）。' +
+      '\n\n10. 文件索引优先（Agent 第一性路径）：查/改代码时优先 get_dsl(query:"files",feature) 拿语义文件列表（含架构层/API 数/行数），' +
+      '再 query:"file" 拿单文件详情（含 API 签名+行号+deps）直达修改点，然后直接 Read/Edit 目标文件。' +
+      'Grep/Glob 仅作 fallback（DSL 未绑定的文件才全文搜索）。' +
+      '绑定新鲜度由 import_project（全量）/ explore_code(action=watch)（增量）维护。' +
       '\n\n增量模式让你逐步完善设计，避免每次重写整个 JSON。所有修改自动保存到 .design-canvas/features/。',
   },
 );

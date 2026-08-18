@@ -41,6 +41,50 @@ import {
   restoreInstrumented,
 } from './camera/instrument.js';
 import path from 'node:path';
+import { statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// ─────────────────────────────────────────────────────────────
+// 陈旧进程检测（版本握手）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 狗食缺陷修复：MCP 进程长驻，dist 重建后进程仍运行旧代码，AI 侧表现为
+ * "工具缺失/参数报错却不知原因"（2026-08-18 decisions 查询缺失事件）。
+ *
+ * 机制：进程加载时记录本文件（dist/server_registry.js）的 mtime；
+ * 每次工具调用轻量 stat 比对，dist 更新后在所有返回（含错误）尾部追加
+ * 重启警告。开销 = 每调用一次 stat，可忽略。
+ */
+const SELF_PATH = (() => {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return null; // 异常环境（理论不可达）——禁用检测
+  }
+})();
+const SELF_MTIME_MS: number | null = SELF_PATH ? safeMtimeMs(SELF_PATH) : null;
+
+function safeMtimeMs(p: string): number | null {
+  try {
+    return statSync(p).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** dist 已更新（进程仍在跑旧代码）时返回重启警告，否则空串。 */
+function staleBuildWarning(): string {
+  if (SELF_MTIME_MS === null || SELF_PATH === null) return '';
+  const cur = safeMtimeMs(SELF_PATH);
+  if (cur !== null && cur > SELF_MTIME_MS) {
+    return (
+      '\n⚠️ STALE BUILD：dist 已在本进程启动后重建，当前响应来自旧代码——' +
+      '新增工具/字段/参数可能缺失或报"未知"错误。请重启 design-canvas MCP server 后再执行写操作。'
+    );
+  }
+  return '';
+}
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -59,16 +103,16 @@ function textOut(text: string, isError = false) {
   return { content: [{ type: 'text' as const, text }], isError };
 }
 
-/** 包装一个同步/异步纯函数调用为 handler（统一 try/catch） */
+/** 包装一个同步/异步纯函数调用为 handler（统一 try/catch + 陈旧构建警告） */
 function wrap(
   fn: (args: Record<string, unknown>) => { message: string; data?: unknown } | Promise<{ message: string; data?: unknown }>,
 ): ToolDef['handler'] {
   return async (args) => {
     try {
       const r = await fn(args);
-      return { text: r.message };
+      return { text: r.message + staleBuildWarning() };
     } catch (e) {
-      return { text: (e as Error).message, isError: true };
+      return { text: (e as Error).message + staleBuildWarning(), isError: true };
     }
   };
 }
@@ -86,9 +130,11 @@ function wrapData(
         parts.push('---DATA---');
         parts.push(JSON.stringify(r.data));
       }
+      const warn = staleBuildWarning();
+      if (warn) parts.push(warn);
       return { text: parts.join('\n') };
     } catch (e) {
-      return { text: (e as Error).message, isError: true };
+      return { text: (e as Error).message + staleBuildWarning(), isError: true };
     }
   };
 }
@@ -528,6 +574,8 @@ const TOOL_DEFS: ToolDef[] = [
       `action: ${EXPLORE_ACTIONS.join(' / ')}。` +
       '语义搜索/影响分析/架构分层/导览/巨石分析/拆分/变形链/动画流/算法/注入回放/仿真/文件监听。' +
       'args 为各 action 的具体参数。' +
+      'search 必填 args.project_dir（目标项目根目录，缺省报错）+ args.query，可选 top_k；' +
+      'arch_layer/diff_impact 等同样需要 project_dir。' +
       'watch 支持 impact_on_change=true：文件变更后自动生成影响报告（一行摘要入 alerts，' +
       'action=status 查看未读提醒，action=impact + seq 取全文；报告持久落盘 .design-canvas/impact/）。' +
       '改代码前建议 action=declare + files 登记预告（Impact Ledger）：改后自动对比实际波及，' +
