@@ -59,12 +59,12 @@ function detectEol(content: string): string {
 }
 
 /** 新代码规范化为文件行尾风格，每行带终止符 */
+/** 新代码规范化为文件行尾风格，每行带终止符（末尾空元素先丢弃——由调用方决定是否补空行） */
 function normalizeCode(code: string, eol: string): string[] {
   const normalized = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const parts = normalized.split('\n');
-  // 结尾空元素（code 以 \n 结尾产生）丢弃——由调用方决定是否补空行
   while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-  return parts.map((l, i) => (i < parts.length - 1 ? l + eol : l + eol));
+  return parts.map((l) => l + eol);
 }
 
 function isBlankLine(line: string): boolean {
@@ -284,7 +284,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     const anchor = args.symbol ? `（锚点 ${args.symbol} 之后）` : '（文件末尾）';
     return {
       message:
-        `✓ 已插入 ${relPath}${anchor}，符号 ${before} → ${after}，索引已重建（${sync.status}）${diffNote}\n` +
+        `✓ 已插入 ${relPath}${anchor}，符号 ${before} → ${after}，索引已重建（${sync.status}）${diffNote}${repairNote}\n` +
         `新符号:\n` + reparsed.symbols
           .filter((s) => !parsed.symbols.some((o) => o.qualified_name === s.qualified_name && o.start_line === s.start_line))
           .map((s) => `  + ${describeSymbol(s)}`)
@@ -294,7 +294,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   return {
     message:
       `✓ 已替换 ${relPath} 的 ${args.symbol}（原 L${lineOp.startIdx + 1}-${lineOp.startIdx + lineOp.count}，` +
-      `${lineOp.count} 行 → ${lineOp.insert.length} 行），索引已重建（${sync.status}）${diffNote}\n` +
+      `${lineOp.count} 行 → ${lineOp.insert.length} 行），索引已重建（${sync.status}）${diffNote}${repairNote}\n` +
       `文件符号: ${before} → ${after}`,
   };
 }
