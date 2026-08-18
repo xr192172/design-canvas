@@ -27,6 +27,19 @@
 - **人审流程**：人类在浏览器双击节点添加标注，LLM 读取标注迭代，支持审批链
 - **HTTP API**：`serve.ts` 提供 /api/save /api/load /api/features 及布局/生成/检查端点，浏览器端可直接调用
 
+## 插桩/摄像头工具链（camera）
+
+双语言插桩工具链**唯一归属本仓库**（2026-08-14 自 ai-base 迁移，原目录不再更新）：
+
+| 组件 | 路径 | 说明 |
+|---|---|---|
+| TS 插桩器 | `src/camera/instrument.ts` | tree-sitter AST 源码级全量插桩（函数出入口/catch/IO），幂等，git 兜底 |
+| Go 插桩器 + 探针 | `go-camera/` | go/ast 改写插桩 + probe 契约判定 + camera-dsl CLI（仅标准库，自包含） |
+| 编译期 trace | `go-trace/` | TraceEntry/TraceExit 函数级仿真采集核心 |
+| 迁移留档 | `go-camera/MIGRATED_FROM_AI_BASE.md` | 自 ai-base 迁移的说明与解耦记录 |
+
+被插桩目标（狗食现场）：`ai-base/agent-shell` —— 其仓库已提交全量插桩基线快照，重跑 hub 即产出 `.agent/camera/events-*.jsonl`，由 camera-dsl CLI 消费判定。
+
 ## 快速开始
 
 ```bash
