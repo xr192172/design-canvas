@@ -1,0 +1,526 @@
+{
+  "id": "feature_camera_v2",
+  "type": "feature_diagram",
+  "feature": "camera_v2",
+  "version": "1.0.0",
+  "title": "Camera v2 黑匣子架构（设计链路 2026-08-18）",
+  "status": "draft",
+  "geometry": {
+    "layout": "vertical_flow",
+    "width": 800,
+    "height": 600,
+    "nodes": [
+      {
+        "id": "v2",
+        "label": "Camera v2 黑匣子架构",
+        "x": 200,
+        "y": 880,
+        "width": 260,
+        "height": 100,
+        "style": {
+          "bg": "#eef2ff",
+          "border": "#6c4cf1",
+          "shape": "rounded"
+        },
+        "type": "module",
+        "description": "设计链路落盘：2026-08-18 对谈结论。核心思想：插桩与采集解耦；黑匣子三环=聚合常开+常录不落盘+错误开箱导出。分支=设计脉络，叶子=具体决策，后续逐步运化为 DSL 契约声明。",
+        "layer": "main"
+      },
+      {
+        "id": "brA",
+        "label": "① 定位演进",
+        "x": 640,
+        "y": 140,
+        "width": 280,
+        "height": 70,
+        "type": "module",
+        "description": "从'事后审计'到'源头驱动'",
+        "layer": "main"
+      },
+      {
+        "id": "brB",
+        "label": "② 屎山重构管线",
+        "x": 640,
+        "y": 480,
+        "width": 280,
+        "height": 70,
+        "type": "module",
+        "description": "哑实体=屎山，行为考古学",
+        "layer": "main"
+      },
+      {
+        "id": "brC",
+        "label": "③ 采集架构·黑匣子（核心）",
+        "x": 640,
+        "y": 900,
+        "width": 280,
+        "height": 70,
+        "style": {
+          "bg": "#eef2ff",
+          "border": "#6c4cf1",
+          "shape": "rounded"
+        },
+        "type": "module",
+        "description": "本轮讨论的核心产出，解决爆盘/爆内存",
+        "layer": "main"
+      },
+      {
+        "id": "brD",
+        "label": "④ 插桩策略三层",
+        "x": 640,
+        "y": 1340,
+        "width": 280,
+        "height": 70,
+        "type": "module",
+        "description": "契约盯守/轮转探索/错误升级",
+        "layer": "main"
+      },
+      {
+        "id": "brE",
+        "label": "⑤ 风险点推荐器",
+        "x": 640,
+        "y": 1600,
+        "width": 280,
+        "height": 70,
+        "type": "module",
+        "description": "解决'契约模式不知道插哪'",
+        "layer": "main"
+      },
+      {
+        "id": "brF",
+        "label": "⑥ 落地状态与待办",
+        "x": 640,
+        "y": 1840,
+        "width": 280,
+        "height": 70,
+        "type": "module",
+        "description": "已落地积木 vs 待做优先级",
+        "layer": "main"
+      },
+      {
+        "id": "a1",
+        "label": "三层认知架构",
+        "x": 1060,
+        "y": 40,
+        "width": 340,
+        "height": 100,
+        "type": "module",
+        "description": "思维导图(想法层)↔设计DSL(结构层)↔代码(行为层)。纪律：每类事实只有一个真相源；跨层只做单向投影+对拍，不做跨层双向同步（同步关系O(N²)，层多必乱）。同层双向可行（如思维导图↔DSL）。",
+        "layer": "detail"
+      },
+      {
+        "id": "a2",
+        "label": "DSL=唯一真相源",
+        "x": 1060,
+        "y": 150,
+        "width": 340,
+        "height": 100,
+        "type": "module",
+        "description": "代码降级为投影物，可由 DSL+scaffold 随时再生。管辖边界：结构层(模块/接口/依赖/契约)归 DSL；行为层(函数体/算法)归代码=LLM 领地，人不读。DSL 保持一页能看完的复杂度。",
+        "layer": "detail"
+      },
+      {
+        "id": "a3",
+        "label": "CAD 类比（可借鉴机制）",
+        "x": 1060,
+        "y": 260,
+        "width": 340,
+        "height": 110,
+        "type": "module",
+        "description": "特征树=操作历史(create/update_feature)；回滚条=save/rollback_snapshot；干涉检查只报告不回写=camera 对拍语义；哑实体=遗留代码合法存在。关键差异：CAD 再生即产物，软件语义=运行行为，camera 是 CAD 不需要而软件必须有的那层。",
+        "layer": "detail"
+      },
+      {
+        "id": "b1",
+        "label": "行为考古学六步",
+        "x": 1060,
+        "y": 380,
+        "width": 340,
+        "height": 100,
+        "type": "module",
+        "description": "①插桩观测(全量) ②行为画像(真实调用链/错误路径/数据形态) ③LLM 反推 DSL ④人审图批准(介入点) ⑤按 DSL 干净重写 ⑥行为等价对拍。每步产出肉眼可验收的 artifact。",
+        "layer": "detail"
+      },
+      {
+        "id": "b2",
+        "label": "行为等价对拍（待做）",
+        "x": 1060,
+        "y": 490,
+        "width": 340,
+        "height": 100,
+        "type": "service",
+        "description": "重构安全网：新旧版本各跑一遍真实负载，diff 事件流序列；一致=行为保真，不一致=重构改坏当场抓住。camera 从'审计器'升级为'重构安全网'。需在现有 Comparator(代码vs DSL)之外新增事件流 vs 事件流模式。",
+        "layer": "detail"
+      },
+      {
+        "id": "b3",
+        "label": "backfill 事件输入通路（待做）",
+        "x": 1060,
+        "y": 600,
+        "width": 340,
+        "height": 100,
+        "type": "service",
+        "description": "现有 backfill_scaffold 从代码结构反推，缺'从行为事件反推'：events.jsonl→行为画像→DSL 候选→人审。与 b2 构成屎山重构的两个新积木。",
+        "layer": "detail"
+      },
+      {
+        "id": "c1",
+        "label": "内存不变式（铁律）",
+        "x": 1060,
+        "y": 740,
+        "width": 340,
+        "height": 100,
+        "type": "data",
+        "description": "任何事件留存层，跑 1 秒与跑 1 年占用必须相同（常数）。聚合=永远安全 O(探针数)；留存=必须有界+有淘汰。O(事件量)增长=下一颗炸弹（爆盘爆内存同源）。",
+        "layer": "detail"
+      },
+      {
+        "id": "c2",
+        "label": "病根复盘（实测数据）",
+        "x": 1060,
+        "y": 850,
+        "width": 340,
+        "height": 100,
+        "type": "data",
+        "description": "狗食实测：3603 探针×200/s 限速×~300B/条≈200MB/s 理论峰值，5% 占空比≈600MB/min——'跑一小会就爆盘'的定量解释。病根=每事件必留存，与放盘还是放内存无关（盘 TB 级、内存几十 GB，换内存死更快）。",
+        "layer": "detail"
+      },
+      {
+        "id": "c3",
+        "label": "计数器常开",
+        "x": 1060,
+        "y": 960,
+        "width": 340,
+        "height": 90,
+        "type": "data",
+        "description": "每探针两个 int64(hit/err)，3603 探针≈60KB，跑一年大小不变。承载趋势/频率信息（调用 80 万次/错 3 次），与错误现场两类信息互不替代，不可省。",
+        "layer": "detail"
+      },
+      {
+        "id": "c4",
+        "label": "直方图",
+        "x": 1060,
+        "y": 1060,
+        "width": 340,
+        "height": 90,
+        "type": "data",
+        "description": "每探针耗时分布固定桶(如 20 桶)，3603 探针≈600KB。回答'平均 12ms 还是长尾 2s'，聚合态常开。",
+        "layer": "detail"
+      },
+      {
+        "id": "c5",
+        "label": "环形缓冲常录",
+        "x": 1060,
+        "y": 1160,
+        "width": 340,
+        "height": 100,
+        "type": "data",
+        "description": "预分配固定预算(如 64MB)滚动覆盖，新事件冲掉最老的：构造性有界，数学上不可能爆。黑匣子语义：一直在录，坠毁才打开；平时永不落盘。嵌入式三十年验证的方案。",
+        "layer": "detail"
+      },
+      {
+        "id": "c6",
+        "label": "错误开箱导出",
+        "x": 1060,
+        "y": 1270,
+        "width": 340,
+        "height": 100,
+        "type": "service",
+        "description": "catch 探针触发才落盘：导出该函数错误前后环形窗口(+链路各层对应窗口)。出事瞬间必有现场，平时零磁盘开销。'出错才采集'的正确实现=平时常录+错误时导出（错误之前的上下文已流走，事后再录录不到）。",
+        "layer": "detail"
+      },
+      {
+        "id": "c7",
+        "label": "correlation ID（关键设计）",
+        "x": 1060,
+        "y": 1380,
+        "width": 340,
+        "height": 100,
+        "type": "service",
+        "description": "跨函数/跨 goroutine/跨 async 的链路串联：trace id 调用进入时生成、层层显式传递。没有它错误触发只能捞局部窗口，有它才能捞整条链路上下文。TS async 与 Go goroutine 都需显式传，是 probe runtime 改造最需设计的一处。",
+        "layer": "detail"
+      },
+      {
+        "id": "c8",
+        "label": "导出限流+自适应采样",
+        "x": 1060,
+        "y": 1490,
+        "width": 340,
+        "height": 90,
+        "type": "service",
+        "description": "防错误风暴二次爆盘：每探针导出限额(~10 次/min)，超限降级只计数不 dump。事件越密采样率越低，总吞吐自动收敛到预算内（背压=降精度而非报错）。",
+        "layer": "detail"
+      },
+      {
+        "id": "d1",
+        "label": "契约模式=常态盯守",
+        "x": 1060,
+        "y": 1610,
+        "width": 340,
+        "height": 80,
+        "type": "config",
+        "description": "已落地。近零成本长期盯守已声明探针；解决探索模式 98% 噪音问题(狗食实测 3603 探针→绝大多数无效)。",
+        "layer": "detail"
+      },
+      {
+        "id": "d2",
+        "label": "轮转探索（待做）",
+        "x": 1060,
+        "y": 1700,
+        "width": 340,
+        "height": 90,
+        "type": "config",
+        "description": "解决全量插桩成本：每次运行只对 1/N 模块开 deep，多次运行滚动覆盖全部模块——continuous profiling 思路，配合分级采集可低频常开。",
+        "layer": "detail"
+      },
+      {
+        "id": "d3",
+        "label": "错误触发升级",
+        "x": 1060,
+        "y": 1800,
+        "width": 340,
+        "height": 80,
+        "type": "config",
+        "description": "第三层：catch 触发时临时开该函数详细模式，只在错误窗口产生数据。三层叠加=常态几乎免费、出事必抓现场、未知滚动排查。",
+        "layer": "detail"
+      },
+      {
+        "id": "e1",
+        "label": "静态扫描高危模式",
+        "x": 1060,
+        "y": 1920,
+        "width": 340,
+        "height": 90,
+        "type": "service",
+        "description": "机器可识别的候选清单：静默吞错(catch 后不 rethrow 不记日志)/IO 返回值未检查/裸 map 并发读写/无超时外部调用/资源不 close 路径。",
+        "layer": "detail"
+      },
+      {
+        "id": "e2",
+        "label": "LLM+DSL 语义打分",
+        "x": 1060,
+        "y": 2020,
+        "width": 340,
+        "height": 80,
+        "type": "service",
+        "description": "静态候选结合模块 DSL 语义排序（核心数据路径>边缘工具），输出推荐探针点清单。",
+        "layer": "detail"
+      },
+      {
+        "id": "e3",
+        "label": "图上勾选批准→提升契约",
+        "x": 1060,
+        "y": 2110,
+        "width": 340,
+        "height": 80,
+        "type": "service",
+        "description": "接现有 annotation/approval 机制：推荐清单上图，人勾选拍板后一键提升为 DSL 契约探针。'不知道插哪'变成'系统给候选，人拍板'。",
+        "layer": "detail"
+      },
+      {
+        "id": "f1",
+        "label": "已落地",
+        "x": 1060,
+        "y": 2230,
+        "width": 340,
+        "height": 110,
+        "type": "output",
+        "description": "conformance 验收闭环 ALL GREEN(TS 12/Go 14 探针点；静态清单/幂等/还原三断言)；camera 三类偏差对拍；scaffold/backfill 雏形；TS/Go 双语言统一 CLI(cmd/instrument + ts-instrument.mjs)；SPEC.md 支持 LLM 自动开发新语言插桩器。",
+        "status": "done",
+        "layer": "detail"
+      },
+      {
+        "id": "f2",
+        "label": "待做优先级",
+        "x": 1060,
+        "y": 2350,
+        "width": 340,
+        "height": 110,
+        "type": "output",
+        "description": "①probe runtime 分级采集+correlation ID(地基，先做) ②风险点推荐器(静态扫描+图上批准) ③事件流 diff=行为等价对拍(重构安全网) ④轮转探索调度 ⑤欠约束诊断(扫描 DSL 列出无契约模块，喂 undesigned)。落地顺序=先 runtime 后推荐器。",
+        "status": "draft",
+        "layer": "detail"
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_v2_a",
+        "from": "v2",
+        "to": "brA",
+        "layer": "main"
+      },
+      {
+        "id": "e_v2_b",
+        "from": "v2",
+        "to": "brB",
+        "layer": "main"
+      },
+      {
+        "id": "e_v2_c",
+        "from": "v2",
+        "to": "brC",
+        "layer": "main"
+      },
+      {
+        "id": "e_v2_d",
+        "from": "v2",
+        "to": "brD",
+        "layer": "main"
+      },
+      {
+        "id": "e_v2_e",
+        "from": "v2",
+        "to": "brE",
+        "layer": "main"
+      },
+      {
+        "id": "e_v2_f",
+        "from": "v2",
+        "to": "brF",
+        "layer": "main"
+      },
+      {
+        "id": "e_a1",
+        "from": "brA",
+        "to": "a1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_a2",
+        "from": "brA",
+        "to": "a2",
+        "layer": "detail"
+      },
+      {
+        "id": "e_a3",
+        "from": "brA",
+        "to": "a3",
+        "layer": "detail"
+      },
+      {
+        "id": "e_b1",
+        "from": "brB",
+        "to": "b1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_b2",
+        "from": "brB",
+        "to": "b2",
+        "layer": "detail"
+      },
+      {
+        "id": "e_b3",
+        "from": "brB",
+        "to": "b3",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c1",
+        "from": "brC",
+        "to": "c1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c2",
+        "from": "brC",
+        "to": "c2",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c3",
+        "from": "brC",
+        "to": "c3",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c4",
+        "from": "brC",
+        "to": "c4",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c5",
+        "from": "brC",
+        "to": "c5",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c6",
+        "from": "brC",
+        "to": "c6",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c7",
+        "from": "brC",
+        "to": "c7",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c8",
+        "from": "brC",
+        "to": "c8",
+        "layer": "detail"
+      },
+      {
+        "id": "e_d1",
+        "from": "brD",
+        "to": "d1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_d2",
+        "from": "brD",
+        "to": "d2",
+        "layer": "detail"
+      },
+      {
+        "id": "e_d3",
+        "from": "brD",
+        "to": "d3",
+        "layer": "detail"
+      },
+      {
+        "id": "e_e1",
+        "from": "brE",
+        "to": "e1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_e2",
+        "from": "brE",
+        "to": "e2",
+        "layer": "detail"
+      },
+      {
+        "id": "e_e3",
+        "from": "brE",
+        "to": "e3",
+        "layer": "detail"
+      },
+      {
+        "id": "e_f1",
+        "from": "brF",
+        "to": "f1",
+        "layer": "detail"
+      },
+      {
+        "id": "e_f2",
+        "from": "brF",
+        "to": "f2",
+        "layer": "detail"
+      }
+    ]
+  },
+  "semantic": {
+    "files": [],
+    "multi_file_invariants": []
+  },
+  "annotations": [],
+  "_sync": {
+    "saved_at": "2026-08-18T04:55:26.145Z",
+    "source": "mcp",
+    "feature": "camera_v2"
+  }
+}
