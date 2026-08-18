@@ -64,12 +64,18 @@ export function captureProbe(probe: string, fields: Record<string, unknown>, sou
   }
 }
 
-/** TS 侧 Event，与 schema definitions.Event 逐字段对齐。 */
+/** TS 侧 Event，与 schema definitions.Event 逐字段对齐（含 v2 trace 字段）。 */
 export interface TSEvent {
   probe: string;
   time: string; // UTC RFC3339
-  source?: string; // static-rule / llm-design / runtime-invariant
+  source?: string; // static-rule / llm-design / runtime-invariant / v2-scope
   fields: Record<string, unknown>;
+  /** c7: 整条调用链共享的 trace id（v1 事件省略，向后兼容）。 */
+  trace_id?: string;
+  /** c7: 本帧唯一 id（每次调用一个；省略=0）。 */
+  frame_id?: number;
+  /** c7: 父调用帧 id（0/省略=根）。 */
+  parent_id?: number;
 }
 
 /** Merge 额外字段到 fields 的辅助类型。 */

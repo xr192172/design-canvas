@@ -70,6 +70,33 @@ ProbeCapture:
 - 语言侧职责：在关键点埋点，捕获数据值（err、op、path、bytes、benign…）。
 - 产出唯一约束：满足 `Event` schema，可被任意语言 loader 读取。
 
+### 3.1.1 v2 分级采集与调用链作用域（2026-08-18 落地，Go/TS 双侧对齐）
+
+v1 探针直写 events.jsonl（全量落盘），适合 conformance/调试；v2 runtime
+（Go `probe.Tiered` / TS `Tiered`）按 camera_v2 决策卡分级采集，生产默认：
+
+```
+Tiered（c1 铁律：任何留存层内存占用为常数）:
+  emit(event)  // 计数器(c3) + 直方图(c4) + 环形缓冲(c5)；热路径无磁盘
+  counters()/histograms()/ringStats()   // 只读快照（报告用）
+  catch 触发 → 错误开箱导出(c6)：同 trace_id 链路窗口 + 环境窗口
+             → 每探针每分钟限速(c8，默认 10 次)，目录保留封顶(64 条)
+
+Scope（c7 correlation ID；调用进入时生成、层层显式传递）:
+  Go:   ctx, sp := probe.Enter(ctx, "svc.Handle", nil); defer sp.Exit()
+        sp.Catch(err)  // 同 trace id 整条链路窗口开箱
+  TS:   withScope('svc.Handle', {..}, async sp => { ... sp.catch(err) })
+        // AsyncLocalStorage 按异步上下文传递（Node 惯用法，
+        //   等价 Go context.Context 显式流动）
+```
+
+- trace id 流动方式按语言惯例：Go 经 `context.Context`，TS 经
+  `AsyncLocalStorage`——均否决模块级全局变量（goroutine / async 下不成立）。
+- Event schema 新增可选字段 `trace_id` / `frame_id` / `parent_id`：
+  v1 事件省略（向后兼容），v2 作用域 API 自动填充。
+- 两侧 runtime 均提供全局路由：`SetGlobalTiered`（Go）/ `setGlobalTiered`
+  （TS，挂 globalThis 防 ESM 多副本），旧探针代码零改动进入 v2。
+
 ### 3.2 规则谓词端口（装配层实现，跨语言复用）
 
 ```

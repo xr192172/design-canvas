@@ -26,3 +26,28 @@ export type {
   RulePredicate,
 } from './contract.js';
 export { enableCameraFromEnv } from './run_sentinel.js';
+// v2 分级采集 runtime（对齐 go-camera/probe：tiered.go/trace.go/export.go）
+export {
+  Tiered,
+  setGlobalTiered,
+  getGlobalTiered,
+  isCatchProbe,
+  DEFAULT_RING_BUDGET_MB,
+} from './tiered.js';
+export type {
+  TieredOptions,
+  FullSink,
+  CountersSnapshot,
+  HistogramSnapshot,
+  RingStats,
+} from './tiered.js';
+export { withScope, enterScope, currentScope, currentTraceId, newTraceId } from './trace.js';
+export type { Scope, ScopeFields } from './trace.js';
+export {
+  ExportGate,
+  exportIncident,
+  splitEvents,
+  DEFAULT_EXPORT_PER_MIN,
+  DEFAULT_MAX_INCIDENTS,
+} from './export_incident.js';
+export type { IncidentHeader } from './export_incident.js';

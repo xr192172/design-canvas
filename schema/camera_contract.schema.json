@@ -29,6 +29,20 @@
           "type": "object",
           "description": "捕获的具体值（err、path、bytes、benign、op…）。键值均为 JSON 可序列化类型。",
           "additionalProperties": true
+        },
+        "trace_id": {
+          "type": "string",
+          "description": "c7 调用链关联 id：整条调用链共享，错误开箱导出按此捞链路窗口。v1 事件省略（向后兼容）；v2 作用域 API（Go probe.Enter / TS withScope）自动填充。"
+        },
+        "frame_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "c7 本帧唯一 id（每次调用一个，进程内递增）。"
+        },
+        "parent_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "c7 父调用帧 id（0=根；嵌套作用域自动继承）。"
         }
       }
     },
