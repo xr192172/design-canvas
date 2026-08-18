@@ -154,7 +154,7 @@ const DIR_STYLE = { bg: '#152141', color: '#90caf9' };
 // 文件扫描
 // ─────────────────────────────────────────────────────────────
 
-function walkFiles(root: string, includeTests: boolean, includeArchive = false): string[] {
+export function walkFiles(root: string, includeTests: boolean, includeArchive = false): string[] {
   const out: string[] = [];
   const stack: string[] = [root];
   while (stack.length > 0) {

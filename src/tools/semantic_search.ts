@@ -21,6 +21,7 @@ import path from 'node:path';
 import { configFilePath } from './llm_focus.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
 import { searchSymbols, type SymbolHit } from '../db/symbols.js';
+import { ensureFreshIndex, hasChanges } from './index_freshness.js';
 
 // ─────────────────────────────────────────────────────────────
 // 配置
@@ -298,6 +299,13 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     );
   }
 
+  // 索引自动保鲜：外部改动（git pull / 手动编辑 / 其他 agent）懒校验增量重同步——
+  // 查询永远基于最新代码，不报已删符号、不漏新符号。失败不阻断查询。
+  const fresh = await ensureFreshIndex(db, path.resolve(input.project_dir));
+  const freshNote = (hasChanges(fresh) || fresh.skipped_adds > 0)
+    ? `（索引自刷新 ${fresh.ms}ms：重同步 ${fresh.resynced} / 新增 ${fresh.added} / 删除 ${fresh.removed}${fresh.failed ? ` / 解析失败 ${fresh.failed}` : ''}${fresh.skipped_adds > 0 ? `；另有 ${fresh.skipped_adds} 个新文件超出保鲜补全上限未纳入，建议重新 import_project` : ''}）`
+    : '';
+
   const rows = db
     .prepare(
       `SELECT id, kind, name, qualified_name, file_path, start_line, signature
@@ -332,7 +340,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
       }));
       return {
         query, provider: 'exact', indexed: rows.length, hits,
-        message: `精确符号命中 ${hits.length} 个（标识符查询未走向量，零 embedding 开销）。`,
+        message: `精确符号命中 ${hits.length} 个（标识符查询未走向量，零 embedding 开销）。${freshNote}`,
       };
     }
   }
@@ -340,7 +348,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
   // 取配置；无配置走降级
   const cfg = loadEmbeddingConfig();
   if (!cfg) {
-    return ftsFallback(db, query, limit, rows.length);
+    return ftsFallback(db, query, limit, rows.length, undefined, freshNote);
   }
 
   // 向量化符号 + query（传 db：命中持久向量表免 API，重启后不全量 embed）
@@ -359,15 +367,17 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
       .map((s) => ({ ...s.r, score: s.score }));
     return {
       query, provider: 'semantic', indexed: rows.length, hits,
-      message: `语义搜索完成，索引 ${rows.length} 个符号（缓存命中 ${dHits}，API 调用 ${dApi} 次${dApi === 0 ? '，全量来自持久向量表' : ''}）。`,
+      message: `语义搜索完成，索引 ${rows.length} 个符号（缓存命中 ${dHits}，API 调用 ${dApi} 次${dApi === 0 ? '，全量来自持久向量表' : ''}）。${freshNote}`,
     };
   } catch (e) {
     // embedding 失败（网络/限流/模型错误）→ 降级 FTS
-    return ftsFallback(db, query, limit, rows.length, (e as Error).message);
+    return ftsFallback(db, query, limit, rows.length, (e as Error).message, freshNote);
   }
 }
 
-function ftsFallback(db: Database, query: string, limit: number, indexed: number, reason?: string): SemanticSearchResult {
+function ftsFallback(
+  db: Database, query: string, limit: number, indexed: number, reason?: string, freshNote = '',
+): SemanticSearchResult {
   const fts = searchSymbols(db, query, limit);
   const hits: SemanticHit[] = fts.map((s: SymbolHit) => ({
     ...s,
@@ -377,7 +387,7 @@ function ftsFallback(db: Database, query: string, limit: number, indexed: number
   return {
     query, provider: 'fts', indexed, hits,
     message: reason
-      ? `语义搜索失败（${reason}），已降级为关键词全文检索。`
-      : `未配置 embedding（config.json 缺 embedding 段），已用关键词全文检索。`,
+      ? `语义搜索失败（${reason}），已降级为关键词全文检索。${freshNote}`
+      : `未配置 embedding（config.json 缺 embedding 段），已用关键词全文检索。${freshNote}`,
   };
 }
