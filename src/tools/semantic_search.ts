@@ -89,7 +89,8 @@ export function embeddingCacheStats(): { cache_size: number; cache_hits: number;
 }
 
 function cacheKey(cfg: EmbeddingConfig, text: string): string {
-  return `${cfg.model}:${crypto.createHash('sha256').update(text).digest('hex')}`;
+  // key 含 dim：换维度配置（同模型 matryoshka 截断等）自动 miss，内存/持久两层一致
+  return `${cfg.model}:${cfg.dim}:${crypto.createHash('sha256').update(text).digest('hex')}`;
 }
 
 interface EmbeddingResponseItem {
@@ -97,8 +98,11 @@ interface EmbeddingResponseItem {
   index: number;
 }
 
-/** 批量向量化。命中缓存的不调 API，仅对未命中的发起调用；按传入顺序返回。 */
-export async function embedTexts(cfg: EmbeddingConfig, texts: string[]): Promise<number[][]> {
+/** 批量向量化。三层查找：进程内存 → 持久 cache.db（embedding_cache 表）→ embedding API。
+ * 任一缓存层命中即免 API 调用；API 结果回写内存 + db（传 db 时）。
+ * 持久层按 model:sha256(文本)+dim 查表——同一符号文本+模型不变，重启后直接查表。
+ * 按传入顺序返回。 */
+export async function embedTexts(cfg: EmbeddingConfig, texts: string[], db?: Database): Promise<number[][]> {
   const out: (number[] | null)[] = texts.map(() => null);
   const pending: number[] = [];
   for (let i = 0; i < texts.length; i++) {
@@ -111,6 +115,29 @@ export async function embedTexts(cfg: EmbeddingConfig, texts: string[]): Promise
       pending.push(i);
     }
   }
+
+  // 持久层：db 命中的回填内存缓存（本进程后续免查库）。dim 过滤——
+  // 换 embedding 模型维度配置时旧向量自动 miss，不产生错配相似度。
+  if (db && pending.length > 0) {
+    const readStmt = db.prepare('SELECT vector FROM embedding_cache WHERE cache_key = ? AND dim = ?');
+    const stillPending: number[] = [];
+    for (const i of pending) {
+      const row = readStmt.get(cacheKey(cfg, texts[i]), cfg.dim) as
+        | { vector: Uint8Array }
+        | undefined;
+      if (row && row.vector && row.vector.byteLength > 0) {
+        const vec = decodeVectorBlob(row.vector);
+        embedCache.set(cacheKey(cfg, texts[i]), vec);
+        cacheHits++;
+        out[i] = vec;
+      } else {
+        stillPending.push(i);
+      }
+    }
+    pending.length = 0;
+    pending.push(...stillPending);
+  }
+
   if (pending.length === 0) return out as number[][];
 
   // 分批调用，避免单次超 token 上限（首批 128 条）
@@ -126,7 +153,32 @@ export async function embedTexts(cfg: EmbeddingConfig, texts: string[]): Promise
       out[i] = vectors[n];
     }
   }
+
+  // 持久化写入：API 新向量批量落库（单事务）。落库失败不影响本次返回
+  // （内存已缓存，本进程不受影响；下次进程重新 embed，语义不损失）。
+  if (db) {
+    const ins = db.prepare(
+      'INSERT OR REPLACE INTO embedding_cache(cache_key, dim, vector, created_at) VALUES (?, ?, ?, ?)',
+    );
+    db.exec('BEGIN');
+    try {
+      for (const i of pending) {
+        ins.run(cacheKey(cfg, texts[i]), cfg.dim, encodeVectorBlob(out[i]!), Date.now());
+      }
+      db.exec('COMMIT');
+    } catch {
+      db.exec('ROLLBACK');
+    }
+  }
   return out as number[][];
+}
+
+function encodeVectorBlob(v: number[]): Uint8Array {
+  return new Uint8Array(new Float32Array(v).buffer);
+}
+
+function decodeVectorBlob(b: Uint8Array): number[] {
+  return Array.from(new Float32Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 4)));
 }
 
 async function callEmbeddings(cfg: EmbeddingConfig, inputs: string[]): Promise<number[][]> {
@@ -291,10 +343,14 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     return ftsFallback(db, query, limit, rows.length);
   }
 
-  // 向量化符号 + query
+  // 向量化符号 + query（传 db：命中持久向量表免 API，重启后不全量 embed）
   try {
-    const vectors = await embedTexts(cfg, rows.map(symbolText));
-    const qvec = (await embedTexts(cfg, [query]))[0];
+    const statsBefore = embeddingCacheStats();
+    const vectors = await embedTexts(cfg, rows.map(symbolText), db);
+    const qvec = (await embedTexts(cfg, [query], db))[0];
+    const statsAfter = embeddingCacheStats();
+    const dHits = statsAfter.cache_hits - statsBefore.cache_hits;
+    const dApi = statsAfter.api_calls - statsBefore.api_calls;
     const scored = rows.map((r, i) => ({ r, score: cosineSimilarity(qvec, vectors[i]) }));
     scored.sort((a, b) => b.score - a.score);
     const hits: SemanticHit[] = scored
@@ -303,7 +359,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
       .map((s) => ({ ...s.r, score: s.score }));
     return {
       query, provider: 'semantic', indexed: rows.length, hits,
-      message: `语义搜索完成，索引 ${rows.length} 个符号。`,
+      message: `语义搜索完成，索引 ${rows.length} 个符号（缓存命中 ${dHits}，API 调用 ${dApi} 次${dApi === 0 ? '，全量来自持久向量表' : ''}）。`,
     };
   } catch (e) {
     // embedding 失败（网络/限流/模型错误）→ 降级 FTS

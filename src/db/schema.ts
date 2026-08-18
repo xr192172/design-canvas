@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS imports (
 );
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
 
+-- 向量缓存（持久层）：model:sha256(文本) → 向量。跨进程重启存活，
+-- 符号文本+模型不变直接查表，重启后首个语义查询不再全量 embed。
+-- 纯新增派生数据，不参与 schema_versions 清库迁移（旧库 IF NOT EXISTS 自动补建）。
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    cache_key TEXT PRIMARY KEY,   -- model:dim:sha256(symbolText)
+    dim INTEGER NOT NULL,
+    vector BLOB NOT NULL,         -- float32 little-endian
+    created_at INTEGER NOT NULL
+);
+
 -- 符号级变更记录（v3）：syncFile 重插符号前对比新旧 sym_hash，把"这个文件真正
 -- 改动了哪些符号"落成一行（按 file_path 最新一份，链式合并——同一文件连续多次
 -- 编辑未消费时累积成 vA→vNow 的净差异）。diffImpact 据此把波及源从"整文件所有

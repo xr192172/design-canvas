@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { describe, it, expect, afterAll, beforeEach } from 'vitest';
 import { importProject } from '../../src/tools/import_project';
 import {
@@ -95,6 +96,79 @@ describe('semantic_search 纯逻辑', () => {
     expect(typeof s.cache_size).toBe('number');
     expect(typeof s.cache_hits).toBe('number');
     expect(typeof s.api_calls).toBe('number');
+  });
+});
+
+describe('embedTexts 持久向量表（embedding_cache）', () => {
+  const cfg: EmbeddingConfig = {
+    baseURL: 'http://127.0.0.1:1', // 故意不可达：任何走到 API 的路径都该失败/被拦截
+    apiKey: 'sk-test',
+    model: 'test-model',
+    dim: 4,
+  };
+
+  /** 手动塞一条持久向量（模拟此前某进程已 embed 过） */
+  function seed(db: ReturnType<typeof openDb>, text: string, vec: number[]): void {
+    const key = `test-model:${cfg.dim}:${crypto.createHash('sha256').update(text, 'utf8').digest('hex')}`;
+    db.prepare(
+      'INSERT OR REPLACE INTO embedding_cache(cache_key, dim, vector, created_at) VALUES (?, ?, ?, ?)',
+    ).run(key, cfg.dim, new Uint8Array(new Float32Array(vec).buffer), Date.now());
+  }
+
+  beforeEach(() => {
+    isolateHome();
+    delete process.env.EMBEDDING_API_KEY;
+    delete process.env.EMBEDDING_BASE_URL;
+    delete process.env.EMBEDDING_MODEL;
+    delete process.env.EMBEDDING_DIM;
+  });
+
+  it('持久表命中 → 返回表中向量，零 API 调用', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'embed-persist-'));
+    roots.push(root);
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    const text = 'persistedSymbol';
+    seed(db, text, [1, 0, 0, 0]);
+    const before = embeddingCacheStats().api_calls;
+    const out = await embedTexts(cfg, [text], db);
+    expect(out[0]).toEqual([1, 0, 0, 0]); // 正是表中那条
+    expect(embeddingCacheStats().api_calls).toBe(before); // 没碰 API
+    db.close();
+  });
+
+  it('模拟重启（重开 db）后仍命中——持久层跨进程存活', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'embed-restart-'));
+    roots.push(root);
+    const dbFile = path.join(root, '.design-canvas', 'cache.db');
+    const db1 = openDb(dbFile);
+    seed(db1, 'rebootSymbol', [0, 1, 0, 0]);
+    db1.close(); // "进程退出"
+    const db2 = openDb(dbFile); // "新进程"
+    const out = await embedTexts(cfg, ['rebootSymbol'], db2);
+    expect(out[0]).toEqual([0, 1, 0, 0]);
+    db2.close();
+  });
+
+  it('内存+持久都 miss 且 API 不可达 → 抛错（且不写持久表）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'embed-miss-'));
+    roots.push(root);
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    await expect(embedTexts(cfg, ['neverSeen'], db)).rejects.toThrow();
+    const n = db.prepare('SELECT COUNT(*) c FROM embedding_cache').get() as { c: number };
+    expect(n.c).toBe(0); // 失败不落库
+    db.close();
+  });
+
+  it('dim 不匹配的旧向量自动 miss（换维度配置不错配）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'embed-dim-'));
+    roots.push(root);
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    const key = `test-model:999:${crypto.createHash('sha256').update('dimSymbol', 'utf8').digest('hex')}`;
+    db.prepare(
+      'INSERT OR REPLACE INTO embedding_cache(cache_key, dim, vector, created_at) VALUES (?, ?, ?, ?)',
+    ).run(key, 999, new Uint8Array(new Float32Array([1, 0, 0, 0]).buffer), Date.now()); // dim=999 ≠ cfg.dim=4
+    await expect(embedTexts(cfg, ['dimSymbol'], db)).rejects.toThrow(); // miss → API 不可达 → 抛
+    db.close();
   });
 });
 
