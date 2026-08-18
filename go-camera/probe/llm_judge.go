@@ -43,13 +43,14 @@ type LLMSender interface {
 //   - verified_by 验证门证据（approve 时由规则回归产出）
 //   - status     声明状态：proposed | verified | locked
 type DSLDecl struct {
-	Rule       string `json:"rule"`                 // 规则 id，如 design:silent-error-discard
-	Probe      string `json:"probe"`                // 探针点 id；空 = 匹配所有探针点
-	Expect     string `json:"expect"`               // 期望行为（人类可读，喂给 LLM）
-	Constraint string `json:"constraint,omitempty"` // 精确约束（可选，进一步限定 Expect）
-	Origin     string `json:"origin,omitempty"`     // 声明来源（审计）
-	VerifiedBy string `json:"verified_by,omitempty"` // 验证门证据（审计）
-	Status     string `json:"status,omitempty"`     // proposed | verified | locked（审计）
+	Rule       string   `json:"rule"`                  // 规则 id，如 design:silent-error-discard
+	Probe      string   `json:"probe"`                 // 探针点 id；空 = 匹配所有探针点
+	Expect     string   `json:"expect"`                // 期望行为（人类可读，喂给 LLM）
+	Constraint string   `json:"constraint,omitempty"`  // 精确约束（可选，进一步限定 Expect）
+	Chain      []string `json:"chain,omitempty"`       // 链路契约：声明关键调用序（基础探针名），子序列语义；非空触发链路级检查
+	Origin     string   `json:"origin,omitempty"`      // 声明来源（审计）
+	VerifiedBy string   `json:"verified_by,omitempty"` // 验证门证据（审计）
+	Status     string   `json:"status,omitempty"`      // proposed | verified | locked（审计）
 }
 
 // LLMVerdict 是 LLM 行为判定的结构化结果，与规则判定 Verdict 对齐。
@@ -109,12 +110,12 @@ func (j *LLMJudge) DSLCount() int {
 // 判确定性，DSL 声明喂语义）。
 func SilentErrorDiscardDSL() DSLDecl {
 	return DSLDecl{
-		Rule:   "design:silent-error-discard",
-		Probe:  "",
-		Expect: "在本来会静默丢弃错误的位置，捕获到的 err 必须为 nil 或可证明是良性的（benign）",
+		Rule:       "design:silent-error-discard",
+		Probe:      "",
+		Expect:     "在本来会静默丢弃错误的位置，捕获到的 err 必须为 nil 或可证明是良性的（benign）",
 		Constraint: "op=writefile/save/mkdirall 时任何错误都不可良性（父目录缺失的 ENOENT 也算非良性，因为数据未持久化）；op=remove/cleanup 仅 os.IsNotExist 良性",
-		Origin: "seed",
-		Status: "locked", // 种子声明：v1 内建，被视为定稿锁定
+		Origin:     "seed",
+		Status:     "locked", // 种子声明：v1 内建，被视为定稿锁定
 	}
 }
 

@@ -44,12 +44,13 @@
 | Go 类型 | Schema 定义 | 关键对齐点 |
 |---|---|---|
 | `probe.Event` | `Event` | probe/time/source/fields 全一致 |
-| `probe.DSLDecl` | `DSLDecl` | rule/probe/expect/constraint 全一致 |
+| `probe.DSLDecl` | `DSLDecl` | rule/probe/expect/constraint/chain（P2 链路契约）+ origin/verified_by/status 审计字段 全一致 |
 | `probe.DesignDSLDoc` | `DesignDSLDoc` | version/updated_at/decls |
 | `probe.HistoryEntry` | `HistoryEntry` | version/at/reason/source/decls |
-| `probe.ActualDSLDoc` | `ActualDSLDoc` | generated_at/source/event_count/bad_lines/probes |
+| `probe.ActualDSLDoc` | `ActualDSLDoc` | generated_at/source/event_count/bad_lines/probes + chains/chains_dropped（P2 链路画像） |
 | `probe.ProbeObs` | `ProbeObs` | probe/count/errs/benigns/ops/facts/events |
-| `probe.Deviation` | `Deviation` | kind/rule/probe/detail |
+| `probe.ChainObs` | `ChainObs` | trace_id/sequence/errs/events（P2：trace 三元组重建调用链） |
+| `probe.Deviation` | `Deviation` | kind（含 chain-broken）/rule/probe/trace_id/window/detail |
 | `probe.DiffReport` | `DiffReport` | generated_at/design/actual/event_count/deviations + 三计数 |
 | `probe.LLMVerdict`/`Verdict` | `Verdict` | result/rule/reason |
 

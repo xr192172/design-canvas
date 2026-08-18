@@ -22,17 +22,20 @@ import (
 type DeviationKind string
 
 const (
-	DevUnobserved DeviationKind = "unobserved" // 设计声明从未被观测到
-	DevViolated   DeviationKind = "violated"   // 观测事件违反了设计声明
-	DevUndesigned DeviationKind = "undesigned" // 观测到事实没有对应设计声明
+	DevUnobserved  DeviationKind = "unobserved"   // 设计声明从未被观测到
+	DevViolated    DeviationKind = "violated"     // 观测事件违反了设计声明
+	DevUndesigned  DeviationKind = "undesigned"   // 观测到事实没有对应设计声明
+	DevChainBroken DeviationKind = "chain-broken" // 链路契约断裂：声明调用序在实测链中不构成子序列
 )
 
 // Deviation 一条偏差。
 type Deviation struct {
-	Kind   DeviationKind `json:"kind"`
-	Rule   string        `json:"rule,omitempty"`
-	Probe  string        `json:"probe,omitempty"`
-	Detail string        `json:"detail"`
+	Kind    DeviationKind `json:"kind"`
+	Rule    string        `json:"rule,omitempty"`
+	Probe   string        `json:"probe,omitempty"`
+	TraceID string        `json:"trace_id,omitempty"` // 链路级偏差：关联的实测链 trace id
+	Window  []string      `json:"window,omitempty"`   // 链路级偏差：实测链调用序列窗口
+	Detail  string        `json:"detail"`
 }
 
 // DiffReport 是 actual vs design 的对比结果。
@@ -45,6 +48,7 @@ type DiffReport struct {
 	Unobserved  int         `json:"unobserved"`
 	Violated    int         `json:"violated"`
 	Undesigned  int         `json:"undesigned"`
+	ChainBroken int         `json:"chain_broken"` // 链路契约断裂数
 }
 
 // Comparator 对比设计 DSL（权威）与观测画像（事实），产出三类偏差。
@@ -147,6 +151,34 @@ func (c *Comparator) Compare(design DesignDSLDoc, actual ActualDSLDoc) DiffRepor
 		}
 	}
 
+	// 3. 链路契约（decl.Chain 非空）：声明的调用序必须是某条实测链的子序列。
+	//    根探针从未出现在任何链上 → 未观测；出现但序列不满足 → 链路断裂。
+	for _, d := range design.Decls {
+		if len(d.Chain) == 0 {
+			continue
+		}
+		satisfied, best := matchChainDecl(d.Chain, actual.Chains)
+		if satisfied {
+			continue
+		}
+		if best.chain.TraceID == "" {
+			r.Unobserved++
+			r.Deviations = append(r.Deviations, Deviation{
+				Kind: DevUnobserved, Rule: d.Rule, Probe: d.Chain[0],
+				Detail: "链路契约的根探针从未在任何调用链上被观测到（该链路无任何调用）",
+			})
+			continue
+		}
+		missing := d.Chain[best.matched]
+		r.ChainBroken++
+		r.Deviations = append(r.Deviations, Deviation{
+			Kind: DevChainBroken, Rule: d.Rule, Probe: d.Chain[0],
+			TraceID: best.chain.TraceID, Window: best.chain.Sequence,
+			Detail: fmt.Sprintf("链路断裂：声明序 [%s] 未被满足，自 %q 起缺失/乱序（前缀匹配 %d/%d）",
+				strings.Join(d.Chain, " → "), missing, best.matched, len(d.Chain)),
+		})
+	}
+
 	// 稳定排序：未观测 → 违反 → 未声明
 	sort.SliceStable(r.Deviations, func(i, j int) bool {
 		return deviationRank(r.Deviations[i].Kind) < deviationRank(r.Deviations[j].Kind)
@@ -159,7 +191,7 @@ func deviationRank(k DeviationKind) int {
 	switch k {
 	case DevUnobserved:
 		return 0
-	case DevViolated:
+	case DevViolated, DevChainBroken:
 		return 1
 	default:
 		return 2
@@ -170,7 +202,7 @@ func deviationRank(k DeviationKind) int {
 func RenderDiffReport(r DiffReport) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Camera 偏差报告（actual vs design）：%d 事件\n", r.EventCount))
-	b.WriteString(fmt.Sprintf("  未观测 %d · 违反 %d · 未声明 %d\n", r.Unobserved, r.Violated, r.Undesigned))
+	b.WriteString(fmt.Sprintf("  未观测 %d · 违反 %d · 未声明 %d · 链路断裂 %d\n", r.Unobserved, r.Violated, r.Undesigned, r.ChainBroken))
 	if len(r.Deviations) == 0 {
 		b.WriteString("  ✓ 设计声明与观测画像一致\n")
 		return b.String()
@@ -182,6 +214,9 @@ func RenderDiffReport(r DiffReport) string {
 			fmt.Fprintf(&b, "  [未观测] rule=%s probe=%s\n      %s\n", d.Rule, d.Probe, d.Detail)
 		case DevViolated:
 			fmt.Fprintf(&b, "  [违反]   rule=%s probe=%s\n      %s\n", d.Rule, d.Probe, d.Detail)
+		case DevChainBroken:
+			fmt.Fprintf(&b, "  [链断裂] rule=%s probe=%s trace=%s\n      %s\n      实测链: %s\n",
+				d.Rule, d.Probe, d.TraceID, d.Detail, strings.Join(d.Window, " → "))
 		default:
 			fmt.Fprintf(&b, "  [未声明] probe=%s\n      %s\n", d.Probe, d.Detail)
 		}

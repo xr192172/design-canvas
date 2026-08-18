@@ -17,22 +17,24 @@ import (
 // ActualDSLDoc 是观测事实画像（可再生·非权威）。区别于设计 DSL（权威），
 // 它只描述"观测到的真实行为分布"，不声明期望。
 type ActualDSLDoc struct {
-	GeneratedAt time.Time  `json:"generated_at"`
-	Source      string     `json:"source,omitempty"` // 事件来源路径
-	EventCount  int        `json:"event_count"`
-	BadLines    int        `json:"bad_lines,omitempty"` // 读取时跳过的坏行数
-	Probes      []ProbeObs `json:"probes"`
+	GeneratedAt   time.Time  `json:"generated_at"`
+	Source        string     `json:"source,omitempty"` // 事件来源路径
+	EventCount    int        `json:"event_count"`
+	BadLines      int        `json:"bad_lines,omitempty"` // 读取时跳过的坏行数
+	Probes        []ProbeObs `json:"probes"`
+	Chains        []ChainObs `json:"chains,omitempty"`         // 链路画像（v2：trace 三元组重建，可再生自 events）
+	ChainsDropped int        `json:"chains_dropped,omitempty"` // 超预算被丢弃的链数
 }
 
 // ProbeObs 是单个探针点的观测画像。
 type ProbeObs struct {
 	Probe   string   `json:"probe"`
 	Count   int      `json:"count"`
-	Errs    int      `json:"errs"`              // 捕获到非空 err 的事件数
-	Benigns int      `json:"benigns"`           // 标记良性的事件数
-	Ops     []string `json:"ops,omitempty"`     // 去重的 op 取值（保持出现顺序）
-	Facts   []string `json:"facts,omitempty"`   // 人类可读的事实摘要
-	Events  []Event  `json:"events,omitempty"`  // 全量证据（可再生自 events.jsonl）
+	Errs    int      `json:"errs"`             // 捕获到非空 err 的事件数
+	Benigns int      `json:"benigns"`          // 标记良性的事件数
+	Ops     []string `json:"ops,omitempty"`    // 去重的 op 取值（保持出现顺序）
+	Facts   []string `json:"facts,omitempty"`  // 人类可读的事实摘要
+	Events  []Event  `json:"events,omitempty"` // 全量证据（可再生自 events.jsonl）
 }
 
 // Aggregator 把事件流按 probe 聚合成观测画像。
@@ -74,10 +76,14 @@ func (a *Aggregator) Aggregate(events []Event) ActualDSLDoc {
 		probes = append(probes, obs)
 	}
 
+	chains, dropped := RebuildChains(events)
+
 	return ActualDSLDoc{
-		GeneratedAt: time.Now().UTC(),
-		EventCount:  len(events),
-		Probes:      probes,
+		GeneratedAt:   time.Now().UTC(),
+		EventCount:    len(events),
+		Probes:        probes,
+		Chains:        chains,
+		ChainsDropped: dropped,
 	}
 }
 

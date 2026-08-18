@@ -69,6 +69,25 @@
         "constraint": {
           "type": "string",
           "description": "可选精确约束，进一步限定 expect（喂给 LLM）。"
+        },
+        "chain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 2,
+          "description": "链路契约（P2）：声明的关键调用序（基础探针名，不含 .enter/.exit/.catch 后缀）。子序列语义——必须是某条实测链调用序列的子序列，未声明的中间帧不算偏差。非空触发链路级检查；chain[0] 为根探针。"
+        },
+        "origin": {
+          "type": "string",
+          "description": "声明来源（审计）：seed | manual | llm-proposal | runtime-observe。"
+        },
+        "verified_by": {
+          "type": "string",
+          "description": "验证门证据（审计，approve 时由规则回归产出）。"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["proposed", "verified", "locked"],
+          "description": "声明状态（审计）。"
         }
       }
     },
@@ -198,6 +217,42 @@
           "type": "array",
           "description": "各探针点的观测画像。",
           "items": { "$ref": "#/definitions/ProbeObs" }
+        },
+        "chains": {
+          "type": "array",
+          "description": "链路画像（P2）：从事件 trace 三元组重建的调用链，可再生自 events.jsonl。链数封顶 512、全链帧预算 4096（超出丢弃并计 chains_dropped）。",
+          "items": { "$ref": "#/definitions/ChainObs" }
+        },
+        "chains_dropped": {
+          "type": "integer",
+          "description": "超预算被丢弃的链数。"
+        }
+      }
+    },
+
+    "ChainObs": {
+      "type": "object",
+      "title": "调用链观测画像",
+      "description": "一条调用链（同 trace_id）的重建结果：帧按起始时间排序得到基础探针名序列。",
+      "required": ["trace_id", "sequence", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": {
+          "type": "string",
+          "description": "链路关联 id（c7）。"
+        },
+        "sequence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "基础探针名调用序列（.enter/.exit/.catch 已剥离；单链导出上限 128，超出尾部标记 …(truncated)）。"
+        },
+        "errs": {
+          "type": "integer",
+          "description": "链上非空 err 的事件数。"
+        },
+        "events": {
+          "type": "integer",
+          "description": "链内事件总数（证据规模）。"
         }
       }
     },
@@ -211,8 +266,8 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["unobserved", "violated", "undesigned"],
-          "description": "unobserved=设计声明未被观测到；violated=观测事件违反声明；undesigned=观测到事实无对应声明。"
+          "enum": ["unobserved", "violated", "undesigned", "chain-broken"],
+          "description": "unobserved=设计声明未被观测到；violated=观测事件违反声明；undesigned=观测到事实无对应声明；chain-broken=链路契约断裂（声明调用序在实测链中不构成子序列，P2）。"
         },
         "rule": {
           "type": "string",
@@ -220,7 +275,16 @@
         },
         "probe": {
           "type": "string",
-          "description": "关联探针点 id。"
+          "description": "关联探针点 id。链路偏差时为契约根探针（chain[0]）。"
+        },
+        "trace_id": {
+          "type": "string",
+          "description": "链路级偏差关联的实测链 trace id（仅 chain-broken）。"
+        },
+        "window": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "链路级偏差的实测链调用序列窗口（仅 chain-broken）。"
         },
         "detail": {
           "type": "string",
@@ -263,6 +327,10 @@
         },
         "undesigned": {
           "type": "integer"
+        },
+        "chain_broken": {
+          "type": "integer",
+          "description": "链路契约断裂数（P2）。"
         }
       }
     },

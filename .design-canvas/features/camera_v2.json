@@ -437,6 +437,45 @@
         }
       },
       {
+        "id": "c9",
+        "label": "P2 链路偏差分析（装配层）",
+        "x": 1440,
+        "y": 1380,
+        "width": 340,
+        "height": 130,
+        "type": "service",
+        "description": "Comparator 升级：消费 c7 的 trace 三元组，从探针级平面对比升级为跨函数链路对比。链路重建（trace_id 分组→frame 树→调用序列）+ 链路契约（DSLDecl.chain 声明关键跳变，子序列语义）+ 新偏差类 chain-broken（断裂时报 trace id + 实测窗口）。",
+        "layer": "detail",
+        "attributes": {
+          "input": "events.jsonl 带 trace_id/frame_id/parent_id",
+          "contract": "DSLDecl.chain 子序列语义",
+          "output": "chain-broken 偏差 + trace 窗口"
+        },
+        "decision": {
+          "summary": "链路契约用子序列语义：声明的调用序必须是实测链的子序列，未声明的中间帧不算偏差",
+          "rationale": "插桩可只覆盖部分函数（哑固体不全插），严格相等会海量误报；DSL 硬约束'只管结构层'也要求契约只声明关键跳变而非全序列",
+          "alternatives": [
+            {
+              "option": "严格序列相等",
+              "rejected_because": "部分插桩/未声明中间帧导致假偏差风暴"
+            },
+            {
+              "option": "维持探针级平面对比（现状）",
+              "rejected_because": "跨函数错误传播链不可见，c7 采集的 trace 数据在装配层断线"
+            }
+          ],
+          "consequences": "Aggregator 需产链路画像 Chains；Deviation 带 trace_id；断裂报告含缺失帧定位与实测窗口",
+          "acceptance": "嵌套 Enter 三层产生的 events → diff 报告正确指出中间帧缺失；含未声明中间帧的正常链路零误报",
+          "thread": "链路追踪",
+          "status": "active",
+          "tags": [
+            "p2",
+            "comparator",
+            "chain-contract"
+          ]
+        }
+      },
+      {
         "id": "d1",
         "label": "契约模式=常态盯守",
         "x": 1060,
@@ -658,6 +697,12 @@
         "id": "e_c7",
         "from": "brC",
         "to": "c7",
+        "layer": "detail"
+      },
+      {
+        "id": "e_c9",
+        "from": "brC",
+        "to": "c9",
         "layer": "detail"
       },
       {
