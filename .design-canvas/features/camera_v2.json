@@ -192,7 +192,12 @@
             }
           ],
           "consequences": "聚合类信息（计数/分布）永远安全；留存类必须预分配+有淘汰",
-          "acceptance": "审查每一层数据结构：跑一年，占用是常数"
+          "acceptance": "审查每一层数据结构：跑一年，占用是常数",
+          "thread": "内存治理",
+          "status": "active",
+          "tags": [
+            "铁律"
+          ]
         }
       },
       {
@@ -223,7 +228,13 @@
             }
           ],
           "consequences": "v1 架构（每事件写 JSONL）不可用于全量模式",
-          "acceptance": "v2 任何模式下磁盘写入速率有硬上限"
+          "acceptance": "v2 任何模式下磁盘写入速率有硬上限",
+          "thread": "内存治理",
+          "status": "active",
+          "tags": [
+            "复盘",
+            "实测数据"
+          ]
         }
       },
       {
@@ -252,7 +263,12 @@
             }
           ],
           "consequences": "不能回答\"第 N 次调用参数是什么\"（本来也不需要）",
-          "acceptance": "任意时长运行后计数器可读出总调用/错误数"
+          "acceptance": "任意时长运行后计数器可读出总调用/错误数",
+          "thread": "分级采集",
+          "status": "active",
+          "tags": [
+            "计数器"
+          ]
         }
       },
       {
@@ -280,7 +296,12 @@
               "rejected_because": "O(事件量) 增长，违反 c1 铁律"
             }
           ],
-          "acceptance": "直方图可读出 P50/P99 形态（近似）"
+          "acceptance": "直方图可读出 P50/P99 形态（近似）",
+          "thread": "分级采集",
+          "status": "active",
+          "tags": [
+            "直方图"
+          ]
         }
       },
       {
@@ -313,7 +334,13 @@
             }
           ],
           "consequences": "超出窗口的旧事件永久丢失（可接受：细节只在错误附近有价值）",
-          "acceptance": "任意压力下内存占用恒等于预算值；正常期磁盘写入为 0"
+          "acceptance": "任意压力下内存占用恒等于预算值；正常期磁盘写入为 0",
+          "thread": "分级采集",
+          "status": "active",
+          "tags": [
+            "环形缓冲",
+            "预分配"
+          ]
         }
       },
       {
@@ -340,7 +367,12 @@
               "rejected_because": "爆盘已证"
             }
           ],
-          "acceptance": "注入错误后，dump 文件含错误点前后完整上下文"
+          "acceptance": "注入错误后，dump 文件含错误点前后完整上下文",
+          "thread": "错误导出",
+          "status": "active",
+          "tags": [
+            "触发导出"
+          ]
         }
       },
       {
@@ -369,7 +401,12 @@
             }
           ],
           "consequences": "探针 runtime 接口要加 trace id 参数，全部探针点受益",
-          "acceptance": "跨 3 层调用的错误 dump 中，各层窗口 trace id 一致"
+          "acceptance": "跨 3 层调用的错误 dump 中，各层窗口 trace id 一致",
+          "thread": "链路追踪",
+          "status": "active",
+          "tags": [
+            "trace-id"
+          ]
         }
       },
       {
@@ -390,7 +427,13 @@
         "decision": {
           "summary": "导出限流+自适应采样：每探针导出限额，超限降级",
           "rationale": "防错误风暴二次爆盘（catch 在循环里疯狂触发时，导出本身成为爆盘源）；事件越密采样率越低，吞吐收敛到预算内",
-          "acceptance": "错误风暴注入下，磁盘写入速率仍不超过限额"
+          "acceptance": "错误风暴注入下，磁盘写入速率仍不超过限额",
+          "thread": "错误导出",
+          "status": "active",
+          "tags": [
+            "限流",
+            "防风暴"
+          ]
         }
       },
       {
@@ -493,7 +536,12 @@
           "summary": "落地顺序：先 runtime 地基，后推荐器，再对拍",
           "rationale": "分级采集是其余一切的地基（没有它全量成本不可承受）；推荐器解\"插哪\"盲区；对拍是重构安全网",
           "consequences": "p1 完成前不动其他件",
-          "acceptance": "每件独立 CLI 可单独验证（模块化阶段式）"
+          "acceptance": "每件独立 CLI 可单独验证（模块化阶段式）",
+          "thread": "路线图",
+          "status": "active",
+          "tags": [
+            "优先级"
+          ]
         }
       }
     ],
@@ -674,9 +722,9 @@
   },
   "annotations": [],
   "_sync": {
-    "saved_at": "2026-08-18T04:55:40.671Z",
-    "source": "mcp",
+    "saved_at": "2026-08-18T05:37:45.782Z",
+    "source": "backfill-script",
     "feature": "camera_v2"
   },
-  "_dsl_rev": 1
+  "_dsl_rev": 2
 }

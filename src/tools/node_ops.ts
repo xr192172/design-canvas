@@ -154,12 +154,14 @@ export interface UpdateNodeInput {
   shapes?: NodeShapes | null;
   /** 决策卡·参数表：类型化 key-value；null 清除 */
   attributes?: Record<string, string | number | boolean> | null;
-  /** 决策卡·决策记录；null 清除 */
+  /** 决策卡·决策记录；null 清除。update 时旧版自动压入 decision_history */
   decision?: NodeDecision | null;
+  /** 决策修订说明：随本次 decision 更新记入版本栈（翻案理由/变更点） */
+  decision_note?: string;
 }
 
 export function updateNode(input: UpdateNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision, decision_note } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -209,9 +211,23 @@ export function updateNode(input: UpdateNodeInput): EditResult {
     if (attributes === null) delete node.attributes;
     else node.attributes = attributes;
   }
+  // decision 更新=版本演进：旧版自动压入 decision_history（时间戳+修订说明），新版成为当前生效版。
+  // 这样决策翻案永不丢历史，query node 可见完整演进链。首版（node 无 decision）不压栈。
   if (decision !== undefined) {
-    if (decision === null) delete node.decision;
-    else node.decision = decision;
+    if (decision === null) {
+      delete node.decision;
+      delete node.decision_history;
+    } else {
+      if (node.decision) {
+        if (!node.decision_history) node.decision_history = [];
+        node.decision_history.push({
+          at: new Date().toISOString(),
+          decision: node.decision,
+          note: decision_note ?? undefined,
+        });
+      }
+      node.decision = decision;
+    }
   }
 
   if (!node.style) node.style = {};

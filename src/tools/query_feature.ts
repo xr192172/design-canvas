@@ -53,6 +53,7 @@ export interface QueryFeatureInput {
     | 'nodes'
     | 'edges'
     | 'node'
+    | 'decisions'
     | 'files'
     | 'file'
     | 'calls'
@@ -63,10 +64,14 @@ export interface QueryFeatureInput {
     | 'templates'
     | 'simulation_state'
     | 'diff';
-  /** feature 名（dsl/nodes/edges/node/files/file/annotations/approvals/approval_history/snapshots/simulation_state 必填；features/templates 忽略；diff 用 feature_a/feature_b） */
+  /** feature 名（dsl/nodes/edges/node/decisions/files/file/annotations/approvals/approval_history/snapshots/simulation_state 必填；features/templates 忽略；diff 用 feature_a/feature_b） */
   feature?: string;
   /** node：节点 ID */
   node_id?: string;
+  /** decisions：按功能线过滤（不传=全部，按 thread 分组输出） */
+  thread?: string;
+  /** decisions：按状态过滤（active/superseded/draft；不传=全部） */
+  decision_status?: 'active' | 'superseded' | 'draft';
   /** file：文件 ID（对应 SemanticFile.id = geometry Node.id） */
   file_id?: string;
   /** nodes：按职责分层过滤（main/error/detail） */
@@ -262,13 +267,19 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       if (dsls.length === 0) return { message: '尚无已设计的 feature', data: [] };
       const lines = dsls.map((dsl, i) => {
         const fileCount = dsl.semantic?.files?.length ?? 0;
+        const decisionCount = dsl.geometry?.nodes?.filter((n) => n.decision).length ?? 0;
         const invariantCount = dsl.semantic?.multi_file_invariants?.length ?? 0;
         const status = dsl.status ?? 'draft';
-        return `${i + 1}. ${dsl.feature} (${status}, ${fileCount} 文件, ${invariantCount} 不变式) [${dsl.id}]`;
+        return `${i + 1}. ${dsl.feature} (${status}, ${fileCount} 文件, ${decisionCount} 决策, ${invariantCount} 不变式) [${dsl.id}]`;
       });
       return {
         message: ['已设计的 feature：', ...lines].join('\n'),
-        data: dsls.map((d) => ({ id: d.id, feature: d.feature, status: d.status })),
+        data: dsls.map((d) => ({
+          id: d.id,
+          feature: d.feature,
+          status: d.status,
+          decisions: d.geometry?.nodes?.filter((n) => n.decision).length ?? 0,
+        })),
       };
     }
 
@@ -368,7 +379,12 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       }
       if (node.decision) {
         const d = node.decision;
+        const status = d.status ?? 'active';
+        const meta = [`状态: ${status}`];
+        if (d.thread) meta.push(`功能线: ${d.thread}`);
+        if (d.tags?.length) meta.push(`标签: ${d.tags.join(', ')}`);
         lines.push('  ─ 决策卡·决策记录 ─');
+        lines.push(`    ${meta.join(' · ')}`);
         lines.push(`    结论: ${d.summary}`);
         if (d.rationale) lines.push(`    理由: ${d.rationale}`);
         for (const alt of d.alternatives ?? []) {
@@ -376,6 +392,16 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
         }
         if (d.consequences) lines.push(`    后果: ${d.consequences}`);
         if (d.acceptance) lines.push(`    验收: ${d.acceptance}`);
+        // 版本史：decision_history 旧→新（当前版在 decision 字段，不入栈）
+        if (node.decision_history?.length) {
+          lines.push(`  ─ 决策版本史 (${node.decision_history.length} 次修订，旧→新) ─`);
+          node.decision_history.forEach((h, i) => {
+            const hStatus = h.decision.status ?? 'active';
+            lines.push(`    v${i + 1} · ${h.at}${h.note ? ` · ${h.note}` : ''} · [${hStatus}]`);
+            lines.push(`      结论: ${h.decision.summary}`);
+          });
+          lines.push(`    当前版 · [${status}] ${d.summary}`);
+        }
       }
 
       // 如有内容块，展示摘要
@@ -402,6 +428,80 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       return {
         message: [`feature "${dsl.feature}" 节点详情 ${viewTag}`, '', ...lines].join('\n'),
         data: node,
+      };
+    }
+
+    // ── 决策目录：按功能线分组，支持状态/功能线过滤 ────────────
+    case 'decisions': {
+      const dsl = loadDSL(input);
+      const nodes = dsl.geometry?.nodes ?? [];
+
+      let entries = nodes.filter((n) => n.decision);
+      if (input.thread) entries = entries.filter((n) => (n.decision!.thread ?? '') === input.thread);
+      if (input.decision_status)
+        entries = entries.filter((n) => (n.decision!.status ?? 'active') === input.decision_status);
+
+      if (entries.length === 0) {
+        const filters = [
+          input.thread ? `功能线="${input.thread}"` : null,
+          input.decision_status ? `状态=${input.decision_status}` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        return {
+          message: `feature "${dsl.feature}" 无匹配决策卡${filters ? `（${filters}）` : ''} ${viewTag}`,
+          data: [],
+        };
+      }
+
+      // 按功能线分组（thread 缺省归"(未分类)"）
+      const groups = new Map<string, Node[]>();
+      for (const n of entries) {
+        const key = n.decision!.thread ?? '(未分类)';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(n);
+      }
+
+      // 排序：未分类放最后，其余按名称
+      const sortedThreads = [...groups.keys()].sort((a, b) => {
+        if (a === '(未分类)') return 1;
+        if (b === '(未分类)') return -1;
+        return a.localeCompare(b);
+      });
+
+      const lines: string[] = [
+        `feature "${dsl.feature}" 决策目录 ${viewTag}`,
+        `决策总数: ${entries.length} · 功能线: ${groups.size}${input.decision_status ? ` · 状态过滤: ${input.decision_status}` : ''}`,
+        '',
+      ];
+
+      for (const thread of sortedThreads) {
+        const group = groups.get(thread)!;
+        lines.push(`─ 功能线「${thread}」(${group.length} 决策) ─`);
+        for (const n of group) {
+          const d = n.decision!;
+          const status = d.status ?? 'active';
+          const tags = d.tags?.length ? ` [${d.tags.join(', ')}]` : '';
+          const verInfo = n.decision_history?.length ? ` · ${n.decision_history.length} 次修订` : '';
+          lines.push(`  [${status}] ${n.label ?? n.title ?? n.id}: ${d.summary}${tags}${verInfo}`);
+          lines.push(`    节点: ${n.id}`);
+        }
+        lines.push('');
+      }
+
+      lines.push('(查看单卡详情与版本史：query=node + node_id)');
+
+      return {
+        message: lines.join('\n'),
+        data: entries.map((n) => ({
+          node_id: n.id,
+          label: n.label ?? n.title,
+          thread: n.decision!.thread ?? null,
+          status: n.decision!.status ?? 'active',
+          summary: n.decision!.summary,
+          tags: n.decision!.tags ?? [],
+          revisions: n.decision_history?.length ?? 0,
+        })),
       };
     }
 

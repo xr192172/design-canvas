@@ -1122,6 +1122,34 @@ main.sidebar-hidden .sidebar-toggle {
 #decision-panel .decision-row.alt span { opacity: 0.75; }
 #decision-panel .decision-row.acc b, #decision-panel .decision-row.acc span { color: #1f8a4c; }
 #decision-panel .decision-close { margin-top: 10px; font-size: 10px; opacity: 0.45; text-align: right; }
+/* 决策卡 meta 行：状态徽章 + 功能线 + 标签（2026-08-18 语义化改造） */
+#decision-panel .decision-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+#decision-panel .decision-st {
+  font-size: 10px; font-weight: 600; padding: 1px 8px; border-radius: 8px; color: #fff;
+}
+#decision-panel .decision-st.st-act { background: #7c5cff; }
+#decision-panel .decision-st.st-sup { background: #8a93a3; }
+#decision-panel .decision-st.st-draft { background: #f59e0b; }
+#decision-panel .decision-thread {
+  font-size: 10px; padding: 1px 8px; border-radius: 8px;
+  background: rgba(124, 92, 255, 0.12); color: #7c5cff;
+}
+#decision-panel .decision-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: rgba(31, 138, 76, 0.1); color: #1f8a4c;
+}
+/* 决策版本史：旧→新列表，当前版高亮 */
+#decision-panel .decision-hist { margin: 4px 0; }
+#decision-panel .hist-item {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  padding: 3px 0; border-left: 2px solid rgba(124, 92, 255, 0.25);
+  padding-left: 8px; margin: 3px 0; opacity: 0.75;
+}
+#decision-panel .hist-item.cur { opacity: 1; border-left-color: #7c5cff; }
+#decision-panel .hist-v { font-size: 10px; font-weight: 700; color: #7c5cff; flex: none; min-width: 28px; }
+#decision-panel .hist-t { font-size: 10px; color: var(--theme-text-sub, #999); flex: none; }
+#decision-panel .hist-s { font-size: 11px; flex: 1; min-width: 100%; }
+#decision-panel .hist-note { font-size: 10px; color: var(--theme-text-sub, #999); width: 100%; padding-left: 34px; }
 
 .sidebar .invariants {
   margin-top: 16px;

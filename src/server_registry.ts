@@ -326,19 +326,25 @@ const TOOL_DEFS: ToolDef[] = [
       '统一只读入口：通过 query 参数查询 DSL 数据。' +
       'query: dsl（完整 DSL JSON）/ features（所有 feature 列表）/ ' +
       'nodes（节点摘要列表，支持 layer/type 过滤）/ edges（边摘要列表，支持 layer 过滤）/ ' +
-      'node（单个节点详情，需 node_id）/ files（语义文件摘要列表，支持 file_layer/file_status 过滤）/ ' +
+      'node（单个节点详情，需 node_id，含决策卡与版本史）/ ' +
+      'decisions（决策卡目录，按功能线 thread 分组，支持 thread/decision_status 过滤）/ ' +
+      'files（语义文件摘要列表，支持 file_layer/file_status 过滤）/ ' +
       'file（单个文件详情，需 file_id，含 expected_apis/actual_apis/deps）/ ' +
+      'calls（文件调用关系，需 file_id+project_dir，查 cache.db 入/出调用）/ ' +
       'annotations（标注）/ approvals（审批）/ approval_history（审批历史，需 annotation_id）/ ' +
       'snapshots（快照）/ templates（模板）/ simulation_state（仿真状态）/ diff（对比，需 feature_a+feature_b）。' +
       'view: design（默认，活态设计）/ live（实际代码快照，仅 query=dsl/nodes/edges/node/files/file 生效，用于对比设计 vs 代码现状）。',
     inputSchema: {
       query: z
-        .enum(['dsl', 'features', 'nodes', 'edges', 'node', 'files', 'file', 'annotations', 'approvals', 'approval_history', 'snapshots', 'templates', 'simulation_state', 'diff'])
-        .describe('查询类型：dsl=完整DSL, features=feature列表, nodes=节点摘要, edges=边摘要, node=节点详情, files=文件摘要, file=文件详情, annotations=标注, approvals=审批, approval_history=审批历史, snapshots=快照, templates=模板, simulation_state=仿真状态, diff=对比'),
+        .enum(['dsl', 'features', 'nodes', 'edges', 'node', 'decisions', 'files', 'file', 'calls', 'annotations', 'approvals', 'approval_history', 'snapshots', 'templates', 'simulation_state', 'diff'])
+        .describe('查询类型：dsl=完整DSL, features=feature列表, nodes=节点摘要, edges=边摘要, node=节点详情, decisions=决策目录(按功能线分组), files=文件摘要, file=文件详情, calls=调用关系, annotations=标注, approvals=审批, approval_history=审批历史, snapshots=快照, templates=模板, simulation_state=仿真状态, diff=对比'),
       view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认），live=实际代码快照'),
-      feature: z.string().optional().describe('feature 名（nodes/edges/node/files/file/annotations/approvals 等需要）'),
+      feature: z.string().optional().describe('feature 名（nodes/edges/node/decisions/files/file/annotations/approvals 等需要）'),
       node_id: z.string().optional().describe('query=node 时：节点 ID'),
-      file_id: z.string().optional().describe('query=file 时：文件 ID（对应 SemanticFile.id = geometry Node.id）'),
+      thread: z.string().optional().describe('query=decisions 时：按功能线过滤（不传=全部，按 thread 分组输出）'),
+      decision_status: z.enum(['active', 'superseded', 'draft']).optional().describe('query=decisions 时：按决策状态过滤（active=生效中/superseded=已迭代/draft=草案）'),
+      file_id: z.string().optional().describe('query=file/calls 时：文件 ID（对应 SemanticFile.id = geometry Node.id）'),
+      project_dir: z.string().optional().describe('query=calls 时：项目根目录（用于打开 cache.db 查询调用关系）'),
       layer: z.enum(['main', 'error', 'detail']).optional().describe('query=nodes/edges 时：按职责分层过滤'),
       type: z.string().optional().describe('query=nodes 时：按节点类型过滤（如 service/module/database/api/queue/ui）'),
       file_layer: z.string().optional().describe('query=files 时：按架构层过滤（如 api/service/data/ui）'),

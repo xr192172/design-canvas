@@ -143,6 +143,11 @@ export interface Node {
    * LLM 运化时填写，人抽查；DSL 只运化可机器执行部分，rationale 永留卡上。
    */
   decision?: NodeDecision;
+  /**
+   * 决策卡·版本栈（2026-08-18 语义化）：每次 update decision 自动把旧版压栈。
+   * 栈底最老、栈顶最近被取代的版本；当前生效版永远是 node.decision 本身。
+   */
+  decision_history?: DecisionHistoryEntry[];
 }
 
 /** 节点决策记录（决策卡的核心结构） */
@@ -157,6 +162,22 @@ export interface NodeDecision {
   consequences?: string;
   /** 验收标准：怎么算做好了（可观测） */
   acceptance?: string;
+  /** 生效状态：active=当前生效（默认）；superseded=已被新版取代（历史版不删，进 decision_history）；draft=讨论中未定稿 */
+  status?: 'active' | 'superseded' | 'draft';
+  /** 功能线：同类决策的聚合标签（如"内存治理"/"链路追踪"），query decisions 按此分组，相似功能线合并视图 */
+  thread?: string;
+  /** 自由标签：跨功能线检索（如 "blackbox" "performance"） */
+  tags?: string[];
+}
+
+/** 决策版本栈条目：旧决策 + 压栈时间 + 修订说明 */
+export interface DecisionHistoryEntry {
+  /** 压栈时间（ISO 8601） */
+  at: string;
+  /** 被取代的旧决策全文 */
+  decision: NodeDecision;
+  /** 本次修订说明（翻案理由/变更点，可空） */
+  note?: string;
 }
 
 /** 边 SVG 样式 */

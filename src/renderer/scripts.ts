@@ -2943,11 +2943,29 @@ ${I18N_SOURCE}
         const d = card.decision;
         if (d) {
           parts.push('<div class="decision-sec">决策记录</div>');
+          const st = d.status || 'active';
+          const stLabel = { active: '生效中', superseded: '已迭代', draft: '草案' }[st] || st;
+          const stCls = st === 'superseded' ? 'st-sup' : st === 'draft' ? 'st-draft' : 'st-act';
+          const meta = ['<span class="decision-st ' + stCls + '">' + stLabel + '</span>'];
+          if (d.thread) meta.push('<span class="decision-thread">🧵 ' + esc2(d.thread) + '</span>');
+          (d.tags || []).forEach(t => meta.push('<span class="decision-tag">#' + esc2(t) + '</span>'));
+          parts.push('<div class="decision-meta">' + meta.join('') + '</div>');
           if (d.summary) parts.push('<div class="decision-row"><b>结论</b><span>' + esc2(d.summary) + '</span></div>');
           if (d.rationale) parts.push('<div class="decision-row"><b>理由</b><span>' + esc2(d.rationale) + '</span></div>');
           (d.alternatives || []).forEach(a => parts.push('<div class="decision-row alt"><b>否决</b><span>' + esc2(a.option) + '：' + esc2(a.rejected_because) + '</span></div>'));
           if (d.consequences) parts.push('<div class="decision-row"><b>后果</b><span>' + esc2(d.consequences) + '</span></div>');
           if (d.acceptance) parts.push('<div class="decision-row acc"><b>验收</b><span>' + esc2(d.acceptance) + '</span></div>');
+        }
+        // 版本史：decision_history 旧→新，当前版在 decision（不入栈）
+        const hist = card.decision_history || [];
+        if (hist.length) {
+          parts.push('<div class="decision-sec">版本史（' + hist.length + ' 次修订，旧→新）</div><div class="decision-hist">');
+          hist.forEach((h, i) => {
+            const t = (h.at || '').replace('T', ' ').slice(0, 16);
+            parts.push('<div class="hist-item"><span class="hist-v">v' + (i + 1) + '</span><span class="hist-t">' + esc2(t) + '</span><span class="hist-s">' + esc2(h.decision && h.decision.summary) + '</span>' + (h.note ? '<div class="hist-note">' + esc2(h.note) + '</div>' : '') + '</div>');
+          });
+          parts.push('<div class="hist-item cur"><span class="hist-v">当前</span><span class="hist-s">' + esc2(card.decision && card.decision.summary) + '</span></div>');
+          parts.push('</div>');
         }
         panel.innerHTML = parts.join('') + '<div class="decision-close">点击空白处关闭</div>';
         document.body.appendChild(panel);

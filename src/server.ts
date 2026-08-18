@@ -28,7 +28,8 @@ const server = new McpServer(
       '\n\n2. 增量编辑模式（推荐）：manage_feature(action=create) 创建 → edit_dsl 统一提交所有写操作 → render_dsl 渲染预览' +
       '\n   edit_dsl 通过 operations 列表批量执行（任一失败全部回滚）：' +
       '\n   - {op:"add",type:"node",id:"n1",data:{label,x,y,bg,shape,type,status,swimlane,layer,host,shapes,...}}' +
-      '\n   - 决策卡字段（设计文档层）：data.attributes={参数名:值}（类型化参数表，如 budget_mb:64）+ data.decision={summary,rationale,alternatives:[{option,rejected_because}],consequences,acceptance}（决策记录：结论/理由/否决方案/后果/验收）。LLM 运化设计时必填——图上短标签，点开见全卡' +
+      '\n   - 决策卡字段（设计文档层）：data.attributes={参数名:值}（类型化参数表，如 budget_mb:64）+ data.decision={summary,rationale,alternatives:[{option,rejected_because}],consequences,acceptance,status,thread,tags}（决策记录：结论/理由/否决方案/后果/验收+状态 active|superseded|draft+功能线+标签）。LLM 运化设计时必填——图上短标签，点开见全卡' +
+      '\n   - 决策语义化：update 时传 data.decision 自动把旧版压入 decision_history 版本栈（可配 data.decision_note 记修订说明）；query:"decisions" 按功能线分组查目录（可传 thread/decision_status 过滤），query:"node" 看单卡版本史。同类决策用同一 thread 名聚合（如"采集分层"、"错误导出"）' +
       '\n   - {op:"update"|"delete"|"move",type:"node",id:"n1",data:{...}}（move 用 data:{dx,dy} 相对平移）' +
       '\n   - {op:"add"|"update"|"delete",type:"edge",id:"e1",data:{from,to,label,edge_type,arrow,layer}}' +
       '\n   - {op:"add"|"update"|"delete",type:"file",id:"f1",data:{path,responsibility,status,...}}' +

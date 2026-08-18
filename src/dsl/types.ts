@@ -24,6 +24,7 @@ export type {
   NodeContent,
   Node,
   NodeDecision,
+  DecisionHistoryEntry,
   EdgeStyle,
   Edge,
   Swimlane,
