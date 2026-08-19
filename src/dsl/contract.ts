@@ -38,6 +38,12 @@ export interface EffectTarget {
   op: 'write' | 'append' | 'delete' | 'acquire' | 'release';
   /** 回收方式（拔积木时怎么撤销）；缺省 = 不可逆，匹配时标红 */
   reversible?: string;
+  /**
+   * 来源标记：ast=静态扫描候选（camera 观测前是"疑似"，可能有误报）；
+   * runtime=camera 实测确认（观测窗口内真实发生过）。
+   * 升格规则：camera 观测到同 target 的写 → 候选转正；观测到候选外的 → 契约不完整告警。
+   */
+  origin?: 'ast' | 'runtime';
 }
 
 /** 文件角色判定（业务/功能二分，DDD 核心域 vs 支撑域） */

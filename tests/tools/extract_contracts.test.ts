@@ -173,3 +173,175 @@ describe('extract_contracts 契约提取', () => {
     expect(dsl.semantic.files[0].contract).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// effects 候选静态扫描（Phase 2b 第一步：origin='ast'）
+// ─────────────────────────────────────────────────────────────
+
+/** TS effects 项目：模块级变量写（含 === / => 防误报）、文件写、listen、emit */
+async function makeEffectsProject(): Promise<string> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-fx-'));
+  roots.push(root);
+  put(
+    root,
+    'src/effects.ts',
+    [
+      "import fs from 'node:fs';",
+      "import { EventEmitter } from 'node:events';",
+      '',
+      'export let counter = 0;',
+      'export const state = { count: 0, items: [] };',
+      'const scalarConst = 1; // 基本类型 const：不可写，不收集',
+      '',
+      'export function bump(): void {',
+      '  counter = counter + 1;',
+      '  counter++;',
+      '  state.count = 5;',
+      '  if (counter === 0) return; // === 不误报',
+      '  const doubled = [1, 2].map(counter => counter * 2); // 箭头参数与模块级同名：=> 不误报',
+      '  _use(doubled, scalarConst);',
+      "  fs.writeFileSync('out.txt', 'data');",
+      '  const ee = new EventEmitter();',
+      "  ee.emit('ready');",
+      '}',
+      '',
+      'function _use(..._a: unknown[]): void {}',
+    ].join('\n'),
+  );
+  put(
+    root,
+    'src/serve.ts',
+    [
+      "import * as http from 'node:http';",
+      'export function serve(): void {',
+      '  const srv = http.createServer(() => {});',
+      '  srv.listen(3000);',
+      '  setInterval(() => {}, 1000);',
+      '}',
+    ].join('\n'),
+  );
+  const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+  await importProject({ project_dir: root, cache_db: db });
+  db.close();
+  return root;
+}
+
+/** Go effects 项目：var 块、赋值、net.Listen、goroutine、chan send/receive、文件写 */
+async function makeGoEffectsProject(): Promise<string> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-gofx-'));
+  roots.push(root);
+  put(root, 'go.mod', 'module example.com/fxdemo\n\ngo 1.21\n');
+  put(
+    root,
+    'worker.go',
+    [
+      'package worker',
+      '',
+      'import (',
+      '\t"errors"',
+      '\t"net"',
+      '\t"os"',
+      ')',
+      '',
+      'var (',
+      '\tErrClosed = errors.New("closed")',
+      '\tcount     int',
+      ')',
+      '',
+      'func Run() {',
+      '\tcount = 1',
+      '\tcount++',
+      '\tErrClosed = nil',
+      '\tl, _ := net.Listen("tcp", ":8080")',
+      '\tdefer l.Close()',
+      '',
+      '\tevents := make(chan int, 8)',
+      '\tgo func() {',
+      '\t\tevents <- 1',
+      '\t}()',
+      '\tv := <-events',
+      '\t_ = v',
+      "\tos.WriteFile(\"state.json\", []byte(\"{}\"), 0644)",
+      '',
+      '\tlocal := 3',
+      '\tlocal = 4',
+      '\t_ = local',
+      '}',
+    ].join('\n'),
+  );
+  const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+  await importProject({ project_dir: root, cache_db: db });
+  db.close();
+  return root;
+}
+
+describe('extract_contracts effects 候选（origin=ast）', () => {
+  it('TS：模块级变量写/文件写/listen/timer/emit + === 与 => 防误报', async () => {
+    const root = await makeEffectsProject();
+    const r = extractContracts({ project_dir: root });
+
+    const byPath = new Map(r.files.map((f) => [f.path, f]));
+    const fx = byPath.get('src/effects.ts')!;
+    expect(fx.effects.writes).toBeGreaterThanOrEqual(3); // counter + state.count + file:out.txt
+    expect(fx.effects.emits).toBeGreaterThanOrEqual(1);
+
+    const serve = byPath.get('src/serve.ts')!;
+    const holdTargets = serve.effects.samples;
+    expect(serve.effects.holds).toBeGreaterThanOrEqual(2); // listen:3000 + timer
+    expect(holdTargets.join(' ')).toContain('listen:3000');
+
+    // 深检走 DSL 语义
+    expect(r.stats.writes_candidates).toBeGreaterThanOrEqual(3);
+    expect(r.stats.holds_candidates).toBeGreaterThanOrEqual(2);
+    expect(r.stats.emits_candidates).toBeGreaterThanOrEqual(1);
+  });
+
+  it('TS 深检：writes 目标精确（counter/state.count/file:out.txt；无 === / => 误报、无局部变量）', async () => {
+    const feature = 'contract_fx_deep';
+    const root = await makeEffectsProject();
+    makeFeatureDsl(feature, [
+      { id: 'f1', path: 'src/effects.ts', responsibility: 'effects' },
+    ]);
+    extractContracts({ project_dir: root, feature });
+    const dsl = getDSL(feature)!;
+    const c = dsl.semantic.files.find((f) => f.path === 'src/effects.ts')!.contract!;
+
+    const targets = c.effects.writes.map((w) => w.target);
+    expect(targets).toContain('counter');
+    expect(targets).toContain('state.count');
+    expect(targets).toContain('file:out.txt');
+    // 全部候选标 origin=ast
+    expect(c.effects.writes.every((w) => w.origin === 'ast')).toBe(true);
+    expect(c.effects.holds.every((h) => h.origin === 'ast')).toBe(true);
+    // 防误报：无下标写/无局部变量（local2、doubled 不出现）
+    expect(targets.some((t) => t.startsWith('local') || t.startsWith('doubled') || t.startsWith('scalar'))).toBe(false);
+    // emits 记事件名
+    expect(c.effects.emits).toContain('event:ready');
+  });
+
+  it('Go：var 块收集 + 赋值写 + Listen/goroutine holds + chan send 记 receive 不记', async () => {
+    const root = await makeGoEffectsProject();
+    const feature = 'contract_gofx';
+    makeFeatureDsl(feature, [{ id: 'w1', path: 'worker.go', responsibility: 'worker' }]);
+    const r = extractContracts({ project_dir: root, feature });
+
+    expect(r.written_to_dsl).toBe(true);
+    const dsl = getDSL(feature)!;
+    const c = dsl.semantic.files.find((f) => f.path === 'worker.go')!.contract!;
+
+    const targets = c.effects.writes.map((w) => w.target);
+    expect(targets).toContain('count');
+    expect(targets).toContain('ErrClosed');
+    expect(targets).toContain('file:state.json');
+    // 局部变量 local 不出现（:= 声明不进模块级收集）
+    expect(targets.some((t) => t === 'local')).toBe(false);
+
+    const holds = c.effects.holds.map((h) => h.target);
+    expect(holds.some((h) => h.startsWith('listen:'))).toBe(true);
+    expect(holds).toContain('goroutine');
+
+    // chan：send 记 chan:events；receive 行（v := <-events）不产生额外 chan 项
+    expect(c.effects.emits).toContain('chan:events');
+    expect(c.effects.emits.filter((e) => e.startsWith('chan:'))).toHaveLength(1);
+  });
+});

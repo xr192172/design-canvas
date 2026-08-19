@@ -280,7 +280,8 @@
       "properties": {
         "target": { "type": "string" },
         "op": { "type": "string", "enum": ["write", "append", "delete", "acquire", "release"] },
-        "reversible": { "type": "string" }
+        "reversible": { "type": "string" },
+        "origin": { "type": "string", "enum": ["ast", "runtime"], "description": "ast=静态扫描候选；runtime=camera 实测确认" }
       }
     },
     "Annotation": {

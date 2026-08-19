@@ -14,5 +14,5 @@ console.log(r.message);
 console.log('=== files ===');
 for (const f of r.files) {
   console.log(`${f.role.class.padEnd(11)} conf=${f.role.confidence} fan=${f.fan_in}/${f.fan_out} shapes=${f.shape_count} env=[${f.reads_config.join(',')}] ${f.path}`);
-  console.log(`            reason: ${f.role.reasons?.[0]}`);
+  console.log(`            effects: w=${f.effects.writes} h=${f.effects.holds} e=${f.effects.emits} [${f.effects.samples.join(' | ')}]`);
 }

@@ -11,9 +11,13 @@
  *      （"功能不依赖业务，业务组装功能"——箭头永远指向功能层）
  *   ② shapes（主线3：结构体形状映射）——nodes 表 struct/interface/class/type 符号
  *      按行范围读源码解析字段（signature 列只有名字，字段在源码里）
- *   ③ effects.reads_config——env/flag 读取点源码扫描（Go: os.Getenv/flag；
- *      TS: process.env.X / process.env['X']）——积木"出厂环境要求"
- *      writes/holds/emits 留空：静态提取范围外，由 camera 运行证据补（Phase 2b）
+ *   ③ effects——静态候选扫描（Phase 2b 第一步，origin='ast'）：
+ *      reads_config：env/flag 读取点（Go: os.Getenv/flag；TS: process.env.X）
+ *      writes：包级/模块级变量赋值与自增、文件写/删调用——"写外部状态"候选
+ *      holds：listen/文件句柄/worker/timer/subprocess（Go 另有 goroutine/db-pool）
+ *      emits：chan send（Go）/ emit·publish·postMessage（TS）
+ *      候选 ≠ 事实：camera 观测窗口内命中 → 转正 origin='runtime'；候选外
+ *      观测到新 target → 契约不完整告警（动静结合的动静对账）
  *
  * 提取来源纪律：结构化字段只接受 AST（此处）与 camera（后续）；LLM 不产生事实。
  * runtime 字段本阶段不填——静态判定的 confidence 自然受 schema 语义封顶 0.7（由调用方执行）。
@@ -29,6 +33,7 @@ import type {
   BrickRole,
   ShapeSchema,
   ShapeField,
+  EffectTarget,
 } from '../dsl/contract.js';
 
 export interface ExtractContractsInput {
@@ -50,6 +55,14 @@ export interface FileContractReport {
   fan_out: number;
   shape_count: number;
   reads_config: string[];
+  /** effects 候选计数（origin='ast'，待 camera 观测转正）；详情在 DSL 契约 */
+  effects: {
+    writes: number;
+    holds: number;
+    emits: number;
+    /** 候选样例（最多 3 条，便于人扫一眼） */
+    samples: string[];
+  };
 }
 
 export interface ExtractContractsResult {
@@ -66,6 +79,10 @@ export interface ExtractContractsResult {
     low_confidence: number; // < 0.7，LLM 兜底候选
     shapes_extracted: number;
     config_keys: number;
+    /** effects 候选汇总（静态扫描，origin='ast'） */
+    writes_candidates: number;
+    holds_candidates: number;
+    emits_candidates: number;
   };
   message: string;
 }
@@ -265,6 +282,172 @@ function scanConfigKeys(source: string, language: string): string[] {
   return [...keys].sort();
 }
 
+// ── effects 候选点静态扫描（Phase 2b 第一步：AST 定位，camera 确认）──
+//
+// 动静结合的"静"半边：只标候选（origin='ast'），不产生事实——
+// 候选 = "这里疑似写外部状态/占资源/发事件"，camera 观测后转正或证伪。
+
+/** 收集包级（Go）/模块级（TS）变量名——赋值目标只有它们才算"写外部状态" */
+function collectModuleVars(source: string, language: string): Set<string> {
+  const names = new Set<string>();
+  if (language === 'go') {
+    let inVarBlock = false;
+    for (const raw of source.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      if (/^var\s*\(/.test(line)) {
+        inVarBlock = true;
+        continue;
+      }
+      if (inVarBlock && /^\)/.test(line)) {
+        inVarBlock = false;
+        continue;
+      }
+      if (line.trim().startsWith('//')) continue;
+      const m = inVarBlock
+        ? /^\s+([A-Za-z_]\w*)\s*(?:=[^=]|[\w\[\]\*\.])/.exec(line) // 块内：Name T / Name = init
+        : /^var\s+([A-Za-z_]\w*)\s*(?:=[^=]|[\w\[\]\*\.])/.exec(line); // 顶层：var Name T / var Name = init
+      if (m && !/^(type|func|package|import)$/.test(m[1])) names.add(m[1]);
+    }
+  } else {
+    for (const raw of source.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      let m = /^(?:export\s+)?(?:let|var)\s+([A-Za-z_$][\w$]*)/.exec(line);
+      if (m) {
+        names.add(m[1]);
+        continue;
+      }
+      // const 对象/数组：整体不可重绑定但字段/元素可写（const obj = {…}; obj.f = 1）
+      m = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*[{\[]/.exec(line);
+      if (m) names.add(m[1]);
+    }
+  }
+  return names;
+}
+
+/** 对模块级变量的赋值/自增扫描。`=(?![=>])` 排除 `==` 与 `=>`；Go `:=` 被 `\s*=` 天然拒绝 */
+function scanVarWrites(source: string, moduleVars: Set<string>): EffectTarget[] {
+  const seen = new Set<string>();
+  const out: EffectTarget[] = [];
+  for (const name of moduleVars) {
+    const assign = new RegExp(`\\b${name}(\\.[\\w.]+|\\[[^\\]]*\\])?\\s*=(?![=>])`, 'g');
+    const incr = new RegExp(`\\b${name}\\s*(?:\\+\\+|--)|(?<![\\w.])\\+\\+${name}\\b`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = assign.exec(source)) !== null) {
+      const suffix = m[1] ?? '';
+      const target = name + (suffix.startsWith('.') ? suffix : suffix.startsWith('[') ? '[]' : '');
+      if (!seen.has(target)) {
+        seen.add(target);
+        out.push({ target, op: 'write', origin: 'ast' });
+      }
+    }
+    if (incr.test(source) && !seen.has(name)) {
+      seen.add(name);
+      out.push({ target: name, op: 'write', origin: 'ast' });
+    }
+  }
+  return out;
+}
+
+/** 文件系统写/删调用（字面量路径直接记；变量路径记表达式名） */
+const GO_FILE_WRITE_RES: Array<{ re: RegExp; op: EffectTarget['op'] }> = [
+  { re: /\bos\.WriteFile\(\s*(?:"([^"]+)"|([\w.]+))/g, op: 'write' },
+  { re: /\bos\.(?:Remove|RemoveAll)\(\s*(?:"([^"]+)"|([\w.]+))/g, op: 'delete' },
+];
+const TS_FILE_WRITE_RES: Array<{ re: RegExp; op: EffectTarget['op'] }> = [
+  { re: /\bfs\.(?:writeFile|writeFileSync)\(\s*(?:['"]([^'"]+)['"]|([\w.]+))/g, op: 'write' },
+  { re: /\bfs\.(?:appendFile|appendFileSync)\(\s*(?:['"]([^'"]+)['"]|([\w.]+))/g, op: 'append' },
+  { re: /\bfs\.(?:unlink|unlinkSync|rm|rmSync)\(\s*(?:['"]([^'"]+)['"]|([\w.]+))/g, op: 'delete' },
+];
+
+/** 资源占用（拔积木须释放） */
+const GO_HOLD_RES: Array<{ re: RegExp; make: (m: RegExpExecArray) => EffectTarget }> = [
+  { re: /net\.Listen\(\s*"[^"]*"\s*,\s*(?:"([^"]+)"|([\w.]+))/g, make: (m) => ({ target: `listen:${m[1] ?? m[2]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /http\.ListenAndServe\(\s*(?:"([^"]*)"|([\w.]+))/g, make: (m) => ({ target: `listen:${m[1] ?? m[2]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /os\.(?:Open|Create|OpenFile)\(\s*(?:"([^"]+)"|([\w.]+))/g, make: (m) => ({ target: `file:${m[1] ?? m[2]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /sql\.Open\(\s*"(\w+)"/g, make: (m) => ({ target: `db-pool:${m[1]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /\bgo\s+(?:func\b|\w)/g, make: () => ({ target: 'goroutine', op: 'acquire', origin: 'ast' }) },
+  { re: /time\.New(?:Ticker|Timer)\(/g, make: () => ({ target: 'ticker', op: 'acquire', origin: 'ast' }) },
+];
+const TS_HOLD_RES: Array<{ re: RegExp; make: (m: RegExpExecArray) => EffectTarget }> = [
+  { re: /\.listen\(\s*(\d+)/g, make: (m) => ({ target: `listen:${m[1]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /\bfs\.(?:open|openSync|createWriteStream|createReadStream)\(\s*(?:['"]([^'"]+)['"]|([\w.]+))/g, make: (m) => ({ target: `file:${m[1] ?? m[2]}`, op: 'acquire', origin: 'ast' }) },
+  { re: /new\s+Worker\(/g, make: () => ({ target: 'worker', op: 'acquire', origin: 'ast' }) },
+  { re: /\bsetInterval\(/g, make: () => ({ target: 'timer', op: 'acquire', origin: 'ast' }) },
+  // exec 加 (?<!\.)：排除 db.exec / regexp.exec 等方法调用（真实项目踩过：db.ts 的 SQL exec 误报）
+  { re: /(?<!\.)\bexec\s*\(|\b(?:spawn|execFile|fork)\s*\(/g, make: () => ({ target: 'subprocess', op: 'acquire', origin: 'ast' }) },
+];
+
+/** chan send / 事件发送。Go 逐行处理：含 `= <-` 的行是 receive，跳过 */
+const GO_CHAN_KEYWORDS = new Set([
+  'case', 'default', 'if', 'for', 'return', 'switch', 'select', 'go', 'defer',
+  'else', 'break', 'continue', 'var', 'const', 'type', 'func', 'range',
+]);
+
+function scanGoEmits(source: string): string[] {
+  const out = new Set<string>();
+  for (const raw of source.split('\n')) {
+    const code = raw.replace(/\r$/, '').replace(/\/\/.*$/, '');
+    if (!code.includes('<-')) continue;
+    if (/=\s*<-/.test(code)) continue; // receive 赋值（x := <-ch / x = <-ch）
+    // send：word <- value。word 为关键字时是 `case <-ch:`（无赋值 receive）等形态，跳过
+    const m = /\b([\w.]+)\s*<-\s*\S/.exec(code);
+    if (m && !GO_CHAN_KEYWORDS.has(m[1].split('.')[0])) out.add(`chan:${m[1]}`);
+  }
+  for (const re of [/\.Publish\(\s*(?:fmt\.Sprintf\()?\s*"([^"]+)"/g, /\.Emit\(\s*"([^"]+)"/g]) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) out.add(`event:${m[1]}`);
+  }
+  return [...out];
+}
+
+function scanTsEmits(source: string): string[] {
+  const out = new Set<string>();
+  for (const re of [
+    /\.emit\(\s*['"]([\w: -]+)['"]/g,
+    /\.publish\(\s*['"]([\w: -]+)['"]/g,
+    /dispatchEvent\(\s*new\s+(\w+)/g,
+  ]) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) out.add(m[1].startsWith('event:') || m[1].startsWith('chan:') ? m[1] : `event:${m[1]}`);
+  }
+  if (/\bpostMessage\(/.test(source)) out.add('event:postMessage');
+  return [...out];
+}
+
+interface EffectCandidates {
+  writes: EffectTarget[];
+  holds: EffectTarget[];
+  emits: string[];
+}
+
+/** effects 候选扫描总入口（每类上限 20 防大文件爆表；详情在 DSL 契约里） */
+function scanEffectCandidates(source: string, language: string): EffectCandidates {
+  const isGo = language === 'go';
+  const writes = scanVarWrites(source, collectModuleVars(source, language));
+  for (const { re, op } of isGo ? GO_FILE_WRITE_RES : TS_FILE_WRITE_RES) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) {
+      const t = m[1] ?? m[2];
+      writes.push({ target: `file:${t}`, op, origin: 'ast' });
+    }
+  }
+  const dedupWrites = [...new Map(writes.map((w) => [`${w.op}:${w.target}`, w])).values()].slice(0, 20);
+
+  const holds: EffectTarget[] = [];
+  for (const { re, make } of isGo ? GO_HOLD_RES : TS_HOLD_RES) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) holds.push(make(m));
+  }
+  const dedupHolds = [...new Map(holds.map((h) => [h.target, h])).values()].slice(0, 20);
+
+  const emits = (isGo ? scanGoEmits(source) : scanTsEmits(source)).slice(0, 20);
+  return { writes: dedupWrites, holds: dedupHolds, emits };
+}
+
 // ── 主流程 ────────────────────────────────────────────────────────
 
 export function extractContracts(input: ExtractContractsInput): ExtractContractsResult {
@@ -320,20 +503,33 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
     const cappedRole: BrickRole = { ...role, confidence: Math.min(role.confidence, 0.7) };
 
     let readsConfig: string[] = [];
+    let effectCand: EffectCandidates = { writes: [], holds: [], emits: [] };
     try {
       const src = fs.readFileSync(path.join(root, f.rel), 'utf-8');
-      readsConfig = scanConfigKeys(src, langOf.get(f.rel) ?? 'ts');
+      const lang = langOf.get(f.rel) ?? 'ts';
+      readsConfig = scanConfigKeys(src, lang);
+      effectCand = scanEffectCandidates(src, lang);
     } catch {
-      // 源文件读取失败（可能已删除），config 清单置空
+      // 源文件读取失败（可能已删除），config/effects 清单置空
     }
 
     const contract: BrickContract = {
       schema_version: 1,
       role: cappedRole,
       shapes: { exposes: shapesByFile.get(f.rel) ?? [], consumes: [] },
-      effects: { writes: [], holds: [], emits: [], reads_config: readsConfig },
+      effects: {
+        writes: effectCand.writes,
+        holds: effectCand.holds,
+        emits: effectCand.emits,
+        reads_config: readsConfig,
+      },
     };
     contracts.set(f.rel, contract);
+    const samples = [
+      ...effectCand.writes.slice(0, 2).map((w) => `${w.op} ${w.target}`),
+      ...effectCand.holds.slice(0, 1).map((h) => `hold ${h.target}`),
+      ...effectCand.emits.slice(0, 1),
+    ].slice(0, 3);
     reports.push({
       path: f.rel,
       language: langOf.get(f.rel) ?? 'unknown',
@@ -342,6 +538,12 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
       fan_out: fanOut,
       shape_count: contract.shapes.exposes.length,
       reads_config: readsConfig,
+      effects: {
+        writes: effectCand.writes.length,
+        holds: effectCand.holds.length,
+        emits: effectCand.emits.length,
+        samples,
+      },
     });
   }
 
@@ -378,13 +580,17 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
   const lowConf = reports.filter((r) => r.role.confidence < 0.7).length;
   const shapeCount = reports.reduce((s, r) => s + r.shape_count, 0);
   const configKeySet = new Set(reports.flatMap((r) => r.reads_config));
+  const writesCount = reports.reduce((s, r) => s + r.effects.writes, 0);
+  const holdsCount = reports.reduce((s, r) => s + r.effects.holds, 0);
+  const emitsCount = reports.reduce((s, r) => s + r.effects.emits, 0);
 
   const message =
     `契约提取：${reports.length} 个文件（business ${business} / functional ${functional} / hybrid ${hybrid}），` +
     `形状 ${shapeCount} 个，配置键 ${configKeySet.size} 个，平均置信度 ${avgConf.toFixed(2)}，` +
-    `低置信（<0.7，LLM 兜底候选）${lowConf} 个` +
+    `低置信（<0.7，LLM 兜底候选）${lowConf} 个；` +
+    `effects 候选（origin=ast）：写 ${writesCount} / 占用 ${holdsCount} / 事件 ${emitsCount}` +
     (feature ? (written ? `，已写回 DSL "${feature}"` : `，DSL "${feature}" 无匹配文件未写回`) : '') +
-    `。writes/holds/emits 留待 camera 运行证据（Phase 2b）。`;
+    `。候选待 camera 运行观测转正（origin=runtime）。`;
 
   return {
     project_dir: root,
@@ -400,6 +606,9 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
       low_confidence: lowConf,
       shapes_extracted: shapeCount,
       config_keys: configKeySet.size,
+      writes_candidates: writesCount,
+      holds_candidates: holdsCount,
+      emits_candidates: emitsCount,
     },
     message,
   };

@@ -79,11 +79,12 @@
 
 ### Phase 2：深度契约提取 ✅ 2026-08-20 静态阶段完成（commit 4073225）
 
-**已落地**（静态阶段；writes/holds/emits 留待 Phase 2b camera 运行证据）：
+**已落地**（静态阶段，含 effects 候选扫描；候选转正留待 camera 运行证据）：
 - `extract_contracts` MCP 工具：role 依赖方向判定（种子识别 + 不动点传播，零 token）+ shapes 结构化类型提取（Go struct/interface + TS class/interface，nodes 符号行范围 + 源码解析）+ reads_config 扫描（process.env / os.Getenv）
+- **effects 候选静态扫描（Phase 2b 静态半边，origin='ast'）**：writes（模块级变量赋值/自增 + 文件写删调用；`=(?![=>])` 防 `==`/`=>` 误报，Go `:=` 天然不匹配）、holds（listen/文件句柄/worker/timer/subprocess；Go 另有 goroutine/db-pool/ticker；exec 加 `(?<!\.)` 排除 db.exec 方法调用——agent-shell/db.ts 真实踩坑）、emits（Go chan send 逐行判 receive 跳过 + 关键字过滤防 `case <-ch:` 误报；TS emit/publish/postMessage）。EffectTarget 加 origin 字段：ast 候选 → camera 观测命中转 runtime
 - 契约写回 `SemanticFile.contract`（saveDSL 正规通道）；DSL schema 同步新增 BrickContract 定义
 - `import_graph` 公共模块：文件级 import 邻接表，harvest_closure / extract_contracts 共用（依赖图单一真相源）
-- 5 单测全绿 + 真实项目自检（storage.ts fan-in=49→functional 0.7 / server_registry.ts conf=0.65→正确落入 LLM 兜底候选 / import_project.ts 6 shapes）
+- 8 单测全绿 + 双真实项目验证：design-canvas 自身（storage.ts 7 writes 全真：dslChangeCallback/file 写；db.ts SQL exec 误报已修）+ agent-shell Go 全库（199 文件：151 写/65 占用/16 事件；corpus_journal 的 `write file:shard | delete file:oldest` 即"拔积木回收清单"实例；chan 全为真通道 done/inbox/m.queue）
 - 在闭包输出上叠加：配置项/环境变量依赖、全局单例、init() 副作用、宿主框架地基接触面
 - 产出"积木出厂说明书"：签名之外回答"这积木需要什么环境才能活"
 - **四问决策（2026-08-20 讨论追加）**：
