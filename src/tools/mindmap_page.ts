@@ -273,8 +273,7 @@ export function renderMindmapPage(feature: string): string {
     return null;
   }
 
-  // ── 水平树布局（tidy tree：叶子行高累加，父垂直居中于子块） ──
-  var LEAF_H = 36, MIN_H = 40, GAP = 14, BRANCH_GAP = 48;
+  var MIN_H = 40;
   function nodePer(n){ return n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : ((n.kind === 'shared' || n.kind === 'file') ? 16 : 11)); }
   function nodeLines(n){ return wrap(n.label || '', nodePer(n)); }
   // 卡片介绍行：所有内容卡片直接画介绍（不用点击才知道）。描述按换行分段，
@@ -307,37 +306,6 @@ export function renderMindmapPage(feature: string): string {
   }
   function collapsed(n){ return !!COLLAPSED[n.id] && n.children.length > 0; }
   function visChildren(n){ return collapsed(n) ? [] : n.children; }
-  function measure(n){
-    var kids = visChildren(n);
-    if(!kids.length){ n._h = nodeH(n); return n._h; }
-    var sum = 0;
-    kids.forEach(function(c){ sum += measure(c); });
-    n._h = Math.max(nodeH(n), sum + GAP * (kids.length - 1));
-    return n._h;
-  }
-  function place(n, xLeft, yTop){
-    n._w = nodeW(n); n._x = xLeft + n._w / 2;
-    var kids = visChildren(n);
-    if(!kids.length){ n._y = yTop + nodeH(n) / 2; n._h = nodeH(n); return; }
-    var cy = yTop, childH = 0;
-    kids.forEach(function(c){ place(c, xLeft + n._w + BRANCH_GAP, cy); cy += c._h + GAP; childH += c._h + GAP; });
-    childH -= GAP;
-    var blockTop = yTop, blockH = childH;
-    n._y = blockTop + blockH / 2;
-  }
-  // 子树块包围盒：先在原点 place 一遍，再取全子树的 x/y 极值（place 同形确定，可整体平移复用）
-  function blockBox(n){
-    place(n, 0, 0);
-    var b = { x1: 1e9, y1: 1e9, x2: -1e9, y2: -1e9 };
-    (function w2(m){
-      if(m._x - m._w/2 < b.x1) b.x1 = m._x - m._w/2;
-      if(m._y - (m._h||nodeH(m))/2 < b.y1) b.y1 = m._y - (m._h||nodeH(m))/2;
-      if(m._x + m._w/2 > b.x2) b.x2 = m._x + m._w/2;
-      if(m._y + (m._h||nodeH(m))/2 > b.y2) b.y2 = m._y + (m._h||nodeH(m))/2;
-      visChildren(m).forEach(w2);
-    })(n);
-    return b;
-  }
   // ── 流转顺序：按设计图层手绘流转边（file→file）排卡片，替代字母序 ──
   // 对任意层级的可见子卡列表：两端分别落在不同子卡子树里的边 → 归纳为"块级边"，
   // 参与边的子卡按链式拓扑序排前（打 1/2/3 序号徽标），孤立子卡保持原序跟后；
@@ -400,19 +368,24 @@ export function renderMindmapPage(feature: string): string {
     }
     var sibs = visChildren(p).map(geo);
     if(!sibs.length) return '';
-    // 行分组（按中心 y，容差 12）
+    if(window.__DBG__){ console.log('[routeFlows]', p.id || p.label, 'sibs:', sibs.map(function(s){ return (s.n.id||'?') + '@' + Math.round(s.top) + '-' + Math.round(s.bot); }).join(' '), '| edges:', (fes||[]).length); }
+    // 行分组：y 区间相交即同行（盒中盒后子块高度差异大，区间比中心点容差稳健）
+    // 注意：分组过程中增量维护 last.bot（rows 的 top/bot 汇总在分组后才有）
     var rows = [];
-    sibs.slice().sort(function(a, b){ return a.cy - b.cy; }).forEach(function(g){
+    sibs.slice().sort(function(a, b){ return a.top - b.top; }).forEach(function(g){
       var last = rows[rows.length - 1];
-      if(last && Math.abs(last.y - g.cy) < 12) last.items.push(g);
-      else rows.push({ y: g.cy, items: [g] });
+      if(last && g.top < last.bot - 0.5){ last.items.push(g); if(g.bot > last.bot) last.bot = g.bot; }
+      else rows.push({ items: [g], top: g.top, bot: g.bot });
     });
     rows.forEach(function(r){
       r.top = Math.min.apply(null, r.items.map(function(i){ return i.top; }));
       r.bot = Math.max.apply(null, r.items.map(function(i){ return i.bot; }));
+      r.y = (r.top + r.bot) / 2;
     });
     function rowOf(g){
-      for(var i = 0; i < rows.length; i++) if(Math.abs(rows[i].y - g.cy) < 12) return i;
+      for(var i = 0; i < rows.length; i++){
+        for(var k = 0; k < rows[i].items.length; k++) if(rows[i].items[k].n === g.n) return i;
+      }
       return -1;
     }
     // 行间通道：chanBelow[i] 在行 i 与行 i+1 之间（末行下方）；行 0 上方单设
@@ -465,6 +438,7 @@ export function renderMindmapPage(feature: string): string {
         pl.corOff = ((best.use % 2 === 0) ? -1 : 1) * Math.ceil(best.use / 2) * 4; best.use++;
       }
       plans.push(pl);
+      if(window.__DBG__){ console.log('  plan', (pl.A.n.id||'?'), '->', (pl.B.n.id||'?'), 'ri', ri, 'rj', rj, 'ex', pl.ex, 'en', pl.en, 'far', !!pl.far, 'chan', pl.chan ? Math.round(pl.chan.y) : (pl.chanA ? Math.round(pl.chanA.y) + '/' + Math.round(pl.chanB.y) : '-')); }
     });
     // 第二遍：出入口展宽统计（同一卡同侧多线 → 横向错开）
     var ports = {};
@@ -479,29 +453,26 @@ export function renderMindmapPage(feature: string): string {
       var off = (arr.indexOf(pl) - (arr.length - 1) / 2) * 14;
       return Math.max(g.left + 8, Math.min(g.right - 8, g.cx + off));
     }
-    // 第三遍：生成正交路径（M/H/V）；标签=线牌（骑线优先 → 贴立柱 → 行上方兜底），全局防叠压
+    // 第三遍：先收集所有线段（正交 M/H/V）；标签=线牌（骑线优先 → 贴立柱 → 行上方兜底）
     var out = '', labels = [];
     plans.forEach(function(pl){
-      var A = pl.A, B = pl.B, d = '', segs = [];
+      var A = pl.A, B = pl.B, segs = [];
       function seg(x1, y1, x2, y2){ segs.push([x1, y1, x2, y2]); }
       if(pl.ex === 'right' && pl.en === 'left'){
         var yy = A.cy;
-        d = 'M ' + A.right + ' ' + yy + ' H ' + B.left;
         seg(A.right, yy, B.left, yy);
       } else if(pl.far){
         var ay = pl.chanA.y + laneOff(pl.chanA), by = pl.chanB.y + laneOff(pl.chanB);
         var mx = pl.cor.x + pl.corOff;
         var ax = portX(A, 'bot', pl), bx = portX(B, 'top', pl);
-        d = 'M ' + ax + ' ' + A.bot + ' V ' + ay + ' H ' + mx + ' V ' + by + ' H ' + bx + ' V ' + B.top;
-        seg(ax, ay, mx, ay); seg(mx, ay, mx, by); seg(mx, by, bx, by);
+        seg(ax, A.bot, ax, ay); seg(ax, ay, mx, ay); seg(mx, ay, mx, by); seg(mx, by, bx, by); seg(bx, by, bx, B.top);
       } else {
         var cy = pl.chan.y + laneOff(pl.chan);
         var x1 = portX(A, pl.ex, pl), y1 = pl.ex === 'bot' ? A.bot : A.top;
         var x2 = portX(B, pl.en, pl), y2 = pl.en === 'top' ? B.top : B.bot;
-        d = 'M ' + x1 + ' ' + y1 + ' V ' + cy + ' H ' + x2 + ' V ' + y2;
-        seg(x1, cy, x2, cy); seg(x1, y1, x1, cy); seg(x2, cy, x2, y2);
+        seg(x1, y1, x1, cy); seg(x1, cy, x2, cy); seg(x2, cy, x2, y2);
       }
-      out += '<path d="'+d+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".78" marker-end="url(#arrowFlow)"/>';
+      pl.segs = segs;
       if(pl.fe.label){
         var w2 = pl.fe.label.length * 10.4 + 12;
         var riA = rowOf(A), rowTop = riA >= 0 ? rows[riA].top : A.top;
@@ -529,6 +500,49 @@ export function renderMindmapPage(feature: string): string {
         }
         labels.push({ t: pl.fe.label, w: w2, cands: cands });
       }
+    });
+    // 跳线（wire hop，电路图经典手法）：不同连线的水平段与垂直段相交处，横线断开、
+    // 上拱小半圆跨过竖线（半径 4.5px）——竖线保持直线，视觉上"跨过"而非"相连"
+    var HOP_R = 4.5, hops = {};
+    plans.forEach(function(pl, ei){
+      plans.forEach(function(q, ej){
+        if(ei === ej) return;
+        pl.segs.forEach(function(hs){
+          if(Math.abs(hs[3] - hs[1]) > 0.5) return; // 只处理水平段
+          q.segs.forEach(function(vs){
+            if(Math.abs(vs[2] - vs[0]) > 0.5) return; // 只处理垂直段
+            var y = hs[1], x = vs[0];
+            if(Math.abs(x - hs[0]) < HOP_R + 2 || Math.abs(x - hs[2]) < HOP_R + 2) return; // 太贴横线端点：不跳
+            if(Math.min(vs[1], vs[3]) + HOP_R + 2 > y || Math.max(vs[1], vs[3]) - HOP_R - 2 < y) return; // 太贴竖线端点：不跳
+            if(x < Math.min(hs[0], hs[2]) || x > Math.max(hs[0], hs[2])) return;
+            if(y < Math.min(vs[1], vs[3]) || y > Math.max(vs[1], vs[3])) return;
+            (hops[ei] = hops[ei] || []).push(x);
+          });
+        });
+      });
+    });
+    // 水平段 path 片段：行进方向上逐个跨过交点（向右 sweep=1 上拱；向左 sweep=0 上拱）
+    function hSegPath(x1, y, x2, ei){
+      var dir = x2 >= x1 ? 1 : -1;
+      var xs = (hops[ei] || []).filter(function(x){
+        return dir > 0 ? (x > x1 + HOP_R + 2 && x < x2 - HOP_R - 2) : (x < x1 - HOP_R - 2 && x > x2 + HOP_R + 2);
+      }).sort(function(a, b){ return dir > 0 ? a - b : b - a; });
+      var d = '';
+      xs.forEach(function(x){
+        d += ' H ' + (x - dir * HOP_R) + ' A ' + HOP_R + ' ' + HOP_R + ' 0 0 ' + (dir > 0 ? 1 : 0) + ' ' + (x + dir * HOP_R) + ' ' + y;
+      });
+      return d + ' H ' + x2;
+    }
+    // 拼 d 输出（水平段带跳弧；箭头 marker 不受影响）
+    plans.forEach(function(pl, ei){
+      var segs = pl.segs;
+      if(!segs.length) return;
+      var d = 'M ' + segs[0][0] + ' ' + segs[0][1];
+      segs.forEach(function(s){
+        if(Math.abs(s[3] - s[1]) < 0.5) d += hSegPath(s[0], s[1], s[2], ei);
+        else d += ' V ' + s[3];
+      });
+      out += '<path d="'+d+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".78" marker-end="url(#arrowFlow)"/>';
     });
     // 线牌全局落位：贪心选第一个不与已放牌/卡块冲突的候选（电工挂牌：先近线，冲突则顺线挪）
     var placedR = [];
@@ -564,66 +578,61 @@ export function renderMindmapPage(feature: string): string {
     return out;
   }
 
-  // 容器收纳布局（借鉴 whiteboard 分区排版）：root 直属分支 = 收纳盒（标题卡 + 内部网格流），
-  // 盒内不再画连线（装进盒子即归属），根→盒保留短连线。折叠时盒子缩回头卡。
+  // ── 递归收纳盒布局（盒中盒）：root=大容器 → 功能盒 → 子模块盒 → 文件卡 ──
+  // 任何有可见子级的节点都是盒（标题卡置顶 + 内容区行流式排列）；叶子是卡。
+  // 归属关系完全由嵌套表达（盒内不画父子线）；行间 gap=线槽（gutter），给 FLOWS 电工布线留通道。
+  // 深度分级参数：越深的盒 padding/间距越小，视觉层层收敛。
+  var DEPTH_PAD = [
+    { x: 22, head: 30, gap: 44, col: 18, b: 26, maxRow: 1500 }, // depth0 root 大容器
+    { x: 16, head: 34, gap: 56, col: 14, b: 36, maxRow: 660 },  // depth1 功能盒
+    { x: 10, head: 18, gap: 40, col: 10, b: 16, maxRow: 620 }   // depth2 子模块盒
+  ];
+  function padOf(depth){ return DEPTH_PAD[Math.min(depth, DEPTH_PAD.length - 1)]; }
   function layoutTree(){
-    measure(TREE);
     orderAll(TREE);
-    var PAD_X = 16, HEAD_GAP = 34, ROW_GAP = 56, COL_GAP = 14, BOX_GAP = 36, PAD_B = 36, MAX_ROW = 660; // 行间留足线槽（gutter），线牌挂线不压卡
-    var kids = visChildren(TREE);
-    var boxes = [];
-    kids.forEach(function(g){
-      var hw = nodeW(g), hh = nodeH(g), gk = visChildren(g);
-      g._box = null;
-      if(!gk.length){ g._h = hh; g._w = hw; boxes.push({ g: g, w: hw, h: hh }); return; }
+    // 递归测尺：叶子=卡 {w,h}；分支=盒 {w,h}（行流式，行内垂直居中）
+    function boxSize(n, depth){
+      var hw = nodeW(n), hh = nodeH(n);
+      n._w = hw; n._h = hh;
+      var kids = visChildren(n);
+      if(!kids.length){ n._box = null; return { w: hw, h: hh }; }
+      var P = padOf(depth);
       var rows = [{ items: [], w: 0, h: 0 }];
-      gk.forEach(function(c){
-        var bb = blockBox(c);
-        var bl = { c: c, w: bb.x2 - bb.x1, h: bb.y2 - bb.y1, ox: bb.x1, oy: bb.y1 };
+      kids.forEach(function(c){
+        var cb = boxSize(c, depth + 1);
         var row = rows[rows.length - 1];
-        if(row.items.length && row.w + COL_GAP + bl.w > MAX_ROW){
+        if(row.items.length && row.w + P.col + cb.w > P.maxRow){
           rows.push({ items: [], w: 0, h: 0 });
           row = rows[rows.length - 1];
         }
-        row.items.push(bl);
-        row.w += (row.items.length > 1 ? COL_GAP : 0) + bl.w;
-        row.h = Math.max(row.h, bl.h);
+        row.items.push({ c: c, w: cb.w, h: cb.h });
+        row.w += (row.items.length > 1 ? P.col : 0) + cb.w;
+        row.h = Math.max(row.h, cb.h);
       });
       var innerW = 0, innerH = 0;
-      rows.forEach(function(r, i){ if(r.w > innerW) innerW = r.w; innerH += r.h + (i ? ROW_GAP : 0); });
-      var w = Math.max(hw, innerW) + PAD_X * 2;
-      var h = hh + HEAD_GAP + innerH + PAD_B;
-      g._box = { w: w, h: h, rows: rows, hh: hh, hw: hw };
-      boxes.push({ g: g, w: w, h: h, hw: hw });
-    });
-    var totalH = 0;
-    boxes.forEach(function(b, i){ totalH += b.h + (i ? BOX_GAP : 0); });
-    TREE._w = nodeW(TREE); TREE._h = nodeH(TREE);
-    var boxX = TREE._w + BRANCH_GAP + 30;
-    var top = 0;
-    boxes.forEach(function(b){
-      var g = b.g;
-      if(g._box){
-        g._x = boxX + b.w / 2;
-        g._y = top + g._box.hh / 2;
-        g._h = g._box.hh; g._w = b.hw;
-        var ry = top + g._box.hh + HEAD_GAP;
-        g._box.rows.forEach(function(row){
-          var cx = boxX + (b.w - row.w) / 2;
-          row.items.forEach(function(bl){
-            place(bl.c, cx - bl.ox, ry - bl.oy);
-            cx += bl.w + COL_GAP;
-          });
-          ry += row.h + ROW_GAP;
+      rows.forEach(function(r, i){ if(r.w > innerW) innerW = r.w; innerH += r.h + (i ? P.gap : 0); });
+      n._box = { w: Math.max(hw, innerW) + P.x * 2, h: hh + P.head + innerH + P.b, rows: rows, hh: hh, hw: hw };
+      return { w: n._box.w, h: n._box.h };
+    }
+    // 递归放置：盒头卡置顶居中，内容区行流式（行内垂直居中）
+    function boxPlace(n, left, top, depth){
+      var b = n._box;
+      if(!b){ n._x = left + n._w / 2; n._y = top + n._h / 2; return; }
+      n._x = left + b.w / 2;
+      n._y = top + b.hh / 2; // 头卡中心 = 盒顶 + hh/2（geo 约定）
+      var P = padOf(depth);
+      var ry = top + b.hh + P.head;
+      b.rows.forEach(function(row){
+        var cx = left + (b.w - row.w) / 2;
+        row.items.forEach(function(it){
+          boxPlace(it.c, cx, ry, depth + 1); // 行内顶对齐：同一行头卡同高，布线"行"语义稳定
+          cx += it.w + P.col;
         });
-      } else {
-        g._x = boxX + b.w / 2;
-        g._y = top + b.h / 2;
-      }
-      top += b.h + BOX_GAP;
-    });
-    TREE._x = TREE._w / 2 + 40;
-    TREE._y = Math.max(TREE._h / 2, totalH / 2);
+        ry += row.h + P.gap;
+      });
+    }
+    boxSize(TREE, 0);
+    boxPlace(TREE, 0, 0, 0);
   }
 
   // ── 渲染 ──
@@ -639,17 +648,31 @@ export function renderMindmapPage(feature: string): string {
     var E = document.getElementById('edges'), N = document.getElementById('nodes'), G = document.getElementById('notes'), FL = document.getElementById('flowlayer');
     E.innerHTML = ''; N.innerHTML = ''; G.innerHTML = ''; FL.innerHTML = '';
     var edges = '', nodes = '', boxes = '', flowSvg = '';
-    // 收纳盒底板（画在最底层）：按分支类型着色，构想=紫虚线、共享=绿、功能=蓝
-    visChildren(TREE).forEach(function(g){
-      if(!g._box) return;
-      var bx = g._x - g._box.w / 2, by = g._y - g._box.hh / 2;
-      var st = g.kind === 'proposal'
-        ? 'fill="rgba(208,191,255,.16)" stroke="#9775fa" stroke-dasharray="10 6"'
-        : (g.kind === 'shared'
-          ? 'fill="rgba(211,249,216,.20)" stroke="#69db7c"'
-          : 'fill="rgba(165,216,255,.13)" stroke="#74c0fc"');
-      boxes += '<rect x="'+bx+'" y="'+by+'" width="'+g._box.w+'" height="'+g._box.h+'" rx="16" '+st+' stroke-width="1.6"/>';
-    });
+    // 收纳盒底板（画在最底层，递归全树）：深度分级着色——
+    //   root=大容器淡靛虚线 / 功能盒=蓝（构想紫虚线、共享绿）/ 子模块盒=青（步骤组黄）/ 更深=灰蓝
+    (function wbox(n, depth){
+      if(n._box){ // root 大容器也画底板（最外层包裹：项目 → 功能盒 → 子模块盒 → 文件卡）
+        var bx = n._x - n._box.w / 2, by = n._y - n._box.hh / 2;
+        var st, rx, sw;
+        if(depth <= 0){ // root 大容器
+          st = 'fill="rgba(159,176,255,.05)" stroke="#91a7ff" stroke-dasharray="14 8"'; rx = 24; sw = 2;
+        } else if(depth === 1){ // 功能盒：构想=紫虚线、共享=绿、功能=蓝
+          rx = 16; sw = 1.6;
+          st = n.kind === 'proposal'
+            ? 'fill="rgba(208,191,255,.16)" stroke="#9775fa" stroke-dasharray="10 6"'
+            : (n.kind === 'shared'
+              ? 'fill="rgba(211,249,216,.20)" stroke="#69db7c"'
+              : 'fill="rgba(165,216,255,.13)" stroke="#74c0fc"');
+        } else { // 子模块盒：社区=青、步骤组=黄
+          rx = 10; sw = 1.3;
+          st = n.kind === 'stepgroup'
+            ? 'fill="rgba(255,243,191,.22)" stroke="#f59f00"'
+            : 'fill="rgba(197,246,250,.16)" stroke="#3bc9db"';
+        }
+        boxes += '<rect x="'+bx+'" y="'+by+'" width="'+n._box.w+'" height="'+n._box.h+'" rx="'+rx+'" '+st+' stroke-width="'+sw+'"/>';
+      }
+      visChildren(n).forEach(function(c){ wbox(c, depth + 1); });
+    })(TREE, 0);
     (function walk(n, parent, noEdge){
       if(parent && !noEdge){
         var x1 = parent._x + parent._w / 2, y1 = parent._y, x2 = n._x - n._w / 2, y2 = n._y;
@@ -657,9 +680,9 @@ export function renderMindmapPage(feature: string): string {
         edges += '<path d="M '+x1+' '+y1+' C '+mx+' '+y1+', '+mx+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="'+(n.kind==='user' ? 'rgba(230,119,0,.55)' : (n.kind==='feature' ? '#4dabf7' : '#adb5bd'))+'" stroke-width="'+(n.kind==='feature'?2.6:(n.kind==='user'?1.6:1.8))+'"/>';
       }
       nodes += renderNode(n);
-      // 流转连线：电工式正交布线（横平竖直、错道不重叠），画在顶层 flowlayer
+      // 流转连线：电工式正交布线（横平竖直、错道不重叠、跳线 hop），画在顶层 flowlayer
       if(n._flowEdges){ flowSvg += routeFlows(n); }
-      var skip = (parent === TREE) && n._box; // 盒内直属卡不画连线：装进盒子即归属
+      var skip = !!(parent && parent._box); // 盒内直属卡不画父子连线：装进盒子即归属（全层级生效）
       visChildren(n).forEach(function(c){ walk(c, n, skip); });
     })(TREE, null, false);
     N.innerHTML = boxes + nodes;
@@ -727,13 +750,15 @@ export function renderMindmapPage(feature: string): string {
     DEPS.forEach(function(d, idx){
       var a = featureByLabel(d.from), b = featureByLabel(d.to);
       if(!a || !b || a === b) return;
-      var x1 = a._x - a._w / 2 - 24, y1 = a._y;
-      var x2 = b._x - b._w / 2 - 24, y2 = b._y;
-      // 扇形错开：每条弧的控制点逐条左移，弧线不互相叠压
-      var cx = TREE._x - TREE._w / 2 - 74 - (idx % 5) * 26;
+      // 盒中盒布局：弧从功能盒顶部出发，绕 root 大容器上方外侧走——不穿任何盒
+      var x1 = a._x, y1 = (a._box ? a._y - a._box.hh / 2 : a._y - a._h / 2) - 12;
+      var x2 = b._x, y2 = (b._box ? b._y - b._box.hh / 2 : b._y - b._h / 2) - 12;
+      // 扇形错开：每条弧的控制点逐条上移，弧线不互相叠压；绕行高度基于 root 大容器顶缘
+      var cy = (TREE._box ? TREE._y - TREE._box.hh / 2 : TREE._y - TREE._h / 2) - 60 - (idx % 5) * 22;
+      var cx = (x1 + x2) / 2;
       var sw = d._pred ? 1.6 : Math.min(1.3 + d.weight / 12, 3.6);
       var path = document.createElementNS('http://www.w3.org/2000/svg','path');
-      path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+y1+', '+cx+' '+y2+', '+x2+' '+y2);
+      path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+cy+', '+cx+' '+cy+', '+x2+' '+y2);
       path.setAttribute('fill','none');
       path.setAttribute('stroke', d._pred ? 'rgba(122,78,212,.6)' : 'rgba(232,89,12,.65)');
       path.setAttribute('stroke-width', sw);
@@ -755,11 +780,11 @@ export function renderMindmapPage(feature: string): string {
       var cands = [0.3 + (idx % 3) * 0.14, 0.5, 0.42, 0.58, 0.36, 0.64, 0.24];
       var pt = null;
       for (var ci = 0; ci < cands.length; ci++) {
-        var p = bezPoint(x1, y1, cx, y1, x2, y2, cands[ci]);
+        var p = bezPoint(x1, y1, cx, cy, x2, y2, cands[ci]);
         if (noClash(p)) { pt = p; break; }
       }
       if (!pt) {
-        pt = bezPoint(x1, y1, cx, y1, x2, y2, 0.3);
+        pt = bezPoint(x1, y1, cx, cy, x2, y2, 0.3);
         pt = { x: pt.x, y: pt.y - 16 * (1 + Math.floor(placedPts.length / 4)) };
       }
       placedPts.push(pt);
@@ -1138,10 +1163,13 @@ export function renderMindmapPage(feature: string): string {
   function treeBounds(){
     var b = { minX: 1e9, minY: 1e9, maxX: -1e9, maxY: -1e9 };
     (function walk(n){
-      if(n._x - n._w/2 < b.minX) b.minX = n._x - n._w/2;
-      if(n._y - 30 < b.minY) b.minY = n._y - 30;
-      if(n._x + n._w/2 + 60 > b.maxX) b.maxX = n._x + n._w/2 + 60;
-      if(n._y + 30 > b.maxY) b.maxY = n._y + 30;
+      var hw = n._box ? n._box.w / 2 : n._w / 2;      // 盒子节点取盒宽（root 大容器覆盖全图）
+      var top = n._box ? n._y - n._box.hh / 2 : n._y - 30;
+      var bot = n._box ? top + n._box.h : n._y + 30;
+      if(n._x - hw - 20 < b.minX) b.minX = n._x - hw - 20;
+      if(top - 10 < b.minY) b.minY = top - 10;
+      if(n._x + hw + 40 > b.maxX) b.maxX = n._x + hw + 40;
+      if(bot + 10 > b.maxY) b.maxY = bot + 10;
       visChildren(n).forEach(walk);
     })(TREE);
     return b;
@@ -1149,7 +1177,7 @@ export function renderMindmapPage(feature: string): string {
   function fitView(){
     if(!TREE) return;
     var b = treeBounds();
-    if(DEPS.length) b.minX -= 110 + Math.min(DEPS.length, 5) * 26; // 依赖弧扇形绕根左侧，视口为其留位
+    if(DEPS.length) b.minY -= 70 + Math.min(DEPS.length, 5) * 22; // 依赖弧扇形绕 root 大容器上方，视口为其留位
     var w = window.innerWidth, h = window.innerHeight - 52;
     var pad = 40;
     var s = Math.min((w - pad*2) / (b.maxX - b.minX), (h - pad*2) / (b.maxY - b.minY), 1.15);
