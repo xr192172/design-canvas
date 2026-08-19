@@ -247,7 +247,8 @@
           "properties": {
             "source_project": { "type": "string" },
             "commit": { "type": "string" },
-            "harvested_at": { "type": "string" }
+            "harvested_at": { "type": "string" },
+            "last_reconciled": { "type": "string", "description": "最近一次 camera 动静对账时间" }
           }
         }
       }

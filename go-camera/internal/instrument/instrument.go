@@ -28,10 +28,11 @@ type ProbeKind string
 
 // 探针点类型枚举。
 const (
-	ProbeEnter ProbeKind = "enter"
-	ProbeExit  ProbeKind = "exit"
-	ProbeIO    ProbeKind = "io"
-	ProbeDeep  ProbeKind = "deep"
+	ProbeEnter  ProbeKind = "enter"
+	ProbeExit   ProbeKind = "exit"
+	ProbeIO     ProbeKind = "io"
+	ProbeDeep   ProbeKind = "deep"
+	ProbeEffect ProbeKind = "effect"
 )
 
 // Site 是单个插桩点。
@@ -59,6 +60,9 @@ type Options struct {
 	Write bool
 	// EnableDeep 是否启用 deep 级插桩（变量赋值捕获，默认 false）。
 	EnableDeep bool
+	// EnableEffect 是否启用 effect 级插桩（Brick Harvest Phase 2c 动静对账：
+	// 包级变量写/chan send/资源获取三类点，Capture 带 kind/target/op）。
+	EnableEffect bool
 	// BackupRoot 备份根：写盘前把原文件备份到 <backupRoot>/.design-canvas/camera-backup/<rel>。
 	BackupRoot string
 	// ExcludeDirs 相对目录名列表（如 internal/probe），这些目录下的文件跳过插桩。
@@ -77,6 +81,9 @@ const probeMarker = "camera:instrumented"
 
 // deep 级插桩独立标记。
 const deepMarker = "camera:deep"
+
+// effect 级插桩独立标记（Phase 2c 动静对账）。
+const effectMarker = "camera:effect"
 
 // 备份目录名（相对被插桩项目根）。
 const backupDir = ".design-canvas/camera-backup"
@@ -180,6 +187,7 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	res := Result{File: file}
 	applyWrite := opts.Write
 	enableDeep := opts.EnableDeep
+	enableEffect := opts.EnableEffect
 
 	content, err := os.ReadFile(file)
 	if err != nil {
@@ -188,10 +196,13 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	}
 	src := string(content)
 
-	// 幂等：核心探针已注入且未请求 deep → 跳过；核心与 deep 都已注入 → 跳过
+	// 幂等：核心探针已注入且未请求 deep/effect → 跳过；已请求的级都已注入 → 跳过
 	hasCore := strings.Contains(src, probeMarker)
 	hasDeep := strings.Contains(src, deepMarker)
-	if (hasCore && !enableDeep) || (hasCore && hasDeep) {
+	hasEffect := strings.Contains(src, effectMarker)
+	wantDeep := enableDeep && !hasDeep
+	wantEffect := opts.EnableEffect && !hasEffect
+	if hasCore && !wantDeep && !wantEffect {
 		return res, nil
 	}
 
@@ -227,7 +238,8 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	}
 
 	var sites []Site
-	collectFuncSites(fset, f, pkg, fileRel, enableDeep, opts.ContractProbes, &sites)
+	pkgVars := collectPkgVars(f)
+	collectFuncSites(fset, f, pkg, fileRel, enableDeep, enableEffect, pkgVars, opts.ContractProbes, &sites)
 
 	if len(sites) == 0 {
 		return res, nil
@@ -236,8 +248,13 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 	// 按 Offset 从大到小排序，从后往前注入避免偏移漂移
 	sortSites(sites)
 
-	// 探针 import 注入：在 package 声明行后补一行
-	importLine := "\nimport " + probeAlias + " \"" + probeImport + "\"\n"
+	// 探针 import 注入：在 package 声明行后补一行。
+	// 已 import 探针包的文件（如初始化 sink 的 main.go）跳过——重复 import 同一路径
+	// 是编译错（camprobe redeclared）。约定：自引探针包须用 camprobe 别名。
+	importLine := ""
+	if !importsProbePkg(f, probeImport) {
+		importLine = "\nimport " + probeAlias + " \"" + probeImport + "\"\n"
+	}
 	insertOffset := packageLineEnd(src, fset, f)
 
 	out := src
@@ -253,11 +270,14 @@ func InstrumentFile(file string, opts Options) (Result, error) {
 		}
 	}
 	// 头部标记 + import（避免重复补 import）
-	if !hasCore {
+	if !hasCore && importLine != "" {
 		out = out[:insertOffset] + importLine + out[insertOffset:]
 	}
-	if enableDeep && !hasDeep {
+	if wantDeep {
 		out = "// " + deepMarker + "\n" + out
+	}
+	if wantEffect {
+		out = "// " + effectMarker + "\n" + out
 	}
 	if !hasCore {
 		out = "// " + probeMarker + "\n" + out
@@ -360,16 +380,16 @@ func sortSites(sites []Site) {
 }
 
 // collectFuncSites 遍历文件 AST，收集所有插桩点。probes 非 nil 时按契约过滤。
-func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, enableDeep bool, probes []ContractProbe, sites *[]Site) {
+func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, enableDeep, enableEffect bool, pkgVars map[string]bool, probes []ContractProbe, sites *[]Site) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch t := n.(type) {
 		case *ast.FuncDecl:
 			if t.Body != nil {
-				processFunction(fset, t.Name.Name, t.Type.Params, t.Body, pkg, fileRel, enableDeep, probes, sites)
+				processFunction(fset, t.Name.Name, t.Type.Params, t.Body, pkg, fileRel, enableDeep, enableEffect, pkgVars, probes, sites)
 			}
 		case *ast.FuncLit:
 			if t.Body != nil {
-				processFunction(fset, "", t.Type.Params, t.Body, pkg, fileRel, enableDeep, probes, sites)
+				processFunction(fset, "", t.Type.Params, t.Body, pkg, fileRel, enableDeep, enableEffect, pkgVars, probes, sites)
 			}
 		}
 		return true
@@ -379,7 +399,7 @@ func collectFuncSites(fset *token.FileSet, f *ast.File, pkg, fileRel string, ena
 // processFunction 处理一个函数体（FuncDecl 或 FuncLit）：入口/出口/return/IO/deep。
 // probes 非 nil（契约模式）时，每条探针注入前用 MatchProbe 精确门控——只注入
 // DSL 声明的 pkg.FuncName.suffix。
-func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body *ast.BlockStmt, pkg, fileRel string, enableDeep bool, probes []ContractProbe, sites *[]Site) {
+func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body *ast.BlockStmt, pkg, fileRel string, enableDeep, enableEffect bool, pkgVars map[string]bool, probes []ContractProbe, sites *[]Site) {
 	if fn == "" {
 		fn = "closure"
 	}
@@ -403,8 +423,8 @@ func processFunction(fset *token.FileSet, fn string, params *ast.FieldList, body
 		*sites = append(*sites, Site{Kind: ProbeEnter, Level: "core", Line: lineOf(body.Lbrace), Offset: insertAt, Code: "\n" + code})
 	}
 
-	// 遍历函数体语句：return / IO / deep 由语句级处理
-	walkStmts(fset, body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+	// 遍历函数体语句：return / IO / deep / effect 由语句级处理
+	walkStmts(fset, body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 
 	// 函数体末尾出口探针：仅当最后一条语句不是 return 时注入（named-return 尾部自然落出等）。
 	// 若最后一条是 return，return 前已有 exit 探针捕获出口；在 return 后插任何语句
@@ -448,9 +468,9 @@ func paramCapture(params *ast.FieldList) string {
 	return strings.Join(fields, ", ")
 }
 
-// walkStmts 递归遍历语句列表，收集 return / IO / deep 探针。
+// walkStmts 递归遍历语句列表，收集 return / IO / deep / effect 探针。
 // probes 非 nil（契约模式）时，每条探针注入前用 MatchProbe 精确门控。
-func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) string, fileRel string, enableDeep bool, offsetOf func(token.Pos) int, lineOf func(token.Pos) int, probes []ContractProbe, sites *[]Site) {
+func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) string, fileRel string, enableDeep, enableEffect bool, pkgVars map[string]bool, offsetOf func(token.Pos) int, lineOf func(token.Pos) int, probes []ContractProbe, sites *[]Site) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.ReturnStmt:
@@ -473,40 +493,40 @@ func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) str
 				*sites = append(*sites, Site{Kind: ProbeExit, Level: "core", Line: lineOf(s.Pos()), Offset: offsetOf(s.Pos()), Code: code + "\n"})
 			}
 		case *ast.BlockStmt:
-			walkStmts(fset, s.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+			walkStmts(fset, s.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 		case *ast.IfStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 			if s.Else != nil {
 				if el, ok := s.Else.(*ast.BlockStmt); ok {
-					walkStmts(fset, el.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+					walkStmts(fset, el.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 				}
 			}
 		case *ast.ForStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.RangeStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.SwitchStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.TypeSwitchStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.SelectStmt:
 			if s.Body != nil {
-				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+				walkStmts(fset, s.Body.List, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 			}
 		case *ast.CaseClause:
-			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 		case *ast.CommClause:
-			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, offsetOf, lineOf, probes, sites)
+			walkStmts(fset, s.Body, probeName, fileRel, enableDeep, enableEffect, pkgVars, offsetOf, lineOf, probes, sites)
 		case *ast.DeferStmt:
 			// defer/recover（event）：捕获 defer 调用中的错误场景（Op）
 			if MatchProbe(probeName("defer"), probes) {
@@ -539,6 +559,17 @@ func walkStmts(fset *token.FileSet, stmts []ast.Stmt, probeName func(string) str
 			if code, ok := deepCapture(stmt, probeName, fileRel); ok {
 				// 同 Bug4：前置换行避免粘连
 				*sites = append(*sites, Site{Kind: ProbeDeep, Level: "deep", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: "\n" + code + "\n"})
+			}
+		}
+
+		// ── effect（可选，Phase 2c 动静对账）：外部作用点观测 ──
+		// 包级变量写 / chan send / go 语句 / 资源获取调用，语句末注入，
+		// Capture 带 kind/target/op，与 design-canvas 静态候选（origin='ast'）同构。
+		if enableEffect && MatchProbe(probeName("effect"), probes) {
+			if hit, ok := effectInStmt(stmt, pkgVars); ok {
+				code := fmt.Sprintf(`camprobe.Capture(%q, "llm-design", map[string]any{"file": %q, "level": "effect", "kind": %q, "target": %q, "op": %q});`,
+					probeName("effect"), fileRel, hit.Kind, hit.Target, hit.Op)
+				*sites = append(*sites, Site{Kind: ProbeEffect, Level: "effect", Line: lineOf(stmt.Pos()), Offset: offsetOf(stmt.End()), Code: "\n" + code + "\n"})
 			}
 		}
 	}

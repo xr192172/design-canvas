@@ -92,5 +92,7 @@ export interface BrickContract {
     source_project?: string;
     commit?: string;
     harvested_at?: string;
+    /** 最近一次 camera 动静对账时间（reconcile_effects 写入） */
+    last_reconciled?: string;
   };
 }

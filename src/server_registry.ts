@@ -34,6 +34,8 @@ import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { extractContracts } from './tools/extract_contracts.js';
 import type { ExtractContractsInput } from './tools/extract_contracts.js';
+import { reconcileEffects } from './tools/reconcile_effects.js';
+import type { ReconcileEffectsInput } from './tools/reconcile_effects.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -693,16 +695,37 @@ const TOOL_DEFS: ToolDef[] = [
       'LLM 不产生事实：结构化字段只接受 AST/camera 源。' +
       '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md Phase 2.5/2.7。',
     inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      project_dir: z.string().describe('目标项目根目录（须先 import_project 建缓存）'),
       feature: z.string().optional().describe('提供时把 contract 写回该 feature 的 DSL（SemanticFile.contract）'),
       files: z
         .array(z.string())
         .optional()
         .describe('限定提取范围的文件（相对项目根）；缺省 = 全部已索引文件'),
-      write_dsl: z.boolean().optional().describe('默认 true 写回 DSL；false = 只读预演（dry-run）'),
+      write_dsl: z.boolean().optional().describe('false=只读预演不写回，默认 true'),
     },
     handler: wrapData(async (a) => {
       const r = extractContracts(a as unknown as ExtractContractsInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'reconcile_effects',
+    title: 'Reconcile effect candidates with camera runtime observation',
+    description:
+      '积木契约动静对账（Brick Harvest Phase 2c 合龙）：读 <project>/.agent/camera/events-*.jsonl 中' +
+      '的 effect 事件（go-camera instrument --effects 插桩产生），与 DSL 契约候选对账——' +
+      '命中转正（origin ast→runtime）、候选外新观测补进契约并记 incomplete 告警（静态漏了）、' +
+      '未触发候选保持 ast（不证伪），并填充 contract.runtime（call_count/top_callers/observed_targets/last_seen）。' +
+      '前置链：import_project → extract_contracts → instrument --effects → 运行项目 → 本工具。' +
+      'LLM 不产生事实：只搬运 camera 观测，判定规则全部机械。',
+    inputSchema: {
+      project_dir: z.string().describe('被观测项目根目录（其下 .agent/camera/events-*.jsonl 是事件源）'),
+      feature: z.string().describe('DSL feature 名（契约在其 SemanticFile.contract）'),
+      events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
+      write_dsl: z.boolean().optional().describe('false=只对账预演不写回，默认 true'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await reconcileEffects(a as unknown as ReconcileEffectsInput);
       return { message: r.message, data: r };
     }),
   },

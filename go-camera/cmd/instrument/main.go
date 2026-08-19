@@ -61,7 +61,7 @@ func main() {
 	// 手动解析：flags 与位置参数顺序无关（Go flag 包遇首个位置参数即停止，
 	// 与 SPEC §2 的 "<cmd> <file> [--flags...]" 契约冲突）。
 	var probesJSON, target string
-	dryRun, deep, restore := false, false, false
+	dryRun, deep, effects, restore := false, false, false, false
 	for i := 0; i < len(os.Args)-1; i++ {
 		a := os.Args[i+1]
 		switch {
@@ -69,6 +69,8 @@ func main() {
 			dryRun = true
 		case a == "--deep":
 			deep = true
+		case a == "--effects":
+			effects = true
 		case a == "--restore":
 			restore = true
 		case a == "--probes":
@@ -120,6 +122,7 @@ func main() {
 	opts := instrument.Options{
 		Write:          !dryRun,
 		EnableDeep:     deep,
+		EnableEffect:   effects,
 		ContractProbes: contract,
 		BackupRoot:     filepath.Dir(abs),
 	}
