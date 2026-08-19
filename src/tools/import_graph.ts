@@ -55,10 +55,16 @@ export function buildImportGraph(db: Database, root: string): ImportGraph {
   const index = buildIndex(files);
   const goModules = readGoModules(root);
   const packageResolved = new Map<string, boolean>();
-  const stmt = db.prepare('SELECT source, line, kind FROM imports WHERE file_path = ?');
+  const stmt = db.prepare('SELECT source, line, kind, type_only FROM imports WHERE file_path = ?');
   for (const f of files) {
-    const rows = stmt.all(f.rel) as Array<{ source: string; line: number; kind: string }>;
+    const rows = stmt.all(f.rel) as Array<{ source: string; line: number; kind: string; type_only: number }>;
     for (const r of rows) {
+      // TS `import type` 运行时擦除——不算依赖边（依赖方向/闭包/波及全不沾）。
+      // 只为 packageResolved 记账保留（type-only 的包导入解析目标无意义，记 false）。
+      if (r.type_only === 1) {
+        packageResolved.set(`${f.rel}:${r.line}`, false);
+        continue;
+      }
       const imp: ParsedImport = { source: r.source, kind: r.kind as ParsedImport['kind'], line: r.line };
       const targets = resolveImport(imp, f, index, goModules);
       packageResolved.set(`${f.rel}:${r.line}`, targets.length > 0);

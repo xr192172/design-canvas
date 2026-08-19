@@ -17,7 +17,10 @@ import path from 'node:path';
 import { afterAll } from 'vitest';
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'design-canvas-test-'));
-process.env.DESIGN_CANVAS_HOME = tmpHome;
+// 外层已显式指定（如"正式入盒"场景指向真实 dataHome）则尊重，不重定向
+if (!process.env.DESIGN_CANVAS_HOME) {
+  process.env.DESIGN_CANVAS_HOME = tmpHome;
+}
 
 afterAll(() => {
   try {

@@ -214,16 +214,18 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
   }
 
   // ── 原始 import 语句：闭包全体文件的 package 级依赖 + 内部文件的带入证据 ──
-  const stmtImports = db.prepare('SELECT source, line, kind FROM imports WHERE file_path = ?');
+  const stmtImports = db.prepare('SELECT source, line, kind, type_only FROM imports WHERE file_path = ?');
   // 内部文件带入证据：imported_by + 该 import 行的原始 source 串
   const evidenceSource = new Map<string, Map<number, string>>(); // file → line → source
   const externalAgg = new Map<string, ExternalDep>();
   for (const p of closurePaths) {
-    const rows = stmtImports.all(p) as Array<{ source: string; line: number; kind: string }>;
+    const rows = stmtImports.all(p) as Array<{ source: string; line: number; kind: string; type_only: number }>;
     let perFile = evidenceSource.get(p);
     if (!perFile) evidenceSource.set(p, (perFile = new Map()));
     for (const r of rows) {
       perFile.set(r.line, r.source);
+      // TS `import type` 运行时擦除——不算外部依赖（运行时不需要那个包）
+      if (r.type_only === 1) continue;
       if (r.kind !== 'package') continue; // relative 已解析为内部闭包
       // 权威判定：该 package 导入若解析到项目内文件（Go 内部包 / Python 同包 sibling）
       // → 属内部闭包，不算外部依赖；解析不到才是真正的外部

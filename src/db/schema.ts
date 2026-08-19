@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS imports (
     file_path TEXT NOT NULL,
     line INTEGER NOT NULL,
     source TEXT NOT NULL,
-    kind TEXT NOT NULL       -- 'relative' | 'package'（与 ts_kernel ParsedImport.kind 一致）
+    kind TEXT NOT NULL,      -- 'relative' | 'package'（与 ts_kernel ParsedImport.kind 一致）
+    type_only INTEGER NOT NULL DEFAULT 0  -- v5：TS "import type" 整条运行时擦除——依赖图/闭包不算边
 );
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
 

@@ -43,6 +43,12 @@ export interface ParsedImport {
   /** relative = 相对路径（./ ../ 或 Python 前导点）；package = 包路径 */
   kind: 'relative' | 'package';
   line: number;
+  /**
+   * TS 系 `import type { X } from ...`——整条语句运行时擦除（零运行时依赖）。
+   * 闭包/依赖方向/外部依赖三分类均不算边；shapes 消费（类型引用）另论。
+   * `import { type X }`（混合语句单说明符）不算——语句仍保留，保守不标。
+   */
+  type_only?: boolean;
 }
 
 /** 函数级调用边（同文件内，AST 提取，路线图序号 3 的第一步） */
@@ -523,11 +529,15 @@ function traverseAndExtractImports(
   if (depth > 100 || !lang.import_nodes || lang.import_nodes.length === 0) return;
   if (lang.import_nodes.includes(node.type)) {
     const sources = extractImportSources(node, lang.name);
+    // TS 系 `import type` 整条语句运行时擦除——标记 type_only，依赖图/闭包不算边
+    const isTs = lang.name === 'typescript' || lang.name === 'tsx' || lang.name === 'javascript' || lang.name === 'jsx';
+    const typeOnly = isTs && /^\s*import\s+type\b/.test(node.text);
     for (const src of sources) {
       imports.push({
         source: src,
         kind: src.startsWith('.') ? 'relative' : 'package',
         line: node.startPosition.row + 1,
+        ...(typeOnly ? { type_only: true } : {}),
       });
     }
     return; // import 节点内部不再递归

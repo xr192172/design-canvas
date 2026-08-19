@@ -334,6 +334,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     let edgeCount = 0;
     for (const imp of parsed.imports) {
       if (imp.kind !== 'relative') continue;
+      // TS `import type` 运行时擦除——不建 import 边（依赖图/闭包不算依赖）
+      if (imp.type_only) continue;
       const target = resolveImportTarget(projectRoot, rel, imp.source);
       if (!target) continue;
       ensureStub.run(target, path.posix.basename(target), target, target, now);
@@ -390,9 +392,9 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     //    import_project 缓存路径靠它重建依赖边——edges 表只有已解析的相对导入，
     //    Go 包路径 / Python 点分模块的原始 source 串只存在这里
     db.prepare('DELETE FROM imports WHERE file_path = ?').run(rel);
-    const insImport = db.prepare('INSERT INTO imports(file_path, line, source, kind) VALUES (?, ?, ?, ?)');
+    const insImport = db.prepare('INSERT INTO imports(file_path, line, source, kind, type_only) VALUES (?, ?, ?, ?, ?)');
     for (const imp of parsed.imports) {
-      insImport.run(rel, imp.line, imp.source, imp.kind);
+      insImport.run(rel, imp.line, imp.source, imp.kind, imp.type_only ? 1 : 0);
     }
 
     // 5. files 行

@@ -1051,6 +1051,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     const p = parsed.get(f.rel);
     if (!p) continue;
     for (const imp of p.imports) {
+      // TS `import type` 运行时擦除——不算依赖边（与 syncFile/import_graph 同一纪律）
+      if (imp.type_only) continue;
       const targets = resolveImport(imp, f, index, goModules);
       for (const t of targets) {
         if (t.rel === f.rel) continue;

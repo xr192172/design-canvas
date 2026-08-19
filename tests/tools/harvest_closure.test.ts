@@ -52,6 +52,22 @@ async function makeTsProject(feature: string): Promise<string> {
   return root;
 }
 
+/** TS 项目（type-only）：a 值引用 b；a 另 type-only 引用 react（运行时擦除，不算依赖） */
+async function makeTypeOnlyProject(feature: string): Promise<string> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harvest-typeonly-'));
+  roots.push(root);
+  put(
+    root,
+    'src/a.ts',
+    `import { helperB } from './b';\nimport type { useState } from 'react';\n\nexport function mainA(x: number): number {\n  return helperB(x);\n}\n`,
+  );
+  put(root, 'src/b.ts', `export function helperB(x: number): number {\n  return x * 2;\n}\n`);
+  const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+  await importProject({ project_dir: root, feature, cache_db: db });
+  db.close();
+  return root;
+}
+
 /** Go 项目：svc → model（内部包），svc 另 import fmt / github.com/x/y */
 async function makeGoProject(feature: string): Promise<string> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harvest-go-'));
@@ -140,5 +156,16 @@ describe('harvest_closure 积木拎取闭包', () => {
     expect(r.internal_files).toEqual([]);
 
     expect(() => harvestClosure({ project_dir: root, files: ['src/a.ts'], feature: 'no_such_feature' })).toThrow();
+  });
+
+  it('import type 运行时擦除：type-only 的 react 不进外部依赖', async () => {
+    const root = await makeTypeOnlyProject('harvest_typeonly_a');
+    const r = harvestClosure({ project_dir: root, files: ['src/a.ts'] });
+
+    // 值引用 b 正常进闭包
+    expect(internalPaths(r)).toEqual(['src/a.ts', 'src/b.ts']);
+    // type-only 的 react 不算三方依赖（运行时不存在该依赖）
+    expect(r.external.some((e) => e.source === 'react')).toBe(false);
+    expect(r.stats.third_party_count).toBe(0);
   });
 });

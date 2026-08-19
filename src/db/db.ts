@@ -29,7 +29,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */
 export function getDbFile(): string {
@@ -60,10 +60,12 @@ export function openDb(dbFile: string = getDbFile()): Database {
   }
   // v4 增列：files.norm_hash + symbol_diffs.norm_from/norm_to（文件级归一化全文 hash，
   // 捕捉符号提取覆盖不到的变更——常量值/字符串/顶层表达式）
+  // v5 增列：imports.type_only（TS `import type` 运行时擦除——依赖图/闭包不算边）
   for (const ddl of [
     'ALTER TABLE files ADD COLUMN norm_hash TEXT',
     "ALTER TABLE symbol_diffs ADD COLUMN norm_from TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE symbol_diffs ADD COLUMN norm_to TEXT NOT NULL DEFAULT ''",
+    'ALTER TABLE imports ADD COLUMN type_only INTEGER NOT NULL DEFAULT 0',
   ]) {
     try {
       db.exec(ddl);
@@ -73,11 +75,13 @@ export function openDb(dbFile: string = getDbFile()): Database {
   }
   const v = db.prepare('SELECT MAX(version) v FROM schema_versions').get() as { v: number | null };
   if (v.v !== null && v.v < SCHEMA_VERSION) {
-    db.exec('DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM unresolved_refs; DELETE FROM symbol_diffs;');
+    // imports 一并清（v5 前的旧行没有 type_only 语义，且此前清库遗漏 imports 表——
+    // 删除的文件会在 imports 留残行；缓存是派生物，全清重建）
+    db.exec('DELETE FROM files; DELETE FROM nodes; DELETE FROM edges; DELETE FROM unresolved_refs; DELETE FROM symbol_diffs; DELETE FROM imports;');
   }
   db.prepare(
     'INSERT OR IGNORE INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)',
-  ).run(SCHEMA_VERSION, Date.now(), 'v4: files.norm_hash + symbol_diffs.norm_from/to（符号外变更判定——常量值等符号级盲区）');
+  ).run(SCHEMA_VERSION, Date.now(), 'v5: imports.type_only（TS import type 运行时擦除——依赖图/闭包不算边；清库补齐 imports 表）');
   return db;
 }
 
