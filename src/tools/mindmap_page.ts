@@ -383,18 +383,199 @@ export function renderMindmapPage(feature: string): string {
     vc.forEach(orderAll);
   }
 
+  // ── 电工式正交布线（横平竖直、通道错道、出入口展宽）──
+  // 同一父节点内子块间的流转边，按相对位置分四种走法（全部只走空白，不穿卡也不藏卡后）：
+  //   同行相邻      → 列间隙直线水平
+  //   同行回退/隔卡 → 行下通道 U 形回线
+  //   相邻行        → 行间通道 Z 形（换行回扫，像文本换行）
+  //   远距离        → 竖直廊道干线（列间隙/盒边距里走竖线，绕到目标行上方再落下）
+  // 同通道多线自动错道（±4px 交替）；同一卡同侧多出入口横向展宽（14px 间隔）
+  function routeFlows(p){
+    var fes = p._flowEdges;
+    if(!fes || !fes.length) return '';
+    function geo(n){
+      if(n._box){ var t = n._y - n._box.hh / 2; return { n: n, cx: n._x, cy: n._y, top: t, bot: t + n._box.h, left: n._x - n._box.w / 2, right: n._x + n._box.w / 2 }; }
+      var h = n._h || nodeH(n), w = n._w || nodeW(n);
+      return { n: n, cx: n._x, cy: n._y, top: n._y - h / 2, bot: n._y + h / 2, left: n._x - w / 2, right: n._x + w / 2 };
+    }
+    var sibs = visChildren(p).map(geo);
+    if(!sibs.length) return '';
+    // 行分组（按中心 y，容差 12）
+    var rows = [];
+    sibs.slice().sort(function(a, b){ return a.cy - b.cy; }).forEach(function(g){
+      var last = rows[rows.length - 1];
+      if(last && Math.abs(last.y - g.cy) < 12) last.items.push(g);
+      else rows.push({ y: g.cy, items: [g] });
+    });
+    rows.forEach(function(r){
+      r.top = Math.min.apply(null, r.items.map(function(i){ return i.top; }));
+      r.bot = Math.max.apply(null, r.items.map(function(i){ return i.bot; }));
+    });
+    function rowOf(g){
+      for(var i = 0; i < rows.length; i++) if(Math.abs(rows[i].y - g.cy) < 12) return i;
+      return -1;
+    }
+    // 行间通道：chanBelow[i] 在行 i 与行 i+1 之间（末行下方）；行 0 上方单设
+    var chanBelow = rows.map(function(r, i){
+      return i < rows.length - 1 ? { y: (rows[i].bot + rows[i + 1].top) / 2, use: 0 } : { y: rows[i].bot + 14, use: 0 };
+    });
+    var chanTop0 = { y: rows[0].top - 14, use: 0 };
+    function chanAbove(i){ return i > 0 ? chanBelow[i - 1] : chanTop0; }
+    function laneOff(chan){ var c = chan.use++; return ((c % 2 === 0) ? -1 : 1) * Math.ceil(c / 2) * 4; }
+    // 竖直廊道：相邻列间隙中点 + 盒边距外侧（远距离线的干线）
+    var cols = [];
+    sibs.slice().sort(function(a, b){ return a.cx - b.cx; }).forEach(function(g){
+      var last = cols[cols.length - 1];
+      if(last && Math.abs(last.x - g.cx) < 60) last.items.push(g);
+      else cols.push({ x: g.cx, items: [g] });
+    });
+    cols.forEach(function(c){
+      c.left = Math.min.apply(null, c.items.map(function(i){ return i.left; }));
+      c.right = Math.max.apply(null, c.items.map(function(i){ return i.right; }));
+    });
+    var corridors = [];
+    for(var ci = 0; ci < cols.length - 1; ci++) corridors.push({ x: (cols[ci].right + cols[ci + 1].left) / 2, use: 0 });
+    if(p._box){
+      corridors.unshift({ x: p._x - p._box.w / 2 + 8, use: 0 });
+      corridors.push({ x: p._x + p._box.w / 2 - 8, use: 0 });
+    } else {
+      corridors.unshift({ x: Math.min.apply(null, sibs.map(function(i){ return i.left; })) - 14, use: 0 });
+    }
+    // 第一遍：分类
+    var plans = [];
+    fes.forEach(function(fe){
+      if(!fe.a || !fe.b || fe.a._x == null || fe.b._x == null) return;
+      var A = geo(fe.a), B = geo(fe.b);
+      var ri = rowOf(A), rj = rowOf(B);
+      if(ri < 0 || rj < 0) return;
+      var pl = { fe: fe, A: A, B: B, ex: 'bot', en: 'top', chan: null };
+      if(ri === rj){
+        var blocking = rows[ri].items.filter(function(s){ return s.cx > Math.min(A.cx, B.cx) && s.cx < Math.max(A.cx, B.cx); });
+        if(B.cx > A.cx && !blocking.length){ pl.ex = 'right'; pl.en = 'left'; }
+        else { pl.chan = chanBelow[ri]; pl.en = 'bot'; }
+      } else if(rj === ri + 1){ pl.chan = chanBelow[ri]; }
+      else if(rj === ri - 1){ pl.chan = chanBelow[rj]; pl.ex = 'top'; pl.en = 'bot'; }
+      else {
+        pl.far = true;
+        pl.chanA = chanBelow[ri];
+        pl.chanB = chanAbove(rj);
+        var mid = (A.cx + B.cx) / 2, best = null;
+        corridors.forEach(function(co){ if(!best || Math.abs(co.x - mid) < Math.abs(best.x - mid)) best = co; });
+        pl.cor = best;
+        pl.corOff = ((best.use % 2 === 0) ? -1 : 1) * Math.ceil(best.use / 2) * 4; best.use++;
+      }
+      plans.push(pl);
+    });
+    // 第二遍：出入口展宽统计（同一卡同侧多线 → 横向错开）
+    var ports = {};
+    plans.forEach(function(pl){
+      [ [pl.A, pl.ex], [pl.B, pl.en] ].forEach(function(t){
+        var key = t[0].n.id + '|' + t[1];
+        (ports[key] = ports[key] || []).push(pl);
+      });
+    });
+    function portX(g, side, pl){
+      var arr = ports[g.n.id + '|' + side] || [pl];
+      var off = (arr.indexOf(pl) - (arr.length - 1) / 2) * 14;
+      return Math.max(g.left + 8, Math.min(g.right - 8, g.cx + off));
+    }
+    // 第三遍：生成正交路径（M/H/V）；标签=线牌（骑线优先 → 贴立柱 → 行上方兜底），全局防叠压
+    var out = '', labels = [];
+    plans.forEach(function(pl){
+      var A = pl.A, B = pl.B, d = '', segs = [];
+      function seg(x1, y1, x2, y2){ segs.push([x1, y1, x2, y2]); }
+      if(pl.ex === 'right' && pl.en === 'left'){
+        var yy = A.cy;
+        d = 'M ' + A.right + ' ' + yy + ' H ' + B.left;
+        seg(A.right, yy, B.left, yy);
+      } else if(pl.far){
+        var ay = pl.chanA.y + laneOff(pl.chanA), by = pl.chanB.y + laneOff(pl.chanB);
+        var mx = pl.cor.x + pl.corOff;
+        var ax = portX(A, 'bot', pl), bx = portX(B, 'top', pl);
+        d = 'M ' + ax + ' ' + A.bot + ' V ' + ay + ' H ' + mx + ' V ' + by + ' H ' + bx + ' V ' + B.top;
+        seg(ax, ay, mx, ay); seg(mx, ay, mx, by); seg(mx, by, bx, by);
+      } else {
+        var cy = pl.chan.y + laneOff(pl.chan);
+        var x1 = portX(A, pl.ex, pl), y1 = pl.ex === 'bot' ? A.bot : A.top;
+        var x2 = portX(B, pl.en, pl), y2 = pl.en === 'top' ? B.top : B.bot;
+        d = 'M ' + x1 + ' ' + y1 + ' V ' + cy + ' H ' + x2 + ' V ' + y2;
+        seg(x1, cy, x2, cy); seg(x1, y1, x1, cy); seg(x2, cy, x2, y2);
+      }
+      out += '<path d="'+d+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".78" marker-end="url(#arrowFlow)"/>';
+      if(pl.fe.label){
+        var w2 = pl.fe.label.length * 10.4 + 12;
+        var riA = rowOf(A), rowTop = riA >= 0 ? rows[riA].top : A.top;
+        var lastBot = rows[rows.length - 1].bot;
+        var cands = [];
+        var hRun = null;
+        segs.forEach(function(s){
+          var dx = Math.abs(s[2] - s[0]), dy = Math.abs(s[3] - s[1]);
+          if(dy < 0.5 && dx >= 8){
+            if(!hRun || dx > Math.abs(hRun[2] - hRun[0])) hRun = s;
+            [0.5, 0.32, 0.68].forEach(function(fr){
+              var below = s[1] > lastBot - 1; // 末行下方通道：牌挂线下侧，不折回压卡
+              cands.push({ x: s[0] + (s[2] - s[0]) * fr, y: s[1], mode: below ? 'below' : 'above', pri: dx });
+            });
+          } else if(dx < 0.5 && dy >= 10){
+            var my = (s[1] + s[3]) / 2;
+            cands.push({ x: s[0] + 6 + w2 / 2, y: my, mode: 'beside', pri: dy * 0.6 });
+            cands.push({ x: s[0] - 6 - w2 / 2, y: my, mode: 'beside', pri: dy * 0.6 - 1 });
+          }
+        });
+        if(hRun){ // 骑不住线的短连接：牌放到本行上方的线槽里
+          [0.5, 0.32, 0.68].forEach(function(fr){
+            cands.push({ x: hRun[0] + (hRun[2] - hRun[0]) * fr, y: rowTop - 12, mode: 'above', pri: 6 });
+          });
+        }
+        labels.push({ t: pl.fe.label, w: w2, cands: cands });
+      }
+    });
+    // 线牌全局落位：贪心选第一个不与已放牌/卡块冲突的候选（电工挂牌：先近线，冲突则顺线挪）
+    var placedR = [];
+    function rectOf(c, w){
+      if(c.mode === 'beside') return { x1: c.x - w / 2, y1: c.y - 9, x2: c.x + w / 2, y2: c.y + 9 };
+      if(c.mode === 'below') return { x1: c.x - w / 2, y1: c.y + 2, x2: c.x + w / 2, y2: c.y + 20 };
+      return { x1: c.x - w / 2, y1: c.y - 20, x2: c.x + w / 2, y2: c.y - 2 };
+    }
+    function hitBlock(r){
+      for(var i = 0; i < sibs.length; i++){
+        var b = sibs[i];
+        if(r.x1 < b.right - 2 && r.x2 > b.left + 2 && r.y1 < b.bot - 2 && r.y2 > b.top + 2) return true;
+      }
+      return false;
+    }
+    labels.forEach(function(L){
+      L.cands.sort(function(a, b){ return b.pri - a.pri; });
+      var pick = null;
+      L.cands.forEach(function(c){
+        if(pick) return;
+        var r = rectOf(c, L.w);
+        var clash = placedR.some(function(p){ return r.x1 < p.x2 - 1.5 && r.x2 > p.x1 + 1.5 && r.y1 < p.y2 - 1.5 && r.y2 > p.y1 + 1.5; });
+        if(!clash && !hitBlock(r)){ pick = c; placedR.push(r); }
+      });
+      if(!pick){ pick = L.cands[0]; placedR.push(rectOf(pick, L.w)); } // 兜底：冲突也放（至少不丢标签）
+      L.at = pick;
+    });
+    labels.forEach(function(L){
+      var r = rectOf(L.at, L.w), lx = (r.x1 + r.x2) / 2, ly = (r.y1 + r.y2) / 2;
+      out += '<rect x="'+r.x1+'" y="'+r.y1+'" width="'+L.w+'" height="18" rx="9" fill="#e3fafc" stroke="#66d9e8" stroke-width="1" opacity=".96"/>'
+        + '<text x="'+lx+'" y="'+(ly + 4)+'" text-anchor="middle" font-size="10" font-weight="600" fill="#0b7285" paint-order="stroke" stroke="#ffffff" stroke-width="2.5">'+esc(L.t)+'</text>';
+    });
+    return out;
+  }
+
   // 容器收纳布局（借鉴 whiteboard 分区排版）：root 直属分支 = 收纳盒（标题卡 + 内部网格流），
   // 盒内不再画连线（装进盒子即归属），根→盒保留短连线。折叠时盒子缩回头卡。
   function layoutTree(){
     measure(TREE);
     orderAll(TREE);
-    var PAD_X = 16, HEAD_GAP = 12, ROW_GAP = 12, COL_GAP = 14, BOX_GAP = 36, PAD_B = 16, MAX_ROW = 660;
+    var PAD_X = 16, HEAD_GAP = 34, ROW_GAP = 56, COL_GAP = 14, BOX_GAP = 36, PAD_B = 36, MAX_ROW = 660; // 行间留足线槽（gutter），线牌挂线不压卡
     var kids = visChildren(TREE);
     var boxes = [];
     kids.forEach(function(g){
       var hw = nodeW(g), hh = nodeH(g), gk = visChildren(g);
       g._box = null;
-      if(!gk.length){ g._h = hh; boxes.push({ g: g, w: hw, h: hh }); return; }
+      if(!gk.length){ g._h = hh; g._w = hw; boxes.push({ g: g, w: hw, h: hh }); return; }
       var rows = [{ items: [], w: 0, h: 0 }];
       gk.forEach(function(c){
         var bb = blockBox(c);
@@ -413,7 +594,7 @@ export function renderMindmapPage(feature: string): string {
       var w = Math.max(hw, innerW) + PAD_X * 2;
       var h = hh + HEAD_GAP + innerH + PAD_B;
       g._box = { w: w, h: h, rows: rows, hh: hh, hw: hw };
-      boxes.push({ g: g, w: w, h: h });
+      boxes.push({ g: g, w: w, h: h, hw: hw });
     });
     var totalH = 0;
     boxes.forEach(function(b, i){ totalH += b.h + (i ? BOX_GAP : 0); });
@@ -425,7 +606,7 @@ export function renderMindmapPage(feature: string): string {
       if(g._box){
         g._x = boxX + b.w / 2;
         g._y = top + g._box.hh / 2;
-        g._h = g._box.hh;
+        g._h = g._box.hh; g._w = b.hw;
         var ry = top + g._box.hh + HEAD_GAP;
         g._box.rows.forEach(function(row){
           var cx = boxX + (b.w - row.w) / 2;
@@ -476,34 +657,8 @@ export function renderMindmapPage(feature: string): string {
         edges += '<path d="M '+x1+' '+y1+' C '+mx+' '+y1+', '+mx+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="'+(n.kind==='user' ? 'rgba(230,119,0,.55)' : (n.kind==='feature' ? '#4dabf7' : '#adb5bd'))+'" stroke-width="'+(n.kind==='feature'?2.6:(n.kind==='user'?1.6:1.8))+'"/>';
       }
       nodes += renderNode(n);
-      // 流转连线：本层按设计事实排出的业务顺序（①→②→③），青色箭头，画在顶层 flowlayer——
-      // 线若画在卡片层之下会被整段盖住（间隙外的部分全隐身）。走线规则：
-      //   同行：右缘→左缘 水平弧（只经过列间空隙）
-      //   折行：底缘出→行间空隙→顶缘入 的 S 曲线（只走空白，不穿卡片也不藏卡后）
-      if(n._flowEdges){
-        n._flowEdges.forEach(function(fe){
-          var A = fe.a, B = fe.b;
-          if(!A || !B || A._x == null || B._x == null) return;
-          var d = '', lx = 0, ly = 0;
-          if(Math.abs(A._y - B._y) < 8 && B._x > A._x){
-            var x1 = A._x + A._w / 2, y1 = A._y, x2 = B._x - B._w / 2, y2 = B._y;
-            var dx = Math.max(30, Math.min(110, Math.abs(x2 - x1) * 0.45));
-            d = 'M '+x1+' '+y1+' C '+(x1 + dx)+' '+y1+', '+(x2 - dx)+' '+y2+', '+x2+' '+y2;
-            lx = (x1 + x2) / 2; ly = (y1 + y2) / 2 - 11;
-          } else {
-            var ax = A._x, ay = A._y + (A._h || nodeH(A)) / 2;
-            var bx = B._x, by = B._y - (B._h || nodeH(B)) / 2;
-            var yMid = (ay + by) / 2;
-            d = 'M '+ax+' '+ay+' C '+ax+' '+yMid+', '+bx+' '+yMid+', '+bx+' '+by;
-            lx = (ax + bx) / 2; ly = yMid - 11;
-          }
-          flowSvg += '<path d="'+d+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".75" marker-end="url(#arrowFlow)"/>';
-          if(fe.label){
-            flowSvg += '<rect x="'+(lx - fe.label.length * 5.2 - 6)+'" y="'+(ly - 9)+'" width="'+(fe.label.length * 10.4 + 12)+'" height="18" rx="9" fill="#e3fafc" stroke="#66d9e8" stroke-width="1" opacity=".96"/>'
-              + '<text x="'+lx+'" y="'+(ly + 4)+'" text-anchor="middle" font-size="10" font-weight="600" fill="#0b7285" paint-order="stroke" stroke="#ffffff" stroke-width="2.5">'+esc(fe.label)+'</text>';
-          }
-        });
-      }
+      // 流转连线：电工式正交布线（横平竖直、错道不重叠），画在顶层 flowlayer
+      if(n._flowEdges){ flowSvg += routeFlows(n); }
       var skip = (parent === TREE) && n._box; // 盒内直属卡不画连线：装进盒子即归属
       visChildren(n).forEach(function(c){ walk(c, n, skip); });
     })(TREE, null, false);
@@ -515,7 +670,7 @@ export function renderMindmapPage(feature: string): string {
     var perTarget = {};
     ANNS.forEach(function(a){ (perTarget[a.target_id] = perTarget[a.target_id] || []).push(a); });
     Object.keys(perTarget).forEach(function(tid){
-      var t = NODE_BY_ID[tid]; if(!t) return;
+      var t = NODE_BY_ID[tid]; if(!t || t._x == null) return; // 目标未上树（空壳清理/折叠）：便签不渲染
       perTarget[tid].forEach(function(a, k){
         if(a.pos){ a._x = a.pos.x; a._y = a.pos.y; }
         else {
