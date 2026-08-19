@@ -115,3 +115,17 @@ export function closeAllProjectCacheDbs(): void {
   }
   projectCachePool.clear();
 }
+
+/** 关闭单个项目的池化缓存连接（harvest_from_url 收尾删临时目录前释放文件句柄，Windows EBUSY） */
+export function closeProjectCacheDb(projectRoot: string): void {
+  const key = path.resolve(projectRoot);
+  const db = projectCachePool.get(key);
+  if (db) {
+    try {
+      db.close();
+    } catch {
+      /* 已关闭 */
+    }
+    projectCachePool.delete(key);
+  }
+}

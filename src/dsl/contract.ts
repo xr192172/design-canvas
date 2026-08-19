@@ -96,3 +96,45 @@ export interface BrickContract {
     last_reconciled?: string;
   };
 }
+
+/**
+ * 积木级清单（注册表：`<dataHome>/.design-canvas/bricks/<name>/manifest.json`）
+ *
+ * 积木 = 动态拎取产物（种子 + 传递闭包），不进 DSL（防膨胀）。
+ * 三件套快照（Phase 2.7 决策）：
+ *   manifest.json —— 本类型（清单+聚合契约，检索货架用）
+ *   contracts.json —— 闭包全体文件的 BrickContract
+ *   files/<rel> —— 闭包文件内容（自包含，原项目不保留）
+ */
+export interface BrickManifest {
+  name: string;
+  schema_version: 1;
+  seed_files: string[];
+  /** 闭包（harvest_closure 输出入档：内部文件 + 外部依赖三分类） */
+  closure: {
+    internal: string[];
+    external: Array<{ source: string; class: 'stdlib' | 'third_party' | 'unresolved' }>;
+  };
+  /** 聚合视图：各成员文件 contract 的并集（检索/匹配的货架卡片） */
+  aggregate: {
+    exposes: ShapeSchema[];
+    consumes: ShapeSchema[];
+    emits: string[];
+    reads_config: string[];
+    /** 不可逆 effect 计数（writes/holds 中无 reversible 的）——空间可组合性风险提示 */
+    irreversible_effects: number;
+  };
+  /** 匹配记录：某次"端口需求 vs 本积木"判定历史（可追溯为何选用/弃用） */
+  matches?: Array<{
+    port: string;
+    verdict: 'exact' | 'adapt' | 'incompatible';
+    adapter_file?: string;
+    at: string;
+  }>;
+  /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
+  provenance?: {
+    source_project?: string;
+    commit?: string;
+    harvested_at?: string;
+  };
+}

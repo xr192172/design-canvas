@@ -36,6 +36,8 @@ import { extractContracts } from './tools/extract_contracts.js';
 import type { ExtractContractsInput } from './tools/extract_contracts.js';
 import { reconcileEffects } from './tools/reconcile_effects.js';
 import type { ReconcileEffectsInput } from './tools/reconcile_effects.js';
+import { harvestFromUrl } from './tools/harvest_from_url.js';
+import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -726,6 +728,43 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await reconcileEffects(a as unknown as ReconcileEffectsInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'harvest_from_url',
+    title: 'Harvest bricks from a git URL or local project into the brick box',
+    description:
+      '积木抽取编排（Brick Harvest Phase 3）：一句"这个项目好，抽它"的完整链——' +
+      '浅克隆（或本地目录原地）→ import_project 索引 → extract_contracts 契约 → ' +
+      '选积木（显式 seeds 或 auto：functional+fan_in≥2+confidence≥0.7 按 fan_in 降序）→ ' +
+      'harvest_closure 闭包 → 入盒三件套（files/ 快照 + contracts.json + manifest.json 聚合清单），' +
+      '默认盒 <dataHome>/.design-canvas/bricks/。原项目只留 provenance 冷记录（URL+commit），不保留工作副本；' +
+      '上游更新凭记录重抽即覆盖。单积木闭包>50 文件自动跳过（防整项目端走）。',
+    inputSchema: {
+      source: z.string().describe('git URL（浅克隆）或本地目录绝对路径（原地分析不写源项目）'),
+      bricks: z
+        .array(
+          z.object({
+            name: z.string().optional().describe('积木名（缺省 <repo>__<种子文件名>）'),
+            seeds: z.array(z.string()).describe('种子文件（相对项目根）'),
+          }),
+        )
+        .optional()
+        .describe('显式积木规格（一组种子一个积木）；缺省走 auto 模式'),
+      auto: z
+        .object({
+          max_bricks: z.number().optional().describe('最多抽几块（默认 5）'),
+          min_fan_in: z.number().optional().describe('种子最低 fan_in（默认 2）'),
+        })
+        .optional()
+        .describe('auto 模式参数（bricks 未提供时生效）'),
+      max_closure: z.number().optional().describe('单积木闭包文件数上限（默认 50）'),
+      box_dir: z.string().optional().describe('积木盒根目录（默认 <dataHome>/.design-canvas/bricks）'),
+      write: z.boolean().optional().describe('false=dry-run 只预演不入盒，默认 true'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await harvestFromUrl(a as unknown as HarvestFromUrlInput);
       return { message: r.message, data: r };
     }),
   },

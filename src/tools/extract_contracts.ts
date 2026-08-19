@@ -45,6 +45,9 @@ export interface ExtractContractsInput {
   files?: string[];
   /** 默认 true：feature 提供时写回 DSL；false = 只读预演（dry-run） */
   write_dsl?: boolean;
+  /** true 时结果携带 contracts（path→BrickContract 全量本体）。编排层（harvest_from_url）
+   *  内部消费用；MCP 直接调用勿开——大项目全量契约会撑爆返回 token */
+  return_contracts?: boolean;
 }
 
 export interface FileContractReport {
@@ -70,6 +73,8 @@ export interface ExtractContractsResult {
   feature?: string;
   written_to_dsl: boolean;
   files: FileContractReport[];
+  /** return_contracts=true 时填充：path → BrickContract 全量本体（编排层内部消费） */
+  contracts?: Record<string, BrickContract>;
   stats: {
     total: number;
     business: number;
@@ -597,6 +602,7 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
     feature,
     written_to_dsl: written,
     files: reports,
+    ...(input.return_contracts ? { contracts: Object.fromEntries(contracts) } : {}),
     stats: {
       total: reports.length,
       business,

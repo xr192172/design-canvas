@@ -238,7 +238,15 @@ interface BrickManifest {
 4. **二分线精确化：能力 = 功能线，决策 = 业务线**：生图管线（prompt 组装/API 调用/落盘/路径管理）是功能积木，跨项目可复用；"这个页面要什么图、配什么文案、怎么布局"是业务线。CSS/主题系统/设计 token 是功能积木，只有页面级组装决策是业务。前端项目里功能线远多于直觉判断
 5. **camera 插桩精度：定向补 effects 探针，不全面细化**：函数级插桩对调用链观测够用，但 Phase 2b 的 writes/holds/emits 证据给不了（函数级 Capture 不知道写了哪个全局变量/占了哪个端口）。解法是动静结合在 effects 上的应用——AST 静态筛候选点（全局赋值/单例字段写/文件写/端口监听/chan send/emit 调用）→ 只在候选点插桩 → 执行时 Capture target+值摘要。不做全量语句级插桩（爆炸，违反 bounded memory 硬约束）
 
-### Phase 3：三项目试验（端到端验收）
+### Phase 3：编排工具 ✅ + 三项目试验（端到端验收）
+
+**编排工具已落地** ✅ 2026-08-20（harvest_from_url）：
+- `harvest_from_url` MCP 工具：一句"这个项目好，抽它"的完整链——浅克隆（git URL）/本地目录原地 → walkFiles+syncProject 纯建索引（不走 importProject，避免写 DSL feature 污染列表）→ extract_contracts（return_contracts 内部消费契约本体，MCP 直调勿开防 token 爆）→ 选积木（显式 seeds 或 auto：functional + fan_in≥2 + confidence≥0.7 按 fan_in 降序，静态封顶恰 0.7 所以 ≥ 成立）→ harvest_closure 闭包 → 入盒三件套
+- 积木盒落位（Phase 2.7 决策实现）：`<dataHome>/.design-canvas/bricks/<name>/` 下 manifest.json（BrickManifest：闭包档案+聚合契约+provenance 冷记录）+ contracts.json（闭包全体 BrickContract）+ files/（闭包文件快照）；同名重抽 = 覆盖更新（replaced 标记）；单积木闭包 >50 文件自动跳过（防整项目端走）
+- 工程细节：extract_contracts/harvest_closure 经 getProjectCacheDb 连接池占住 cache.db 句柄，harvest 收尾必须 closeProjectCacheDb 释放（Windows 删临时目录 EBUSY 实测踩坑）
+- 7 单测全绿：本地全链三件套/auto 选积木（fan_in=3 util 唯一够格）/dry-run/闭包超限跳过/重抽替换/种子缺失/git URL e2e（file:// 浅克隆 + commit 记录 + 临时目录清理）
+
+**三项目试验**（待做）：
 - 试验场：design-canvas（TS）+ agent-shell（Go）+ cross-border-scout（TS/Node），三种异构真库
 - 流程：导入三项目 → 建索引 → 用户指定功能（如"LLM 调用封装"，三项目各有实现，顺便验语义去重）→ 检索、算闭包、出契约清单 → 拼新 DSL → 思维导图验收新积木盒
 - 可选加验：指定一个老依赖，演示契约匹配 + 适配器替换全过程
