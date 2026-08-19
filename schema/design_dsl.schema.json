@@ -195,7 +195,92 @@
           "items": { "type": "string" }
         },
         "expected_behavior": { "type": "string" },
-        "layer": { "type": "string", "description": "架构层 id（序号5：architecture-analyzer 推断，如 api/service/data/ui）" }
+        "layer": { "type": "string", "description": "架构层 id（序号5：architecture-analyzer 推断，如 api/service/data/ui）" },
+        "contract": { "$ref": "#/definitions/BrickContract" }
+      }
+    },
+    "BrickContract": {
+      "type": "object",
+      "required": ["schema_version", "role", "shapes", "effects"],
+      "properties": {
+        "schema_version": { "type": "number", "enum": [1] },
+        "role": {
+          "type": "object",
+          "required": ["class", "basis", "confidence"],
+          "properties": {
+            "class": { "type": "string", "enum": ["business", "functional", "hybrid"] },
+            "basis": { "type": "string", "enum": ["graph", "runtime", "llm", "mixed"] },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "reasons": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "shapes": {
+          "type": "object",
+          "required": ["exposes", "consumes"],
+          "properties": {
+            "exposes": { "type": "array", "items": { "$ref": "#/definitions/ShapeSchema" } },
+            "consumes": { "type": "array", "items": { "$ref": "#/definitions/ShapeSchema" } }
+          }
+        },
+        "effects": {
+          "type": "object",
+          "required": ["writes", "holds", "emits", "reads_config"],
+          "properties": {
+            "writes": { "type": "array", "items": { "$ref": "#/definitions/EffectTarget" } },
+            "holds": { "type": "array", "items": { "$ref": "#/definitions/EffectTarget" } },
+            "emits": { "type": "array", "items": { "type": "string" } },
+            "reads_config": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "required": ["call_count", "top_callers", "observed_targets"],
+          "properties": {
+            "call_count": { "type": "number" },
+            "top_callers": { "type": "array", "items": { "type": "string" } },
+            "observed_targets": { "type": "array", "items": { "type": "string" } },
+            "last_seen": { "type": "string" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "source_project": { "type": "string" },
+            "commit": { "type": "string" },
+            "harvested_at": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ShapeSchema": {
+      "type": "object",
+      "required": ["name", "kind", "fields", "origin"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string", "enum": ["struct", "interface", "type", "class"] },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "properties": {
+              "name": { "type": "string" },
+              "type": { "type": "string" },
+              "required": { "type": "boolean" }
+            }
+          }
+        },
+        "origin": { "type": "string", "enum": ["ast", "runtime", "llm"] },
+        "notes": { "type": "string" }
+      }
+    },
+    "EffectTarget": {
+      "type": "object",
+      "required": ["target", "op"],
+      "properties": {
+        "target": { "type": "string" },
+        "op": { "type": "string", "enum": ["write", "append", "delete", "acquire", "release"] },
+        "reversible": { "type": "string" }
       }
     },
     "Annotation": {

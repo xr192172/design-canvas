@@ -32,6 +32,8 @@ import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
 import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
+import { extractContracts } from './tools/extract_contracts.js';
+import type { ExtractContractsInput } from './tools/extract_contracts.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -675,6 +677,31 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = harvestClosure(a as unknown as HarvestClosureInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'extract_contracts',
+    title: 'Extract brick contracts (role/shapes/effects) for project files',
+    description:
+      '积木契约提取（Brick Harvest Phase 2，静态阶段）：给项目文件生成 BrickContract——' +
+      'role（业务/功能二分：依赖方向图算法，零 token，"功能不依赖业务，业务组装功能"）、' +
+      'shapes（struct/interface/class 数据形状+字段，结构化类型匹配的判定单元）、' +
+      'effects.reads_config（env/flag 读取点=积木出厂环境要求）。' +
+      '提供 feature 时写回 DSL 的 SemanticFile.contract（write_dsl=false 可只读预演）。' +
+      'writes/holds/emits 留待 camera 运行证据（Phase 2b）。LLM 不产生事实：结构化字段只接受 AST/camera 源。' +
+      '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md Phase 2.5。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      feature: z.string().optional().describe('提供时把 contract 写回该 feature 的 DSL（SemanticFile.contract）'),
+      files: z
+        .array(z.string())
+        .optional()
+        .describe('限定提取范围的文件（相对项目根）；缺省 = 全部已索引文件'),
+      write_dsl: z.boolean().optional().describe('默认 true 写回 DSL；false = 只读预演（dry-run）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = extractContracts(a as unknown as ExtractContractsInput);
       return { message: r.message, data: r };
     }),
   },

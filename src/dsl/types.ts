@@ -42,6 +42,14 @@ export type {
 } from './semantic.js';
 
 export type {
+  BrickContract,
+  BrickRole,
+  ShapeSchema,
+  ShapeField,
+  EffectTarget,
+} from './contract.js';
+
+export type {
   ApprovalStatus,
   ApprovalHistoryEntry,
   Annotation,

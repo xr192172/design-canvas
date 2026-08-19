@@ -22,13 +22,7 @@
 import path from 'node:path';
 import { getDSL } from '../storage.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
-import {
-  resolveImport,
-  readGoModules,
-  buildIndex,
-  type FileEntry,
-} from './import_project.js';
-import type { ParsedImport } from './ts_kernel/kernel.js';
+import { buildImportGraph } from './import_graph.js';
 
 export interface HarvestClosureInput {
   /** 被分析项目的根目录（其下 .design-canvas/cache.db 是符号缓存） */
@@ -181,52 +175,9 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
     else warnings.push(`种子文件 ${rel} 不在缓存中（可能未同步或非受支持语言），已跳过。`);
   }
 
-  // ── 文件级 import 邻接表（importee 方向 = 拎取方向；可选 importer 方向）──
-  // 两个数据源取并集：
-  //   a) edges 表已解析的 import 边（TS 相对导入——import_project 建缓存时写入）
-  //   b) imports 表原始记录经 resolveImport 权威解析（Go 包路径 / Python 点分模块
-  //      不进 edges 表，须重走与 import_project 相同的解析规则，避免两套真相）
-  const importeeOf = new Map<string, Array<{ to: string; line: number | null }>>(); // 导入方 → 被导入文件
-  const importerOf = new Map<string, Array<{ to: string; line: number | null }>>(); // 被导入文件 → 导入方
-  const addEdge = (src: string, dst: string, line: number | null): void => {
-    let ie = importeeOf.get(src);
-    if (!ie) importeeOf.set(src, (ie = []));
-    if (!ie.some((x) => x.to === dst)) ie.push({ to: dst, line });
-    let im = importerOf.get(dst);
-    if (!im) importerOf.set(dst, (im = []));
-    if (!im.some((x) => x.to === src)) im.push({ to: src, line });
-  };
-  const edgeRows = db
-    .prepare("SELECT source, target, line FROM edges WHERE kind = 'import'")
-    .all() as Array<{ source: string; target: string; line: number | null }>;
-  for (const e of edgeRows) addEdge(e.source, e.target, e.line);
-
-  // 原始 import 记录的权威解析（Go/Python 补齐；TS relative 与 edges 重复自动去重）
-  const allFileRows = db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
-  const fileEntries: FileEntry[] = allFileRows.map((r) => {
-    const ext = path.posix.extname(r.path);
-    return {
-      rel: r.path,
-      abs: path.join(root, r.path),
-      ext,
-      dir: path.posix.dirname(r.path),
-    };
-  });
-  const index = buildIndex(fileEntries);
-  const goModules = readGoModules(root);
-  // 原始 package 导入是否解析到项目内（解析到 → 内部闭包成员；解析不到 → 外部依赖）
-  const packageResolved = new Map<string, boolean>(); // `${file_path}:${line}` → 是否内部
-  for (const f of fileEntries) {
-    const rows = db
-      .prepare('SELECT source, line, kind FROM imports WHERE file_path = ?')
-      .all(f.rel) as Array<{ source: string; line: number; kind: string }>;
-    for (const r of rows) {
-      const imp: ParsedImport = { source: r.source, kind: r.kind as ParsedImport['kind'], line: r.line };
-      const targets = resolveImport(imp, f, index, goModules);
-      packageResolved.set(`${f.rel}:${r.line}`, targets.length > 0);
-      for (const t of targets) addEdge(f.rel, t.rel, r.line);
-    }
-  }
+  // ── 文件级 import 邻接表（与 extract_contracts 共用 buildImportGraph，单一真相源）──
+  // edges 表已解析边 ∪ 原始 imports 权威解析（Go 包路径/Python 模块不进 edges 表）
+  const { importeeOf, importerOf, packageResolved } = buildImportGraph(db, root);
 
   // ── 闭包 BFS：importee 方向必走；include_callers 时 importer 方向也走 ──
   // 首达信息（depth / imported_by / import line）记 importee 侧；callers 侧只标 depth。

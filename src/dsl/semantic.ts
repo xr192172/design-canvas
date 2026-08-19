@@ -3,6 +3,7 @@
  */
 
 import type { DiagramStatus } from './geometry.js';
+import type { BrickContract } from './contract.js';
 
 /** 预期 API */
 export interface ExpectedApi {
@@ -56,6 +57,8 @@ export interface SemanticFile {
   lines?: number;
   /** 架构层 id（序号5：architecture-analyzer 按路径启发式推断，如 api/service/data/ui） */
   layer?: string;
+  /** 积木契约（Phase 2 契约提取填充；缺省 = 契约未提取） */
+  contract?: BrickContract;
 }
 
 /** 代码模板配置 */
