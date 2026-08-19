@@ -111,6 +111,9 @@ export interface MindMap {
   root: MindMapNode;
   /** 功能间依赖叠加层（teach：从 cache.db 真实调用边聚合；画布渲染为虚线弧） */
   deps?: FeatureDep[];
+  /** 文件间流转链（设计视图 geometry.edges 的投影，file→file）：
+   *  思维导图按此给盒内卡片排出 1→2→3 业务顺序并画连线（顺序来自设计事实，不按字母序） */
+  flows?: Array<{ from: string; to: string; label?: string }>;
   /** 底座功能名列表（被 ≥2 个功能调用且几乎不调用别人的基建，树内排首位 + 🧱 徽章） */
   foundations?: string[];
   /** 共享能力文件（跨功能被调 ≥3 次的"隐形地板"，树内 🧰 分支，排在功能之前） */

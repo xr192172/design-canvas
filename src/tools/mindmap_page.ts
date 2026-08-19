@@ -38,16 +38,18 @@ export function renderMindmapPage(feature: string): string {
   <div id="canvas-wrap">
     <svg id="mm" xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <radialGradient id="gRoot" cx="35%" cy="30%"><stop offset="0%" stop-color="#1e4e86"/><stop offset="100%" stop-color="#0d2140"/></radialGradient>
-        <radialGradient id="gFeat" cx="35%" cy="30%"><stop offset="0%" stop-color="#16406b"/><stop offset="100%" stop-color="#0b1e38"/></radialGradient>
         <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 1 L 9 5 L 0 9 z" fill="rgba(251,146,60,.9)"/>
+          <path d="M 0 1 L 9 5 L 0 9 z" fill="#e8590c"/>
+        </marker>
+        <marker id="arrowFlow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9 z" fill="#15aabf"/>
         </marker>
       </defs>
       <g id="vp">
         <g id="edges"></g>
         <g id="deplayer"></g>
         <g id="nodes"></g>
+        <g id="flowlayer"></g>
         <g id="notes"></g>
       </g>
     </svg>
@@ -61,51 +63,53 @@ export function renderMindmapPage(feature: string): string {
     <textarea id="ed-text" placeholder="写你的理解、纠正、问题……&#10;例如：这一步其实先查缓存；这个功能应该叫配置中心"></textarea>
     <div class="ed-btns"><button id="ed-cancel">取消</button><button id="ed-ok" class="primary">确定</button></div>
   </div>
-  <div id="hint">点节点看详情 · 点左侧圆点折叠 · hover 节点点 ⊕ 新增分支 · 双击 AI 节点写批注 / 双击自己的节点改字 · <b style="color:#d8b4fe;">加新功能：根节点写构想 → 保存 → AI 自动定位挂上去（🔮）</b></div>
+  <div id="hint">点节点看详情 · 点左侧圆点折叠 · hover 节点点 ⊕ 新增分支 · 双击 AI 节点写批注 / 双击自己的节点改字 · <b>青色连线 + 序号 = 业务流转顺序（1→2→3）</b> · <b>加新功能：根节点写构想 → 保存 → AI 自动定位挂上去（🔮）</b></div>
   <style>
     html, body { height: 100%; overflow: hidden; }
+    body { background-color: #f5faff; background-image: radial-gradient(#ced4da 1.1px, transparent 1.1px); background-size: 22px 22px; color: #1e1e1e; font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif; }
     .wrap { max-width: none; margin: 0; padding: 0; }
-    .mm-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.85); position: relative; z-index: 6; }
-    .mm-top .back { font-size: 14px; font-weight: 700; }
+    .mm-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid #e9ecef; background: rgba(255,255,255,.92); backdrop-filter: blur(4px); position: relative; z-index: 6; }
+    .mm-top .back { font-size: 14px; font-weight: 700; color: #1e1e1e; }
     .mm-top .tools { display: flex; gap: 10px; align-items: center; }
-    .mm-top button { background: rgba(6,11,31,.7); color: #7dd3fc; font-size: 12.5px; border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
-    .lv-group { display: inline-flex; align-items: center; gap: 4px; background: rgba(6,11,31,.7); border: 1px solid rgba(125,211,252,.35); border-radius: 8px; padding: 2px 8px 2px 10px; }
-    .lv-label { font-size: 11px; color: #5b7ba6; margin-right: 2px; }
-    .lv-btn { border: none !important; padding: 4px 10px !important; border-radius: 6px !important; background: transparent !important; color: #5b7ba6 !important; }
-    .lv-btn.lv-on { background: rgba(125,211,252,.18) !important; color: #7dd3fc !important; font-weight: 700; }
-    .mm-top button:hover:not(:disabled) { background: rgba(125,211,252,.14); }
+    .mm-top button { background: #fff; color: #364fc7; font-size: 12.5px; border: 1.5px solid #a5d8ff; border-radius: 10px; padding: 6px 14px; cursor: pointer; }
+    .lv-group { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1.5px solid #a5d8ff; border-radius: 10px; padding: 2px 8px 2px 10px; }
+    .lv-label { font-size: 11px; color: #748ffc; margin-right: 2px; }
+    .lv-btn { border: none !important; padding: 4px 10px !important; border-radius: 6px !important; background: transparent !important; color: #748ffc !important; }
+    .lv-btn.lv-on { background: #d0ebff !important; color: #1971c2 !important; font-weight: 700; }
+    .mm-top button:hover:not(:disabled) { background: #e7f5ff; }
     .mm-top button:disabled { opacity: .4; cursor: not-allowed; }
-    #save-state { font-size: 12px; color: #fbbf24; min-width: 60px; }
+    #save-state { font-size: 12px; color: #e8590c; min-width: 60px; }
     #canvas-wrap { position: absolute; inset: 52px 0 0 0; cursor: grab; }
     #canvas-wrap:active { cursor: grabbing; }
     #mm { width: 100%; height: 100%; display: block; }
     .mnode { cursor: pointer; }
     .mnode .addbtn, .mnode .delbtn { opacity: 0; transition: opacity .12s; }
     .mnode:hover .addbtn, .mnode:hover .delbtn { opacity: 1; }
-    .mnode.sel rect, .mnode.sel circle { stroke: #7dd3fc !important; stroke-width: 2.6 !important; filter: drop-shadow(0 0 8px rgba(125,211,252,.5)); }
+    .mnode.sel rect, .mnode.sel circle { stroke: #1971c2 !important; stroke-width: 3 !important; filter: drop-shadow(0 3px 8px rgba(25,113,194,.35)); }
     .fold { cursor: pointer; }
-    .fold:hover { filter: drop-shadow(0 0 6px rgba(125,211,252,.8)); }
+    .fold:hover { filter: drop-shadow(0 2px 5px rgba(25,113,194,.45)); }
     .note { cursor: move; }
-    .note:hover rect { stroke: #fbbf24; filter: drop-shadow(0 0 8px rgba(251,191,36,.35)); }
+    .note:hover rect { stroke: #e8590c; filter: drop-shadow(0 3px 8px rgba(232,89,12,.3)); }
     #inline-ed { position: fixed; z-index: 40; transform: translate(-4px, -50%); }
-    #inline-text { width: 190px; background: rgba(251,191,36,.12); color: #fde9c0; border: 1.5px dashed rgba(251,191,36,.75); border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; outline: none; }
-    #inline-text:focus { border-style: solid; background: rgba(251,191,36,.18); }
-    #detail { position: fixed; left: 20px; bottom: 20px; max-width: 520px; background: rgba(6,11,31,.94); border: 1px solid rgba(125,211,252,.3); border-left: 3px solid #7dd3fc; border-radius: 12px; padding: 14px 18px; font-size: 13px; line-height: 1.7; z-index: 20; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
-    #detail b { font-size: 14.5px; color: #e8f1ff; }
-    #detail .tag { font-size: 11px; color: #7dd3fc; border: 1px solid rgba(125,211,252,.4); border-radius: 10px; padding: 1px 9px; margin-left: 10px; vertical-align: 2px; }
-    #detail p { margin-top: 8px; color: #c9dcf5; }
-    #detail .mynote { color: #fde9c0; }
-    #detail .files { font-size: 11px; color: #7a93b8; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
-    #detail .danger { margin-top: 10px; background: rgba(120,20,40,.35); color: #fda4af; font-size: 12px; border: 1px solid rgba(244,63,94,.4); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
-    #editor { position: fixed; inset: 0; background: rgba(2,4,13,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 50; }
-    #editor > div { width: 400px; background: rgba(10,18,42,.98); border: 1px solid rgba(125,211,252,.35); border-radius: 14px; padding: 18px 20px; }
-    .ed-title { font-size: 14px; font-weight: 700; color: #e8f1ff; margin-bottom: 10px; }
-    .ed-title em { font-style: normal; font-size: 12px; color: #fbbf24; margin-left: 8px; }
-    #ed-text { width: 100%; height: 90px; background: rgba(6,11,31,.9); color: #e8f1ff; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; resize: vertical; }
+    #inline-text { width: 190px; background: #fff9b2; color: #5c4400; border: 1.5px dashed #e67700; border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; outline: none; box-shadow: 0 3px 10px rgba(0,0,0,.12); }
+    #inline-text:focus { border-style: solid; background: #fff3bf; }
+    #detail { position: fixed; left: 20px; bottom: 20px; max-width: 520px; background: #ffffff; border: 1px solid #dee2e6; border-left: 4px solid #4dabf7; border-radius: 12px; padding: 14px 18px; font-size: 13px; line-height: 1.7; z-index: 20; box-shadow: 0 8px 24px rgba(50,60,80,.14); color: #343a40; }
+    #detail b { font-size: 14.5px; color: #1e1e1e; }
+    #detail .tag { font-size: 11px; color: #1971c2; border: 1px solid #a5d8ff; border-radius: 10px; padding: 1px 9px; margin-left: 10px; vertical-align: 2px; background: #e7f5ff; }
+    #detail p { margin-top: 8px; color: #495057; }
+    #detail .mynote { color: #e8590c; }
+    #detail .files { font-size: 11px; color: #868e96; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+    #detail .danger { margin-top: 10px; background: #fff5f5; color: #e03131; font-size: 12px; border: 1px solid #ffc9c9; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+    #editor { position: fixed; inset: 0; background: rgba(240,244,255,.55); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; z-index: 50; }
+    #editor > div { width: 400px; background: #ffffff; border: 1px solid #dee2e6; border-radius: 14px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(50,60,80,.18); }
+    .ed-title { font-size: 14px; font-weight: 700; color: #1e1e1e; margin-bottom: 10px; }
+    .ed-title em { font-style: normal; font-size: 12px; color: #e8590c; margin-left: 8px; }
+    #ed-text { width: 100%; height: 90px; background: #f8f9fa; color: #343a40; border: 1px solid #ced4da; border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; resize: vertical; }
     .ed-btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
-    .ed-btns button { background: rgba(6,11,31,.8); color: #c9dcf5; font-size: 13px; border: 1px solid rgba(125,211,252,.3); border-radius: 8px; padding: 6px 16px; cursor: pointer; }
-    .ed-btns .primary { background: rgba(125,211,252,.18); color: #7dd3fc; font-weight: 700; }
-    #hint { position: fixed; right: 20px; bottom: 20px; font-size: 11.5px; color: #7a93b8; opacity: .85; background: rgba(6,11,31,.7); border-radius: 8px; padding: 5px 12px; z-index: 15; max-width: 460px; }
+    .ed-btns button { background: #fff; color: #495057; font-size: 13px; border: 1px solid #ced4da; border-radius: 8px; padding: 6px 16px; cursor: pointer; }
+    .ed-btns .primary { background: #a5d8ff; color: #1864ab; border-color: #4dabf7; font-weight: 700; }
+    #hint { position: fixed; right: 20px; bottom: 20px; font-size: 11.5px; color: #5c6770; opacity: .92; background: rgba(255,255,255,.94); border: 1px solid #e9ecef; border-radius: 8px; padding: 5px 12px; z-index: 15; max-width: 460px; box-shadow: 0 2px 8px rgba(50,60,80,.08); }
+    #hint b { color: #6741d9; }
   </style>`;
 
   const script = `
@@ -123,6 +127,7 @@ export function renderMindmapPage(feature: string): string {
     UNODES = rs2.user_nodes || [];
     DEPS = ((OV.mind_map && OV.mind_map.deps) || []).slice();
     FOUNDATIONS = (OV.mind_map && OV.mind_map.foundations) || [];
+    FLOWS = ((OV.mind_map && OV.mind_map.flows) || []).slice();
     // 构想的预判依赖：紫色"预判"弧（区别于真实调用证据的橙色弧）
     ((OV.mind_map && OV.mind_map.proposals) || []).forEach(function(pp){
       (pp.depends_on || []).forEach(function(d){ DEPS.push({ from: pp.title, to: d, weight: 0, _pred: true }); });
@@ -265,15 +270,34 @@ export function renderMindmapPage(feature: string): string {
 
   // ── 水平树布局（tidy tree：叶子行高累加，父垂直居中于子块） ──
   var LEAF_H = 36, MIN_H = 40, GAP = 14, BRANCH_GAP = 48;
-  function nodeLines(n){
-    var per = n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : ((n.kind === 'shared' || n.kind === 'file') ? 16 : 11));
-    return wrap(n.label || '', per);
+  function nodePer(n){ return n.kind === 'step' ? 10 : (n.kind === 'root' ? 8 : ((n.kind === 'shared' || n.kind === 'file') ? 16 : 11)); }
+  function nodeLines(n){ return wrap(n.label || '', nodePer(n)); }
+  // 卡片介绍行：所有内容卡片直接画介绍（不用点击才知道）。描述按换行分段，
+  // 以"→"开头的段是增量/借鉴标注，渲染成紫色区分"是什么"与"要变什么"
+  function descLines(n){
+    if(n.kind === 'root' || n.kind === 'note' || n.kind === 'user' || n.kind === 'step') return [];
+    var d = n.raw && n.raw.description;
+    if(!d) return [];
+    var segs = String(d).split('\\n').map(function(s){ return s.trim(); }).filter(Boolean);
+    var per = nodePer(n) + 4;
+    var budget = (n.kind === 'feature' || n.kind === 'proposal') ? 3 : 2;
+    var out = [];
+    for(var i = 0; i < segs.length && out.length < budget; i++){
+      var isDelta = segs[i].charAt(0) === '→';
+      var w = wrap(segs[i], per);
+      for(var j = 0; j < w.length && out.length < budget; j++) out.push({ t: w[j], delta: isDelta });
+    }
+    return out;
   }
-  function nodeH(n){ var ls = nodeLines(n); return Math.max(MIN_H, 22 + ls.length * 15); }
+  function nodeH(n){
+    var ls = nodeLines(n), ds = descLines(n);
+    return Math.max(MIN_H, 22 + ls.length * 15 + (ds.length ? ds.length * 12.5 + 5 : 0));
+  }
   function nodeW(n){
-    var ls = nodeLines(n), maxLen = 0;
+    var ls = nodeLines(n), ds = descLines(n), maxLen = 0;
     ls.forEach(function(ln){ if(ln.length > maxLen) maxLen = ln.length; });
-    var min = n.kind === 'root' ? 120 : (n.kind === 'feature' ? 104 : 88);
+    ds.forEach(function(dl){ if(dl.t.length * 0.78 > maxLen) maxLen = Math.ceil(dl.t.length * 0.78); });
+    var min = n.kind === 'root' ? 120 : (n.kind === 'feature' ? 116 : 88);
     return Math.max(min, maxLen * 12.5 + 28);
   }
   function collapsed(n){ return !!COLLAPSED[n.id] && n.children.length > 0; }
@@ -296,7 +320,125 @@ export function renderMindmapPage(feature: string): string {
     var blockTop = yTop, blockH = childH;
     n._y = blockTop + blockH / 2;
   }
-  function layoutTree(){ measure(TREE); place(TREE, 0, 0); }
+  // 子树块包围盒：先在原点 place 一遍，再取全子树的 x/y 极值（place 同形确定，可整体平移复用）
+  function blockBox(n){
+    place(n, 0, 0);
+    var b = { x1: 1e9, y1: 1e9, x2: -1e9, y2: -1e9 };
+    (function w2(m){
+      if(m._x - m._w/2 < b.x1) b.x1 = m._x - m._w/2;
+      if(m._y - (m._h||nodeH(m))/2 < b.y1) b.y1 = m._y - (m._h||nodeH(m))/2;
+      if(m._x + m._w/2 > b.x2) b.x2 = m._x + m._w/2;
+      if(m._y + (m._h||nodeH(m))/2 > b.y2) b.y2 = m._y + (m._h||nodeH(m))/2;
+      visChildren(m).forEach(w2);
+    })(n);
+    return b;
+  }
+  // ── 流转顺序：按设计图层手绘流转边（file→file）排卡片，替代字母序 ──
+  // 对任意层级的可见子卡列表：两端分别落在不同子卡子树里的边 → 归纳为"块级边"，
+  // 参与边的子卡按链式拓扑序排前（打 1/2/3 序号徽标），孤立子卡保持原序跟后；
+  // 块级边记到父节点 _flowEdges（渲染为青色连线）。链头=盒内入度 0，回边成环时按原序兜底。
+  function flowOrder(p, ch){
+    if(ch.length < 2 || !FLOWS.length) return;
+    var owner = {};   // 文件 id → 所属子卡 id
+    ch.forEach(function(c){
+      (function col(m){ owner[m.id] = c.id; visChildren(m).forEach(col); })(c);
+    });
+    var edges = [], inChain = {}, outs = {};
+    FLOWS.forEach(function(f){
+      var a = owner[f.from], b = owner[f.to];
+      if(a && b && a !== b){
+        edges.push({ a: a, b: b, label: f.label });
+        (outs[a] = outs[a] || []).push(b);
+        inChain[a] = inChain[b] = true;
+      }
+    });
+    if(!edges.length) return;
+    var inDeg = {};
+    ch.forEach(function(c){ inDeg[c.id] = 0; });
+    edges.forEach(function(e){ inDeg[e.b]++; });
+    var seen = {}, chain = [];
+    function visit(id){
+      if(seen[id]) return; seen[id] = true; chain.push(id);
+      (outs[id] || []).forEach(visit);
+    }
+    ch.forEach(function(c){ if(inChain[c.id] && !inDeg[c.id]) visit(c.id); }); // 链头优先
+    ch.forEach(function(c){ if(inChain[c.id] && !seen[c.id]) visit(c.id); });  // 回边成环：按原序兜底
+    // 重排：链上子卡按链序在前、其余子卡原序跟后；序号徽标 + 块级连线记录
+    var rest = ch.filter(function(c){ return !seen[c.id]; });
+    p.children = chain.map(function(id){ return NODE_BY_ID[id]; }).concat(rest);
+    chain.forEach(function(id, i){ var n = NODE_BY_ID[id]; if(n) n._flowSeq = i + 1; });
+    p._flowEdges = edges.map(function(e){ return { a: NODE_BY_ID[e.a], b: NODE_BY_ID[e.b], label: e.label }; });
+  }
+  // 全树逐层应用：功能层（跨功能流转）→ 子模块层（本项目的核心场景）→ 文件层，同一算法分形复用
+  function orderAll(n){
+    delete n._flowEdges;
+    var vc = visChildren(n);
+    vc.forEach(function(c){ delete c._flowSeq; });
+    if(vc.length > 1) flowOrder(n, vc);
+    vc.forEach(orderAll);
+  }
+
+  // 容器收纳布局（借鉴 whiteboard 分区排版）：root 直属分支 = 收纳盒（标题卡 + 内部网格流），
+  // 盒内不再画连线（装进盒子即归属），根→盒保留短连线。折叠时盒子缩回头卡。
+  function layoutTree(){
+    measure(TREE);
+    orderAll(TREE);
+    var PAD_X = 16, HEAD_GAP = 12, ROW_GAP = 12, COL_GAP = 14, BOX_GAP = 36, PAD_B = 16, MAX_ROW = 660;
+    var kids = visChildren(TREE);
+    var boxes = [];
+    kids.forEach(function(g){
+      var hw = nodeW(g), hh = nodeH(g), gk = visChildren(g);
+      g._box = null;
+      if(!gk.length){ g._h = hh; boxes.push({ g: g, w: hw, h: hh }); return; }
+      var rows = [{ items: [], w: 0, h: 0 }];
+      gk.forEach(function(c){
+        var bb = blockBox(c);
+        var bl = { c: c, w: bb.x2 - bb.x1, h: bb.y2 - bb.y1, ox: bb.x1, oy: bb.y1 };
+        var row = rows[rows.length - 1];
+        if(row.items.length && row.w + COL_GAP + bl.w > MAX_ROW){
+          rows.push({ items: [], w: 0, h: 0 });
+          row = rows[rows.length - 1];
+        }
+        row.items.push(bl);
+        row.w += (row.items.length > 1 ? COL_GAP : 0) + bl.w;
+        row.h = Math.max(row.h, bl.h);
+      });
+      var innerW = 0, innerH = 0;
+      rows.forEach(function(r, i){ if(r.w > innerW) innerW = r.w; innerH += r.h + (i ? ROW_GAP : 0); });
+      var w = Math.max(hw, innerW) + PAD_X * 2;
+      var h = hh + HEAD_GAP + innerH + PAD_B;
+      g._box = { w: w, h: h, rows: rows, hh: hh, hw: hw };
+      boxes.push({ g: g, w: w, h: h });
+    });
+    var totalH = 0;
+    boxes.forEach(function(b, i){ totalH += b.h + (i ? BOX_GAP : 0); });
+    TREE._w = nodeW(TREE); TREE._h = nodeH(TREE);
+    var boxX = TREE._w + BRANCH_GAP + 30;
+    var top = 0;
+    boxes.forEach(function(b){
+      var g = b.g;
+      if(g._box){
+        g._x = boxX + b.w / 2;
+        g._y = top + g._box.hh / 2;
+        g._h = g._box.hh;
+        var ry = top + g._box.hh + HEAD_GAP;
+        g._box.rows.forEach(function(row){
+          var cx = boxX + (b.w - row.w) / 2;
+          row.items.forEach(function(bl){
+            place(bl.c, cx - bl.ox, ry - bl.oy);
+            cx += bl.w + COL_GAP;
+          });
+          ry += row.h + ROW_GAP;
+        });
+      } else {
+        g._x = boxX + b.w / 2;
+        g._y = top + b.h / 2;
+      }
+      top += b.h + BOX_GAP;
+    });
+    TREE._x = TREE._w / 2 + 40;
+    TREE._y = Math.max(TREE._h / 2, totalH / 2);
+  }
 
   // ── 渲染 ──
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -308,19 +450,49 @@ export function renderMindmapPage(feature: string): string {
   }
   function cssId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
   function renderAll(){
-    var E = document.getElementById('edges'), N = document.getElementById('nodes'), G = document.getElementById('notes');
-    E.innerHTML = ''; N.innerHTML = ''; G.innerHTML = '';
-    var edges = '', nodes = '';
-    (function walk(n, parent){
-      if(parent){
+    var E = document.getElementById('edges'), N = document.getElementById('nodes'), G = document.getElementById('notes'), FL = document.getElementById('flowlayer');
+    E.innerHTML = ''; N.innerHTML = ''; G.innerHTML = ''; FL.innerHTML = '';
+    var edges = '', nodes = '', boxes = '', flowTags = '';
+    // 收纳盒底板（画在最底层）：按分支类型着色，构想=紫虚线、共享=绿、功能=蓝
+    visChildren(TREE).forEach(function(g){
+      if(!g._box) return;
+      var bx = g._x - g._box.w / 2, by = g._y - g._box.hh / 2;
+      var st = g.kind === 'proposal'
+        ? 'fill="rgba(208,191,255,.16)" stroke="#9775fa" stroke-dasharray="10 6"'
+        : (g.kind === 'shared'
+          ? 'fill="rgba(211,249,216,.20)" stroke="#69db7c"'
+          : 'fill="rgba(165,216,255,.13)" stroke="#74c0fc"');
+      boxes += '<rect x="'+bx+'" y="'+by+'" width="'+g._box.w+'" height="'+g._box.h+'" rx="16" '+st+' stroke-width="1.6"/>';
+    });
+    (function walk(n, parent, noEdge){
+      if(parent && !noEdge){
         var x1 = parent._x + parent._w / 2, y1 = parent._y, x2 = n._x - n._w / 2, y2 = n._y;
         var mx = (x1 + x2) / 2;
-        edges += '<path d="M '+x1+' '+y1+' C '+mx+' '+y1+', '+mx+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="'+(n.kind==='user' ? 'rgba(251,191,36,.5)' : '#2d4a78')+'" stroke-width="'+(n.kind==='feature'?2.6:(n.kind==='user'?1.6:1.8))+'"/>';
+        edges += '<path d="M '+x1+' '+y1+' C '+mx+' '+y1+', '+mx+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="'+(n.kind==='user' ? 'rgba(230,119,0,.55)' : (n.kind==='feature' ? '#4dabf7' : '#adb5bd'))+'" stroke-width="'+(n.kind==='feature'?2.6:(n.kind==='user'?1.6:1.8))+'"/>';
       }
       nodes += renderNode(n);
-      visChildren(n).forEach(function(c){ walk(c, n); });
-    })(TREE, null);
-    E.innerHTML = edges; N.innerHTML = nodes;
+      // 流转连线：本层按设计事实排出的业务顺序（①→②→③），青色曲线 + 箭头，与树的灰色归属线分开
+      if(n._flowEdges){
+        n._flowEdges.forEach(function(fe){
+          var A = fe.a, B = fe.b;
+          if(!A || !B || A._x == null || B._x == null) return;
+          var x1 = A._x + A._w / 2, y1 = A._y, x2 = B._x - B._w / 2, y2 = B._y;
+          var dx = Math.max(30, Math.min(110, Math.abs(x2 - x1) * 0.45));
+          edges += '<path d="M '+x1+' '+y1+' C '+(x1 + dx)+' '+y1+', '+(x2 - dx)+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".75" marker-end="url(#arrowFlow)"/>';
+          if(fe.label){
+            // 标签画到顶层 flowlayer：卡片之间间隙常比标签窄，放底层会被卡片盖住只剩中间几个字
+            var mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 9;
+            flowTags += '<rect x="'+(mx - fe.label.length * 5.2 - 6)+'" y="'+(my - 9)+'" width="'+(fe.label.length * 10.4 + 12)+'" height="18" rx="9" fill="#e3fafc" stroke="#66d9e8" stroke-width="1" opacity=".96"/>'
+              + '<text x="'+mx+'" y="'+(my + 4)+'" text-anchor="middle" font-size="10" font-weight="600" fill="#0b7285" paint-order="stroke" stroke="#ffffff" stroke-width="2.5">'+esc(fe.label)+'</text>';
+          }
+        });
+      }
+      var skip = (parent === TREE) && n._box; // 盒内直属卡不画连线：装进盒子即归属
+      visChildren(n).forEach(function(c){ walk(c, n, skip); });
+    })(TREE, null, false);
+    N.innerHTML = boxes + nodes;
+    E.innerHTML = edges;
+    FL.innerHTML = flowTags;
     renderDeps();
     // 便签：锚定目标节点右侧偏下堆叠（有 pos 用 pos）
     var perTarget = {};
@@ -338,14 +510,15 @@ export function renderMindmapPage(feature: string): string {
         var g = document.createElementNS('http://www.w3.org/2000/svg','g');
         g.setAttribute('class','note'); g.setAttribute('data-id', a.id);
         g.setAttribute('transform','translate('+a._x+','+a._y+')');
-        g.innerHTML = '<rect x="0" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="7" fill="rgba(251,191,36,.13)" stroke="rgba(251,191,36,.7)" stroke-width="1.6"/>'
-          + '<text x="'+(w/2)+'" y="'+(-h/2+15)+'" text-anchor="middle" font-size="10" fill="#fbbf24">✍️ 批注</text>'
+        g.innerHTML = '<rect x="0" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="3" fill="#fff9b2" stroke="#e67700" stroke-width="1.4"/>'
+          + '<path d="M '+(w-10)+' '+(-h/2)+' L '+w+' '+(-h/2+10)+' L '+w+' '+(-h/2)+' Z" fill="#ffd43b" stroke="#e67700" stroke-width="1"/>'
+          + '<text x="'+(w/2)+'" y="'+(-h/2+15)+'" text-anchor="middle" font-size="10" fill="#a05a00">✍️ 批注</text>'
           + ls2.map(function(ln, li){
-              return '<text x="'+(w/2)+'" y="'+(-h/2+32+li*15)+'" text-anchor="middle" font-size="11" fill="#fde9c0">'+esc(ln)+'</text>';
+              return '<text x="'+(w/2)+'" y="'+(-h/2+32+li*15)+'" text-anchor="middle" font-size="11" fill="#664d00">'+esc(ln)+'</text>';
             }).join('');
         G.appendChild(g);
         edges += '';
-        E.innerHTML += '<line class="nline-'+cssId(a.id)+'" x1="'+a._x+'" y1="'+a._y+'" x2="'+(t._x + t._w/2)+'" y2="'+t._y+'" stroke="rgba(251,191,36,.45)" stroke-width="1.3" stroke-dasharray="5 4"/>';
+        E.innerHTML += '<line class="nline-'+cssId(a.id)+'" x1="'+a._x+'" y1="'+a._y+'" x2="'+(t._x + t._w/2)+'" y2="'+t._y+'" stroke="rgba(230,119,0,.5)" stroke-width="1.3" stroke-dasharray="5 4"/>';
       });
     });
     bindNodeEvents();
@@ -390,7 +563,7 @@ export function renderMindmapPage(feature: string): string {
       var path = document.createElementNS('http://www.w3.org/2000/svg','path');
       path.setAttribute('d','M '+x1+' '+y1+' C '+cx+' '+y1+', '+cx+' '+y2+', '+x2+' '+y2);
       path.setAttribute('fill','none');
-      path.setAttribute('stroke', d._pred ? 'rgba(192,132,252,.55)' : 'rgba(251,146,60,.6)');
+      path.setAttribute('stroke', d._pred ? 'rgba(122,78,212,.6)' : 'rgba(232,89,12,.65)');
       path.setAttribute('stroke-width', sw);
       path.setAttribute('stroke-dasharray','7 5');
       path.setAttribute('marker-end','url(#arrowDep)');
@@ -421,8 +594,8 @@ export function renderMindmapPage(feature: string): string {
       var t = document.createElementNS('http://www.w3.org/2000/svg','text');
       t.setAttribute('x', pt.x); t.setAttribute('y', pt.y - 6);
       t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','9.5');
-      t.setAttribute('fill', d._pred ? 'rgba(192,132,252,.95)' : 'rgba(251,146,60,.9)');
-      t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#02040d'); t.setAttribute('stroke-width','3');
+      t.setAttribute('fill', d._pred ? '#5f3dc4' : '#a33d00');
+      t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#ffffff'); t.setAttribute('stroke-width','3');
       t.textContent = d._pred ? '预判' : '×' + d.weight;
       G.appendChild(t);
     });
@@ -430,82 +603,97 @@ export function renderMindmapPage(feature: string): string {
   function showDep(d){
     var det = document.getElementById('detail');
     if(d._pred){
-      det.innerHTML = '<b style="color:#c084fc;">🔮 预判依赖</b>'
-        + '<p>' + esc(d.from) + ' <b style="color:#c084fc;">可能踩着</b> ' + esc(d.to) + '</p>'
-        + '<p style="font-size:11px;color:#7a93b8;">构想尚未实现，这是 AI 按现有结构预判的依赖（紫色弧）；真实调用证据画橙色弧。</p>';
+      det.innerHTML = '<b style="color:#6741d9;">🔮 预判依赖</b>'
+        + '<p>' + esc(d.from) + ' <b style="color:#6741d9;">可能踩着</b> ' + esc(d.to) + '</p>'
+        + '<p style="font-size:11px;color:#868e96;">构想尚未实现，这是 AI 按现有结构预判的依赖（紫色弧）；真实调用证据画橙色弧。</p>';
       det.style.display = 'block';
       return;
     }
     var via = (d.via_files && d.via_files.length)
       ? '<p class="files">主要打向：' + d.via_files.map(esc).join(' · ') + '</p>' : '';
-    det.innerHTML = '<b style="color:#fb923c;">🔗 功能依赖</b>'
-      + '<p>' + esc(d.from) + ' <b style="color:#fb923c;">踩着</b> ' + esc(d.to) + '（真实调用 ×' + d.weight + ' 次）</p>'
+    det.innerHTML = '<b style="color:#a33d00;">🔗 功能依赖</b>'
+      + '<p>' + esc(d.from) + ' <b style="color:#a33d00;">踩着</b> ' + esc(d.to) + '（真实调用 ×' + d.weight + ' 次）</p>'
       + via
-      + '<p style="font-size:11px;color:#7a93b8;">依赖不占树的层级（归属归归属、依赖归依赖），橙色虚线单独表达"什么撑着什么"。</p>';
+      + '<p style="font-size:11px;color:#868e96;">依赖不占树的层级（归属归归属、依赖归依赖），橙色虚线单独表达"什么撑着什么"。</p>';
     det.style.display = 'block';
   }
   function renderNode(n){
-    var ls = nodeLines(n), w = n._w, h = nodeH(n), x = n._x - w/2, y = n._y - h/2;
+    var ls = nodeLines(n), ds = descLines(n), w = n._w, h = nodeH(n), x = n._x - w/2, y = n._y - h/2;
     var s = '<g class="mnode'+(SEL===n.id?' sel':'')+'" data-id="'+esc(n.id)+'" transform="translate('+n._x+','+n._y+')">';
     if(n.kind === 'root'){
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="url(#gRoot)" stroke="#8ab6e8" stroke-width="2.4"/>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="#a5d8ff" stroke="#1971c2" stroke-width="2.4"/>';
     } else if(n.kind === 'feature'){
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="url(#gFeat)" stroke="#5ba3d9" stroke-width="2"/>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="#d0ebff" stroke="#1971c2" stroke-width="2"/>';
       if(FOUNDATIONS.indexOf(n.label) >= 0){ // 底座徽章：基建不占兄弟名目，但一眼可见
         s += '<g transform="translate('+(-w/2+2)+','+(-h/2-9)+')">'
-          + '<rect x="0" y="-10" width="62" height="18" rx="9" fill="rgba(251,146,60,.16)" stroke="rgba(251,146,60,.85)" stroke-width="1.2"/>'
-          + '<text x="31" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#fb923c">🧱 底座</text></g>';
+          + '<rect x="0" y="-10" width="62" height="18" rx="9" fill="#ffd8a8" stroke="#e8590c" stroke-width="1.2"/>'
+          + '<text x="31" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#a33d00">🧱 底座</text></g>';
       }
     } else if(n.kind === 'step'){
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(16,42,70,.92)" stroke="#3d7ab5" stroke-width="1.4"/>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="#ffec99" stroke="#f08c00" stroke-width="1.4"/>';
     } else if(n.kind === 'stepgroup'){
       // 工作步骤组：把"怎么实现的"归成一组，与结构层（子模块/文件）分开
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(30,52,86,.95)" stroke="#8fb7e0" stroke-width="1.5"/>'
-        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a8c8ec">⚙️ 步骤</text>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="#fff3bf" stroke="#f59f00" stroke-width="1.5"/>'
+        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a06200">⚙️ 步骤</text>';
     } else if(n.kind === 'community'){
       // 子模块（聚类社区）：功能的真实构成单元，文件挂在它下面
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="rgba(20,47,66,.95)" stroke="#5fb3d4" stroke-width="1.5"/>'
-        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#8ed4ec">🧩 子模块</text>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="#c5f6fa" stroke="#0c8599" stroke-width="1.5"/>'
+        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#0b7285">🧩 子模块</text>';
     } else if(n.kind === 'shared'){
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="rgba(13,60,68,.9)" stroke="#2dd4bf" stroke-width="1.6"/>'
-        + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#5eead4">🔧 共享</text>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="#d3f9d8" stroke="#2f9e44" stroke-width="1.6"/>'
+        + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#2b8a3e">🔧 共享</text>';
     } else if(n.kind === 'file'){
       // 关键文件：功能内调用热度 top 的实际功能单元，小号青蓝、左上 📄 标
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="8" fill="rgba(15,38,63,.9)" stroke="#4c9fd8" stroke-width="1.3"/>'
-        + '<text y="'+(-h/2+11)+'" text-anchor="middle" font-size="8" fill="#8ec8ef">📄 文件</text>';
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="8" fill="#ffffff" stroke="#94a8bd" stroke-width="1.3"/>'
+        + '<text y="'+(-h/2+11)+'" text-anchor="middle" font-size="8" fill="#748393">📄 文件</text>';
     } else if(n.kind === 'proposal'){
       // 新功能构想：紫虚线（尚不存在，是主人想加的）；AI 定位挂靠现有功能或根下独立
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="rgba(88,28,135,.28)" stroke="rgba(192,132,252,.9)" stroke-width="2" stroke-dasharray="8 5"/>'
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="13" fill="#e5dbff" stroke="#6741d9" stroke-width="2" stroke-dasharray="8 5"/>'
         + '<g transform="translate('+(-w/2+2)+','+(-h/2-9)+')">'
-        + '<rect x="0" y="-10" width="56" height="18" rx="9" fill="rgba(192,132,252,.16)" stroke="rgba(192,132,252,.85)" stroke-width="1.2"/>'
-        + '<text x="28" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#d8b4fe">🔮 构想</text></g>';
-    } else { // user：暖色贴纸感（虚线边框 + 折角）
-      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="9" fill="rgba(251,191,36,.10)" stroke="rgba(251,191,36,.75)" stroke-width="1.6" stroke-dasharray="7 4"/>';
+        + '<rect x="0" y="-10" width="56" height="18" rx="9" fill="#d0bfff" stroke="#5f3dc4" stroke-width="1.2"/>'
+        + '<text x="28" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#4c3385">🔮 构想</text></g>';
+    } else { // user：黄便签贴纸（虚线边框 + 折角）
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="3" fill="#fff9b2" stroke="#e67700" stroke-width="1.6"/>'
+        + '<path d="M '+(-w/2+w-11)+' '+(-h/2)+' L '+(-w/2+w)+' '+(-h/2+11)+' L '+(-w/2+w)+' '+(-h/2)+' Z" fill="#ffd43b" stroke="#e67700" stroke-width="1"/>';
     }
-    // 文字
+    // 文字：标题（有介绍行时整体上移）
     var fs = n.kind === 'root' ? 14 : ((n.kind === 'feature' || n.kind === 'proposal') ? 13 : 12);
     var fw = (n.kind === 'root' || n.kind === 'feature' || n.kind === 'proposal') ? ' font-weight="700"' : '';
-    var fillc = n.kind === 'user' ? '#fde9c0' : (n.kind === 'proposal' ? '#e9d5ff' : '#e8f1ff');
+    var fillc = n.kind === 'user' ? '#664d00' : (n.kind === 'proposal' ? '#503c95' : (n.kind === 'root' || n.kind === 'feature' ? '#1864ab' : '#343a40'));
+    var lift = ds.length ? (ds.length * 12.5 + 5) / 2 : 0;
     s += ls.map(function(ln, li){
-      return '<text y="'+(5 + (li-(ls.length-1)/2)*15)+'" text-anchor="middle" font-size="'+fs+'"'+fw+' fill="'+fillc+'">'+esc(ln)+'</text>';
+      return '<text y="'+(5 - lift + (li-(ls.length-1)/2)*15)+'" text-anchor="middle" font-size="'+fs+'"'+fw+' fill="'+fillc+'">'+esc(ln)+'</text>';
     }).join('');
+    // 介绍行：小字灰蓝（"是什么"）+ 紫色增量段（"要变什么"，→ 开头）
+    if(ds.length){
+      s += ds.map(function(dl, li){
+        var c = dl.delta ? '#7048e8' : (n.kind === 'proposal' ? '#7a6cb0' : '#5c7c9a');
+        return '<text y="'+(5 - lift + (ls.length-(ls.length-1)/2)*15 + li*12.5 - 2)+'" text-anchor="middle" font-size="9.5" fill="'+c+'">'+esc(dl.t)+'</text>';
+      }).join('');
+    }
     // 折叠指示：左侧小圆点（有子节点才显示）
     if(n.children.length){
       var isC = collapsed(n);
       s += '<g class="fold" data-fold="'+esc(n.id)+'" transform="translate('+(-w/2-11)+',0)">'
-        + '<circle r="'+(isC?7:5.5)+'" fill="'+(isC?'#7dd3fc':'#26456f')+'" stroke="#7dd3fc" stroke-width="1.4"/>'
-        + (isC ? '<text y="3.5" text-anchor="middle" font-size="9" font-weight="700" fill="#0b1e38">'+n.children.length+'</text>' : '')
+        + '<circle r="'+(isC?7:5.5)+'" fill="'+(isC?'#1971c2':'#ffffff')+'" stroke="#1971c2" stroke-width="1.4"/>'
+        + (isC ? '<text y="3.5" text-anchor="middle" font-size="9" font-weight="700" fill="#ffffff">'+n.children.length+'</text>' : '')
         + '</g>';
+    }
+    // 流转序号徽标：右上角青色圆底白字数字（1→2→3 业务顺序，来自设计图层的流转边）
+    if(n._flowSeq){
+      s += '<g transform="translate('+(w/2 - 1)+','+(-h/2 - 8)+')">'
+        + '<circle r="9" fill="#0c8599" stroke="#e3fafc" stroke-width="1.6"/>'
+        + '<text y="3.5" text-anchor="middle" font-size="10.5" font-weight="700" fill="#ffffff">'+n._flowSeq+'</text></g>';
     }
     // hover ⊕ 新增（所有节点）
     s += '<g class="addbtn" data-add="'+esc(n.id)+'" transform="translate('+(w/2-4)+','+(h/2+2)+')">'
-      + '<circle r="9" fill="rgba(125,211,252,.2)" stroke="#7dd3fc" stroke-width="1.3"/>'
-      + '<text y="3.5" text-anchor="middle" font-size="11" font-weight="700" fill="#7dd3fc">＋</text></g>';
+      + '<circle r="9" fill="#ffffff" stroke="#1971c2" stroke-width="1.3"/>'
+      + '<text y="3.5" text-anchor="middle" font-size="11" font-weight="700" fill="#1971c2">＋</text></g>';
     // user 节点 ✕ 删除
     if(n.kind === 'user'){
       s += '<g class="delbtn" data-del="'+esc(n.id)+'" transform="translate('+(w/2+2)+','+(-h/2-2)+')">'
-        + '<circle r="8" fill="rgba(120,20,40,.5)" stroke="rgba(244,63,94,.7)" stroke-width="1.2"/>'
-        + '<text y="3" text-anchor="middle" font-size="9.5" fill="#fda4af">✕</text></g>';
+        + '<circle r="8" fill="#fff5f5" stroke="#e03131" stroke-width="1.2"/>'
+        + '<text y="3" text-anchor="middle" font-size="9.5" fill="#e03131">✕</text></g>';
     }
     return s + '</g>';
   }
@@ -614,7 +802,7 @@ export function renderMindmapPage(feature: string): string {
       var isF = FOUNDATIONS.indexOf(n.label) >= 0;
       var depHtml = '';
       if(stoodOnBy.length){
-        depHtml += '<p style="color:#fcd9a8;">🧱 谁踩着它：'
+        depHtml += '<p style="color:#a06100;">🧱 谁踩着它：'
           + stoodOnBy.map(function(d){
               var top1 = (d.via_files && d.via_files[0]) ? '，主要打向 ' + esc(d.via_files[0]) : '';
               return esc(d.from)+'（×'+d.weight+'）'+top1;
@@ -622,7 +810,7 @@ export function renderMindmapPage(feature: string): string {
           + (isF ? ' —— 这就是底座：自己几乎不叫别人，别人都来叫它。' : '') + '</p>';
       }
       if(standsOn.length){
-        depHtml += '<p style="color:#fcd9a8;">🧱 它踩着谁：' + standsOn.map(function(d){ return esc(d.to)+'（×'+d.weight+'）'; }).join('、') + '</p>';
+        depHtml += '<p style="color:#a06100;">🧱 它踩着谁：' + standsOn.map(function(d){ return esc(d.to)+'（×'+d.weight+'）'; }).join('、') + '</p>';
       }
       det.innerHTML = '<b>'+esc(n.label)+'</b><span class="tag">'+(isF ? '底座功能' : '功能')+'</span><p>'+esc(n.raw.description||'')+'</p>'+depHtml+myNoteHtml;
     } else if(n.kind === 'step'){
@@ -633,53 +821,53 @@ export function renderMindmapPage(feature: string): string {
       det.innerHTML = '<b>'+esc(n.owner.label)+' › ⚙️ '+esc(n.label)+'</b><span class="tag">步骤组</span>'
         + '<p>'+esc(n.raw.description||'')+'</p>'
         + (n.children.length ? '<p class="files">'+n.children.length+' 步：'+n.children.map(function(c){ return esc(c.label); }).join(' → ')+'</p>' : '')
-        + '<p style="font-size:11px;color:#7a93b8;">讲"怎么一步步跑起来"；功能"由什么构成"看旁边的 🧩 子模块分支。</p>'
+        + '<p style="font-size:11px;color:#868e96;">讲"怎么一步步跑起来"；功能"由什么构成"看旁边的 🧩 子模块分支。</p>'
         + myNoteHtml;
     } else if(n.kind === 'community'){
-      det.innerHTML = '<b style="color:#8ed4ec;">🧩 '+esc(n.label)+'</b><span class="tag">子模块</span>'
+      det.innerHTML = '<b style="color:#0b7285;">🧩 '+esc(n.label)+'</b><span class="tag">子模块</span>'
         + '<p>'+esc(n.raw.description||'')+'</p>'
         + (n.children.length ? '<p class="files">关键文件：'+n.children.map(function(c){ return esc(c.label); }).join(' · ')+'</p>' : '')
-        + '<p style="font-size:11px;color:#7a93b8;">聚类真实产物：这些文件在调用关系上抱团，构成功能的这个部分。</p>'
+        + '<p style="font-size:11px;color:#868e96;">聚类真实产物：这些文件在调用关系上抱团，构成功能的这个部分。</p>'
         + myNoteHtml;
     } else if(n.kind === 'file'){
-      det.innerHTML = '<b style="color:#8ec8ef;">📄 ' + esc(n.label) + '</b><span class="tag">关键文件</span>'
+      det.innerHTML = '<b style="color:#49557a;">📄 ' + esc(n.label) + '</b><span class="tag">关键文件</span>'
         + '<p>' + esc(n.raw.description || '（暂无职责描述）') + '</p>'
         + (n._host ? '<p class="files">属于功能：' + esc(n._host.label) + (n._comm ? ' · 子模块：' + esc(n._comm) : '') + '</p>' : '')
         + (n.raw.meta && n.raw.meta.lines ? '<p class="files">' + n.raw.meta.lines + ' 行</p>' : '')
-        + '<p style="font-size:11px;color:#7a93b8;">功能内调用热度最高的实际功能单元——功能的原理分镜最终落到这些文件上执行。</p>'
+        + '<p style="font-size:11px;color:#868e96;">功能内调用热度最高的实际功能单元——功能的原理分镜最终落到这些文件上执行。</p>'
         + myNoteHtml;
     } else if(n.kind === 'proposal'){
       var pp = n.raw;
       var parentHtml = pp.parent
-        ? '<p style="color:#e9d5ff;">AI 判断它属于「' + esc(pp.parent) + '」的子能力，已挂到该功能下。</p>'
-        : '<p style="color:#e9d5ff;">AI 判断它是独立新功能，挂在根节点下。</p>';
+        ? '<p style="color:#6741d9;">AI 判断它属于「' + esc(pp.parent) + '」的子能力，已挂到该功能下。</p>'
+        : '<p style="color:#6741d9;">AI 判断它是独立新功能，挂在根节点下。</p>';
       var depP = (pp.depends_on && pp.depends_on.length)
-        ? '<p style="color:#d8b4fe;">🔮 预判要踩：' + pp.depends_on.map(esc).join('、') + '（紫色虚线弧）</p>' : '';
+        ? '<p style="color:#5f3dc4;">🔮 预判要踩：' + pp.depends_on.map(esc).join('、') + '（紫色虚线弧）</p>' : '';
       var stepsHtml = (pp.steps && pp.steps.length)
-        ? '<p style="margin-top:6px;"><b style="color:#c084fc;">实现步骤（AI 预判）：</b></p>' + pp.steps.map(function(s, i){
+        ? '<p style="margin-top:6px;"><b style="color:#6741d9;">实现步骤（AI 预判）：</b></p>' + pp.steps.map(function(s, i){
             return '<p>' + (i+1) + '. <b>' + esc(s.title) + '</b> — ' + esc(s.detail) + '</p>';
           }).join('')
         : '';
-      det.innerHTML = '<b style="color:#d8b4fe;">🔮 ' + esc(pp.title) + '</b><span class="tag">' + (pp.mode === 'llm' ? '构想 · AI 已定位' : '构想') + '</span>'
-        + '<p style="color:#bae6fd;">' + esc(pp.desc) + '</p>'
+      det.innerHTML = '<b style="color:#5f3dc4;">🔮 ' + esc(pp.title) + '</b><span class="tag">' + (pp.mode === 'llm' ? '构想 · AI 已定位' : '构想') + '</span>'
+        + '<p style="color:#495057;">' + esc(pp.desc) + '</p>'
         + parentHtml + depP + stepsHtml
-        + '<p style="font-size:11px;color:#7a93b8;">你的原话：「' + esc(pp.raw) + '」——改原话：删除这个构想节点重写；要细化：给它加子节点后保存。</p>'
+        + '<p style="font-size:11px;color:#868e96;">你的原话：「' + esc(pp.raw) + '」——改原话：删除这个构想节点重写；要细化：给它加子节点后保存。</p>'
         + myNoteHtml;
     } else if(n.kind === 'shared'){
       var ub = n.raw.used_by || [];
-      det.innerHTML = '<b style="color:#2dd4bf;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
+      det.innerHTML = '<b style="color:#2b8a3e;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
         + '<p class="files">' + esc(n.raw.file) + '</p>'
         + (n.raw.desc
-            ? '<p style="color:#bae6fd;">' + esc(n.raw.desc) + '</p>'
+            ? '<p style="color:#495057;">' + esc(n.raw.desc) + '</p>'
             : (SH_GAVEUP
-                ? '<p style="font-size:11px;color:#7a93b8;">介绍暂不可用（AI 未配置或生成失败），调用证据不受影响。</p>'
-                : '<p style="color:#fbbf24;">⏳ AI 正在写介绍，生成后这里自动补上…</p>'))
-        + '<p style="color:#99f6e4;">谁在用它：' + ub.map(function(u){ return esc(u.feature) + '（×' + u.count + '）'; }).join('、') + '</p>'
-        + '<p style="font-size:11px;color:#7a93b8;">被多个功能真实调用的隐形地板——聚类会把它吸进某个大功能里，这里是按调用证据挖出来的。</p>'
+                ? '<p style="font-size:11px;color:#868e96;">介绍暂不可用（AI 未配置或生成失败），调用证据不受影响。</p>'
+                : '<p style="color:#e8590c;">⏳ AI 正在写介绍，生成后这里自动补上…</p>'))
+        + '<p style="color:#2f9e44;">谁在用它：' + ub.map(function(u){ return esc(u.feature) + '（×' + u.count + '）'; }).join('、') + '</p>'
+        + '<p style="font-size:11px;color:#868e96;">被多个功能真实调用的隐形地板——聚类会把它吸进某个大功能里，这里是按调用证据挖出来的。</p>'
         + myNoteHtml;
     } else if(n.kind === 'user'){
-      det.innerHTML = '<b style="color:#fbbf24;">✍️ 我写的节点</b><span class="tag">'+esc(n._anchor ? n._anchor.label : '')+'</span><p>'+esc(n.label)+'</p>'
-        + '<p style="font-size:11px;color:#7a93b8;">双击可修改文字；保存后 AI 再生成时会作为你的理解读入。</p>';
+      det.innerHTML = '<b style="color:#e8590c;">✍️ 我写的节点</b><span class="tag">'+esc(n._anchor ? n._anchor.label : '')+'</span><p>'+esc(n.label)+'</p>'
+        + '<p style="font-size:11px;color:#868e96;">双击可修改文字；保存后 AI 再生成时会作为你的理解读入。</p>';
     } else { det.style.display = 'none'; return; }
     det.style.display = 'block';
   }
@@ -688,7 +876,7 @@ export function renderMindmapPage(feature: string): string {
     if(!a) return;
     var t = NODE_BY_ID[a.target_id];
     var det = document.getElementById('detail');
-    det.innerHTML = '<b style="color:#fbbf24;">✍️ 我的批注</b>'
+    det.innerHTML = '<b style="color:#e8590c;">✍️ 我的批注</b>'
       + '<span class="tag">'+(t ? esc(t.label) : esc(a.target_id))+'</span>'
       + '<p>'+esc(a.text)+'</p>'
       + '<button class="danger" onclick="window.__delNote(\\''+a.id+'\\')">🗑 删除这条批注</button>';

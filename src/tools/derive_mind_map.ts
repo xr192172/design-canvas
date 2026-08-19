@@ -171,45 +171,57 @@ async function llmEnrichDescriptions(
     '严禁发明清单里没有的功能名或项目背景；信息不足就只描述文件本身，不要推测。' +
     '只输出 JSON：{"descriptions":{"<id>":"<人话描述>", ...}}，id 必须来自给定清单，且必须覆盖清单中的每一个 id。';
   const kindLabel = (k: string): string => (k === 'feature' ? '功能' : k === 'file' ? '文件' : '子模块');
-  const results = await Promise.all(
-    chunks.map(async (chunk) => {
-      const list = chunk
-        .map((n) => `- id=${n.id} · ${kindLabel(n.kind)}「${n.label}」（所属功能名只能用：${n.owner ?? '未提供'}）· ${n.hint}`)
-        .join('\n');
-      try {
-        const res = await fetch(`${cfg.baseURL}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-          body: JSON.stringify({
-            model: cfg.model,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: `项目：${projectTitle}\n条目清单：\n${list}` },
-            ],
-            temperature: 0.4,
-            response_format: { type: 'json_object' },
-          }),
-          signal: AbortSignal.timeout(60_000),
-        });
-        if (!res.ok) return null;
-        const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-        const content = data.choices?.[0]?.message?.content ?? '';
-        const parsed = extractJsonObject(content);
-        const raw = parsed?.descriptions as Record<string, unknown> | undefined;
-        if (!raw || typeof raw !== 'object') return null;
-        const out = new Map<string, string>();
-        for (const [id, v] of Object.entries(raw)) {
-          const s = typeof v === 'string' ? v.trim() : '';
-          if (s) out.set(id, s);
-        }
-        return out.size > 0 ? out : null;
-      } catch {
-        return null; // 单批失败不拖垮其余批次
+  /** 单批调用：成功返回 Map，失败（网络/超时/JSON 截断）返回 null */
+  const fetchChunk = async (
+    chunk: Array<{ id: string; label: string; kind: string; hint: string; owner?: string }>,
+  ): Promise<Map<string, string> | null> => {
+    const list = chunk
+      .map((n) => `- id=${n.id} · ${kindLabel(n.kind)}「${n.label}」（所属功能名只能用：${n.owner ?? '未提供'}）· ${n.hint}`)
+      .join('\n');
+    try {
+      const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `项目：${projectTitle}\n条目清单：\n${list}` },
+          ],
+          temperature: 0.4,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const content = data.choices?.[0]?.message?.content ?? '';
+      const parsed = extractJsonObject(content);
+      const raw = parsed?.descriptions as Record<string, unknown> | undefined;
+      if (!raw || typeof raw !== 'object') return null;
+      const out = new Map<string, string>();
+      for (const [id, v] of Object.entries(raw)) {
+        const s = typeof v === 'string' ? v.trim() : '';
+        if (s) out.set(id, s);
       }
-    }),
-  );
+      return out.size > 0 ? out : null;
+    } catch {
+      return null;
+    }
+  };
+  const results = await Promise.all(chunks.map((c) => fetchChunk(c)));
   const merged = new Map<string, string>();
   for (const r of results) if (r) for (const [k, v] of r) merged.set(k, v);
+  // 收敛补漏：首轮未覆盖的条目重组小批**串行**重跑——
+  // 服务不稳/限流时并行批易整批失败，串行小批（8 个/批）成功率高
+  let pending = nodes.filter((n) => !merged.has(n.id));
+  for (let round = 0; round < 3 && pending.length > 0; round++) {
+    for (let i = 0; i < pending.length; i += 8) {
+      const r = await fetchChunk(pending.slice(i, i + 8));
+      if (r) for (const [k, v] of r) merged.set(k, v);
+    }
+    pending = nodes.filter((n) => !merged.has(n.id));
+  }
   return merged.size > 0 ? merged : null;
 }
 
@@ -927,12 +939,20 @@ async function buildTeachMindMap(
     /* 旧文件损坏则忽略 */
   }
 
+  // 文件流转链：设计图层的手绘边（geometry.edges，file→file）透传给思维导图——
+  // 盒内卡片按此排 1→2→3 业务顺序并画连线（顺序来自设计事实，不按字母序）
+  const fileIdSet = new Set((dsl.semantic?.files ?? []).map((sf) => sf.id));
+  const flows = (dsl.geometry?.edges ?? [])
+    .filter((e) => fileIdSet.has(e.from) && fileIdSet.has(e.to) && e.from !== e.to)
+    .map((e) => ({ from: e.from, to: e.to, label: e.label }));
+
   const mindMap: MindMap = {
     feature,
     mode: anyLlm ? 'llm' : 'rule',
     view: 'teach',
     root,
     deps: deps.length > 0 ? deps : undefined,
+    flows: flows.length > 0 ? flows : undefined,
     foundations: foundations.length > 0 ? foundations : undefined,
     shared: shared.length > 0 ? shared : undefined,
     community_zh: Object.keys(communityZh).length > 0 ? communityZh : undefined,
@@ -1098,7 +1118,30 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   const ft: FeatureTree | undefined = dsl.feature_tree;
 
   // 记录已尝试 LLM 提炼的节点，供批量生成描述
-  const llmTargets: Array<{ id: string; label: string; kind: 'feature' | 'community'; hint: string }> = [];
+  const llmTargets: Array<{ id: string; label: string; kind: 'feature' | 'community' | 'file'; hint: string }> = [];
+
+  // AI 设计标注索引（node_id → 标注文本）：DSL 里挂的借鉴/决策标注，
+  // 作为文件描述的"增量"段拼进导图——每个模块不只说"是什么"，还说"要变什么"
+  const aiNotesByNode = new Map<string, string>();
+  for (const a of dsl.annotations ?? []) {
+    if (!a.node_id || a.resolved) continue;
+    if (aiNotesByNode.has(a.node_id)) continue; // 每节点取第一条，避免描述爆炸
+    aiNotesByNode.set(a.node_id, a.text);
+  }
+
+  /** 规则合成文件描述：API 摘要（干瘪统计 → 具体函数名）+ AI 增量段（→ 借鉴：…） */
+  const fileDesc = (f: { id: string; path?: string; responsibility?: string; actual_apis?: Array<{ signature: string }>; expected_apis?: Array<{ signature: string }> }): string => {
+    const sigs = (f.actual_apis ?? f.expected_apis ?? []).map((a) => String(a.signature).split('(')[0].trim()).filter(Boolean);
+    const names = [...new Set(sigs)].slice(0, 3);
+    const base = names.length > 0
+      ? `API：${names.join(' · ')}${sigs.length > 3 ? ` …（共 ${sigs.length} 个）` : ''}`
+      : (f.responsibility || '');
+    const note = aiNotesByNode.get(f.id);
+    if (!note) return base;
+    // 增量段截断到 ~56 字，保住两行内可读
+    const short = note.length > 56 ? note.slice(0, 56) + '…' : note;
+    return `${base}\n→ ${short}`;
+  };
   let root: MindMapNode;
 
   if (ft && ft.features.length > 0) {
@@ -1121,6 +1164,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
         children: [],
       };
       llmTargets.push({ id: fNode.id, label: f.name, kind: 'feature', hint: ruleFeatureDesc(f, fFileCount) });
+      const semById = new Map((dsl.semantic?.files ?? []).map((sf) => [sf.id, sf]));
       for (const c of f.communities) {
         const fileNodes: MindMapNode[] = [];
         const files = c.files.slice(0, max_files_per_community);
@@ -1130,7 +1174,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
           fileNodes.push({
             id: info.id,
             label: basename(rel),
-            description: ruleFileDesc(info),
+            description: fileDesc(semById.get(info.id) ?? { id: info.id, responsibility: info.responsibility }),
             kind: 'file',
             meta: { lines: info.lines, l2_ref: info.id },
           });
@@ -1158,17 +1202,97 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
       root.children!.push(fNode);
     }
   } else {
-    // ── 无功能树兜底：root → 文件（按语义层平铺） ──
-    root = { id: 'root', label: title, description: '项目总览（未生成功能树，按文件平铺）', kind: 'root', children: [] };
-    for (const f of dsl.semantic?.files ?? []) {
-      if (!f.path) continue;
-      root.children!.push({
-        id: f.id,
-        label: basename(f.path),
-        description: f.responsibility || '（无描述）',
-        kind: 'file',
-        meta: { lines: f.lines, l2_ref: f.id },
-      });
+    // ── 无功能树兜底（两级）──
+    // 1) 设计视图有语义分组（geometry.module 节点 + 文件 swimlane）：root → 分组 → 文件
+    //    （fork 后在设计层提炼的分组容器是"人工功能树"，优先于平铺）
+    // 2) 否则：root → 文件（按语义层平铺）
+    const gnodes = dsl.geometry?.nodes ?? [];
+    const modules = gnodes
+      .filter((n) => n.type === 'module' && typeof n.id === 'string')
+      .sort((a, b) => (a.y ?? 0) - (b.y ?? 0));
+    const laneOf = new Map<string, string>();
+    for (const n of gnodes) {
+      if (n.type === 'file' && typeof n.swimlane === 'string') laneOf.set(n.id, n.swimlane);
+    }
+
+    const semanticFiles = (dsl.semantic?.files ?? []).filter((f) => f.path);
+    const grouped = new Map<string, typeof semanticFiles>(modules.map((m) => [m.id as string, []]));
+    const ungrouped: typeof semanticFiles = [];
+    for (const f of semanticFiles) {
+      const lane = laneOf.get(f.id);
+      if (lane && grouped.has(lane)) grouped.get(lane)!.push(f);
+      else ungrouped.push(f);
+    }
+    const anyGrouped = [...grouped.values()].some((arr) => arr.length > 0);
+
+    if (modules.length > 0 && anyGrouped) {
+      root = {
+        id: 'root',
+        label: title,
+        description: `项目总览：${modules.filter((m) => (grouped.get(m.id as string) ?? []).length > 0).length} 个功能分组（设计视图语义分组）`,
+        kind: 'root',
+        children: [],
+      };
+      const buildFileNodes = (files: typeof semanticFiles, groupId: string): MindMapNode[] => {
+        const out: MindMapNode[] = files.slice(0, max_files_per_community).map((f) => {
+          const desc = fileDesc(f);
+          const n: MindMapNode = {
+            id: f.id,
+            label: basename(f.path as string),
+            description: desc,
+            kind: 'file',
+            meta: { lines: f.lines, l2_ref: f.id },
+          };
+          llmTargets.push({ id: n.id, label: n.label, kind: 'file', hint: desc });
+          return n;
+        });
+        if (files.length > max_files_per_community) {
+          out.push({
+            id: `more_${groupId}`,
+            label: `… 还有 ${files.length - max_files_per_community} 个文件`,
+            description: '为保持导图可读，其余文件已折叠',
+            kind: 'note',
+          });
+        }
+        return out;
+      };
+      for (const m of modules) {
+        const files = grouped.get(m.id as string) ?? [];
+        if (files.length === 0) continue;
+        const mNode: MindMapNode = {
+          id: m.id as string,
+          label: m.label || (m.id as string),
+          description: m.description || `${files.length} 个文件`,
+          kind: 'feature',
+          meta: { files: files.length },
+          children: buildFileNodes(files, m.id as string),
+        };
+        llmTargets.push({ id: mNode.id, label: mNode.label, kind: 'feature', hint: mNode.description ?? '' });
+        root.children!.push(mNode);
+      }
+      if (ungrouped.length > 0) {
+        root.children!.push({
+          id: 'grp_ungrouped',
+          label: '未分组',
+          description: '设计视图中未归入任何分组容器的文件',
+          kind: 'feature',
+          meta: { files: ungrouped.length },
+          children: buildFileNodes(ungrouped, 'ungrouped'),
+        });
+      }
+    } else {
+      root = { id: 'root', label: title, description: '项目总览（未生成功能树，按文件平铺）', kind: 'root', children: [] };
+      for (const f of semanticFiles) {
+        const desc = fileDesc(f);
+        root.children!.push({
+          id: f.id,
+          label: basename(f.path as string),
+          description: desc,
+          kind: 'file',
+          meta: { lines: f.lines, l2_ref: f.id },
+        });
+        llmTargets.push({ id: f.id, label: basename(f.path as string), kind: 'file', hint: desc });
+      }
     }
   }
 
@@ -1207,7 +1331,14 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
       mode = 'llm';
       const apply = (n: MindMapNode): void => {
         const d = enriched!.get(n.id);
-        if (d) n.description = d;
+        if (d) {
+          // LLM 只负责"是什么"的人话；描述里"→ 增量段"（DSL 标注投影）必须保留，否则借鉴标注被覆盖丢失
+          const delta = (n.description ?? '')
+            .split('\n')
+            .filter((s) => s.trim().startsWith('→'))
+            .join('\n');
+          n.description = delta ? `${d}\n${delta}` : d;
+        }
         if (n.children) for (const c of n.children) apply(c);
       };
       apply(root);
