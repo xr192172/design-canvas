@@ -228,6 +228,14 @@ interface BrickManifest {
 - role.class 与 `layer` 正交：layer 是架构分层（api/service/data），role 是复用价值（functional 可拎/business 不拎）
 - `reads_config` 未来可从 go flag 定义/env.Getenv/前端 config 读取点 AST 提取——Phase 2 实现范围先做 Go/TS 两语言
 
+### Phase 2.7：五问决策（2026-08-20 第二轮：积木盒形态与自举）
+
+1. **积木盒，不保留原项目**：积木盒 = 自包含快照（闭包文件内容 + BrickContract + BrickManifest 三件套），不是对原项目的引用。原项目降级为 provenance 冷记录（git URL + commit hash），不保留工作副本。理由：引用式随上游演化腐烂而快照不会；上游修复凭记录可重抽（修复杠杆不丢）；契约在快照内，溯源无需活项目
+2. **行为内化成编排工具**：目标场景"用户说哪个项目好 → 拉取 → 解析 → 抽积木 → 入盒"是一条编排链（浅 clone → import_project → extract_contracts → 挑积木 → harvest_closure → 入盒）。原子工具已齐，Phase 3 补 `harvest_from_url` 编排层串起来，不重写
+3. **一切皆插件 = 收敛终点，design-canvas 自举**：最终开发收敛成"一切皆插件"格式（对应 Cordis 映射表第一条）；design-canvas 自己成为第一个用积木机制重构的对象——Phase 2 已给自身抽了契约，dogfood 有基础，自举路径已通
+4. **二分线精确化：能力 = 功能线，决策 = 业务线**：生图管线（prompt 组装/API 调用/落盘/路径管理）是功能积木，跨项目可复用；"这个页面要什么图、配什么文案、怎么布局"是业务线。CSS/主题系统/设计 token 是功能积木，只有页面级组装决策是业务。前端项目里功能线远多于直觉判断
+5. **camera 插桩精度：定向补 effects 探针，不全面细化**：函数级插桩对调用链观测够用，但 Phase 2b 的 writes/holds/emits 证据给不了（函数级 Capture 不知道写了哪个全局变量/占了哪个端口）。解法是动静结合在 effects 上的应用——AST 静态筛候选点（全局赋值/单例字段写/文件写/端口监听/chan send/emit 调用）→ 只在候选点插桩 → 执行时 Capture target+值摘要。不做全量语句级插桩（爆炸，违反 bounded memory 硬约束）
+
 ### Phase 3：三项目试验（端到端验收）
 - 试验场：design-canvas（TS）+ agent-shell（Go）+ cross-border-scout（TS/Node），三种异构真库
 - 流程：导入三项目 → 建索引 → 用户指定功能（如"LLM 调用封装"，三项目各有实现，顺便验语义去重）→ 检索、算闭包、出契约清单 → 拼新 DSL → 思维导图验收新积木盒
