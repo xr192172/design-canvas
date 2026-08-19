@@ -86,6 +86,142 @@
   3. **契约 = 数据形状映射**：结构化类型匹配（Go interface 隐式实现 / TS 结构类型）为具体机制——契约核心产出是积木暴露/消费的结构体 schema；匹配 = 形状子类型检查；不匹配 = LLM 生成薄适配器（量小/边界清晰/可单测，恰是生成擅长的）
   4. **时空可组合性对齐**：作为契约 schema 的设计验收标准，不照搬 Cordis 运行时实现——空间可组合性 → 契约必须登记 effects 清单（写哪些外部状态/占哪些资源/发哪些事件，拔积木该回收什么设计时即知）；时间可组合性 → 跨积木状态变更必须走事件流（camera 事件流已是该形态，只需加约束）
 
+### Phase 2.5：契约 Schema 设计草案（2026-08-20，基于三主线）
+
+#### 设计原则
+- **一切字段结构化、机器可判**（不做自由文本槽位——LLM 描述进 `notes`，判定依据进结构化字段）
+- **文件级契约挂 DSL**（`SemanticFile.contract`，复用现有存储/渲染/diff 管线）；**积木级清单存独立注册表**（`.design-canvas/bricks/<name>.json`——积木是动态拎取产物，进 DSL 会膨胀）
+- **提取来源必须标记**（`origin: 'ast' | 'runtime' | 'llm'`）——AST 免费且准，camera 证据贵但真，LLM 便宜但需验证；来源不同置信度不同
+- **schema 自带 version**，后续演进走版本迁移而非静默变形
+
+#### A. 文件级契约（DSL：`SemanticFile.contract?: BrickContract`）
+
+```typescript
+interface BrickContract {
+  schema_version: 1;
+
+  // ── 主线2：业务/功能二分 ──────────────────────────────
+  role: {
+    class: 'business' | 'functional' | 'hybrid';
+    /** 判定依据：graph=依赖方向算法 / runtime=camera 证据 / llm=语义 / mixed */
+    basis: 'graph' | 'runtime' | 'llm' | 'mixed';
+    confidence: number;              // 0-1；< 0.7 时 Phase 3 检索降权
+    reasons?: string[];              // 人话依据（如"依赖箭头全部指向 util 层"）
+  };
+
+  // ── 主线3a：数据形状（复用判定单元）────────────────────
+  shapes: {
+    /** 本文件导出/暴露给外界的形状 */
+    exposes: ShapeSchema[];
+    /** 本文件消费（参数/返回值/全局读取）的形状 */
+    consumes: ShapeSchema[];
+  };
+
+  // ── 主线3b：effects 清单（空间可组合性验收单元）────────
+  effects: {
+    /** 写哪些外部状态（全局 var/单例字段/文件系统） */
+    writes: EffectTarget[];
+    /** 占用哪些资源（端口/goroutine/连接池/句柄）——拔积木须释放 */
+    holds: EffectTarget[];
+    /** 发出哪些事件（时间可组合性通道） */
+    emits: string[];
+    /** 读哪些配置项/env（积木"出厂环境要求"） */
+    reads_config: string[];
+  };
+
+  // ── 主线1：运行证据（camera 动静结合）──────────────────
+  runtime?: {
+    /** 观测窗口内调用次数（0 = 纯静态判定，confidence 上限 0.7） */
+    call_count: number;
+    /** 实测高频调用方（校验静态依赖图，发现图上看不到的隐式调用） */
+    top_callers: string[];
+    /** 实测读过的 config key / 写过的 target——校验 effects 清单真实性 */
+    observed_targets: string[];
+    last_seen?: string;              // ISO 时间戳
+  };
+
+  provenance?: {
+    source_project?: string;         // 外来积木溯源（本项目内为空）
+    commit?: string;
+    harvested_at?: string;
+  };
+}
+
+interface ShapeSchema {
+  name: string;                      // 如 "ContextGraph"、"User"
+  kind: 'struct' | 'interface' | 'type' | 'class';
+  fields: Array<{
+    name: string;
+    type: string;                    // 归一化类型串（"string"、"*ContextGraph"、"(int, error)"）
+    required?: boolean;
+  }>;
+  origin: 'ast' | 'runtime' | 'llm'; // AST 提取 / camera 观测形状 / LLM 推断
+  notes?: string;
+}
+
+interface EffectTarget {
+  target: string;                    // 全局名/单例名/文件路径/env key
+  op: 'write' | 'append' | 'delete' | 'acquire' | 'release';
+  /** 回收方式（拔积木时怎么撤销）；缺省 = 不可逆，匹配时标红 */
+  reversible?: string;
+}
+```
+
+#### B. 积木级清单（注册表：`.design-canvas/bricks/<name>.json`）
+
+```typescript
+interface BrickManifest {
+  name: string;                      // 如 "context-graph-writer"
+  schema_version: 1;
+  seed_files: string[];
+  /** harvest_closure 的输出原样入档（内部闭包+外部三分类+证据边） */
+  closure: {
+    internal: string[];
+    external: Array<{ source: string; class: 'stdlib' | 'third_party' | 'unresolved' }>;
+  };
+  /** 聚合视图：各成员文件 contract 的 shapes/effects 并集（检索货架用） */
+  aggregate: {
+    exposes: ShapeSchema[];
+    consumes: ShapeSchema[];
+    emits: string[];
+    reads_config: string[];
+  };
+  /** 匹配记录：某次"端口需求 vs 本积木"的判定历史（可追溯为何选用/弃用） */
+  matches?: Array<{
+    port: string;                    // 需求方端口（接口名/形状名）
+    verdict: 'exact' | 'adapt' | 'incompatible';
+    adapter_file?: string;           // verdict=adapt 时生成的适配器路径
+    at: string;
+  }>;
+}
+```
+
+#### C. 判定流水线（主线1 动静结合的实现顺序）
+
+```
+① 静态（零成本，import 时自动跑）
+   AST → shapes.exposes/consumes（origin='ast'）
+   依赖方向图算法 → role.class 初判（basis='graph'）
+② 运行（camera 事件流，watch 累积）
+   top_callers 校验依赖图 → role.basis 升级 'mixed'
+   observed_targets 校验 effects 清单（漏登 = 契约不完整告警）
+   runtime.call_count = 0 的文件 confidence 封顶 0.7
+③ 语义（LLM，按需触发）
+   仅对 confidence < 0.7 或 hybrid 文件跑 → basis 补 'llm'
+   LLM 结论只进 role/reasons + notes，不进 shapes/effects
+   （结构化字段只接受 AST/camera 两个可信源——LLM 不产生事实）
+```
+
+#### D. 两条验收标准（时空可组合性的落地判据）
+- **空间**：拔积木模拟 = 遍历 `closure.internal` 各文件 effects，全部 target 满足 `reversible` 有值（或显式标"不可逆+影响说明"）→ 判定可安全拔除；存在未登记 effect（camera 观测到 writes 里没有的 target）→ 契约不完整，拒绝拔除
+- **时间**：跨积木状态变更必须出现在双方契约里（A.emits ↔ B.writes/observed_targets）；camera 事件流中存在"绕过事件流的直接状态写入" → 违反时间可组合性，标记技术债
+
+#### E. 与现有结构的挂接
+- `SemanticFile.contract` 新字段（可选，向后兼容——老 DSL 无此字段视为"契约未提取"）
+- shapes 复用 `Symbol`（kind=struct/interface/class 的条目升格为 ShapeSchema.fields）
+- role.class 与 `layer` 正交：layer 是架构分层（api/service/data），role 是复用价值（functional 可拎/business 不拎）
+- `reads_config` 未来可从 go flag 定义/env.Getenv/前端 config 读取点 AST 提取——Phase 2 实现范围先做 Go/TS 两语言
+
 ### Phase 3：三项目试验（端到端验收）
 - 试验场：design-canvas（TS）+ agent-shell（Go）+ cross-border-scout（TS/Node），三种异构真库
 - 流程：导入三项目 → 建索引 → 用户指定功能（如"LLM 调用封装"，三项目各有实现，顺便验语义去重）→ 检索、算闭包、出契约清单 → 拼新 DSL → 思维导图验收新积木盒
