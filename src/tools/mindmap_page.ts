@@ -64,6 +64,11 @@ export function renderMindmapPage(feature: string): string {
     <div class="ed-btns"><button id="ed-cancel">取消</button><button id="ed-ok" class="primary">确定</button></div>
   </div>
   <div id="hint">点节点看详情 · 点左侧圆点折叠 · hover 节点点 ⊕ 新增分支 · 双击 AI 节点写批注 / 双击自己的节点改字 · <b>青色连线 + 序号 = 业务流转顺序（1→2→3）</b> · <b>加新功能：根节点写构想 → 保存 → AI 自动定位挂上去（🔮）</b></div>
+  <div id="jserr" style="display:none; position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:99; background:#ffe3e3; color:#c92a2a; border:1px solid #ffa8a8; border-radius:8px; padding:8px 14px; font:12px ui-monospace,monospace; max-width:90vw; max-height:40vh; overflow:auto; white-space:pre-wrap;"></div>
+  <script>
+    window.addEventListener('error', function(e){ var d = document.getElementById('jserr'); if(d){ d.style.display='block'; d.textContent += '✗ ' + e.message + ' @' + (e.lineno||'?') + ':' + (e.colno||'?') + '\\n'; } });
+    window.addEventListener('unhandledrejection', function(e){ var d = document.getElementById('jserr'); if(d){ d.style.display='block'; d.textContent += '✗ Promise: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason) + '\\n'; } });
+  </script>
   <style>
     html, body { height: 100%; overflow: hidden; }
     body { background-color: #f5faff; background-image: radial-gradient(#ced4da 1.1px, transparent 1.1px); background-size: 22px 22px; color: #1e1e1e; font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif; }
@@ -452,7 +457,7 @@ export function renderMindmapPage(feature: string): string {
   function renderAll(){
     var E = document.getElementById('edges'), N = document.getElementById('nodes'), G = document.getElementById('notes'), FL = document.getElementById('flowlayer');
     E.innerHTML = ''; N.innerHTML = ''; G.innerHTML = ''; FL.innerHTML = '';
-    var edges = '', nodes = '', boxes = '', flowTags = '';
+    var edges = '', nodes = '', boxes = '', flowSvg = '';
     // 收纳盒底板（画在最底层）：按分支类型着色，构想=紫虚线、共享=绿、功能=蓝
     visChildren(TREE).forEach(function(g){
       if(!g._box) return;
@@ -471,19 +476,31 @@ export function renderMindmapPage(feature: string): string {
         edges += '<path d="M '+x1+' '+y1+' C '+mx+' '+y1+', '+mx+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="'+(n.kind==='user' ? 'rgba(230,119,0,.55)' : (n.kind==='feature' ? '#4dabf7' : '#adb5bd'))+'" stroke-width="'+(n.kind==='feature'?2.6:(n.kind==='user'?1.6:1.8))+'"/>';
       }
       nodes += renderNode(n);
-      // 流转连线：本层按设计事实排出的业务顺序（①→②→③），青色曲线 + 箭头，与树的灰色归属线分开
+      // 流转连线：本层按设计事实排出的业务顺序（①→②→③），青色箭头，画在顶层 flowlayer——
+      // 线若画在卡片层之下会被整段盖住（间隙外的部分全隐身）。走线规则：
+      //   同行：右缘→左缘 水平弧（只经过列间空隙）
+      //   折行：底缘出→行间空隙→顶缘入 的 S 曲线（只走空白，不穿卡片也不藏卡后）
       if(n._flowEdges){
         n._flowEdges.forEach(function(fe){
           var A = fe.a, B = fe.b;
           if(!A || !B || A._x == null || B._x == null) return;
-          var x1 = A._x + A._w / 2, y1 = A._y, x2 = B._x - B._w / 2, y2 = B._y;
-          var dx = Math.max(30, Math.min(110, Math.abs(x2 - x1) * 0.45));
-          edges += '<path d="M '+x1+' '+y1+' C '+(x1 + dx)+' '+y1+', '+(x2 - dx)+' '+y2+', '+x2+' '+y2+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".75" marker-end="url(#arrowFlow)"/>';
+          var d = '', lx = 0, ly = 0;
+          if(Math.abs(A._y - B._y) < 8 && B._x > A._x){
+            var x1 = A._x + A._w / 2, y1 = A._y, x2 = B._x - B._w / 2, y2 = B._y;
+            var dx = Math.max(30, Math.min(110, Math.abs(x2 - x1) * 0.45));
+            d = 'M '+x1+' '+y1+' C '+(x1 + dx)+' '+y1+', '+(x2 - dx)+' '+y2+', '+x2+' '+y2;
+            lx = (x1 + x2) / 2; ly = (y1 + y2) / 2 - 11;
+          } else {
+            var ax = A._x, ay = A._y + (A._h || nodeH(A)) / 2;
+            var bx = B._x, by = B._y - (B._h || nodeH(B)) / 2;
+            var yMid = (ay + by) / 2;
+            d = 'M '+ax+' '+ay+' C '+ax+' '+yMid+', '+bx+' '+yMid+', '+bx+' '+by;
+            lx = (ax + bx) / 2; ly = yMid - 11;
+          }
+          flowSvg += '<path d="'+d+'" fill="none" stroke="#15aabf" stroke-width="1.8" opacity=".75" marker-end="url(#arrowFlow)"/>';
           if(fe.label){
-            // 标签画到顶层 flowlayer：卡片之间间隙常比标签窄，放底层会被卡片盖住只剩中间几个字
-            var mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 9;
-            flowTags += '<rect x="'+(mx - fe.label.length * 5.2 - 6)+'" y="'+(my - 9)+'" width="'+(fe.label.length * 10.4 + 12)+'" height="18" rx="9" fill="#e3fafc" stroke="#66d9e8" stroke-width="1" opacity=".96"/>'
-              + '<text x="'+mx+'" y="'+(my + 4)+'" text-anchor="middle" font-size="10" font-weight="600" fill="#0b7285" paint-order="stroke" stroke="#ffffff" stroke-width="2.5">'+esc(fe.label)+'</text>';
+            flowSvg += '<rect x="'+(lx - fe.label.length * 5.2 - 6)+'" y="'+(ly - 9)+'" width="'+(fe.label.length * 10.4 + 12)+'" height="18" rx="9" fill="#e3fafc" stroke="#66d9e8" stroke-width="1" opacity=".96"/>'
+              + '<text x="'+lx+'" y="'+(ly + 4)+'" text-anchor="middle" font-size="10" font-weight="600" fill="#0b7285" paint-order="stroke" stroke="#ffffff" stroke-width="2.5">'+esc(fe.label)+'</text>';
           }
         });
       }
@@ -492,7 +509,7 @@ export function renderMindmapPage(feature: string): string {
     })(TREE, null, false);
     N.innerHTML = boxes + nodes;
     E.innerHTML = edges;
-    FL.innerHTML = flowTags;
+    FL.innerHTML = flowSvg;
     renderDeps();
     // 便签：锚定目标节点右侧偏下堆叠（有 pos 用 pos）
     var perTarget = {};

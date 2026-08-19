@@ -1119,6 +1119,10 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
 
   // 记录已尝试 LLM 提炼的节点，供批量生成描述
   const llmTargets: Array<{ id: string; label: string; kind: 'feature' | 'community' | 'file'; hint: string }> = [];
+  /** 改名/迁移遗留空壳：无导出 API 且个位数行（如 l3.go 仅剩 3 行注释占位）——
+   *  导图不收，避免以"独立卡片"误导（其业务本体已改名迁走、在链上） */
+  const isHuskFile = (f: { lines?: number; actual_apis?: unknown[]; expected_apis?: unknown[] }): boolean =>
+    (f.lines ?? 999) < 10 && !f.actual_apis?.length && !f.expected_apis?.length;
 
   // AI 设计标注索引（node_id → 标注文本）：DSL 里挂的借鉴/决策标注，
   // 作为文件描述的"增量"段拼进导图——每个模块不只说"是什么"，还说"要变什么"
@@ -1215,7 +1219,7 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
       if (n.type === 'file' && typeof n.swimlane === 'string') laneOf.set(n.id, n.swimlane);
     }
 
-    const semanticFiles = (dsl.semantic?.files ?? []).filter((f) => f.path);
+    const semanticFiles = (dsl.semantic?.files ?? []).filter((f) => f.path && !isHuskFile(f));
     const grouped = new Map<string, typeof semanticFiles>(modules.map((m) => [m.id as string, []]));
     const ungrouped: typeof semanticFiles = [];
     for (const f of semanticFiles) {
