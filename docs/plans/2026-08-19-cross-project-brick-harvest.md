@@ -77,7 +77,13 @@
   - 测试：tests/tools/harvest_closure.test.ts 6 用例全绿（TS 闭包/证据链/callers/三分类/Go 内部包/异常路径）
   - 真实验证：design-canvas 自身 cache.db 上拎 diff_impact.ts → 11 内部文件（深度 3）+ 4 标准库 0 三方，证据链完整
 
-### Phase 2：深度契约提取
+### Phase 2：深度契约提取 ✅ 2026-08-20 静态阶段完成（commit 4073225）
+
+**已落地**（静态阶段；writes/holds/emits 留待 Phase 2b camera 运行证据）：
+- `extract_contracts` MCP 工具：role 依赖方向判定（种子识别 + 不动点传播，零 token）+ shapes 结构化类型提取（Go struct/interface + TS class/interface，nodes 符号行范围 + 源码解析）+ reads_config 扫描（process.env / os.Getenv）
+- 契约写回 `SemanticFile.contract`（saveDSL 正规通道）；DSL schema 同步新增 BrickContract 定义
+- `import_graph` 公共模块：文件级 import 邻接表，harvest_closure / extract_contracts 共用（依赖图单一真相源）
+- 5 单测全绿 + 真实项目自检（storage.ts fan-in=49→functional 0.7 / server_registry.ts conf=0.65→正确落入 LLM 兜底候选 / import_project.ts 6 shapes）
 - 在闭包输出上叠加：配置项/环境变量依赖、全局单例、init() 副作用、宿主框架地基接触面
 - 产出"积木出厂说明书"：签名之外回答"这积木需要什么环境才能活"
 - **四问决策（2026-08-20 讨论追加）**：
