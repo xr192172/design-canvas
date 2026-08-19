@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDsl } from './tools/render_dsl.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
+import { deriveMindMap } from './tools/derive_mind_map.js';
 import { queryFeature } from './tools/query_feature.js';
 import { updateFeature } from './tools/update_feature.js';
 import { scaffold } from './tools/scaffold.js';
@@ -198,12 +199,34 @@ const editDslHandler = wrap(async (a) => {
 /** manage_feature：生命周期 */
 const manageFeatureHandler = wrap(async (a) => manageFeature(a as never));
 
-/** render_dsl：渲染 HTML/SVG/Markdown（format 参数聚合三个导出；view 决定渲染设计或实际视图） */
+/** render_dsl：渲染思维导图/HTML/SVG/Markdown（format 参数聚合导出；view 决定渲染设计或实际视图） */
 const renderDslHandler = wrap(async (a) => {
-  const format = typeof a.format === 'string' ? a.format : 'html';
+  // 默认 mindmap：现行思维导图架构（root → 功能分组 → 文件）；html 星图画布仅调试保留
+  const format = typeof a.format === 'string' ? a.format : 'mindmap';
   const feature = a.feature as string;
   const view = a.view === 'live' ? 'live' : 'design';
   const output_path = typeof a.output_path === 'string' ? a.output_path : undefined;
+  if (format === 'mindmap') {
+    if (!feature) throw new Error('render_dsl mindmap 模式需要 feature（从存储读取设计 DSL 派生，不支持 dsl_json 直传）');
+    const r = await deriveMindMap({ feature, gen_descriptions: false });
+    // 空导图回退：DSL 无 semantic.files 时导图会空，降级为 html 设计画布避免产物不可用
+    if ((r.mind_map.root.children ?? []).length === 0) {
+      const dsl = getDSLByView(feature, view);
+      if (dsl) {
+        const rr = renderDsl({ dsl_json: JSON.stringify(dsl), output_path, persist: false });
+        return {
+          message:
+            `⚠ 思维导图为空（DSL 无语义文件层），已回退渲染设计画布：\n${rr.message}\n` +
+            `提示：先 import_project 或 edit_dsl 补充 semantic.files 后再派生思维导图`,
+        };
+      }
+    }
+    return {
+      message:
+        r.message +
+        `\n交互版（人机共笔：⊕ 新增分支 / 双击批注 / 保存回写 DSL）：http://localhost:3000/mindmap/${feature}`,
+    };
+  }
   if (format === 'svg') {
     const r = exportSvg({ feature, output_path });
     return { message: r.message };
@@ -498,15 +521,16 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'render_dsl',
-    title: 'Render design DSL to HTML/SVG/Markdown',
+    title: 'Render design DSL to mindmap/HTML/SVG/Markdown',
     description:
-      '渲染设计 DSL：format=html（默认，自包含单 HTML，内联 CSS+JS）/ svg（矢量图）/ markdown（可读设计文档）。' +
-      'html 模式可直接传 dsl_json 渲染，或用 feature+view 从存储读取。' +
-      'view: design（默认，渲染设计视图「🎭 设计」）/ live（渲染实际视图「⚡ 实际」，不写回设计层）。',
+      '渲染设计 DSL：format=mindmap（默认，现行思维导图架构：root → 功能分组 → 文件，自包含查看器 HTML；' +
+      '功能分组优先读设计视图语义分组容器，其次 feature_tree 功能树）/' +
+      'html（旧设计画布·星图，仅调试用，自包含单 HTML）/ svg（矢量图）/ markdown（可读设计文档）。' +
+      'mindmap/svg/markdown 用 feature 从存储读取；html 模式可直接传 dsl_json 渲染，或用 feature+view 读取。',
     inputSchema: {
-      feature: z.string().optional().describe('feature 名（html 用 feature+view 读取，或 svg/markdown 模式用）'),
-      view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认），live=实际代码快照'),
-      format: z.enum(['html', 'svg', 'markdown']).optional().describe('输出格式，默认 html'),
+      feature: z.string().optional().describe('feature 名（mindmap/svg/markdown 必填；html 用 feature+view 读取）'),
+      view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认），live=实际代码快照（仅 html 用）'),
+      format: z.enum(['mindmap', 'html', 'svg', 'markdown']).optional().describe('输出格式，默认 mindmap（现行思维导图架构）'),
       dsl_json: z.string().optional().describe('html 模式：完整 DSL JSON 字符串'),
       output_path: z.string().optional().describe('输出路径'),
     },

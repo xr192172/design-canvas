@@ -174,12 +174,24 @@ export async function embedTexts(cfg: EmbeddingConfig, texts: string[], db?: Dat
   return out as number[][];
 }
 
-function encodeVectorBlob(v: number[]): Uint8Array {
-  return new Uint8Array(new Float32Array(v).buffer);
+export function encodeVectorBlob(v: number[]): Uint8Array {
+  // 返回独立的 Uint8Array（底层 ArrayBuffer offset=0，对齐）。
+  // 避免 better-sqlite3 写回 blob 时携带共享视图的非对齐 byteOffset（写路径本身不
+  // 依赖对齐，但与 decode 路径保持一致，减少边界面）。
+  const src = new Uint8Array(new Float32Array(v).buffer);
+  const out = new Uint8Array(src.byteLength);
+  out.set(src);
+  return out;
 }
 
-function decodeVectorBlob(b: Uint8Array): number[] {
-  return Array.from(new Float32Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 4)));
+export function decodeVectorBlob(b: Uint8Array): number[] {
+  // 防御对齐：better-sqlite3 返回的 blob 可能是共享 Buffer 的一个视图（byteOffset
+  // 非 0 且可能不是 4 的倍数），直接 new Float32Array(buffer, offset) 会抛
+  // RangeError: start offset of Float32Array should be a multiple of 4。
+  // 先拷贝到对齐的独立 Uint8Array，再构造 Float32Array。
+  const aligned = new Uint8Array(b.byteLength);
+  aligned.set(b);
+  return Array.from(new Float32Array(aligned.buffer, 0, Math.floor(aligned.byteLength / 4)));
 }
 
 async function callEmbeddings(cfg: EmbeddingConfig, inputs: string[]): Promise<number[][]> {

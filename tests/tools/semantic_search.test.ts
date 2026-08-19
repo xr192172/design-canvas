@@ -21,6 +21,8 @@ import {
   embedTexts,
   embeddingCacheStats,
   loadEmbeddingConfig,
+  encodeVectorBlob,
+  decodeVectorBlob,
   type EmbeddingConfig,
 } from '../../src/tools/semantic_search';
 import { openDb } from '../../src/db/db';
@@ -243,5 +245,47 @@ describe('semantic_search FTS 降级（无 embedding 配置）', () => {
 
   it('loadEmbeddingConfig：无配置返回 null', () => {
     expect(loadEmbeddingConfig()).toBeNull();
+  });
+});
+
+describe('embedding_cache blob 对齐防御', () => {
+  const VEC: number[] = [1.5, -2.25, 3.125, 0.0009765625, 1e6, -0.5];
+
+  it('encode → decode 往返：独立 Uint8Array（对齐）数值还原', () => {
+    const blob = encodeVectorBlob(VEC);
+    expect(blob.byteOffset).toBe(0); // 自身必须对齐（写路径产物）
+    const got = decodeVectorBlob(blob);
+    expect(got.length).toBe(VEC.length);
+    for (let i = 0; i < VEC.length; i++) expect(got[i]).toBeCloseTo(VEC[i], 5);
+  });
+
+  it('decodeVectorBlob：非 4 对齐的共享 Buffer 视图（模拟 better-sqlite3）不抛 RangeError，数值还原', () => {
+    // 构造模拟场景：大的共享 ArrayBuffer，blob 数据写在 byteOffset 为 1/2/3（非 4 倍数）
+    // 的位置，然后在该位置创建 Uint8Array 视图——等同于 better-sqlite3 复用内部 pool
+    // 返回的 blob（其 byteOffset 取决于前一次分配的残余偏移，不保证 4 对齐）。
+    const encoded = encodeVectorBlob(VEC);
+    for (const shift of [1, 2, 3]) {
+      const bigBuf = new ArrayBuffer(encoded.byteLength + 16); // 留足头偏移空间
+      const bigView = new Uint8Array(bigBuf);
+      bigView.set(encoded, shift); // 把 blob 拷贝到非对齐偏移 shift
+      const misalignedView = new Uint8Array(bigBuf, shift, encoded.byteLength);
+      // 旧实现：new Float32Array(b.buffer, b.byteOffset, N) 在此必抛：
+      //   RangeError: start offset of Float32Array should be a multiple of 4
+      expect(() => decodeVectorBlob(misalignedView)).not.toThrow();
+      const got = decodeVectorBlob(misalignedView);
+      expect(got.length).toBe(VEC.length);
+      for (let i = 0; i < VEC.length; i++) {
+        expect(got[i]).toBeCloseTo(VEC[i], 5);
+      }
+    }
+  });
+
+  it('decodeVectorBlob：空 blob 返回空数组（边界：无向量的空符号文本场景）', () => {
+    for (const shift of [0, 1, 2, 3]) {
+      const big = new ArrayBuffer(16);
+      const v = new Uint8Array(big, shift, 0); // byteLength=0 空视图
+      expect(() => decodeVectorBlob(v)).not.toThrow();
+      expect(decodeVectorBlob(v)).toEqual([]);
+    }
   });
 });
