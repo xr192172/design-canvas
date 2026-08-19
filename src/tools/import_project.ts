@@ -200,7 +200,7 @@ function inArchiveDir(p: string): boolean {
 // import 解析 → 内部文件
 // ─────────────────────────────────────────────────────────────
 
-interface FileEntry {
+export interface FileEntry {
   /** 相对项目根的 posix 路径（如 src/tools/a.ts） */
   rel: string;
   abs: string;
@@ -213,7 +213,7 @@ function toPosix(p: string): string {
 }
 
 /** Go module 条目：module 路径 + go.mod 所在目录（相对项目根，'' 表示根） */
-interface GoModule {
+export interface GoModule {
   module: string;
   dir: string;
 }
@@ -223,7 +223,7 @@ interface GoModule {
  * 按 module 路径长度降序，保证最长前缀优先匹配
  * （如 example.com/a/v2 优先于 example.com/a）。
  */
-function readGoModules(root: string): GoModule[] {
+export function readGoModules(root: string): GoModule[] {
   const mods: GoModule[] = [];
   const stack: string[] = [root];
   while (stack.length > 0) {
@@ -259,7 +259,7 @@ function readGoModules(root: string): GoModule[] {
 const RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go'];
 
 /** 构建查找索引：无扩展名路径 / 目录路径 → 文件 rel 列表 */
-function buildIndex(files: FileEntry[]): {
+export function buildIndex(files: FileEntry[]): {
   byNoExt: Map<string, FileEntry>;
   byDir: Map<string, FileEntry[]>;
   /** 同名不同扩展名的碰撞记录（被丢弃的一方），用于结果可见性 */
@@ -308,7 +308,7 @@ function buildIndex(files: FileEntry[]): {
  * - Go package：module 前缀剥离 → 包目录下全部文件
  * - Python 点分模块 → 点转斜杠，先试项目根再试导入者目录
  */
-function resolveImport(
+export function resolveImport(
   imp: ParsedImport,
   importer: FileEntry,
   index: { byNoExt: Map<string, FileEntry>; byDir: Map<string, FileEntry[]> },

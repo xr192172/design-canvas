@@ -66,10 +66,16 @@
 
 ## 五、实施路线图
 
-### Phase 1：拎取闭包工具（算法活，量不大）
+### Phase 1：拎取闭包工具（算法活，量不大）✅ 2026-08-19 完成
 - 输入：项目 + 文件路径（或符号）
 - 输出：传递依赖闭包 + 分类（标准库 / 三方库 / 项目内部）+ 证据边
 - 基础：import 边已在索引中解析
+- **实现**：MCP 工具 `harvest_closure`（src/tools/harvest_closure.ts，14 号主工具）
+  - 邻接表 = edges 表 import 边 ∪ 原始 imports 经 resolveImport 权威解析（复用 import_project 导出的 resolveImport/readGoModules/buildIndex，单一真相源）
+  - 关键发现：Go 包导入不进 edges 表（只有 TS 相对导入建边），Go/Python 必须重走 resolveImport 解析；内部包（example.com/...）解析到项目内文件即算内部，不算外部三方
+  - include_callers=true 连调用方生态一起端走
+  - 测试：tests/tools/harvest_closure.test.ts 6 用例全绿（TS 闭包/证据链/callers/三分类/Go 内部包/异常路径）
+  - 真实验证：design-canvas 自身 cache.db 上拎 diff_impact.ts → 11 内部文件（深度 3）+ 4 标准库 0 三方，证据链完整
 
 ### Phase 2：深度契约提取
 - 在闭包输出上叠加：配置项/环境变量依赖、全局单例、init() 副作用、宿主框架地基接触面

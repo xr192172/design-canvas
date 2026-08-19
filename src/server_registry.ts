@@ -30,6 +30,8 @@ import { importProject } from './tools/import_project.js';
 import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
+import { harvestClosure } from './tools/harvest_closure.js';
+import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -651,6 +653,30 @@ const TOOL_DEFS: ToolDef[] = [
       live_dir: z.string().optional().describe('live 视图的 baseDir（可选，默认 dataHome），与 import_project 的 live_dir 一致'),
     },
     handler: diffViewsHandler,
+  },
+  {
+    name: 'harvest_closure',
+    title: 'Harvest a brick with its transitive import closure',
+    description:
+      '积木拎取闭包（Brick Harvest Phase 1）：给定种子文件，沿 import 边算出"拎走这块积木必须连根带走的全部东西"。' +
+      '输出：项目内传递闭包（带深度/带入者/import 语句证据）+ 外部依赖三分类（标准库/三方/未归类）。' +
+      '与 diff_impact 正交：diff_impact 答"改这里波及谁"（importer 方向），本工具答"拎走它需要什么"（importee 方向）。' +
+      'include_callers=true 时连调用方一起端走（拎服务层带生态）。前置：项目需先跑 import_project 建符号缓存。' +
+      '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      files: z.array(z.string()).describe('种子文件（相对项目根或绝对路径，可多个）'),
+      feature: z.string().optional().describe('可选 feature 名：提供时为闭包文件附加 DSL 文件节点 id'),
+      include_callers: z
+        .boolean()
+        .optional()
+        .describe('true=importer 方向也纳入闭包（连功能带调用方生态一起端走），默认 false=纯根须'),
+      max_depth: z.number().optional().describe('BFS 深度上限（默认 30，传递闭包天然有界）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = harvestClosure(a as unknown as HarvestClosureInput);
+      return { message: r.message, data: r };
+    }),
   },
   {
     name: 'camera_log',
