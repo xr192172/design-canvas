@@ -30,8 +30,10 @@
  *     不需要知道源 module 名：后缀落在闭包目录集合内 ⇔ 是内部 import。
  *
  * 诚实边界（decline rather than guess）：
- *   - 三方依赖不自动生成 require（各积木 external third_party 汇总成
- *     pending 清单报告，由 LLM/人补 go.mod / package.json）
+ *   - 三方依赖版本只从积木的 go_mod_requires 存档取（源项目 go.mod 原文，
+ *     不猜不升版）；存档缺项/TS 依赖 → 汇总 pending 清单由人/LLM 补
+ *   - 多积木同库不同版本：MVS 语义取高版本 + version_conflicts 留档警告
+ *   - go.sum 不生成（需 go 工具链算哈希）——拼装区跑 go mod tidy 补
  *   - 跨积木闭包重叠文件只**警告**不合并——两份同源代码在 Go 里是两个
  *     不兼容的包，静默合并等于猜；正确解法（提升共享积木）留给下次入盒
  *   - glue 代码不生成——粘合是 LLM 的活，工具只搬已验证实码
@@ -40,6 +42,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrickManifest } from '../dsl/contract.js';
+import { resolveGoThirdParty, compareGoVersion } from './go_mod.js';
 
 export interface AssembleBricksInput {
   /** 要拼装的积木名列表（须已在盒中） */
@@ -64,8 +67,10 @@ export interface AssembledBrickReport {
   dest_root: string;
   /** Go import 重写明细（old → new；TS 积木为空） */
   imports_rewritten: string[];
-  /** 闭包里的三方依赖（待人/LLM 补进 go.mod 或 package.json） */
+  /** 闭包里的三方依赖（全量；其中自动 require 的见 third_party_resolved） */
   third_party: string[];
+  /** 三方依赖中从 go_mod_requires 存档定位到版本的 module（自动进拼装区 go.mod） */
+  third_party_resolved: string[];
   source_project?: string;
   commit?: string;
 }
@@ -76,8 +81,12 @@ export interface AssembleBricksResult {
   bricks: AssembledBrickReport[];
   /** 跨积木闭包重叠警告（同路径文件出现在多个积木闭包里） */
   overlaps: string[];
-  /** 汇总三方依赖清单（去重） */
+  /** 无法从存档定位版本的三方依赖（待人/LLM 补进 go.mod 或 package.json） */
   third_party_pending: string[];
+  /** 自动写进拼装区 go.mod 的 require 块（module → version，版本来自源项目 go.mod 存档） */
+  go_requires: Record<string, string>;
+  /** 多积木同库不同版本的冲突记录（MVS 取高，决策留档） */
+  version_conflicts: string[];
   go_mod_written: boolean;
   assembly_manifest_written: boolean;
   written: boolean;
@@ -237,7 +246,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
 
   // ── 逐积木搬运 ──
   const reports: AssembledBrickReport[] = [];
-  const thirdPartyAll = new Set<string>();
+  const thirdPartyPending = new Set<string>();
+  // Go 三方依赖版本归并（module → version；版本事实来自各积木 go_mod_requires 存档）
+  const goRequires = new Map<string, string>();
+  const modOwner = new Map<string, string>();
+  const versionConflicts: string[] = [];
   for (const { manifest, dir } of loaded) {
     const internal = manifest.closure?.internal ?? [];
     const dirs = closureDirs(internal);
@@ -272,7 +285,30 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     const thirdParty = (manifest.closure?.external ?? [])
       .filter((e) => e.class === 'third_party')
       .map((e) => e.source);
-    for (const t of thirdParty) thirdPartyAll.add(t);
+
+    // 三方依赖治理：Go 积木凭 go_mod_requires 存档自动定位版本（MVS 取高，冲突留档）；
+    // TS 积木/无存档/归并不上 → 全量进 pending（decline rather than guess）
+    let resolvedMods: string[] = [];
+    if (isGoBrick && manifest.go_mod_requires) {
+      const { resolved, unresolved } = resolveGoThirdParty(thirdParty, manifest.go_mod_requires);
+      resolvedMods = Object.keys(resolved);
+      for (const src of unresolved) thirdPartyPending.add(src);
+      for (const [mod, ver] of Object.entries(resolved)) {
+        const prev = goRequires.get(mod);
+        if (prev === undefined) {
+          goRequires.set(mod, ver);
+          modOwner.set(mod, manifest.name);
+        } else if (prev !== ver) {
+          const pick = compareGoVersion(prev, ver) >= 0 ? prev : ver;
+          versionConflicts.push(
+            `${mod}：${modOwner.get(mod)}=${prev} vs ${manifest.name}=${ver} → 取 ${pick}（MVS 取高）`,
+          );
+          goRequires.set(mod, pick);
+        }
+      }
+    } else {
+      for (const t of thirdParty) thirdPartyPending.add(t);
+    }
 
     reports.push({
       name: manifest.name,
@@ -280,17 +316,26 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
       dest_root: `${destRoot}/`,
       imports_rewritten: importsRewritten,
       third_party: thirdParty,
+      third_party_resolved: resolvedMods,
       source_project: manifest.provenance?.source_project,
       commit: manifest.provenance?.commit,
     });
   }
 
-  // ── go.mod（有 Go 积木时） ──
+  // ── go.mod（有 Go 积木时；require 块版本来自源项目 go.mod 存档，不猜不升版） ──
   let goModWritten = false;
+  const goRequiresObj: Record<string, string> = {};
+  for (const [m, v] of [...goRequires.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    goRequiresObj[m] = v;
+  }
   if (write && anyGo && input.module) {
     const goVersion = input.go_version ?? '1.25.5';
     let goMod = `module ${input.module}\n\ngo ${goVersion}\n`;
-    // 三方依赖不自动 require——pending 清单报告，人/LLM 补（decline rather than guess）
+    if (goRequires.size) {
+      goMod += '\nrequire (\n';
+      for (const m of Object.keys(goRequiresObj)) goMod += `\t${m} ${goRequiresObj[m]}\n`;
+      goMod += ')\n';
+    }
     fs.writeFileSync(path.join(targetDir, 'go.mod'), goMod, 'utf-8');
     goModWritten = true;
   }
@@ -310,7 +355,9 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
         source_project: r.source_project,
         commit: r.commit,
       })),
-      third_party_pending: [...thirdPartyAll],
+      third_party_pending: [...thirdPartyPending],
+      go_requires: goRequiresObj,
+      version_conflicts: versionConflicts,
       overlaps,
     };
     fs.writeFileSync(path.join(targetDir, 'assembly.json'), JSON.stringify(assembly, null, 2), 'utf-8');
@@ -323,8 +370,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     `拼装${write ? '完成' : '预演'}：${reports.length} 积木 → ${targetDir}` +
     `（${totalFiles} 文件${totalRewrites ? `，Go import 重写 ${totalRewrites} 处` : ''}）` +
     (goModWritten ? `，go.mod module=${input.module}` : '') +
-    (thirdPartyAll.size ? `；三方依赖待补 ${thirdPartyAll.size} 项（见 third_party_pending）` : '') +
+    (goRequires.size ? `，三方依赖自动 require ${goRequires.size} 项（版本来自源项目 go.mod 存档）` : '') +
+    (thirdPartyPending.size ? `；无版本存档待补 ${thirdPartyPending.size} 项（见 third_party_pending）` : '') +
+    (versionConflicts.length ? `；版本冲突 ${versionConflicts.length} 处（MVS 取高，见 version_conflicts）` : '') +
     (overlaps.length ? `；重叠警告 ${overlaps.length} 条` : '') +
+    (goModWritten && goRequires.size ? '。跑 go mod tidy 补 go.sum 与 indirect' : '') +
     `。下一步：写 glue（cmd/main.go 或入口文件）后编译验证。`;
 
   return {
@@ -332,7 +382,9 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     module: input.module,
     bricks: reports,
     overlaps,
-    third_party_pending: [...thirdPartyAll],
+    third_party_pending: [...thirdPartyPending],
+    go_requires: goRequiresObj,
+    version_conflicts: versionConflicts,
     go_mod_written: goModWritten,
     assembly_manifest_written: manifestWritten,
     written: write,

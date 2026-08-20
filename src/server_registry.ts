@@ -836,8 +836,10 @@ const TOOL_DEFS: ToolDef[] = [
       '拼出新项目骨架。核心纪律：每次拼装一个新目录，绝不在原项目上抽取和拼装（原项目永远只读）。' +
       '布局 <target>/<积木名>/<原闭包相对路径>（积木名做顶层命名空间，永不撞路径）。' +
       'import 重接：TS/JS 零改动（闭包内相对位置不变）；Go 按闭包目录最长后缀匹配识别内部 import，' +
-      '重写为 <module>/<积木名>/<后缀>，并生成 go.mod。' +
-      '诚实边界：三方依赖不自动 require（汇总 pending 清单由人/LLM 补）；跨积木闭包重叠只警告不合并；' +
+      '重写为 <module>/<积木名>/<后缀>，并生成 go.mod（含 require 块：版本从各积木 go_mod_requires 存档' +
+      '原样取用——源项目 go.mod 原文，不猜不升版；多积木同库不同版本 MVS 取高并留 version_conflicts 警告）。' +
+      '诚实边界：存档缺项/TS 依赖汇总 pending 清单由人/LLM 补；go.sum 不生成（跑 go mod tidy 补）；' +
+      '跨积木闭包重叠只警告不合并；' +
       'glue 粘合代码不生成（LLM 的活）。写完 glue 编译通过 = 拼装区成为可运行新项目（可 import_project 解析、可再入盒）。',
     inputSchema: {
       bricks: z.array(z.string()).describe('要拼装的积木名列表（须已在盒中；search_bricks 可查）'),

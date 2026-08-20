@@ -348,7 +348,7 @@ interface BrickManifest {
 - **TS/JS 零重写**：积木=种子+传递闭包整体入盒，闭包内相对位置不变
 - **Go 按闭包目录最长后缀匹配**识别内部 import（不需要知道源 module 名），重写为 `<module>/<积木名>/<后缀>`；不需要重写的（stdlib/三方）原样保留
 - **Go 顶层 internal/ 段解除**：Go 的 internal 语义按路径走，不去段则积木子树外的 glue 编译期拒绝引用（实战踩坑：cmd/demo 引用 go_logging/internal/logging 报 use of internal package not allowed）。语义成立：源项目 internal 是防外部引用的封装，积木被选中拼装即成为新项目公开部件
-- go.mod 生成（module + go 版本）；三方依赖**不自动 require**（汇总 pending 清单，go mod tidy / 人 / LLM 补——decline rather than guess）
+- go.mod 生成（module + go 版本 + require 块——版本来自积木的 go_mod_requires 存档，见 Phase 5+；无存档的老积木三方进 pending 清单，decline rather than guess）
 - assembly.json 出生证明：积木清单、来源 commit、搬运映射、重写计数
 - 跨积木闭包重叠只**警告不合并**（两份同源代码在 Go 是两个不兼容的包，静默合并=猜；正解是提升共享积木再入盒）
 - glue 粘合代码不生成——粘合是 LLM 的活，工具只搬已验证实码
@@ -364,10 +364,32 @@ interface BrickManifest {
 - 诚实观察：Go 包=编译单元≠功能单元——resolver 只要 hunk/parser，整包闭包把 gitcmd/llm/telemetry 生态全拖进来（25 三方）。细粒度拎取（拆包重组）是 LLM 的活，工具不猜
 
 **遗留观察（后续 Phase 5+ 可选）**：
-- Go 积木重依赖治理：源项目 go.mod 的 require 版本可随盒存档（manifest.go_require），拼装时生成带版本的 require 块省去 tidy 拉新版风险
+- ~~Go 积木重依赖治理：源项目 go.mod 的 require 版本可随盒存档~~ ✅ 2026-08-20 完成（见下节 Phase 5+）
 - 拼装区 git init + camera 插桩验证行为等价（依赖替换流程第 4 步的基建已就绪）
 
 测试：assemble_bricks 12 用例（重写状态机：块内/单行/alias/最长后缀/三方撞名已知局限 + 布局/go.mod/预演/非空拒绝/异常/重叠警告/纯 TS 免 module）+ harvest_closure 新增 Go sibling 与 embed 回归；全量 854/854 绿。
+
+### Phase 5+：Go 积木重依赖治理 ✅ 2026-08-20 完成（go_mod_requires 存档）
+
+**版本事实单一来源**——"LLM 不产生事实"在依赖版本上的落点：版本不猜、不查网、不升版，唯一来源是**源项目 go.mod 的 require 块**。
+
+新共享模块 src/tools/go_mod.ts：
+- `parseGoModRequires`：require 解析（单行/括号块/indirect 注释/伪版本）
+- `resolveGoThirdParty`：闭包三方 import source 归并到 module root（最长段对齐前缀，如 `openai-go/v3/option` → `openai-go/v3`）；无命中进 unresolved（不猜）
+- `compareGoVersion`：Go 语义版本比较（MVS 近似：数值比较、无 prerelease 者高、伪版本按时间戳）
+
+链路：
+1. **入盒存档**（harvest_from_url）：Go 积木闭包三方归并出 module root → 版本存进 manifest 新字段 `go_mod_requires`（机器可重算字段——重抽时从源项目 go.mod 重新提取刷新，不进保留列表；只存闭包直接用到的，间接依赖由拼装区 tidy 解析）
+2. **拼装自动 require**（assemble_bricks）：各 Go 积木凭存档归并出 require 块自动写进拼装区 go.mod；多积木同库不同版本 MVS 取高 + version_conflicts 留档警告；无存档/TS 依赖/归并不上 → pending 清单（行为退化为 Phase 5 原状，老积木兼容）
+3. 诚实边界：go.sum 不生成（需 go 工具链算哈希），拼装区跑 `go mod tidy` 补 go.sum 与 indirect；replace/exclude 指令不解析（本地 replace 场景存不了版本，自然进 pending）
+
+**实战验证**（assembly-002-require-demo）：
+- 重抽 ocr_diff_resolver → 15 个三方 module 全自动定位版本（openai v3.51.0、anthropic v1.63.1、otel 全家 v1.45.0…），description 人工沉淀保留；go_logging 零三方 → 存档正确缺省
+- 拼装 54 文件、12 处 import 重写，**go.mod require 块 15 项全自动生成、pending 清零**（assembly-001 时 25 项全靠人工抄）
+- 实证"人工抄版本会出错"：assembly-001 手抄 openai v3.52.0/anthropic v1.66.0 均与源 go.mod 不符（v3.51.0/v1.63.1），工具提取的才是事实
+- `go mod tidy`（goproxy.cn）+ `go build ./...` 编译通过，indirect 38 项由 tidy 自动补齐，go.sum 111 行
+
+测试：go_mod 12 用例（解析/归并/版本比较）+ assemble_bricks 新增 4 用例（自动 require/MVS 冲突留档/子路径归并/无存档退化）+ harvest_from_url 新增 3 用例（Go 入盒存档/TS 缺省/重抽刷新）；全量 873/873 绿。
 
 ## 六、验收标准（Phase 3 试验）
 

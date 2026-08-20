@@ -285,4 +285,116 @@ describe('assembleBricks', () => {
     expect(r.go_mod_written).toBe(false);
     expect(fs.existsSync(path.join(r.target_dir, 'go.mod'))).toBe(false);
   });
+
+  it('go_mod_requires 存档：拼装区 go.mod 自动生成 require 块（版本原样取用不猜）', async () => {
+    f.goBrick('demo_go_ver', {
+      manifest: {
+        go_mod_requires: {
+          'github.com/anthropics/anthropic-sdk-go': 'v1.66.0',
+        },
+      },
+    });
+    const target = f.targetDir();
+    const r = await assembleBricks({
+      bricks: ['demo_go_ver', 'demo_ts'],
+      target_dir: target,
+      module: 'example.com/asm-002',
+      box_dir: f.boxDir,
+    });
+    // Go 积木三方自动 require；TS 积木三方（zod）无版本存档机制 → pending
+    expect(r.go_requires).toEqual({ 'github.com/anthropics/anthropic-sdk-go': 'v1.66.0' });
+    expect(r.third_party_pending).toEqual(['zod']);
+    expect(r.version_conflicts).toEqual([]);
+    const goReport = r.bricks.find((b) => b.name === 'demo_go_ver')!;
+    expect(goReport.third_party_resolved).toEqual(['github.com/anthropics/anthropic-sdk-go']);
+    // go.mod 落盘带 require 块
+    const goMod = fs.readFileSync(path.join(target, 'go.mod'), 'utf8');
+    expect(goMod).toContain('require (');
+    expect(goMod).toContain('github.com/anthropics/anthropic-sdk-go v1.66.0');
+    // assembly.json 出生证明含 require 归并与 pending
+    const asm = JSON.parse(fs.readFileSync(path.join(target, 'assembly.json'), 'utf8'));
+    expect(asm.go_requires).toEqual({ 'github.com/anthropics/anthropic-sdk-go': 'v1.66.0' });
+    expect(asm.third_party_pending).toEqual(['zod']);
+    expect(r.message).toContain('自动 require 1 项');
+    expect(r.message).toContain('go mod tidy');
+  });
+
+  it('多积木同库不同版本：MVS 取高 + version_conflicts 留档', async () => {
+    f.goBrick('demo_go_a', {
+      manifest: {
+        closure: {
+          internal: ['internal/diff/resolver.go', 'internal/model/types.go'],
+          external: [
+            { source: 'github.com/x/y/sub', class: 'third_party' },
+            { source: 'github.com/x/z', class: 'third_party' },
+          ],
+        },
+        go_mod_requires: { 'github.com/x/y': 'v1.9.0', 'github.com/x/z': 'v0.1.0' },
+      },
+    });
+    f.goBrick('demo_go_b', {
+      manifest: {
+        closure: {
+          internal: ['internal/diff/resolver.go', 'internal/model/types.go'],
+          external: [{ source: 'github.com/x/y', class: 'third_party' }],
+        },
+        go_mod_requires: { 'github.com/x/y': 'v1.10.0' },
+      },
+    });
+    const r = await assembleBricks({
+      bricks: ['demo_go_a', 'demo_go_b'],
+      target_dir: f.targetDir(),
+      module: 'example.com/asm-003',
+      box_dir: f.boxDir,
+    });
+    // v1.10.0 > v1.9.0（数值比较非字典序）
+    expect(r.go_requires['github.com/x/y']).toBe('v1.10.0');
+    expect(r.go_requires['github.com/x/z']).toBe('v0.1.0');
+    expect(r.version_conflicts).toHaveLength(1);
+    expect(r.version_conflicts[0]).toContain('demo_go_a=v1.9.0');
+    expect(r.version_conflicts[0]).toContain('demo_go_b=v1.10.0');
+    expect(r.version_conflicts[0]).toContain('取 v1.10.0');
+    const goMod = fs.readFileSync(path.join(r.target_dir, 'go.mod'), 'utf8');
+    expect(goMod).toContain('github.com/x/y v1.10.0');
+  });
+
+  it('闭包三方是子路径形态：归并到 module root 再查存档', async () => {
+    f.goBrick('demo_go_sub', {
+      manifest: {
+        closure: {
+          internal: ['internal/diff/resolver.go', 'internal/model/types.go'],
+          external: [
+            { source: 'fmt', class: 'stdlib' },
+            { source: 'github.com/openai/openai-go/v3/option', class: 'third_party' },
+            { source: 'unknown.example.com/lib', class: 'third_party' },
+          ],
+        },
+        go_mod_requires: {
+          'github.com/openai/openai-go/v3': 'v3.52.0',
+        },
+      },
+    });
+    const r = await assembleBricks({
+      bricks: ['demo_go_sub'],
+      target_dir: f.targetDir(),
+      module: 'example.com/asm-004',
+      box_dir: f.boxDir,
+    });
+    expect(r.go_requires).toEqual({ 'github.com/openai/openai-go/v3': 'v3.52.0' });
+    expect(r.third_party_pending).toEqual(['unknown.example.com/lib']);
+  });
+
+  it('无 go_mod_requires 存档的老积木：三方全进 pending（行为退化为 Phase 5 原状）', async () => {
+    const target = f.targetDir();
+    const r = await assembleBricks({
+      bricks: ['demo_go', 'demo_ts'],
+      target_dir: target,
+      module: 'example.com/asm-005',
+      box_dir: f.boxDir,
+    });
+    expect(r.go_requires).toEqual({});
+    expect(r.third_party_pending.sort()).toEqual(['github.com/anthropics/anthropic-sdk-go', 'zod']);
+    const goMod = fs.readFileSync(path.join(target, 'go.mod'), 'utf8');
+    expect(goMod).not.toContain('require (');
+  });
 });

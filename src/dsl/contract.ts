@@ -178,6 +178,12 @@ export interface BrickManifest {
     }>;
     known_blind_spots?: string[];
   };
+  /**
+   * 源项目 go.mod 的 require 版本存档（Go 积木重依赖治理 Phase 5+）。
+   * 版本事实单一来源：拼装区自动 require 的版本从这里原样取用，不猜不升版。
+   * 机器可重算字段——重抽时从源项目 go.mod 重新提取刷新（不进重抽保留列表）。
+   */
+  go_mod_requires?: Record<string, string>;
   /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
   provenance?: {
     source_project?: string;

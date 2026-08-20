@@ -29,6 +29,7 @@ import { syncProject } from '../db/symbols.js';
 import { walkFiles } from './import_project.js';
 import { extractContracts, type FileContractReport } from './extract_contracts.js';
 import { harvestClosure } from './harvest_closure.js';
+import { parseGoModRequires, resolveGoThirdParty } from './go_mod.js';
 import type { BrickContract, BrickManifest, ShapeSchema } from '../dsl/contract.js';
 
 export interface BrickSpec {
@@ -322,6 +323,21 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       }
       const agg = aggregateContracts(Object.values(closureContracts));
 
+      // Go 积木重依赖存档：源项目 go.mod 的 require 版本（拼装区自动 require 的事实来源）。
+      // 机器可重算字段——重抽时刷新，不进保留列表；TS 积木/无 go.mod/归并不上 → 留空（拼装时进 pending）。
+      let goModRequires: Record<string, string> | undefined;
+      if (closure.internal_files.some((f) => f.path.endsWith('.go'))) {
+        const goModPath = path.join(root, 'go.mod');
+        if (fs.existsSync(goModPath)) {
+          const requires = parseGoModRequires(fs.readFileSync(goModPath, 'utf-8'));
+          const thirdParty = closure.external
+            .filter((e) => e.class === 'third_party')
+            .map((e) => e.source);
+          const { resolved } = resolveGoThirdParty(thirdParty, requires);
+          if (Object.keys(resolved).length) goModRequires = resolved;
+        }
+      }
+
       if (input.write !== false) {
         // files/：闭包文件内容快照
         fs.rmSync(brickDir, { recursive: true, force: true });
@@ -349,6 +365,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
             external: closure.external.map((e) => ({ source: e.source, class: e.class })),
           },
           aggregate: agg,
+          go_mod_requires: goModRequires,
           ...preserved,
           provenance: {
             source_project: source,

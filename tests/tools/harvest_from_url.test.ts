@@ -69,6 +69,46 @@ function makeAutoProject(): string {
   return root;
 }
 
+/** Go fixture：svc → model（内部包），svc 另 import fmt / 三方库；go.mod 带 require 块 */
+function makeGoProjectWithMod(): string {
+  const root = tmpDir('brick-gomod-');
+  put(
+    root,
+    'go.mod',
+    [
+      'module example.com/demo',
+      '',
+      'go 1.21',
+      '',
+      'require (',
+      '\tgithub.com/openai/openai-go/v3 v3.52.0',
+      '\tgithub.com/pkoukk/tiktoken-go v0.1.8 // indirect',
+      '\tgo.opentelemetry.io/otel v1.45.0',
+      ')',
+    ].join('\n'),
+  );
+  put(root, 'pkg/model/model.go', 'package model\n\ntype User struct {\n\tName string\n}\n');
+  put(
+    root,
+    'pkg/svc/svc.go',
+    [
+      'package svc',
+      '',
+      'import (',
+      '\t"fmt"',
+      '\t"github.com/openai/openai-go/v3/option"',
+      '\t"example.com/demo/pkg/model"',
+      ')',
+      '',
+      'func GetUser() *model.User {',
+      '\tfmt.Println(option.Header{})',
+      '\treturn &model.User{Name: "alice"}',
+      '}',
+    ].join('\n'),
+  );
+  return root;
+}
+
 describe('harvest_from_url 积木抽取编排', () => {
   it('本地目录 + 显式 bricks：全链入盒三件套', async () => {
     const root = makeTsProject();
@@ -208,6 +248,68 @@ describe('harvest_from_url 积木抽取编排', () => {
 
     expect(r.bricks).toHaveLength(0);
     expect(r.skipped[0].reason).toContain('种子不在索引中');
+  });
+
+  it('Go 项目入盒：go_mod_requires 存档（闭包三方归并到 module root 的版本）', async () => {
+    const root = makeGoProjectWithMod();
+    const box = tmpDir('brick-box-');
+
+    const r = await harvestFromUrl({
+      source: root,
+      bricks: [{ name: 'go_demo', seeds: ['pkg/svc/svc.go'] }],
+      box_dir: box,
+    });
+
+    expect(r.bricks).toHaveLength(1);
+    const manifest: BrickManifest = JSON.parse(
+      fs.readFileSync(path.join(box, 'go_demo', 'manifest.json'), 'utf-8'),
+    );
+    // 闭包三方只有 openai 子路径 → 归并到 module root 存档；
+    // tiktoken/otel 未被闭包直接引用不存（间接依赖由拼装区 go mod tidy 解析）
+    expect(manifest.go_mod_requires).toEqual({
+      'github.com/openai/openai-go/v3': 'v3.52.0',
+    });
+  });
+
+  it('TS 项目入盒：无 go.mod → go_mod_requires 缺省', async () => {
+    const root = makeTsProject();
+    const box = tmpDir('brick-box-');
+
+    const r = await harvestFromUrl({ source: root, bricks: [{ seeds: ['src/a.ts'] }], box_dir: box });
+
+    const manifest: BrickManifest = JSON.parse(
+      fs.readFileSync(path.join(box, r.bricks[0].name, 'manifest.json'), 'utf-8'),
+    );
+    expect(manifest.go_mod_requires).toBeUndefined();
+  });
+
+  it('重抽刷新：go_mod_requires 机器可重算字段随源项目 go.mod 变化更新', async () => {
+    const root = makeGoProjectWithMod();
+    const box = tmpDir('brick-box-');
+    const bricks = [{ name: 'go_demo', seeds: ['pkg/svc/svc.go'] }];
+
+    await harvestFromUrl({ source: root, bricks, box_dir: box });
+    const mf = path.join(box, 'go_demo', 'manifest.json');
+
+    // 源项目升级三方版本（重抽前改 go.mod）
+    put(
+      root,
+      'go.mod',
+      [
+        'module example.com/demo',
+        '',
+        'go 1.21',
+        '',
+        'require (',
+        '\tgithub.com/openai/openai-go/v3 v3.53.0',
+        ')',
+      ].join('\n'),
+    );
+    const r2 = await harvestFromUrl({ source: root, bricks, box_dir: box });
+
+    expect(r2.bricks[0].replaced).toBe(true);
+    const m2: BrickManifest = JSON.parse(fs.readFileSync(mf, 'utf-8'));
+    expect(m2.go_mod_requires).toEqual({ 'github.com/openai/openai-go/v3': 'v3.53.0' });
   });
 
   it('git URL e2e：浅克隆 → commit 记录 → 临时目录清理', async () => {
