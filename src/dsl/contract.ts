@@ -124,6 +124,22 @@ export interface BrickManifest {
     /** 不可逆 effect 计数（writes/holds 中无 reversible 的）——空间可组合性风险提示 */
     irreversible_effects: number;
   };
+  /**
+   * 验收判据（Phase 2.8 四层验证模型；schema 占位，Phase 2b 填充）。
+   * 测试用例是点采样，正确性是全称命题——invariants 用铁律断言补全称性，
+   * effect_check 把语义层锚定到人类眼见为实。
+   */
+  acceptance?: {
+    /** 数学铁律断言（属性测试可执行，fast-check/Hypothesis）。来源优先级：源项目自带属性测试 > LLM 提议+人确认 */
+    invariants?: Array<{
+      /** 铁律名（如 "distance-preserving" / "invertible" / "composable"） */
+      name: string;
+      /** 可执行断言描述（属性测试源） */
+      assertion: string;
+    }>;
+    /** 人类效果验收锚点（"左移10厘米后，眼见物体在原位置左侧10cm"）——语义层专属，LLM 不可代判 */
+    effect_check?: string;
+  };
   /** 匹配记录：某次"端口需求 vs 本积木"判定历史（可追溯为何选用/弃用） */
   matches?: Array<{
     port: string;
