@@ -30,6 +30,7 @@ import { walkFiles } from './import_project.js';
 import { extractContracts, type FileContractReport } from './extract_contracts.js';
 import { harvestClosure } from './harvest_closure.js';
 import { parseGoModRequires, resolveGoThirdParty } from './go_mod.js';
+import { parseNpmDeps, resolveNpmThirdParty } from './npm_mod.js';
 import { analyzeDeadThirdParty } from './dead_deps.js';
 import type { BrickContract, BrickManifest, ShapeSchema } from '../dsl/contract.js';
 
@@ -342,6 +343,43 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
         }
       }
 
+      // TS 积木依赖存档：源项目 package.json 的依赖版本。monorepo 依赖不一定
+      // 在根（pnpm workspace 挂子包）——按闭包文件最近祖先 package.json 收集，
+      // 近者优先（子包版本覆盖根），根兜底。机器可重算——重抽刷新
+      let npmRequires: Record<string, string> | undefined;
+      if (closure.internal_files.some((f) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path))) {
+        const requires: Record<string, string> = {};
+        const seenPkg = new Set<string>();
+        const collect = (pkgPath: string): void => {
+          if (seenPkg.has(pkgPath)) return;
+          seenPkg.add(pkgPath);
+          try {
+            Object.assign(requires, parseNpmDeps(JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))));
+          } catch {
+            // package.json 损坏：跳过（后续归并不上自然进 pending）
+          }
+        };
+        collect(path.join(root, 'package.json')); // 根先收集（后写的子包覆盖根——近者优先）
+        for (const f of closure.internal_files) {
+          // 最近祖先 package.json（子包声明优先于根——assign 后写覆盖）
+          const segs = f.path.split('/');
+          for (let i = segs.length - 1; i >= 1; i--) {
+            const pkgPath = path.join(root, ...segs.slice(0, i), 'package.json');
+            if (fs.existsSync(pkgPath)) {
+              collect(pkgPath);
+              break;
+            }
+          }
+        }
+        if (Object.keys(requires).length) {
+          const thirdParty = closure.external
+            .filter((e) => e.class === 'third_party')
+            .map((e) => e.source);
+          const { resolved } = resolveNpmThirdParty(thirdParty, requires);
+          if (Object.keys(resolved).length) npmRequires = resolved;
+        }
+      }
+
       // 死依赖检测（瘦身事实层）：种子不可达代码引入的三方依赖 = 死候选。
       // Camera 宪法同构——只报告不剔除；机器可重算，重抽刷新。
       // 门槛：有源码文件即跑（不再要求三方依赖存在）——live 明细档案
@@ -402,6 +440,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
           },
           aggregate: agg,
           go_mod_requires: goModRequires,
+          npm_requires: npmRequires,
           slim_candidates: slimCandidates,
           ...preserved,
           provenance: {

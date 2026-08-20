@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { importProject } from '../../src/tools/import_project';
+import { importProject, readAssemblyBricks } from '../../src/tools/import_project';
 import { getDSL, getLiveFeature } from '../../src/storage';
 import { diffViews } from '../../src/tools/diff_views';
 
@@ -290,5 +290,188 @@ describe('import_project', () => {
         writable: true,
       });
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // 积木折叠（拼装区黑盒化）：assembly.json 出生证明 → DSL 单符号节点
+  // ─────────────────────────────────────────────────────────────
+  describe('import_project 积木折叠', () => {
+    let brickRoot: string;
+
+    function putBrick(rel: string, content: string): void {
+      const abs = path.join(brickRoot, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content, 'utf-8');
+    }
+
+    beforeAll(() => {
+      brickRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'import-brick-fixture-'));
+
+      // 出生证明：2 个积木 + 契约投影（description/aggregate——assemble_bricks 写入形态）
+      putBrick('assembly.json', JSON.stringify({
+        assembled_at: '2026-08-20T00:00:00.000Z',
+        tool: 'assemble_bricks',
+        bricks: [
+          {
+            name: 'go_logging',
+            dest_root: 'go_logging/',
+            files: 2,
+            go_imports_rewritten: 0,
+            description: '日志积木：结构化日志与轮转',
+            aggregate: {
+              exposes: [
+                { name: 'Logger', kind: 'struct', fields: [{ name: 'Info', type: 'func(msg string)' }], origin: 'ast' },
+                { name: 'Sink', kind: 'interface', fields: [{ name: 'Write', type: 'func([]byte) error' }], origin: 'ast' },
+              ],
+              consumes: [],
+              emits: ['log.rotated'],
+              reads_config: ['LOG_LEVEL'],
+              irreversible_effects: 0,
+            },
+          },
+          {
+            name: 'ts_utils',
+            dest_root: 'ts_utils/',
+            files: 1,
+            go_imports_rewritten: 0,
+            description: 'TS 工具积木',
+            aggregate: {
+              exposes: [{ name: 'formatDate', kind: 'type', fields: [], origin: 'ast' }],
+              consumes: [],
+              emits: [],
+              reads_config: [],
+              irreversible_effects: 0,
+            },
+          },
+        ],
+      }, null, 2));
+
+      // go_logging 积木内部（2 文件，内部依赖——黑盒应吞掉）
+      putBrick('go_logging/logger.ts', `import { sink } from './sink';\nexport function logInfo(msg: string): void {\n  sink(msg);\n}\n`);
+      putBrick('go_logging/sink.ts', `export function sink(msg: string): void {\n  console.log(msg);\n}\n`);
+      // ts_utils 积木内部（1 文件）
+      putBrick('ts_utils/format.ts', `export function formatDate(d: Date): string {\n  return d.toISOString();\n}\n`);
+
+      // glue：根散文件 + 深层 cmd 各一，都 import 积木
+      putBrick('main.ts', `import { logInfo } from './go_logging/logger';\nimport { formatDate } from './ts_utils/format';\n\nlogInfo(formatDate(new Date()));\n`);
+      putBrick('cmd/app.ts', `import { logInfo } from '../go_logging/logger';\n\nexport function run(): void {\n  logInfo('app');\n}\n`);
+    });
+
+    afterAll(() => {
+      try {
+        fs.rmSync(brickRoot, { recursive: true, force: true });
+      } catch {
+        // Windows 文件占用，留给 OS 清理
+      }
+    });
+
+    it('积木折叠成单符号黑盒节点：内部文件无节点，契约投影进 attributes', async () => {
+      const result = await importProject({ project_dir: brickRoot, feature: 'brick_fold_demo' });
+      expect(result.bricks_folded).toBe(2);
+
+      const dsl = getDSL('brick_fold_demo')!;
+      expect(dsl).not.toBeNull();
+
+      // 黑盒节点存在：type=module、契约投影、description 做 title
+      const brickNode = dsl.geometry.nodes.find((n) => n.id === 'brick_go_logging');
+      expect(brickNode).toBeDefined();
+      expect(brickNode!.type).toBe('module');
+      expect(brickNode!.attributes?.exposes).toContain('Logger');
+      expect(brickNode!.attributes?.emits).toContain('log.rotated');
+      expect(brickNode!.title).toContain('日志积木');
+      expect(brickNode!.description).toBe('go_logging/');
+
+      // 积木内部文件无节点（黑盒）
+      const ids = dsl.geometry.nodes.map((n) => n.id);
+      expect(ids.some((id) => id.includes('logger') || id.includes('sink') || id.includes('format'))).toBe(false);
+
+      // 语义层：积木条目 path=dest_root、expected_apis 来自契约投影；
+      // 积木内文件无语义条目（黑盒——LLM 检索不见内部）
+      const sf = dsl.semantic.files.find((f) => f.path === 'go_logging/');
+      expect(sf).toBeDefined();
+      expect(sf!.expected_apis!.some((a) => a.signature.includes('Logger'))).toBe(true);
+      expect(dsl.semantic.files.some((f) => f.path === 'go_logging/logger.ts')).toBe(false);
+
+      // glue 文件节点存在（黑盒外的东西照常）
+      expect(ids).toContain('file_main_ts');
+      expect(ids).toContain('file_cmd_app_ts');
+    });
+
+    it('黑盒边界边聚合正确：glue→积木 保留、积木内部边吞掉、无悬空边', async () => {
+      const dsl = getDSL('brick_fold_demo')!;
+      const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+
+      // 无悬空边：每条边的 from/to 都必须落在已存在节点上
+      for (const e of dsl.geometry.edges) {
+        expect(nodeIds.has(e.from), `边 ${e.id} 的 from=${e.from} 悬空`).toBe(true);
+        expect(nodeIds.has(e.to), `边 ${e.id} 的 to=${e.to} 悬空`).toBe(true);
+      }
+
+      const depPairs = dsl.geometry.edges.filter((e) => e.label.startsWith('imports')).map((e) => `${e.from}→${e.to}`);
+      // 根散文件 main.ts → 两个积木（文件粒度保留）
+      expect(depPairs).toContain('file_main_ts→brick_go_logging');
+      expect(depPairs).toContain('file_main_ts→brick_ts_utils');
+      // 深层 cmd/app.ts → 积木（聚合到顶级目录容器 cmd）
+      expect(depPairs).toContain('dir_cmd→brick_go_logging');
+      // 积木内部边（logger→sink）被黑盒吞掉
+      expect(depPairs.some((p) => p.includes('logger') && p.includes('sink'))).toBe(false);
+
+      // 布局无负坐标；画布容纳 brick 节点
+      for (const n of dsl.geometry.nodes) {
+        expect(n.x!).toBeGreaterThanOrEqual(0);
+        expect(n.y!).toBeGreaterThanOrEqual(0);
+      }
+      const brickNode = dsl.geometry.nodes.find((n) => n.id === 'brick_go_logging')!;
+      expect(brickNode.x! + brickNode.width!).toBeLessThanOrEqual(dsl.geometry.width!);
+    });
+
+    it('functional_mode 下同样折叠：积木黑盒节点存在且无盒内文件泄漏', async () => {
+      await importProject({ project_dir: brickRoot, feature: 'brick_fold_func', functional_mode: true });
+      const dsl = getDSL('brick_fold_func')!;
+      expect(dsl).not.toBeNull();
+
+      // 黑盒节点存在
+      expect(dsl.geometry.nodes.some((n) => n.id === 'brick_go_logging')).toBe(true);
+      expect(dsl.geometry.nodes.some((n) => n.id === 'brick_ts_utils')).toBe(true);
+      // 无盒内文件泄漏（无 logger/sink/format 文件节点；语义层无盒内路径）
+      expect(dsl.geometry.nodes.some((n) => /logger|sink|format/.test(n.id))).toBe(false);
+      expect(dsl.semantic.files.some((f) => f.path.startsWith('go_logging/') && f.path !== 'go_logging/')).toBe(false);
+      // 无悬空边
+      const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+      for (const e of dsl.geometry.edges) {
+        expect(nodeIds.has(e.from), `边 ${e.id} 的 from=${e.from} 悬空`).toBe(true);
+        expect(nodeIds.has(e.to), `边 ${e.id} 的 to=${e.to} 悬空`).toBe(true);
+      }
+    });
+
+    it('readAssemblyBricks：无出生证明/损坏 JSON → 空数组（退化为全量解析，不猜）', () => {
+      const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'import-brick-empty-'));
+      try {
+        expect(readAssemblyBricks(empty)).toEqual([]);
+        // 空对象 / 损坏 JSON / bricks 非数组
+        fs.writeFileSync(path.join(empty, 'assembly.json'), '{}');
+        expect(readAssemblyBricks(empty)).toEqual([]);
+        fs.writeFileSync(path.join(empty, 'assembly.json'), '{broken');
+        expect(readAssemblyBricks(empty)).toEqual([]);
+        fs.writeFileSync(path.join(empty, 'assembly.json'), '{"bricks": "not-array"}');
+        expect(readAssemblyBricks(empty)).toEqual([]);
+        // 条目缺 name/dest_root → 跳过；dest_root 自动补尾斜杠
+        fs.writeFileSync(path.join(empty, 'assembly.json'), JSON.stringify({
+          bricks: [{ name: 'a', dest_root: 'a/' }, { dest_root: 'b/' }, { name: 'c' }],
+        }));
+        expect(readAssemblyBricks(empty)).toEqual([{ name: 'a', dest_root: 'a/', description: undefined, aggregate: undefined }]);
+        fs.writeFileSync(path.join(empty, 'assembly.json'), JSON.stringify({ bricks: [{ name: 'b', dest_root: 'b' }] }));
+        expect(readAssemblyBricks(empty)[0].dest_root).toBe('b/');
+      } finally {
+        fs.rmSync(empty, { recursive: true, force: true });
+      }
+    });
+
+    it('无出生证明的普通项目：行为不变（bricks_folded 未定义）', async () => {
+      const result = await importProject({ project_dir: fixtureRoot, feature: 'no_brick_demo' });
+      expect(result.bricks_folded).toBeUndefined();
+      const dsl = getDSL('no_brick_demo')!;
+      expect(dsl.geometry.nodes.some((n) => n.id.startsWith('brick_'))).toBe(false);
+    });
   });
 });

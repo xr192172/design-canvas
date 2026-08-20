@@ -185,6 +185,13 @@ export interface BrickManifest {
    */
   go_mod_requires?: Record<string, string>;
   /**
+   * 源项目 package.json 的依赖版本存档（TS 积木依赖治理，对标 go_mod_requires）。
+   * monorepo 按闭包文件最近祖先 package.json 收集（子包覆盖根，根兜底）；
+   * 拼装区自动生成 package.json 的版本从这里原样取用，不猜不升版。
+   * 机器可重算字段——重抽时重新提取刷新（不进重抽保留列表）。
+   */
+  npm_requires?: Record<string, string>;
+  /**
    * 死依赖候选档案（积木瘦身事实层 Phase 5+）。Camera 宪法同构：只报告偏差，
    * 绝不自动改写——剔除=改写=风险，须人拍板 + 四层验证（编译/源测试/camera/效果验收）
    * 后产出 -slim 衍生积木，原积木永不覆盖。

@@ -34,6 +34,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getStorageRoot } from '../storage.js';
 import { resolveGoThirdParty } from './go_mod.js';
+import { resolveNpmThirdParty } from './npm_mod.js';
 import { parseGoImportQualifiers } from './dead_deps.js';
 import { aggregateContracts } from './harvest_from_url.js';
 import { slimTsFile, type TsSlimResult } from './ts_slim.js';
@@ -1046,6 +1047,12 @@ async function slimTsBrickCore(
     const depsAfter = thirdPartyImports;
     const unresolvedImports: string[] = [];
     const depsRemoved = depsBefore.filter((d) => !depsAfter.includes(d));
+    // 依赖版本存档传导：只留剪后仍存活的依赖（死依赖的版本档案随代码一起出清）
+    let slimNpmRequires: Record<string, string> | undefined;
+    if (manifest.npm_requires) {
+      const after = resolveNpmThirdParty(depsAfter, manifest.npm_requires);
+      if (Object.keys(after.resolved).length) slimNpmRequires = after.resolved;
+    }
 
     // ── ⑤ 无可剪内容：不生成空壳衍生积木 ──
     const nothingToSlim =
@@ -1121,6 +1128,7 @@ async function slimTsBrickCore(
         },
         aggregate: aggregateContracts(Object.values(slimContracts)),
         acceptance: manifest.acceptance,
+        npm_requires: slimNpmRequires,
         derived_from: {
           brick: input.brick_name,
           slimmed_at: new Date().toISOString(),

@@ -101,7 +101,7 @@ function setupBox(): Fixture {
     };
     fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
   };
-  const tsBrick = (name: string) => {
+  const tsBrick = (name: string, extra?: { manifest?: Record<string, unknown> }) => {
     const dir = path.join(boxDir, name);
     for (const [rel, content] of Object.entries({
       'src/a.ts': `import { b } from './b.js';\nexport const a = b + 1;\n`,
@@ -117,6 +117,7 @@ function setupBox(): Fixture {
       closure: { internal: ['src/a.ts', 'src/b.ts'], external: [{ source: 'zod', class: 'third_party' }] },
       aggregate: { exposes: [], consumes: [], emits: [], reads_config: [], irreversible_effects: 0 },
       provenance: { source_project: 'D:/proj/x', commit: 'def5678', harvested_at: '2026-08-20T00:00:00Z' },
+      ...(extra?.manifest ?? {}),
     };
     fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
   };
@@ -444,5 +445,93 @@ describe('assembleBricks', () => {
       box_dir: f.boxDir,
     });
     expect(r2.dead_require_candidates).toEqual([]);
+  });
+
+  it('npm_requires 存档：拼装区 package.json 自动生成 dependencies（spec 原样取用不猜）', async () => {
+    f.tsBrick('demo_ts_ver', {
+      manifest: {
+        npm_requires: { zod: '^4.3.6' },
+      },
+    });
+    const target = f.targetDir();
+    const r = await assembleBricks({
+      bricks: ['demo_ts_ver'],
+      target_dir: target,
+      box_dir: f.boxDir,
+    });
+    expect(r.package_json_written).toBe(true);
+    expect(r.npm_requires).toEqual({ zod: '^4.3.6' });
+    expect(r.third_party_pending).toEqual([]);
+    const tsReport = r.bricks.find((b) => b.name === 'demo_ts_ver')!;
+    expect(tsReport.third_party_resolved).toEqual(['zod']);
+    // package.json 落盘：ESSM + dependencies
+    const pkg = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8'));
+    expect(pkg.type).toBe('module');
+    expect(pkg.private).toBe(true);
+    expect(pkg.dependencies).toEqual({ zod: '^4.3.6' });
+    // assembly.json 出生证明含 npm 依赖归并
+    const asm = JSON.parse(fs.readFileSync(path.join(target, 'assembly.json'), 'utf8'));
+    expect(asm.npm_requires).toEqual({ zod: '^4.3.6' });
+    expect(r.message).toContain('package.json dependencies 1 项');
+    expect(r.message).toContain('npm install');
+  });
+
+  it('多 TS 积木同库不同版本：semver 取高；跨 major 留档警告', async () => {
+    f.tsBrick('demo_ts_a', {
+      manifest: {
+        closure: {
+          internal: ['src/a.ts', 'src/b.ts'],
+          external: [
+            { source: 'lodash', class: 'third_party' },
+            { source: 'tree-sitter-cpp', class: 'third_party' },
+          ],
+        },
+        npm_requires: { lodash: '^3.10.0', 'tree-sitter-cpp': '^0.23.4' },
+      },
+    });
+    f.tsBrick('demo_ts_b', {
+      manifest: {
+        closure: {
+          internal: ['src/a.ts', 'src/b.ts'],
+          external: [{ source: 'lodash', class: 'third_party' }],
+        },
+        npm_requires: { lodash: '^4.17.20' },
+      },
+    });
+    const r = await assembleBricks({
+      bricks: ['demo_ts_a', 'demo_ts_b'],
+      target_dir: f.targetDir(),
+      box_dir: f.boxDir,
+    });
+    // ^4.17.20 > ^3.10.0 且跨 major
+    expect(r.npm_requires.lodash).toBe('^4.17.20');
+    expect(r.npm_requires['tree-sitter-cpp']).toBe('^0.23.4');
+    expect(r.version_conflicts).toHaveLength(1);
+    expect(r.version_conflicts[0]).toContain('demo_ts_a=^3.10.0');
+    expect(r.version_conflicts[0]).toContain('demo_ts_b=^4.17.20');
+    expect(r.version_conflicts[0]).toContain('跨 major');
+    const pkg = JSON.parse(fs.readFileSync(path.join(r.target_dir, 'package.json'), 'utf8'));
+    expect(pkg.dependencies.lodash).toBe('^4.17.20');
+  });
+
+  it('workspace: 协议依赖进 pending（离开源仓库无解，不猜替代版本）', async () => {
+    f.tsBrick('demo_ts_ws', {
+      manifest: {
+        closure: {
+          internal: ['src/a.ts', 'src/b.ts'],
+          external: [{ source: 'tree-sitter-cpp', class: 'third_party' }],
+        },
+        npm_requires: { 'tree-sitter-cpp': 'workspace:*' },
+      },
+    });
+    const r = await assembleBricks({
+      bricks: ['demo_ts_ws'],
+      target_dir: f.targetDir(),
+      box_dir: f.boxDir,
+    });
+    expect(r.npm_requires).toEqual({});
+    expect(r.package_json_written).toBe(false);
+    expect(r.third_party_pending[0]).toContain('tree-sitter-cpp@workspace:*');
+    expect(r.third_party_pending[0]).toContain('非 registry 协议');
   });
 });

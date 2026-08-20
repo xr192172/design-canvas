@@ -30,9 +30,12 @@
  *     不需要知道源 module 名：后缀落在闭包目录集合内 ⇔ 是内部 import。
  *
  * 诚实边界（decline rather than guess）：
- *   - 三方依赖版本只从积木的 go_mod_requires 存档取（源项目 go.mod 原文，
- *     不猜不升版）；存档缺项/TS 依赖 → 汇总 pending 清单由人/LLM 补
- *   - 多积木同库不同版本：MVS 语义取高版本 + version_conflicts 留档警告
+ *   - 三方依赖版本只从积木存档取（Go：go_mod_requires 源 go.mod 原文 /
+ *     TS：npm_requires 源 package.json 原文，不猜不升版）；存档缺项 →
+ *     汇总 pending 清单由人/LLM 补；workspace:/file: 等非 registry 协议
+ *     同样进 pending（离开源仓库无解，不猜替代版本）
+ *   - 多积木同库不同版本：MVS/semver 语义取高版本 + version_conflicts 留档
+ *     警告（npm 跨 major 额外标注：API 不兼容，glue 需对账或嵌套安装）
  *   - go.sum 不生成（需 go 工具链算哈希）——拼装区跑 go mod tidy 补
  *   - 跨积木闭包重叠文件只**警告**不合并——两份同源代码在 Go 里是两个
  *     不兼容的包，静默合并等于猜；正确解法（提升共享积木）留给下次入盒
@@ -43,6 +46,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { BrickManifest } from '../dsl/contract.js';
 import { resolveGoThirdParty, compareGoVersion } from './go_mod.js';
+import { resolveNpmThirdParty, compareNpmVersion, isNonRegistrySpec } from './npm_mod.js';
 import { getStorageRoot } from '../storage.js';
 
 export interface AssembleBricksInput {
@@ -74,6 +78,10 @@ export interface AssembledBrickReport {
   third_party_resolved: string[];
   source_project?: string;
   commit?: string;
+  /** 积木人话一句话（盒内 manifest.description 的投影） */
+  description?: string;
+  /** 聚合契约（盒内 manifest.aggregate 的投影——拼装区折叠视图的接口事实来源） */
+  aggregate?: BrickManifest['aggregate'];
 }
 
 export interface AssembleBricksResult {
@@ -86,6 +94,10 @@ export interface AssembleBricksResult {
   third_party_pending: string[];
   /** 自动写进拼装区 go.mod 的 require 块（module → version，版本来自源项目 go.mod 存档） */
   go_requires: Record<string, string>;
+  /** 自动写进拼装区 package.json 的 dependencies（package → spec，版本来自源项目 package.json 存档） */
+  npm_requires: Record<string, string>;
+  /** package.json 是否已写入拼装区 */
+  package_json_written: boolean;
   /** 多积木同库不同版本的冲突记录（MVS 取高，决策留档） */
   version_conflicts: string[];
   /** 自动 require 项中的死依赖候选（slim_candidates 档案投影——剔除前须四层验证） */
@@ -186,6 +198,11 @@ function hasGoFiles(internal: string[]): boolean {
   return internal.some((f) => f.endsWith('.go'));
 }
 
+/** 闭包文件里是否含 TS/JS（决定是否走 npm 依赖治理 / package.json） */
+function hasTsFiles(internal: string[]): boolean {
+  return internal.some((f) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f));
+}
+
 export async function assembleBricks(input: AssembleBricksInput): Promise<AssembleBricksResult> {
   if (!input.bricks?.length) {
     throw new Error('bricks 不能为空：至少指定一个积木名（search_bricks 可查盒内清单）');
@@ -257,8 +274,12 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
   const goRequires = new Map<string, string>();
   const modOwner = new Map<string, string>();
   const versionConflicts: string[] = [];
+  // npm 三方依赖版本归并（package → spec；版本事实来自各积木 npm_requires 存档）
+  const npmRequires = new Map<string, string>();
+  const npmOwner = new Map<string, string>();
   // module root → 跨积木使用统计（live/dead 计数；全 dead 才进 dead_require_candidates）
   const moduleUse = new Map<string, { live: number; dead: number }>();
+  const anyTs = loaded.some(({ manifest }) => hasTsFiles(manifest.closure?.internal ?? []));
   for (const { manifest, dir } of loaded) {
     const internal = manifest.closure?.internal ?? [];
     const dirs = closureDirs(internal);
@@ -295,8 +316,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
       .map((e) => e.source);
 
     // 三方依赖治理：Go 积木凭 go_mod_requires 存档自动定位版本（MVS 取高，冲突留档）；
-    // TS 积木/无存档/归并不上 → 全量进 pending（decline rather than guess）
+    // TS 积木凭 npm_requires 存档同构治理（semver 取高，同 major 安全 / 跨 major
+    // 留档警告——glue 阶段对账或嵌套安装）；无存档/归并不上 → 全量进 pending
+    // （decline rather than guess）
     let resolvedMods: string[] = [];
+    const isTsBrick = hasTsFiles(internal);
     if (isGoBrick && manifest.go_mod_requires) {
       const { resolved, unresolved } = resolveGoThirdParty(thirdParty, manifest.go_mod_requires);
       resolvedMods = Object.keys(resolved);
@@ -335,6 +359,47 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
         else agg.live += 1;
         moduleUse.set(cur, agg);
       }
+    } else if (isTsBrick && manifest.npm_requires) {
+      // npm 包名归并（@scope/pkg/sub → @scope/pkg；pkg/sub → pkg）
+      const { resolved, unresolved } = resolveNpmThirdParty(thirdParty, manifest.npm_requires);
+      for (const src of unresolved) thirdPartyPending.add(src);
+      for (const [pkg, spec] of Object.entries(resolved)) {
+        if (isNonRegistrySpec(spec)) {
+          // workspace:/file:/link: 离开源仓库无解——不猜替代版本，进 pending
+          thirdPartyPending.add(`${pkg}@${spec}（非 registry 协议，装不进拼装区）`);
+          continue;
+        }
+        resolvedMods.push(pkg);
+        const prev = npmRequires.get(pkg);
+        if (prev === undefined) {
+          npmRequires.set(pkg, spec);
+          npmOwner.set(pkg, manifest.name);
+        } else if (prev !== spec) {
+          const pick = compareNpmVersion(prev, spec) >= 0 ? prev : spec;
+          const crossMajor =
+            compareNpmVersion(prev, spec) !== 0 &&
+            (prev.replace(/^[\^~>=<v]+/, '').split('.')[0] !==
+              spec.replace(/^[\^~>=<v]+/, '').split('.')[0]);
+          versionConflicts.push(
+            `${pkg}：${npmOwner.get(pkg)}=${prev} vs ${manifest.name}=${spec} → 取 ${pick}` +
+              `（semver 取高${crossMajor ? '；跨 major：API 不兼容，glue 需对账或嵌套安装' : ''}）`,
+          );
+          npmRequires.set(pkg, pick);
+        }
+      }
+      // 死候选聚合（npm 包名口径，与 Go moduleUse 同一账本）
+      const deadSources = new Set(
+        (manifest.slim_candidates?.dead_third_party ?? []).map((d) => d.source),
+      );
+      for (const src of thirdParty) {
+        const segs = src.split('/');
+        const pkg = src.startsWith('@') ? segs.slice(0, 2).join('/') : segs[0];
+        if (manifest.npm_requires[pkg] === undefined) continue;
+        const agg = moduleUse.get(pkg) ?? { live: 0, dead: 0 };
+        if (deadSources.has(src)) agg.dead += 1;
+        else agg.live += 1;
+        moduleUse.set(pkg, agg);
+      }
     } else {
       for (const t of thirdParty) thirdPartyPending.add(t);
     }
@@ -348,6 +413,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
       third_party_resolved: resolvedMods,
       source_project: manifest.provenance?.source_project,
       commit: manifest.provenance?.commit,
+      // 契约投影（盒内 manifest 单向投影到出生证明）：
+      // import_project 读 assembly.json 时据此把积木折叠成 DSL 单符号节点——
+      // 黑盒视图的接口事实唯一来源仍是盒内 manifest，这里只是拼装时点的存档快照
+      description: manifest.description,
+      aggregate: manifest.aggregate,
     });
   }
 
@@ -369,6 +439,24 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     goModWritten = true;
   }
 
+  // ── package.json（有 TS 积木且依赖归并上时；spec 原样存档不猜不升版） ──
+  let packageJsonWritten = false;
+  const npmRequiresObj: Record<string, string> = {};
+  for (const [p, v] of [...npmRequires.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    npmRequiresObj[p] = v;
+  }
+  if (write && anyTs && npmRequires.size) {
+    const pkg = {
+      name: path.basename(targetDir).toLowerCase().replace(/[^a-z0-9-]+/g, '-'),
+      private: true,
+      // 积木源多为 ESM（import/export）；闭包零重接的前提是模块语义不变
+      type: 'module',
+      dependencies: npmRequiresObj,
+    };
+    fs.writeFileSync(path.join(targetDir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf-8');
+    packageJsonWritten = true;
+  }
+
   // ── assembly.json 出生证明 ──
   let manifestWritten = false;
   // 死依赖候选投影（提前算：assembly.json 与返回值共用）
@@ -388,9 +476,14 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
         go_imports_rewritten: r.imports_rewritten.length,
         source_project: r.source_project,
         commit: r.commit,
+        // 契约投影：import_project 折叠积木时读这里（拼装区自包含，
+        // 无需回盒查 manifest）。事实唯一来源仍是盒内 manifest——单向投影
+        description: r.description,
+        aggregate: r.aggregate,
       })),
       third_party_pending: [...thirdPartyPending],
       go_requires: goRequiresObj,
+      npm_requires: npmRequiresObj,
       version_conflicts: versionConflicts,
       dead_require_candidates: deadRequireCandidates,
       overlaps,
@@ -405,14 +498,16 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     `拼装${write ? '完成' : '预演'}：${reports.length} 积木 → ${targetDir}` +
     `（${totalFiles} 文件${totalRewrites ? `，Go import 重写 ${totalRewrites} 处` : ''}）` +
     (goModWritten ? `，go.mod module=${input.module}` : '') +
-    (goRequires.size ? `，三方依赖自动 require ${goRequires.size} 项（版本来自源项目 go.mod 存档）` : '') +
+    (goRequires.size ? `，Go 三方依赖自动 require ${goRequires.size} 项（版本来自源项目 go.mod 存档）` : '') +
+    (packageJsonWritten ? `，package.json dependencies ${npmRequires.size} 项（版本来自源项目 package.json 存档）` : '') +
     (deadRequireCandidates.length
       ? `，其中死依赖候选 ${deadRequireCandidates.length} 项（slim 前须四层验证，见 dead_require_candidates）`
       : '') +
     (thirdPartyPending.size ? `；无版本存档待补 ${thirdPartyPending.size} 项（见 third_party_pending）` : '') +
-    (versionConflicts.length ? `；版本冲突 ${versionConflicts.length} 处（MVS 取高，见 version_conflicts）` : '') +
+    (versionConflicts.length ? `；版本冲突 ${versionConflicts.length} 处（取高，见 version_conflicts）` : '') +
     (overlaps.length ? `；重叠警告 ${overlaps.length} 条` : '') +
     (goModWritten && goRequires.size ? '。跑 go mod tidy 补 go.sum 与 indirect' : '') +
+    (packageJsonWritten ? '。跑 npm install 后 tsc 可全量编译（贫困口径的三方缺类型消失）' : '') +
     `。下一步：写 glue（cmd/main.go 或入口文件）后编译验证。`;
 
   return {
@@ -422,9 +517,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     overlaps,
     third_party_pending: [...thirdPartyPending],
     go_requires: goRequiresObj,
+    npm_requires: npmRequiresObj,
     version_conflicts: versionConflicts,
     dead_require_candidates: deadRequireCandidates,
     go_mod_written: goModWritten,
+    package_json_written: packageJsonWritten,
     assembly_manifest_written: manifestWritten,
     written: write,
     message,
