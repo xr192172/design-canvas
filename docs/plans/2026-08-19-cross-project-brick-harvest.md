@@ -328,6 +328,16 @@ interface BrickManifest {
 - 列表模式不虚构 writes/holds 计数（manifest.aggregate 无全量清单），详情模式才从 contracts.json 实算——宁可缺省不造假
 - 5 单测（浏览+语言推断/打分排序+matched/三态过滤/详情实算/异常）+ 真盒端到端（4 积木：theme accent 检索 ua_theme_engine 210 分 7 处命中；logger rotate 命中 go_logging；verified=true 过滤唯一）；全量 841 测绿
 
+**4-2 跨项目挖掘检索评估（survey 多项目盘点是否工具化）** ✅ 2026-08-20 评估完成，结论：**不工具化**
+- 场景拆解：
+  - 已入盒资产的跨项目检索 → search_bricks 已覆盖（盒 = 统一命名空间，4 积木来自 4 个源项目同盒共存）
+  - 未入盒代码的多项目盘点 → harvest_from_url auto + dry-run 已覆盖：每次调用输出候选积木清单（闭包规模/外部依赖三分类/聚合契约 exposes+emits+config+不可逆计数）。多项目 = LLM 编排多次单项目调用——MCP 工具的设计初衷就是 LLM 做编排层，循环调用即盘点
+- 不建 survey 工具的三条理由：
+  1. 多项目盘点输出 = 各项目候选清单的并集，无跨项目计算需求（不像闭包需要跨文件图计算，并集不需要专门算法）
+  2. 唯一真正的跨项目语义是"同一积木多个项目都有、选哪个"——那是入盒之后 search_bricks 的 verified/provenance 维度（比较谁的 camera 验证更全、来源更可信），已覆盖
+  3. survey 会在 harvest_from_url（未入盒盘点）与 search_bricks（已入盒检索）之间造第三个职责重叠工具
+- 与 4-1 同原则：避免为不存在的问题建基础设施
+
 ### Phase 5：实码搬运与重组
 - scaffold 扩展：积木实码搬运 + import 路径重接 → 真正拼出新项目
 
