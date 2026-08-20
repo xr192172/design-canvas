@@ -38,6 +38,8 @@ import { reconcileEffects } from './tools/reconcile_effects.js';
 import type { ReconcileEffectsInput } from './tools/reconcile_effects.js';
 import { reconcileBrick } from './tools/reconcile_brick.js';
 import type { ReconcileBrickInput } from './tools/reconcile_brick.js';
+import { searchBricks } from './tools/search_bricks.js';
+import type { SearchBricksInput } from './tools/search_bricks.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -796,6 +798,31 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await reconcileBrick(a as unknown as ReconcileBrickInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'search_bricks',
+    title: 'Search and browse the brick shelf (cross-project reuse catalog)',
+    description:
+      '积木货架（Brick Harvest Phase 4：跨项目统一检索层）——浏览/检索积木盒 .design-canvas/bricks/ 的全部积木，' +
+      '"拎之前先看它要什么、给什么"。三种模式：①浏览（无参数：全部积木概况——语言/来源/规模/exposes/验证状态）；' +
+      '②检索（query 关键词打分：积木名 > 形状名 > 字段名 > 人话介绍，matched 明细可追溯）；' +
+      '③详情（name 精确：完整契约——形状 fields、effects 全清单、不变量断言、闭包、camera 验证档案）。' +
+      '过滤：language / verified（有运行证据）/ has_invariants / zero_third_party（拎走即跑）。' +
+      '数据源是盒内 manifest.json 自包含档案（跨项目资产的统一命名空间就是盒本身，不碰项目 cache.db）。' +
+      '这是"我要 X 功能 → 找到积木 → 拎取拼装"价值链的检索环节。',
+    inputSchema: {
+      query: z.string().optional().describe('关键词检索（多词独立打分求和：命中积木名/形状名/字段名/description）'),
+      language: z.enum(['go', 'typescript', 'python', 'javascript']).optional().describe('语言过滤（闭包文件扩展名推断）'),
+      verified: z.boolean().optional().describe('只看有 camera 运行验证的（effect_verification 档案）'),
+      has_invariants: z.boolean().optional().describe('只看有数学不变量的（acceptance.invariants）'),
+      zero_third_party: z.boolean().optional().describe('只看零三方依赖的（拎走即跑）'),
+      name: z.string().optional().describe('精确积木名 → 详情模式（完整契约输出）'),
+      box_dir: z.string().optional().describe('积木盒根目录（默认 <cwd>/.design-canvas/bricks）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await searchBricks(a as unknown as SearchBricksInput);
       return { message: r.message, data: r };
     }),
   },

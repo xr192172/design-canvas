@@ -109,6 +109,8 @@ export interface BrickContract {
 export interface BrickManifest {
   name: string;
   schema_version: 1;
+  /** 人话一句话介绍（LLM 生成后人工确认；货架浏览的第一行）。重抽保留：与 acceptance 同类人工沉淀 */
+  description?: string;
   seed_files: string[];
   /** 闭包（harvest_closure 输出入档：内部文件 + 外部依赖三分类） */
   closure: {

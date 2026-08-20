@@ -317,6 +317,17 @@ interface BrickManifest {
 - 统一命名空间（多 cache.db 聚合或联邦检索）
 - 积木货架：可浏览的接口契约目录（拎之前先看它要什么、给什么）
 
+**4-1 积木货架 search_bricks** ✅ 2026-08-20：
+- **关键决策——统一命名空间 = 盒本身**：积木盒 `.design-canvas/bricks/` 是跨项目资产（4 积木来自 4 个源项目），manifest.json 自包含档案天然统一，**不需要**多 cache.db 聚合/联邦检索——那是未入盒代码的挖掘需求（harvest_from_url dry-run 已覆盖），已入盒资产走盒内检索。避免为不存在的问题建基础设施
+- `search_bricks` MCP 工具（第 15 个主工具）三模式：
+  - 浏览（无参数）：全积木概况——语言（闭包扩展名投票推断）/来源/规模/exposes/effects/验证状态/description
+  - 检索（query）：关键词打分 name(100/60) > shape 名(50/30) > 字段名(20) > description(15)，多词独立求和，**matched 明细可追溯**（哪个词命中了什么）
+  - 详情（name 精确）：完整契约——contracts.json 实算 writes/holds 计数、effects 全清单、不变量、闭包、camera 验证档案
+- 过滤四维三态（undefined 不过滤 / true 只看有 / false 只看无）：language / verified / has_invariants / zero_third_party
+- `BrickManifest.description` 新槽位（LLM 生成人话一句话，**重抽保留**——与 acceptance 同类人工沉淀）；四积木已补：cg_wal_valve（WAL 写放大治理阀）/ go_logging（分级日志四件套）/ ua_ignore_filter / ua_theme_engine
+- 列表模式不虚构 writes/holds 计数（manifest.aggregate 无全量清单），详情模式才从 contracts.json 实算——宁可缺省不造假
+- 5 单测（浏览+语言推断/打分排序+matched/三态过滤/详情实算/异常）+ 真盒端到端（4 积木：theme accent 检索 ua_theme_engine 210 分 7 处命中；logger rotate 命中 go_logging；verified=true 过滤唯一）；全量 841 测绿
+
 ### Phase 5：实码搬运与重组
 - scaffold 扩展：积木实码搬运 + import 路径重接 → 真正拼出新项目
 
