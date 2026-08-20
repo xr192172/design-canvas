@@ -338,8 +338,36 @@ interface BrickManifest {
   3. survey 会在 harvest_from_url（未入盒盘点）与 search_bricks（已入盒检索）之间造第三个职责重叠工具
 - 与 4-1 同原则：避免为不存在的问题建基础设施
 
-### Phase 5：实码搬运与重组
-- scaffold 扩展：积木实码搬运 + import 路径重接 → 真正拼出新项目
+### Phase 5：实码搬运与重组 ✅ 2026-08-20 微型验证贯通
+
+**核心纪律（用户决策）：每次拼装一个新拼装区**——绝不在原项目上抽取和拼装，原项目（design-canvas / OCR 克隆 / 任何源）永远只读。拼装区是工作区平级一次性新目录，可 git init、可编译运行、可 import_project 解析，不满意整个删掉零残留。
+
+**关键修正：拼装不是 scaffold 的活**。scaffold 职责是"改 DSL → 投影代码结构"（结构层）；拼装是"搬已验证实码 + 重接 import"（行为层实码），独立新工具 `assemble_bricks`（第 16 个主工具，src/tools/assemble_bricks.ts）。
+
+布局：`<target>/<积木名>/<原闭包相对路径>`——积木名做顶层命名空间，跨积木永不撞路径。import 重接规则：
+- **TS/JS 零重写**：积木=种子+传递闭包整体入盒，闭包内相对位置不变
+- **Go 按闭包目录最长后缀匹配**识别内部 import（不需要知道源 module 名），重写为 `<module>/<积木名>/<后缀>`；不需要重写的（stdlib/三方）原样保留
+- **Go 顶层 internal/ 段解除**：Go 的 internal 语义按路径走，不去段则积木子树外的 glue 编译期拒绝引用（实战踩坑：cmd/demo 引用 go_logging/internal/logging 报 use of internal package not allowed）。语义成立：源项目 internal 是防外部引用的封装，积木被选中拼装即成为新项目公开部件
+- go.mod 生成（module + go 版本）；三方依赖**不自动 require**（汇总 pending 清单，go mod tidy / 人 / LLM 补——decline rather than guess）
+- assembly.json 出生证明：积木清单、来源 commit、搬运映射、重写计数
+- 跨积木闭包重叠只**警告不合并**（两份同源代码在 Go 是两个不兼容的包，静默合并=猜；正解是提升共享积木再入盒）
+- glue 粘合代码不生成——粘合是 LLM 的活，工具只搬已验证实码
+
+**实战抓到并修复的两个 Go 闭包盲区**（harvest_closure 修复）：
+1. **同包 sibling 漏抽**：Go 包语义是目录内聚——同目录文件共享符号但无 import 边，纯 import 图闭包漏抽（症状：拼装区编译 undefined: ParseHunks）。修复：BFS 内 Go 文件触发同目录 .go 非 test 文件补全（ocr_diff_resolver 闭包 5→37 文件，整包是编译最小单元）
+2. **go:embed 资源漏抽**：embed 数据文件（bpe_data/*.tiktoken、prompts/*）无 import 边不进符号索引（症状：编译 pattern no matching files）。修复：闭包内 .go 文件解析 //go:embed 指令（支持多模式/目录通配/all: 前缀），文件系统匹配资源入闭包（39→50 文件）
+
+**微型拼装实战**（assembly-001-brick-demo，工作区平级目录）：
+- 盒内 go_logging（agent-shell，camera 已验证）+ 新入盒 ocr_diff_resolver（OCR 招牌能力：LLM 出证据、机器出事实的行级定位）
+- 54 文件搬运、12 处 Go import 重写、go mod tidy 补 25 三方（goproxy.cn 代理）、**go build 编译通过、go run 运行成功**：resolver 把 ExistingCode 证据定位到 L4-L4/L3-L3，go_logging 会话路由日志双落盘（hub.log + sessions/assembly-001-demo.log）
+- **验证闭环**：import_project 解析拼装区成功入图（新项目成为正规可解析项目，可再入盒滚雪球）
+- 诚实观察：Go 包=编译单元≠功能单元——resolver 只要 hunk/parser，整包闭包把 gitcmd/llm/telemetry 生态全拖进来（25 三方）。细粒度拎取（拆包重组）是 LLM 的活，工具不猜
+
+**遗留观察（后续 Phase 5+ 可选）**：
+- Go 积木重依赖治理：源项目 go.mod 的 require 版本可随盒存档（manifest.go_require），拼装时生成带版本的 require 块省去 tidy 拉新版风险
+- 拼装区 git init + camera 插桩验证行为等价（依赖替换流程第 4 步的基建已就绪）
+
+测试：assemble_bricks 12 用例（重写状态机：块内/单行/alias/最长后缀/三方撞名已知局限 + 布局/go.mod/预演/非空拒绝/异常/重叠警告/纯 TS 免 module）+ harvest_closure 新增 Go sibling 与 embed 回归；全量 854/854 绿。
 
 ## 六、验收标准（Phase 3 试验）
 

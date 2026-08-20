@@ -40,6 +40,8 @@ import { reconcileBrick } from './tools/reconcile_brick.js';
 import type { ReconcileBrickInput } from './tools/reconcile_brick.js';
 import { searchBricks } from './tools/search_bricks.js';
 import type { SearchBricksInput } from './tools/search_bricks.js';
+import { assembleBricks } from './tools/assemble_bricks.js';
+import type { AssembleBricksInput } from './tools/assemble_bricks.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -823,6 +825,35 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await searchBricks(a as unknown as SearchBricksInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'assemble_bricks',
+    title: 'Assemble a new project from boxed bricks (assembly zone)',
+    description:
+      '拼装区（Brick Harvest Phase 5：实码搬运与重组）——把积木盒里的已验证积木搬进一个**全新的拼装区目录**，' +
+      '拼出新项目骨架。核心纪律：每次拼装一个新目录，绝不在原项目上抽取和拼装（原项目永远只读）。' +
+      '布局 <target>/<积木名>/<原闭包相对路径>（积木名做顶层命名空间，永不撞路径）。' +
+      'import 重接：TS/JS 零改动（闭包内相对位置不变）；Go 按闭包目录最长后缀匹配识别内部 import，' +
+      '重写为 <module>/<积木名>/<后缀>，并生成 go.mod。' +
+      '诚实边界：三方依赖不自动 require（汇总 pending 清单由人/LLM 补）；跨积木闭包重叠只警告不合并；' +
+      'glue 粘合代码不生成（LLM 的活）。写完 glue 编译通过 = 拼装区成为可运行新项目（可 import_project 解析、可再入盒）。',
+    inputSchema: {
+      bricks: z.array(z.string()).describe('要拼装的积木名列表（须已在盒中；search_bricks 可查）'),
+      target_dir: z
+        .string()
+        .describe('拼装区目录（必须不存在或为空目录——拼装区一次性，拒绝覆盖已有内容）'),
+      module: z
+        .string()
+        .optional()
+        .describe('新项目 Go module 名（闭包含 .go 文件时必填，如 example.com/assembly-001）'),
+      go_version: z.string().optional().describe('go.mod 的 go 版本声明（默认 1.25.5）'),
+      box_dir: z.string().optional().describe('积木盒根目录（默认 <cwd>/.design-canvas/bricks）'),
+      write: z.boolean().optional().describe('false 只预演：输出搬运计划与 import 重写预览，不落盘（默认 true）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await assembleBricks(a as unknown as AssembleBricksInput);
       return { message: r.message, data: r };
     }),
   },

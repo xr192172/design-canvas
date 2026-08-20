@@ -149,6 +149,27 @@ describe('harvest_closure 积木拎取闭包', () => {
     expect(r.external.some((e) => e.source === 'example.com/demo/pkg/model')).toBe(false);
   });
 
+  it('Go 同包 sibling 补全：同目录文件无 import 边但符号共享，必须进闭包（_test.go 除外）', async () => {
+    // ocr_diff_resolver 实战抓到的盲区：resolver.go 引用同 package 的 ParseHunks，
+    // 同包文件间没有 import 边，纯 import 图闭包漏抽 → 拼装编译 undefined
+    const root = await makeGoProject('harvest_go_sibling');
+    put(root, 'pkg/svc/svc2.go', 'package svc\n\n// Helper 与 svc.go 同包共享，无 import 边\nfunc Helper() int { return 7 }\n');
+    put(root, 'pkg/svc/svc_test.go', 'package svc\n\nimport "testing"\n\nfunc TestHelper(t *testing.T) { _ = Helper() }\n');
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    await importProject({ project_dir: root, cache_db: db });
+    db.close();
+
+    const r = harvestClosure({ project_dir: root, files: ['pkg/svc/svc.go'] });
+    const paths = internalPaths(r).sort();
+    // svc2.go（同包 sibling）进来；svc_test.go（测试文件）不进来
+    expect(paths).toContain('pkg/svc/svc2.go');
+    expect(paths).not.toContain('pkg/svc/svc_test.go');
+    expect(paths).toEqual(['pkg/model/model.go', 'pkg/svc/svc.go', 'pkg/svc/svc2.go']);
+    // sibling 的带入证据：imported_by 指向同包文件
+    const sib = r.internal_files.find((f) => f.path === 'pkg/svc/svc2.go')!;
+    expect(sib.imported_by).toBe('pkg/svc/svc.go');
+  });
+
   it('种子不在缓存 → 警告；feature 不存在 → 抛错', async () => {
     const root = await makeTsProject('harvest_ts_e');
     const r = harvestClosure({ project_dir: root, files: ['src/nope.ts'] });

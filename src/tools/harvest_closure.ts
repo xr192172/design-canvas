@@ -19,6 +19,7 @@
  * 拎服务层连它的调用方一起搬）；默认 false——纯积木只需要根须不需要用户。
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { getDSL } from '../storage.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
@@ -179,8 +180,32 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
   // edges 表已解析边 ∪ 原始 imports 权威解析（Go 包路径/Python 模块不进 edges 表）
   const { importeeOf, importerOf, packageResolved } = buildImportGraph(db, root);
 
+  // ── Go 同包 sibling 目录索引：Go 包语义是目录内聚——同目录文件共享符号但无 import 边 ──
+  // 闭包只沿 import 边走会漏抽（ocr_diff_resolver 案例：resolver.go 与 hunk.go
+  // 同 package diff 无边，拼装编译时 undefined: ParseHunks）。
+  // sibling 与普通 importee 一样进闭包并继续展开（其 import 可能引入新包）。
+  // dirFiles 收全部文件（embed 资源补全用）；goSibling 只补 .go 非 test。
+  const goDirFiles = new Map<string, string[]>();
+  const dirFiles = new Map<string, string[]>();
+  {
+    const rows = db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+    for (const r of rows) {
+      if (r.path.endsWith('_test.go') || r.path.startsWith('.design-canvas/')) continue;
+      const i = r.path.lastIndexOf('/');
+      const dir = i < 0 ? '' : r.path.slice(0, i);
+      let arr = dirFiles.get(dir);
+      if (!arr) dirFiles.set(dir, (arr = []));
+      arr.push(r.path);
+      if (r.path.endsWith('.go')) {
+        let garr = goDirFiles.get(dir);
+        if (!garr) goDirFiles.set(dir, (garr = []));
+        garr.push(r.path);
+      }
+    }
+  }
+
   // ── 闭包 BFS：importee 方向必走；include_callers 时 importer 方向也走 ──
-  // 首达信息（depth / imported_by / import line）记 importee 侧；callers 侧只标 depth。
+  // 首达信息（depth / imported_by / import line）记 importee 侧；callers 侧只标深度。
   interface Reach { depth: number; imported_by?: string; line?: number | null }
   const reached = new Map<string, Reach>();
   for (const s of seedCachePaths) reached.set(s, { depth: 0 });
@@ -188,6 +213,16 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
   for (let depth = 1; depth <= max_depth && frontier.length > 0; depth++) {
     const next: string[] = [];
     for (const f of frontier) {
+      // Go 同包 sibling 补全（目录内聚语义；imported_by 记带入者，无 import 语句故无 line）
+      if (f.endsWith('.go')) {
+        const i = f.lastIndexOf('/');
+        const dir = i < 0 ? '' : f.slice(0, i);
+        for (const sib of goDirFiles.get(dir) ?? []) {
+          if (sib === f || reached.has(sib)) continue;
+          reached.set(sib, { depth, imported_by: f });
+          next.push(sib);
+        }
+      }
       const expand = (adj: Map<string, Array<{ to: string; line: number | null }>>, asCaller: boolean) => {
         for (const t of adj.get(f) || []) {
           if (reached.has(t.to)) continue;
@@ -200,6 +235,69 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
       if (include_callers) expand(importerOf, true);
     }
     frontier = next;
+  }
+
+  // ── go:embed 资源补全：闭包内 .go 文件的 embed 指令引用的资源文件必须随包走 ──
+  //（纯数据文件无 import 边也不进符号索引——如 llm/bpe_data/cl100k_base.tiktoken，
+  //  漏抽则拼装区编译报 missing embedded file。files 表只收代码扩展名，
+  //  资源匹配直接扫文件系统）
+  {
+    const dirCache = new Map<string, string[]>(); // 包目录 → 递归文件名清单（相对包目录）
+    const listDir = (dir: string): string[] => {
+      const hit = dirCache.get(dir);
+      if (hit) return hit;
+      const names: string[] = [];
+      const walk = (d: string, prefix: string) => {
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(d, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+          if (e.isDirectory()) walk(path.join(d, e.name), `${prefix}${e.name}/`);
+          else if (e.isFile()) names.push(`${prefix}${e.name}`);
+        }
+      };
+      walk(path.join(root, dir), '');
+      dirCache.set(dir, names);
+      return names;
+    };
+    for (const f of [...reached.keys()]) {
+      if (!f.endsWith('.go')) continue;
+      let src: string;
+      try {
+        src = fs.readFileSync(path.join(root, f), 'utf-8');
+      } catch {
+        continue;
+      }
+      for (const m of src.matchAll(/\/\/go:embed\s+(.+)/g)) {
+        for (const raw of m[1].trim().split(/\s+/)) {
+          const pat = raw.replace(/^all:/, '');
+          const i = f.lastIndexOf('/');
+          const dir = i < 0 ? '' : f.slice(0, i);
+          const re = new RegExp(
+            '^' +
+              pat
+                .split('/')
+                .map((seg) =>
+                  // 先转义非 * 特殊字符，再换 * 为通配——顺序反了 * 会先变 \* 而失效
+                  seg.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*'),
+                )
+                .join('/') +
+              '$',
+          );
+          for (const name of listDir(dir)) {
+            if (!re.test(name)) continue;
+            const p = dir ? `${dir}/${name}` : name;
+            if (!reached.has(p)) {
+              reached.set(p, { depth: reached.get(f)!.depth, imported_by: f });
+            }
+          }
+        }
+      }
+    }
   }
 
   // ── 文件元信息 + 符号数 ──
