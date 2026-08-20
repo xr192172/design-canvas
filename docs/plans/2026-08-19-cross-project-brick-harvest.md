@@ -437,7 +437,14 @@ interface BrickManifest {
 - 文件 50→41（剔除 9 个死文件）、顶层声明 394→279、剔除三方依赖 8 个（otel 全家：otel + otlp 4 导出器 + stdout 2 导出器 + trace）
 - 保留 7 个活依赖：anthropic-sdk-go / doublestar/v4 / openai-go/v3 / tiktoken-go / otel/metric / otel/sdk / otel/sdk/metric
 - 编译验证 pass；拼装验证：-slim 衍生积木 → 拼装区 → go mod tidy + go build 无错误
-- 原积木零改动；四层验证只做了第一层（编译），源测试/camera 行为对比/效果验收三层未做——剔除生效前需人工补验（slim_verification 档案如实记录）
+- **源测试验证 pass**（四层第二层，贫困依赖法，见下节）
+- 原积木零改动；四层验证余 camera 行为对比/效果验收两层未做——正式采用前补（slim_verification 档案如实记录）
+
+**源测试验证（贫困依赖法，2026-08-20）**：
+- 方法：验证项目 go.mod **只给 7 个活依赖**（版本抄源项目 go.mod，不猜）+ 源项目 internal/diff 全部 10 个测试文件——让编译器裁决死活，环境留存 `.design-canvas/tmp/slim-verify/`
+- 结果：**73 个顶层测试全绿**（种子本体 ResolveLineNumbers 全家族 22 个、招牌能力 RelocateAcrossFiles 4 个、ParseHunks/ParseDiffText 13 个、workspace_file 安全测试 8 个含 symlink 防逃逸、firstLine、IsRangeMode/IsCommitMode）——贫困依赖下编译+测试双通过 = 被剔 otel 依赖确实死的硬证据
+- 测试适配（死代码的测试保护一并剔除，合法非误剪）：git_test / git_resolve_test / relocation_test 整文件剔除（测 Provider 构造生态/relocation.go）；gitignore_test 重写为仅含 IsRangeMode/IsCommitMode（gitignore.go 公开 API 全死）
+- **测试抓到的真洞察**：NewProvider 系构造函数被剪 = 种子聚焦语义正确（ResolveLineNumbers 接收外部传入的 diff 数据，不构造 Provider）；但 GetDiff/ResolveInput 等方法保留而构造函数被剪 = "半活状态"——拼装方需要 Provider 能力时应选用原积木而非 -slim。**Go 的整包内聚（sibling 补全）+ 种子可达性剪枝组合语义 = "包拖进来、能力剪出去"**
 
 测试：slim_brick 8 用例（全链/版本后缀回归/dry-run/已存在拒绝/缺档案拒绝/路径漂移防线/无可剪/非 Go 拒绝）+ dead_deps 扩至 14 用例（新增跨包类型引用、版本后缀候选限定符回归）；全量 899/899 绿。
 
