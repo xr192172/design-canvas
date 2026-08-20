@@ -55,8 +55,7 @@ const contracts = JSON.parse(fs.readFileSync(contractsPath, 'utf8'));
 
 // 未观测候选的覆盖缺口（人工分析，机器无法自动区分）
 const gapNotes: Record<string, string> = {
-  'rotate.go|file:filepath.Join': 'not_triggered：100MB 轮转阈值未达（驱动写入量 << 阈值）',
-  'rotate.go|file:r.basePath': 'probe_gap：effect 插桩器四类检测点（包级赋值/chan send/go/Listen·sql·Ticker）不含 os.Create 文件句柄 acquire——静态候选有、探针无检测点，工具改进项',
+  'rotate.go|file:filepath.Join': 'not_triggered：os.Remove 仅在 cleanupExpired（轮转后清理）内调用，100MB 轮转阈值未达（驱动写入量 << 阈值）',
   'rotate.go|goroutine': 'not_triggered：go cleanupExpired 仅在 rotateLocked 内启动，轮转未发生',
   'router.go|routeTable': 'static_only：包级字面量初始化被静态扫描记 write 候选，运行时只读无写——静态候选模式的固有噪声',
 };
@@ -77,7 +76,14 @@ for (const [rel, contract] of Object.entries<Record<string, any>>(contracts)) {
   if (obs && fx) {
     for (const { kind, target } of obs.values()) {
       if (kind === 'write') {
-        const hit = fx.writes.find((w: any) => w.target === target && w.origin === 'ast');
+        // 已转正（runtime）的命中只计数；ast 的命中当场转正
+        const hit = fx.writes.find((w: any) => w.target === target);
+        if (hit) {
+          hit.origin = 'runtime';
+          confirmed.push(target);
+        }
+      } else if (kind === 'hold') {
+        const hit = fx.holds.find((h: any) => h.target === target);
         if (hit) {
           hit.origin = 'runtime';
           confirmed.push(target);
@@ -128,7 +134,7 @@ manifest.effect_verification = {
   files: report,
   known_blind_spots: [
     'Go init() 先于 main 执行：logging.init 的 3 个 effect 探针点（AGENT_LOG_DEBUG/AGENT_SHELL_VERBOSE 初始写）在 sink 注册前运行，观测不到——驱动侧 sink 初始化时机固有限制',
-    'probe_gap 类缺口（见 files[].unobserved[].note）：插桩器检测点覆盖 < 静态候选覆盖',
+    '探针 target 与静态候选 target 已同构（2026-08-20 补齐文件句柄检测点：os.Create/OpenFile/WriteFile/Remove/RemoveAll + listen:addr/db-pool:driver 带参数），剩余 unobserved 均为 not_triggered / static_only 类（见归因 note）',
   ],
 };
 fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');

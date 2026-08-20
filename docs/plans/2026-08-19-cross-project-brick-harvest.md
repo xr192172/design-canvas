@@ -298,6 +298,13 @@ interface BrickManifest {
 - 工程细节：插桩代码 import go-camera/probe 需 go.mod replace 指向本地模块；sink 须在驱动 main 里自初始化（`camprobe.NewSink` + `SetGlobalSink`，自引探针包用 camprobe 别名——instrument 对已 import 的文件跳过 import 注入）
 - 产出：验证驱动环境保留于 `.design-canvas/tmp/golog-verify/`（可复跑）；对账脚本 `scripts/tmp-brick-reconcile.ts`（go_logging 首例，流程验证后可工具化）
 
+**3R-4 补探针盲区（狗食闭环：发现问题就补）** ✅ 2026-08-20：
+- 3R-3 暴露的 probe_gap 不是"缺一个检测点"，而是**两侧 target 不同构**：静态正则产 `file:r.basePath`（带参数后缀），探针只会产 `file-handle`（泛型名）——write 类天然同构（变量名）所以 6 个全转正，hold 类全军覆没是必然
+- effects.go 重构：①新增 `callArgName`（与静态正则 `(?:"([^"]+)"|([\w.]+))` 同构：字面量→去引号 / 标识符·选择链→名字 / 下标→base / **CallExpr→函数名**（filepath.Join(dir,name)→filepath.Join，初版漏此分支被测试抓住）；②补 `Create`/`OpenFile`/`WriteFile`/`Remove`/`RemoveAll` 检测点（writeCallSelectors 新表：文件写删 → Kind=write）；③receiver 包名严格判定（`recvPkg(sel)`——GORM `db.Create`/`zip.Open`/自定义 `Listen` 不命中，与静态 `os\.` 前缀正则同构）；④target 带参数：`listen:addr`（net.Listen 取第 2 参 / ListenAndServe 第 1 参）、`db-pool:driver`、`file:路径表达式`
+- 测试：fixture 扩 os.OpenFile/os.Remove + `db.Create` 负样本；断言 `listen::8080`、`file:app.log`、`file:filepath.Join` 同构 target；instrument 全测绿
+- 复跑对账：**转正 7/10**（+`file:r.basePath` hold acquire ×6 精确命中），probe_gap 归零；剩余 3 个未观测全为 not_triggered×2（轮转阈值未达）+ static_only×1（包级字面量噪声）——诚实归因
+- 对账脚本修正：hold 类匹配（此前只匹配 write）；已转正 runtime 的命中只计数不重复转正
+
 ### Phase 4：跨项目统一索引 + 摘要层
 - 统一命名空间（多 cache.db 聚合或联邦检索）
 - 积木货架：可浏览的接口契约目录（拎之前先看它要什么、给什么）

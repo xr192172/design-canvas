@@ -5,10 +5,13 @@
 // 与 design-canvas 侧 extract_contracts 静态候选（origin='ast'）同构对账：
 //
 //	writes : 包级 var 赋值/自增        kind="write"  target=变量名（含 .字段/[下标] 归一）
+//	         + os.WriteFile/Remove     target=file:路径表达式（op=write/delete）
 //	holds  : net.Listen / sql.Open /    kind="hold"   target=listen:addr / db-pool:driver /
+//	         os.Open·Create·OpenFile /                file:路径表达式 /
 //	         time.NewTicker / go 语句                ticker / goroutine
 //	emits  : ch <- v（chan send）      kind="emit"   target=chan:通道表达式名
 //
+// target 形态与静态候选侧正则严格同构（含参数后缀），对账按 target 精确匹配转正。
 // 不捕获值：对账只需 target 事实，值捕获有副作用风险（急切求值陷阱，见
 // blockingReturnCapture 的教训），留给 exit/enter 探针。
 package instrument
@@ -59,7 +62,7 @@ func collectPkgVars(f *ast.File) map[string]bool {
 type EffectHit struct {
 	Kind   string // write | hold | emit
 	Target string // 与 design-canvas 契约 target 同构
-	Op     string // write | append | acquire | release | emit
+	Op     string // write | append | acquire | release | emit | delete
 }
 
 // effectInStmt 检测一条语句的 effect 点（每语句至多取第一个命中——
@@ -89,8 +92,9 @@ func effectInStmt(stmt ast.Stmt, pkgVars map[string]bool) (EffectHit, bool) {
 		return EffectHit{Kind: "hold", Target: "goroutine", Op: "acquire"}, true
 	}
 
-	// 调用型 hold：语句树内含 net.Listen / sql.Open / time.NewTicker / time.NewTimer。
-	// 遍历整个语句（调用可出现在赋值 RHS / if 条件 / 表达式语句等位置）。
+	// 调用型 effect：语句树内含资源获取（Listen/sql.Open/os.Create...）
+	// 或文件写删（os.WriteFile/Remove）调用。遍历整个语句
+	// （调用可出现在赋值 RHS / if 条件 / 表达式语句等位置）。
 	if h, ok := holdCallInStmt(stmt); ok {
 		return h, true
 	}
@@ -131,33 +135,124 @@ func chanTargetName(e ast.Expr) string {
 	return ""
 }
 
-// holdOps 包级资源获取调用 → target 前缀（选择器名匹配，宽松——
-// 静态候选侧同名匹配，误报在对账时自然证伪）。
-var holdSelectors = map[string]func(c *ast.CallExpr) (EffectHit, bool){
-	"Listen": func(c *ast.CallExpr) (EffectHit, bool) {
-		return EffectHit{Kind: "hold", Target: "listen", Op: "acquire"}, true
-	},
-	"ListenAndServe": func(c *ast.CallExpr) (EffectHit, bool) {
-		return EffectHit{Kind: "hold", Target: "listen", Op: "acquire"}, true
-	},
-	"Open": func(c *ast.CallExpr) (EffectHit, bool) {
-		// sql.Open(driver, ...) → db-pool；其他 Open（os.Open 等文件句柄）→ file 句柄
-		if sel, ok := c.Fun.(*ast.SelectorExpr); ok {
-			if pkg, ok2 := sel.X.(*ast.Ident); ok2 && pkg.Name == "sql" {
-				return EffectHit{Kind: "hold", Target: "db-pool", Op: "acquire"}, true
+// callArgName 提取调用参数的表达式名，与静态候选侧正则
+// (?:"([^"]+)"|([\w.]+)) 同构：字符串字面量→去引号内容；标识符/选择链→名字；
+// 下标→base 名；其他复杂表达式→空（静态侧同样捕获不到，保持两侧对齐）。
+func callArgName(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.BasicLit:
+		if t.Kind == token.STRING {
+			if s, err := strconv.Unquote(t.Value); err == nil {
+				return s
 			}
 		}
-		return EffectHit{Kind: "hold", Target: "file-handle", Op: "acquire"}, true
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		if base := callArgName(t.X); base != "" {
+			return base + "." + t.Sel.Name
+		}
+	case *ast.IndexExpr:
+		return callArgName(t.X)
+	case *ast.CallExpr:
+		// 调用表达式：取函数名（filepath.Join(dir,name) → filepath.Join），
+		// 静态正则 [\w.]+ 从源码文本捕获同名形态
+		return callArgName(t.Fun)
+	}
+	return ""
+}
+
+// argName 取调用第 i 个参数的表达式名（越界返回空）。
+func argName(c *ast.CallExpr, i int) string {
+	if i < 0 || i >= len(c.Args) {
+		return ""
+	}
+	return callArgName(c.Args[i])
+}
+
+// recvPkg 取选择器调用的 receiver 包名（os.Create → "os"；方法调用 db.Create → ""）。
+func recvPkg(sel *ast.SelectorExpr) string {
+	if id, ok := sel.X.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// holdSelectors 资源获取调用 → target（receiver 包名严格判定，与静态候选侧
+// 正则 net\.Listen / os\.Create 等同构——target 也同构：listen:addr /
+// db-pool:driver / file:路径表达式，对账按 target 精确匹配转正）。
+// 非标准库 receiver 的同名方法（GORM db.Create / zip.Open / 自定义 Listen）不命中。
+var holdSelectors = map[string]func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool){
+	"Listen": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "net" {
+			return EffectHit{}, false
+		}
+		// net.Listen(proto, addr) → listen:addr（静态取第 2 参数）
+		return EffectHit{Kind: "hold", Target: "listen:" + argName(c, 1), Op: "acquire"}, true
 	},
-	"NewTicker": func(c *ast.CallExpr) (EffectHit, bool) {
+	"ListenAndServe": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		// http.ListenAndServe(addr, ...) → listen:addr（静态取第 1 参数）
+		return EffectHit{Kind: "hold", Target: "listen:" + argName(c, 0), Op: "acquire"}, true
+	},
+	"Open": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		switch recvPkg(sel) {
+		case "sql":
+			return EffectHit{Kind: "hold", Target: "db-pool:" + argName(c, 0), Op: "acquire"}, true
+		case "os":
+			return EffectHit{Kind: "hold", Target: "file:" + argName(c, 0), Op: "acquire"}, true
+		}
+		return EffectHit{}, false
+	},
+	"Create": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "os" {
+			return EffectHit{}, false
+		}
+		return EffectHit{Kind: "hold", Target: "file:" + argName(c, 0), Op: "acquire"}, true
+	},
+	"OpenFile": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "os" {
+			return EffectHit{}, false
+		}
+		return EffectHit{Kind: "hold", Target: "file:" + argName(c, 0), Op: "acquire"}, true
+	},
+	"NewTicker": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "time" {
+			return EffectHit{}, false
+		}
 		return EffectHit{Kind: "hold", Target: "ticker", Op: "acquire"}, true
 	},
-	"NewTimer": func(c *ast.CallExpr) (EffectHit, bool) {
+	"NewTimer": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "time" {
+			return EffectHit{}, false
+		}
 		return EffectHit{Kind: "hold", Target: "ticker", Op: "acquire"}, true
 	},
 }
 
-// holdCallInStmt 在语句树内找资源获取调用。
+// writeCallSelectors 文件写/删调用（Kind=write，静态侧 GO_FILE_WRITE_RES 同构）：
+// os.WriteFile → write、os.Remove/RemoveAll → delete，target=file:路径表达式。
+var writeCallSelectors = map[string]func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool){
+	"WriteFile": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "os" {
+			return EffectHit{}, false
+		}
+		return EffectHit{Kind: "write", Target: "file:" + argName(c, 0), Op: "write"}, true
+	},
+	"Remove": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "os" {
+			return EffectHit{}, false
+		}
+		return EffectHit{Kind: "write", Target: "file:" + argName(c, 0), Op: "delete"}, true
+	},
+	"RemoveAll": func(sel *ast.SelectorExpr, c *ast.CallExpr) (EffectHit, bool) {
+		if recvPkg(sel) != "os" {
+			return EffectHit{}, false
+		}
+		return EffectHit{Kind: "write", Target: "file:" + argName(c, 0), Op: "delete"}, true
+	},
+}
+
+// holdCallInStmt 在语句树内找资源获取/文件写删调用（一次遍历查两张表）。
 func holdCallInStmt(stmt ast.Stmt) (EffectHit, bool) {
 	var hit *EffectHit
 	ast.Inspect(stmt, func(n ast.Node) bool {
@@ -173,7 +268,13 @@ func holdCallInStmt(stmt ast.Stmt) (EffectHit, bool) {
 			return true
 		}
 		if mk, found := holdSelectors[sel.Sel.Name]; found {
-			if h, ok := mk(c); ok {
+			if h, ok := mk(sel, c); ok {
+				hit = &h
+				return false
+			}
+		}
+		if mk, found := writeCallSelectors[sel.Sel.Name]; found {
+			if h, ok := mk(sel, c); ok {
 				hit = &h
 				return false
 			}

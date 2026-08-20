@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// effectFixture 构造含全部四类 effect 点的项目：
-// 包级变量赋值/自增（write）、chan send（emit）、go 语句 + Listen + Ticker（hold）、
-// 以及局部变量赋值（负样本——不应产生 effect 探针）。
+// effectFixture 构造含各类 effect 点的项目：
+// 包级变量赋值/自增（write）、chan send（emit）、go 语句 + Listen + Ticker + 文件句柄（hold）、
+// 文件写删调用（write 类）、以及局部变量赋值/非 os 包同名方法（负样本——不应产生 effect 探针）。
 func effectFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -18,6 +18,8 @@ func effectFixture(t *testing.T) string {
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -26,6 +28,10 @@ var (
 	ErrClosed = error(nil)
 	state     = map[string]int{}
 )
+
+type db struct{}
+
+func (d db) Create(v interface{}) error { return nil } // 负样本：非 os 包 Create
 
 func Run(done chan int) {
 	local := 1
@@ -47,6 +53,13 @@ func Run(done chan int) {
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
 	done <- 1
+
+	// 文件句柄 acquire（hold）+ 文件删（write）+ 同名方法负样本
+	f, _ := os.OpenFile("app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	_ = f.Close()
+	_ = os.Remove(filepath.Join("dir", "name"))
+	var d db
+	_ = d.Create("x")
 }
 `
 	file := filepath.Join(dir, "worker.go")
@@ -69,11 +82,11 @@ func TestEffectProbes_DryRun(t *testing.T) {
 			effects = append(effects, s)
 		}
 	}
-	// 期望命中：Count=/Count++/ErrClosed=/state[]=（state 是 map 下标写）
-	// events<-（闭包内 send）/done<-/go func/Listen/NewTicker = 9
-	// local= 不命中（局部变量）
-	if len(effects) < 8 {
-		t.Fatalf("期望 ≥8 个 effect 探针，实得 %d：%v", len(effects), effects)
+	// 期望命中：Count=/Count++/ErrClosed=/state[]=（包级写）+ file:filepath.Join（os.Remove）
+	// events<-（闭包内 send）/done<-/go func/Listen/NewTicker/OpenFile = 11
+	// local= 不命中（局部变量）；db.Create 不命中（非 os 包）
+	if len(effects) < 10 {
+		t.Fatalf("期望 ≥10 个 effect 探针，实得 %d：%v", len(effects), effects)
 	}
 
 	joined := strings.Join(mapToStr(effects), "\n")
@@ -82,8 +95,11 @@ func TestEffectProbes_DryRun(t *testing.T) {
 		`"kind": "emit", "target": "chan:events"`,
 		`"kind": "emit", "target": "chan:done"`,
 		`"kind": "hold", "target": "goroutine"`,
-		`"kind": "hold", "target": "listen"`,
+		`"kind": "hold", "target": "listen::8080"`,
 		`"kind": "hold", "target": "ticker"`,
+		// target 与静态候选侧同构（含参数后缀）：os.OpenFile("app.log") / os.Remove(filepath.Join(...))
+		`"kind": "hold", "target": "file:app.log"`,
+		`"kind": "write", "target": "file:filepath.Join"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("缺少 effect 探针字段组合: %s", want)
@@ -91,6 +107,9 @@ func TestEffectProbes_DryRun(t *testing.T) {
 	}
 	if strings.Contains(joined, `"target": "local"`) {
 		t.Error("局部变量赋值不应产生 effect 探针")
+	}
+	if strings.Contains(joined, `"target": "file:x"`) {
+		t.Error("非 os 包的 Create 方法调用不应产生 effect 探针")
 	}
 	if !strings.Contains(joined, `"target": "state[]"`) {
 		t.Error("包级 map 下标写应归一为 state[]")
