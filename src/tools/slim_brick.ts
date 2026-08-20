@@ -725,8 +725,9 @@ export function resolveTsSpecifier(
 
 /** TS 贫困编译验证：tsc noEmit（进程内动态加载）。贫困口径：
  *  TS2307 且非相对路径 = 三方类型缺失（无 node_modules，预期）；
- *  相对路径 2307 / 其他诊断 = 真错误。typescript 不可用 → skipped 降级。 */
-async function verifyTsBuild(
+ *  相对路径 2307 / 其他诊断 = 真错误。typescript 不可用 → skipped 降级。
+ *  导出供拼装区 e2e 复用（slim_brick / assemble 验证同口径）。 */
+export async function verifyTsBuild(
   filesRoot: string,
 ): Promise<{ status: 'pass' | 'fail' | 'skipped'; at: string; detail?: string }> {
   const at = new Date().toISOString();
