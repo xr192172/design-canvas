@@ -8,7 +8,7 @@
  *   dead_deps（眼睛）——索引可达性 BFS 产出 live 集，入盒时存进
  *     manifest.slim_candidates.live_symbols_by_file / live_type_names
  *   go-slim（手）——go/ast + go/format 按 live 集重写源文件（本仓库 go-slim/）
- *   slim_brick（本工具，编排）——读盒内积木 → 调剪刀 → 非 Go 文件原样搬运 →
+ *   slim_brick（本工具，编排）——读盒内积木 → 调剪刀 → 非 Go 资产按需搬运 →
  *     依赖清单对账 → 产出 -slim 衍生积木回盒
  *
  * 纪律（Camera 宪法同构）：
@@ -254,6 +254,44 @@ function isStdlibImport(p: string): boolean {
   return !p.split('/')[0].includes('.');
 }
 
+// ── 非 Go 资产按需搬运（embed 资产/.s 汇编——剪刀只碰 .go）─────────
+
+/** //go:embed 模式提取：`//go:embed p1 p2`——all: 前缀剥掉、双引号剥壳。
+ *  反引号 raw string 模式罕见不认（漏保由编译验证兜底）。 */
+export function goEmbedPatterns(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/\/\/go:embed\s+(.+)$/gm)) {
+    for (const tok of m[1].trim().split(/\s+/)) {
+      out.push(tok.replace(/^all:/, '').replace(/^"([^"]*)"$/, '$1'));
+    }
+  }
+  return out;
+}
+
+/** embed 模式匹配：pattern 相对 fromDir 解析。逐段 glob（* 不跨 /，与
+ *  path.Match 同规）；模式命中 candidate 的某级路径前缀（目录）= 整棵
+ *  子树（Go embed 语义：模式匹配到的目录递归全嵌）。 */
+export function embedPatternMatches(fromDir: string, pattern: string, rel: string): boolean {
+  const prefix = fromDir === '' ? '' : fromDir + '/';
+  if (!rel.startsWith(prefix)) return false;
+  const candidate = rel.slice(prefix.length);
+  if (candidate === '') return false;
+  const ps = pattern.split('/');
+  const cs = candidate.split('/');
+  if (ps.length > cs.length) return false;
+  return ps.every((p, i) => globSegMatches(p, cs[i]));
+}
+
+function globSegMatches(patternSeg: string, name: string): boolean {
+  let re = '';
+  for (const ch of patternSeg) {
+    if (ch === '*') re += '[^/]*';
+    else if (ch === '?') re += '[^/]';
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`).test(name);
+}
+
 /**
  * 内部包 import 判定（assemble_bricks 同款规则）：import 路径的某个目录后缀
  * 落在闭包目录集合内 ⇔ 引的是积木自己的包（如 example.com/demo/pkg/model），
@@ -335,12 +373,37 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
     });
     if (!report) throw new Error(error ?? 'go-slim 无输出');
 
-    // ── ② 非 Go 文件原样搬运（embed 资产/.s 汇编/配置——剪刀只碰 .go）──
+    // ── ② 非 Go 资产按需搬运（剪刀只碰 .go）──
+    // 死包的资产不再整体端走，只搬：
+    //   a) 存活 .go 文件 //go:embed 引用的资产（模式相对该 .go 文件目录解析，
+    //      逐段 glob；模式命中目录 = 整棵子树，与 Go embed 语义一致）
+    //   b) 存活目录（含存活 .go 文件的目录）的 .s/.S 汇编（包编译即需要）
+    // 运行时 os.ReadFile 读的资产静态看不见——camera/效果验收层把关
+    const producedGo = walkRelative(outRoot).filter((p) => p.endsWith('.go'));
+    const survivingDirs = new Set(producedGo.map((p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')));
+    const embedPatterns: Array<{ dir: string; pattern: string }> = [];
+    for (const rel of producedGo) {
+      const src = fs.readFileSync(path.join(outRoot, ...rel.split('/')), 'utf-8');
+      const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+      for (const pattern of goEmbedPatterns(src)) embedPatterns.push({ dir, pattern });
+    }
+    const keptAssets = new Set<string>();
     for (const rel of nonGoFiles) {
+      if (/\.[sS]$/.test(rel)) {
+        const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+        if (survivingDirs.has(dir)) keptAssets.add(rel);
+        continue;
+      }
+      if (embedPatterns.some(({ dir, pattern }) => embedPatternMatches(dir, pattern, rel))) {
+        keptAssets.add(rel);
+      }
+    }
+    for (const rel of keptAssets) {
       const dest = path.join(outRoot, ...rel.split('/'));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(filesRoot, ...rel.split('/')), dest);
     }
+    const droppedNonGo = nonGoFiles.filter((f) => !keptAssets.has(f));
 
     // ── ③ 统计：以剪刀盘上产物为准 ──
     // 解析失败文件被剪刀原样拷贝、报告里没有它——盘上真相优先于报告。

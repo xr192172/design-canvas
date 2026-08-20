@@ -448,6 +448,43 @@ interface BrickManifest {
 
 测试：slim_brick 8 用例（全链/版本后缀回归/dry-run/已存在拒绝/缺档案拒绝/路径漂移防线/无可剪/非 Go 拒绝）+ dead_deps 扩至 14 用例（新增跨包类型引用、版本后缀候选限定符回归）；全量 899/899 绿。
 
+### Phase 6R：「包活才活」规则 + 四层验证完成 + 产线 e2e ✅ 2026-08-20 第二轮
+
+**触发**（用户质疑，一针见血）："剪出来的积木其实是没用的"——旧规则下 Go init 函数/包级变量**无条件保活**，死包（llm/telemetry/config 整生态）的包级代码把 15 个三方依赖全拖回来，第一轮瘦身（50→41 文件、仅剔 8 个 otel 依赖）形同虚剪。
+
+**规则修复三处**（眼睛/手/编排同步，单一规则两处实现保持一致）：
+1. dead_deps.ts：包活判定（aliveDirs 不动点）——目录内有任一 live 符号或被存活目录空/点导入 ⇔ 包活；死包的 init/包级 var/包级出现不再保活依赖。附带修复两个误活源：注释里的类型名（stripGoCommentishLines 剥注释行，保行号）+ 同包兄弟裸名引用误配（go-bare 模式）
+2. go-slim/main.go：根集合同步 pkgAlive——keep 名单 + 活类型方法 + （包活才留的）init/包级 var；全空文件且非存活包副作用导入才整文件剔除
+3. slim_brick.ts：非 Go 资产按需搬运——只搬存活 .go 的 //go:embed 引用资产（逐段 glob，目录命中=整棵子树，Go embed 语义）+ 存活目录的 .s/.S 汇编；死包的 prompt 模板/tiktoken 词表不再整体端走
+
+**工程教训（JS 注释语法炸弹）**：块注释里书写字面量星斜杠序列会**提前终止注释**，残留半行代码开未闭合模板字面量，把后续正则里的 `${` 当插值——esbuild 报错位置（180 行 `}`）远离病灶（163 行注释），Read 工具肉眼无感。双编译器交叉定位（esbuild + tsc）才锁定。教训：注释里永远不要写字面量注释定界符。
+
+**重抽重瘦（ocr_diff_resolver，真实盒刷新）**：
+- live 17/296 符号；dead_third_party 25 条 import 路径（归并 15 module）全部 `unreachable_only`
+- 文件 50→**6**、顶层声明 394→**23**、三方依赖 15 个**全剔除**（deps_after 空）——anthropic/openai SDK、tiktoken、otel 全家桶、doublestar 出清；贫困依赖法（零 require）编译 pass
+- 存活清单：`diff/{resolver,hunk,parser,git}.go + model/{diff,review}.go`——契约核心（resolver.go/hunk.go/model/diff.go）与源项目 **SHA256 逐字节一致**（剪刀对种子可达代码零改动）
+
+**关键澄清（纠正第一轮误判）**：被剪的 relocation.go 不是确定性重定位——它装的是 `ReLocateComment`/`BuildReLocationMessages`（**LLM 编排层**：构造 prompt→调模型→解析回复），正是拖 SDK 全家桶的元凶；确定性核心 `RelocateAcrossFiles`（纯字符串匹配、零命中拒绝）**定义在 resolver.go 内，完整保留**。用户"入态/出态"契约模型验证成立：入态=已解析 `[]Diff`+带摘录 `[]LlmComment`，出态=行号解析+跨文件重定位，6 文件即干净零件。可分割判据同时验证：resolver 与 parser/Provider 之间只有类型连接（model.Diff）无代码调用——各抽各的零件合法，代码级互调才须并块。
+
+**四层验证收官**：
+| 层 | 方法 | 结果 |
+|---|---|---|
+| ① 编译 | 贫困依赖法（零 require + go build） | ✅ pass |
+| ② 源测试 | 契约匹配 3 测试文件（resolver/relocate_across_files/hunk，约 60 用例）贫困环境 `go test` | ✅ 全绿 |
+| ③ 行为等价 | 契约核心文件字节级一致（SHA256）+ 原厂测试全过——保留代码零改动=行为等价由构造保证，强于采样式 camera 对比；camera 插桩对比留给运行时观测场景 | ✅ |
+| ④ 效果验收 | 用户拍板 | ✅ 通过 |
+
+**产线 e2e（整条线打通：抽取→瘦身→拼装→编译）**：
+- assembly-002-slim-demo = go_logging + ocr_diff_resolver-slim：10 文件、**go.mod 零依赖**、`go build ./...` 零输出通过
+- 对照 assembly-001（肥积木拼装区）：42 go 文件、15 直接 + 27 间接依赖——瘦身价值传导到拼装区的实体化对比
+
+**遗留改进项（不阻塞，按优先级）**：
+1. 空壳文件：parser.go（150→17 行）/git.go（638→20 行）只剩包级 var——pkgAlive 对包级 var 保守面；无害（编译通过）但不干净，改进方向=包级 var 仅被死代码引用时随死代码走（须区分纯初始化与副作用初始化，暂缓）
+2. 测试筛选自动化：本轮从 10 个测试文件人手挑 3 个契约匹配的——可按 live 符号自动筛（测试函数引用的符号 ⊆ live 集）
+3. 种子契约先行：先定入态/出态再反推种子（本轮靠事后澄清，前置可省一轮纠偏）
+
+下一项：TS 瘦身剪刀（推广到第二语言，盒内 3 块 TS 积木 cg_wal_valve/ua_ignore_filter/ua_theme_engine 立即可验证）。
+
 ## 六、验收标准（Phase 3 试验）
 
 用户应能看到：

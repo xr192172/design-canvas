@@ -8,10 +8,12 @@
 //   { "root": 积木 files/ 目录, "out_root": 输出目录, "types": [活类型名全集],
 //     "files": [{ "path": 相对路径, "keep": [活符号名] }] }
 //
-// 保守规则（宁多少剪不少剪——错杀由 slim_brick 的编译验证兜底回捞）：
-//   1. 根 = keep 名单（索引可达性 BFS 的 live 集）+ init() + 包级 var（初始化
-//      副作用，linker 语义：import 即执行）+ 活类型的全部方法（接口满足/反射盲区，
-//      与 dead_deps 的方法挂靠规则同构）
+// 保守规则（宁少剪不少剪——错杀由 slim_brick 的编译验证兜底回捞）：
+//   1. 根 = keep 名单（索引可达性 BFS 的 live 集）+ 活类型的全部方法（接口
+//      满足/反射盲区，与 dead_deps 的方法挂靠规则同构）+ init()/包级 var
+//      ——后两者包活才留：包活 = 本目录任一 keep 命中或活类型命中（dead_deps
+//      同规则；活包的 init 已随 live 集进 keep 名单，此处是语义兜底）。死包
+//      （闭包整目录端走的无关文件）的包级初始化永不执行：随文件整体剔除
 //   2. 包内不动点：kept 声明源码文本中出现的同包顶层名逐轮激活——索引漏边不出血
 //   3. iota const 块整体保留（删中间项会使后续值移位）
 //   4. import 按实际引用剪枝（限定符候选集——/v4 版本后缀取前段，与 TS 侧
@@ -213,7 +215,24 @@ func slimPackage(in *slimInput, pfs []*parsedFile, liveTypes map[string]bool) []
 	}
 
 	// ── 根集合 ──
-	// keep 名单（索引 live 集）+ init() + 包级 var + 活类型的全部方法
+	// 包活判定（与 dead_deps 同规则）：本目录任一 keep 命中或活类型命中 ⇔
+	// 包被存活代码 import ⇔ 包级初始化（init + 包级 var）执行。死包的
+	// init/var 永不执行：不保留 → 文件整体剔除 → 死依赖出清。
+	pkgAlive := false
+	for _, u := range units {
+		hit := false
+		for _, n := range u.bare {
+			if u.pf.keep[n] {
+				hit = true
+				break
+			}
+		}
+		if hit || (u.isType && liveTypes[u.name]) {
+			pkgAlive = true
+			break
+		}
+	}
+	// keep 名单（索引 live 集）+ 活类型的全部方法 + （包活才留的）init/包级 var
 	kept := map[*unit]bool{}
 	var queue []*unit
 	enqueue := func(u *unit) {
@@ -235,12 +254,12 @@ func slimPackage(in *slimInput, pfs []*parsedFile, liveTypes map[string]bool) []
 				if liveTypes[u.recvType] || keepHit {
 					enqueue(u)
 				}
-			} else if u.isInit || keepHit {
+			} else if (u.isInit && pkgAlive) || keepHit {
 				enqueue(u)
 			}
 			continue
 		}
-		if u.isVar || keepHit || (u.isType && liveTypes[u.name]) {
+		if (u.isVar && pkgAlive) || keepHit || (u.isType && liveTypes[u.name]) {
 			enqueue(u)
 		}
 	}
@@ -343,7 +362,8 @@ func slimPackage(in *slimInput, pfs []*parsedFile, liveTypes map[string]bool) []
 			}
 		}
 
-		// 全空文件（无存活声明且无副作用导入）→ 整文件剔除
+		// 全空文件（无存活声明，或仅剩副作用导入但整包已死——死包的空导入
+		// 随文件一起消失）→ 整文件剔除
 		hasBody := false
 		for _, u := range fileUnits {
 			if kept[u] {
@@ -358,7 +378,7 @@ func slimPackage(in *slimInput, pfs []*parsedFile, liveTypes map[string]bool) []
 				break
 			}
 		}
-		if !hasBody && !sideEffectImport {
+		if !hasBody && !(sideEffectImport && pkgAlive) {
 			fr.Dropped = true
 			reports = append(reports, fr)
 			continue

@@ -16,9 +16,13 @@
  *      零引用 → 死候选
  *
  * 保守规则（宁漏报死候选，不误报——报告的信任优先）：
- *   - Go init 函数 / 包级（符号 span 外）出现 → 依赖活（import 即执行的副作用）
- *   - Go `_` 空导入（副作用）/ `.` 点导入（无法定位引用）→ 依赖活
- *   - TS 裸副作用导入 `import 'x'` → 依赖活
+ *   - Go init 函数 / 包级（符号 span 外）出现 / `_` 空导入 / `.` 点导入：
+ *     包活才活——包活 = 目录内有任一 live 符号（引用必经 import）或被存活
+ *     目录内文件的空/点导入（import 即执行的副作用）。死包（闭包整目录
+ *     端走的无关文件——同目录里种子够不到的兄弟、只被死代码引用的整个包）
+ *     的包级代码永不执行，其依赖按死候选报告
+ *   - TS 裸副作用导入 `import 'x'` / 顶层 const → 依赖活（TS 闭包逐文件沿
+ *     import 边收集，文件可达 = 模块必加载，模块级代码恒执行）
  *   - 限定符提取失败（语法不认识）→ 依赖活
  *   - 活跃类型的方法（parent 挂靠）随类型一起活——接口方法集/反射调用
  *     静态看不见，宁可多活
@@ -62,8 +66,8 @@ interface SymbolRow {
 
 const LIMITATIONS = [
   '静态可达性看不见反射/接口动态分发/字符串引用符号——瘦身为行动前必须过编译+源测试+camera 四层验证',
-  'Go init()/包级初始化与 TS 模块级副作用已保守按"活"处理，但符号 span 判定仍有近似',
-  'Go 跨文件引用边由源码扫描补齐（包限定符/同包兄弟符号）——注释/字符串里的同名出现会保守多活；TS 跨文件边依赖索引期解析',
+  'Go init/包级初始化按"包活才活"判定（目录内有 live 符号或被存活空/点导入）；TS 模块级代码闭包内恒活——符号 span 判定仍有近似',
+  'Go 跨文件引用边由源码扫描补齐（包限定符/同包兄弟符号）——字符串里的同名出现会保守多活；TS 跨文件边依赖索引期解析',
 ];
 
 /** Go import 路径的候选限定符（无 alias 时）。Go 生态惯例：主版本后缀段
@@ -122,7 +126,7 @@ export function parseTsImportQualifiers(src: string, mod: string): string[] | nu
   const ns = src.match(new RegExp(`import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s+['"]${escaped}['"]`));
   if (ns) return [ns[1]];
   // 具名/默认混合：import X, { a, b as c } from 'mod'
-  const named = src.match(new RegExp(`import\\s+([\\w$]+)?\\s*,?\\s*\\{([^}]*)\\}\\s*from\\s+['"]${escaped}['"]`));
+  const named = src.match(new RegExp(`import\\s+([\\w$]+)?\\s*,?\\s*\\{([^}]*)\\}\\s+from\\s+['"]${escaped}['"]`));
   if (named) {
     const out: string[] = [];
     if (named[1]) out.push(named[1]);
@@ -155,21 +159,31 @@ export function parseTsImportQualifiers(src: string, mod: string): string[] | nu
 }
 
 /** 源码中限定符出现行（Go：`Q.` 成员访问；TS：裸标识符出现即引用） */
-export function qualifierLines(src: string, qualifier: string, lang: 'go' | 'ts'): number[] {
+/** Go 注释行剔除（保行号）：行注释 `//`（前须是行首或空白——URL 字符串
+ *  "https://…" 里的 `//` 前是冒号，不当注释剥）+ 块注释中段行（以星号开头、
+ *  星号后跟空白或行尾的 ` * text` 形态——解引用 `*p` 星号后紧跟标识符，
+ *  不误伤）。跨行块注释状态机不做：raw string 里恰有 ` * ` 开头行的罕见
+ *  场景，漏剥只是多活（安全方向），误剥会假死（危险方向）——只剥形态无
+ *  歧义的行。注：本注释避免书写字面量星斜杠序列，防止提前终止块注释。 */
+export function stripGoCommentishLines(src: string): string {
+  return src
+    .split('\n')
+    .map((l) => l.replace(/(^|\s)\/\/.*$/, '$1'))
+    .map((l) => (/^\s*\*(\s|\/|$)/.test(l) ? '' : l))
+    .join('\n');
+}
+
+export function qualifierLines(src: string, qualifier: string, lang: 'go' | 'ts' | 'go-bare'): number[] {
+  // 'go'：注释剔除 + Q. 成员访问；'go-bare'：注释剔除 + 裸名（同包兄弟扫描
+  // 用——Go 源码走 'ts' 裸名模式时不剥注释，注释里的同名出现曾把死符号误活）；
+  // 'ts'：裸名（TS 无行注释剔除）
+  const scan = lang === 'ts' ? src : stripGoCommentishLines(src);
   const q = qualifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = lang === 'go' ? new RegExp(`\\b${q}\\.`, 'g') : new RegExp(`\\b${q}\\b`, 'g');
   const lines: number[] = [];
   let offset = 0;
-  for (const chunk of src.split('\n')) {
+  for (const chunk of scan.split('\n')) {
     offset += 1;
-    if (lang === 'go') {
-      // Go 行注释剔除：`//` 前须是行首或空白——URL 字符串（"https://…"）里的
-      // `//` 前是冒号，不当注释剥（否则字符串后的真实引用会漏判 → 假死候选）
-      const code = chunk.replace(/(^|\s)\/\/.*$/, '$1');
-      if (re.test(code)) lines.push(offset);
-      re.lastIndex = 0;
-      continue;
-    }
     if (re.test(chunk)) lines.push(offset);
     re.lastIndex = 0;
   }
@@ -177,17 +191,17 @@ export function qualifierLines(src: string, qualifier: string, lang: 'go' | 'ts'
 }
 
 /** Go 源码中限定符成员引用（Q.Name）：出现行 + 成员名。
- *  行注释剔除同 qualifierLines（URL 字符串保护）。 */
+ *  注释剔除同 qualifierLines（行注释 + 块注释中段行，URL 字符串保护）。 */
 export function qualifierMemberLines(src: string, qualifier: string): Array<{ line: number; member: string }> {
+  const scan = stripGoCommentishLines(src);
   const q = qualifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`\\b${q}\\.(\\w+)`, 'g');
   const out: Array<{ line: number; member: string }> = [];
   let offset = 0;
-  for (const chunk of src.split('\n')) {
+  for (const chunk of scan.split('\n')) {
     offset += 1;
-    const code = chunk.replace(/(^|\s)\/\/.*$/, '$1');
     re.lastIndex = 0;
-    for (let m = re.exec(code); m !== null; m = re.exec(code)) {
+    for (let m = re.exec(chunk); m !== null; m = re.exec(chunk)) {
       out.push({ line: offset, member: m[1] });
     }
   }
@@ -230,8 +244,8 @@ export function analyzeDeadThirdParty(opts: {
   external: ExternalDep[];
 }): DeadDepsResult {
   const { db, projectDir, closureFiles, seedFiles } = opts;
-  const closureSet = new Set(closureFiles);
   const seedSet = new Set(seedFiles);
+  const goDir = (f: string): string => (f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '');
 
   // ── 1. 闭包符号装载 ──
   const stmtNodes = db.prepare(
@@ -252,15 +266,16 @@ export function analyzeDeadThirdParty(opts: {
   }
 
   // ── 2. 可达性 BFS ──
-  // 根：种子文件全部符号 + Go init 函数（import 即执行）
-  //     + TS 顶层 const（模块初始化即执行——Go 包级 var 不进符号索引，
-  //       落在符号 span 外自然保守按活；TS 顶层 const 是符号，须显式补根）
+  // 根：种子文件全部符号 + TS 顶层 const（模块初始化即执行——TS 闭包按
+  //     import 边逐文件收集，文件可达 = 模块必加载；Go 包级 var 不进符号
+  //     索引，落在符号 span 外由包活性规则 2.6 管理）。
+  //     Go init 不进根：包活才活（2.6）——死包的 init 永不执行
   const live = new Set<string>();
   const queue: string[] = [];
   for (const s of symbols) {
     const isTsTopConst =
       s.kind === 'const' && s.parent === null && /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(s.file_path);
-    if (seedSet.has(s.file_path) || (s.name === 'init' && s.file_path.endsWith('.go')) || isTsTopConst) {
+    if (seedSet.has(s.file_path) || isTsTopConst) {
       live.add(s.id);
       queue.push(s.id);
     }
@@ -314,7 +329,9 @@ export function analyzeDeadThirdParty(opts: {
   //      边到目标包（resolveImport 权威解析，与 harvest_closure 同规则）同名符号
   //   b) 同包兄弟引用：同目录（Go 包=目录）其他文件的顶层符号名裸出现 → 边
   //      （方法经接收者调用，由方法挂靠规则覆盖）
-  //   c) 包级出现（符号 span 外）：包级初始化恒执行 → 直接入活集
+  //   c) 包级出现（符号 span 外）：包活才活——收集进 pkgLevelPending（按
+  //      引用方文件所在目录），由 2.6 包活性不动点延迟激活；空/点导入的
+  //      内部目标包收集进 sideEffectByDir，同样延迟激活
   const srcCache = new Map<string, string>();
   const readSrc = (f: string): string => {
     let s = srcCache.get(f);
@@ -328,6 +345,14 @@ export function analyzeDeadThirdParty(opts: {
     }
     return s;
   };
+  const pkgLevelPending = new Map<string, Set<string>>();
+  const pendPkgLevel = (fromFile: string, symbolId: string): void => {
+    const dir = goDir(fromFile);
+    let set = pkgLevelPending.get(dir);
+    if (!set) pkgLevelPending.set(dir, (set = new Set()));
+    set.add(symbolId);
+  };
+  const sideEffectByDir = new Map<string, Set<string>>();
   const goClosureFiles = closureFiles.filter((f) => f.endsWith('.go'));
   if (goClosureFiles.length > 0) {
     const addDerived = (from: string, to: string): void => {
@@ -374,24 +399,31 @@ export function analyzeDeadThirdParty(opts: {
       for (const r of rows) {
         if (r.type_only === 1 || r.kind !== 'package') continue;
         const qc = quals.get(r.source);
-        if (qc === undefined || qc.some((x) => x === '.' || x === '_')) continue;
         const targets = resolveImport(
           { source: r.source, kind: 'package', line: r.line },
           entryByRel.get(f)!,
           index,
           goModules,
         );
-        if (targets.length === 0) continue;
+        if (qc !== undefined && qc.some((x) => x === '.' || x === '_')) {
+          // 空/点导入的内部包：import 即执行副作用——fromDir 包活时目标包
+          // 激活（2.6：目标包 init/包级代码执行）
+          if (targets.length > 0) {
+            const fromDir = goDir(f);
+            let set = sideEffectByDir.get(fromDir);
+            if (!set) sideEffectByDir.set(fromDir, (set = new Set()));
+            for (const t of targets) set.add(goDir(t.rel));
+          }
+          continue;
+        }
+        if (qc === undefined || targets.length === 0) continue;
         for (const q of qc) {
           for (const hit of qualifierMemberLines(src, q)) {
             const owner = enclosingSymbol(fileSyms, hit.line);
             for (const t of targets) {
               for (const x of symbolsByNameByFile.get(t.rel)?.get(hit.member) ?? []) {
                 if (owner) addDerived(owner.id, x.id);
-                else if (!live.has(x.id)) {
-                  live.add(x.id); // 包级初始化恒执行（c）
-                  queue.push(x.id);
-                }
+                else pendPkgLevel(f, x.id); // 包级出现（c）：包活才活
               }
             }
           }
@@ -402,7 +434,7 @@ export function analyzeDeadThirdParty(opts: {
     // b) 同包兄弟顶层符号裸引用边
     const goFilesByDir = new Map<string, string[]>();
     for (const f of goClosureFiles) {
-      const dir = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '';
+      const dir = goDir(f);
       let arr = goFilesByDir.get(dir);
       if (!arr) goFilesByDir.set(dir, (arr = []));
       arr.push(f);
@@ -417,16 +449,69 @@ export function analyzeDeadThirdParty(opts: {
           if (g === f) continue;
           for (const s of byFile.get(g) ?? []) {
             if (s.parent !== null) continue;
-            for (const line of qualifierLines(src, s.name, 'ts')) {
+            for (const line of qualifierLines(src, s.name, 'go-bare')) {
               const owner = enclosingSymbol(fileSyms, line);
               if (owner) addDerived(owner.id, s.id);
-              else if (!live.has(s.id)) {
-                live.add(s.id); // 包级引用（c）
-                queue.push(s.id);
-              }
+              else pendPkgLevel(f, s.id); // 包级引用（c）：包活才活
             }
           }
         }
+      }
+    }
+  }
+
+  // ── 2.6 Go 包活性不动点 ──
+  // Go linker 语义的源码级复刻：包活 ⇔ 被存活代码 import ⇔ 目录内有 live
+  // 符号（引用必经 import）；或被存活目录内文件的空/点导入（import 即执行
+  // 副作用）。包活 ⇒ 包级初始化执行：init 函数、包级 var 表达式
+  // （pkgLevelPending 收集的 span 外引用）、空/点导入目标包的顶层符号全部
+  // 激活——激活产生新的 live 符号/新的包活，级联到不动点。死包（闭包整
+  // 目录端走的无关文件、只被死代码引用的包）的包级代码永不执行：不激活，
+  // 其依赖才能按死候选报告（go-slim 剪刀同规则：keep 集空 → 整文件剔除）。
+  const aliveDirs = new Set<string>();
+  const activatedDirs = new Set<string>();
+  const initSymbols = symbols.filter(
+    (s) => s.name === 'init' && s.parent === null && s.file_path.endsWith('.go'),
+  );
+  const markLive = (id: string): void => {
+    if (live.has(id)) return;
+    live.add(id);
+    queue.push(id);
+    const sym = symById.get(id);
+    if (sym && sym.file_path.endsWith('.go')) {
+      const dir = goDir(sym.file_path);
+      if (!aliveDirs.has(dir)) {
+        aliveDirs.add(dir);
+        activateDir(dir);
+      }
+    }
+  };
+  function activateDir(dir: string): void {
+    if (activatedDirs.has(dir)) return;
+    activatedDirs.add(dir);
+    for (const s of initSymbols) {
+      if (goDir(s.file_path) === dir) markLive(s.id);
+    }
+    for (const id of pkgLevelPending.get(dir) ?? []) markLive(id);
+    for (const toDir of sideEffectByDir.get(dir) ?? []) {
+      if (aliveDirs.has(toDir)) continue;
+      aliveDirs.add(toDir);
+      // 空/点导入目标包：init/包级代码执行；顶层符号保守全活（点导入把
+      // 名字直接引进作用域；空导入严格只需 init+var——全活只是多保，安全向）
+      for (const s of symbols) {
+        if (s.parent === null && goDir(s.file_path) === toDir) markLive(s.id);
+      }
+      activateDir(toDir);
+    }
+  }
+  // 初始：种子 live 符号所在目录先激活（init/包级引用/副作用导入级联入队）
+  for (const id of [...live]) {
+    const sym = symById.get(id);
+    if (sym?.file_path.endsWith('.go')) {
+      const dir = goDir(sym.file_path);
+      if (!aliveDirs.has(dir)) {
+        aliveDirs.add(dir);
+        activateDir(dir);
       }
     }
   }
@@ -438,12 +523,7 @@ export function analyzeDeadThirdParty(opts: {
       if (sym && (sym.kind === 'type' || sym.kind === 'class' || sym.kind === 'interface')) {
         activateChildren(sym);
       }
-      for (const next of adj.get(id) ?? []) {
-        if (!live.has(next)) {
-          live.add(next);
-          queue.push(next);
-        }
-      }
+      for (const next of adj.get(id) ?? []) markLive(next);
     }
   }
 
@@ -466,6 +546,8 @@ export function analyzeDeadThirdParty(opts: {
     const isGo = f.endsWith('.go');
     const isTs = /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f);
     if (!isGo && !isTs) continue;
+    // Go 包活性（2.6）：死包的包级出现/空导入不保活依赖；TS 恒活
+    const dirAlive = !isGo || aliveDirs.has(goDir(f));
     const src = readSrc(f);
     if (!src) continue;
     const fileSyms = byFile.get(f) ?? [];
@@ -489,7 +571,7 @@ export function analyzeDeadThirdParty(opts: {
       if (isGo) {
         const q = goQuals?.get(r.source);
         if (q === undefined || q.some((x) => x === '.' || x === '_')) {
-          a.liveHit = true; // 点导入/空导入/解析失败：保守按活
+          if (dirAlive) a.liveHit = true; // 点导入/空导入/解析失败：包活才执行副作用
           continue;
         }
         quals = q;
@@ -504,7 +586,9 @@ export function analyzeDeadThirdParty(opts: {
         for (const line of qualifierLines(scanSrc, q, isGo ? 'go' : 'ts')) {
           const owner = enclosingSymbol(fileSyms, line);
           if (owner === null) {
-            a.liveHit = true; // 包级/模块级作用域：import 即执行的副作用
+            // 包级/模块级作用域：import 即执行的副作用——Go 须包活（死包
+            // 的包级代码永不执行）；TS 模块可达恒执行
+            if (dirAlive) a.liveHit = true;
           } else {
             a.symbolHit = true;
             if (live.has(owner.id)) a.liveHit = true;
