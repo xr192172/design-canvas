@@ -125,17 +125,26 @@ export interface BrickManifest {
     irreversible_effects: number;
   };
   /**
-   * 验收判据（Phase 2.8 四层验证模型；schema 占位，Phase 2b 填充）。
+   * 验收判据（Phase 2.8 四层验证模型）。
    * 测试用例是点采样，正确性是全称命题——invariants 用铁律断言补全称性，
    * effect_check 把语义层锚定到人类眼见为实。
+   * 重抽保留：harvest_from_url 覆盖快照时原样继承本字段（人工沉淀不随重抽丢失）。
    */
   acceptance?: {
-    /** 数学铁律断言（属性测试可执行，fast-check/Hypothesis）。来源优先级：源项目自带属性测试 > LLM 提议+人确认 */
+    /**
+     * 数学铁律断言（属性测试可执行，fast-check/Hypothesis）。
+     * 来源优先级：源项目自带测试（source-test）> LLM 提议+人确认（llm-proposed）——
+     * "LLM 不产生事实"纪律：llm-proposed 只是候选，人拍板前不可当已验证事实引用。
+     */
     invariants?: Array<{
       /** 铁律名（如 "distance-preserving" / "invertible" / "composable"） */
       name: string;
       /** 可执行断言描述（属性测试源） */
       assertion: string;
+      /** 断言来源：source-test=源项目测试钉死 / llm-proposed=LLM 提议待人确认 */
+      source: 'source-test' | 'llm-proposed';
+      /** 源测试文件路径（source-test 时，重抽可回溯） */
+      ref?: string;
     }>;
     /** 人类效果验收锚点（"左移10厘米后，眼见物体在原位置左侧10cm"）——语义层专属，LLM 不可代判 */
     effect_check?: string;

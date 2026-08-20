@@ -247,6 +247,21 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       const brickDir = path.join(boxDir, name);
       const replaced = fs.existsSync(path.join(brickDir, 'manifest.json'));
 
+      // 重抽保留：acceptance/matches 是人工沉淀（验收判据、匹配历史），
+      // 不随快照覆盖丢失——契约/闭包/文件由重抽重算，人的判断只有一份。
+      let preserved: Pick<BrickManifest, 'acceptance' | 'matches'> = {};
+      if (replaced) {
+        try {
+          const old = JSON.parse(
+            fs.readFileSync(path.join(brickDir, 'manifest.json'), 'utf-8'),
+          ) as BrickManifest;
+          if (old.acceptance) preserved.acceptance = old.acceptance;
+          if (old.matches) preserved.matches = old.matches;
+        } catch {
+          // 旧 manifest 损坏：按全新入盒处理，保留逻辑静默跳过
+        }
+      }
+
       // 闭包契约（含 src/ 前缀适配）与聚合
       const closureContracts: Record<string, BrickContract> = {};
       for (const f of closure.internal_files) {
@@ -275,7 +290,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
           JSON.stringify(closureContracts, null, 2),
           'utf-8',
         );
-        // manifest.json：清单 + 聚合
+        // manifest.json：清单 + 聚合（+ 重抽保留的 acceptance/matches）
         const manifest: BrickManifest = {
           name,
           schema_version: 1,
@@ -285,6 +300,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
             external: closure.external.map((e) => ({ source: e.source, class: e.class })),
           },
           aggregate: agg,
+          ...preserved,
           provenance: {
             source_project: source,
             commit: commit || undefined,

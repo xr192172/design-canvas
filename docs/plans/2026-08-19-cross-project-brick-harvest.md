@@ -256,9 +256,11 @@ interface BrickManifest {
 3. **数学内核不自己写 = 验证手段的延伸**：three.js 矩阵被百万项目锤过二十年，抽积木复用即继承其验证履历。左移出错几乎必在①③层（约定/接线），恰是人与契约的主场；②层错误在使用成熟库的场景下概率极低
 
 落地动作：
-- `BrickManifest` 增 `acceptance` 槽位（schema 占位，Phase 2b 填充）：
-  - `invariants[]`：数学铁律断言（name + assertion），属性测试可执行（fast-check / Hypothesis）。来源优先级：源项目自带的属性测试文件 > LLM 提议 + 人确认（"LLM 不产生事实"纪律不变：提议可以，转正需人拍板）
+- `BrickManifest` 增 `acceptance` 槽位 ✅（2026-08-20 第四轮落地）：
+  - `invariants[]`：数学铁律断言（name + assertion + source + ref），属性测试可执行（fast-check / Hypothesis）。来源优先级：源项目自带的属性测试文件（source-test，带 ref 可回溯）> LLM 提议 + 人确认（llm-proposed，拍板前不可当已验证事实引用——"LLM 不产生事实"纪律不变）
   - `effect_check`：人类效果验收锚点描述（"左移10厘米后，眼见物体在原位置左侧10cm"）——LLM 不可代判，语义层专属
+  - **三积木首填**：cg_wal_valve 8 条（全部 source-test，钉自 vendor `__tests__/wal-deferral.test.ts`——触发/静默/基线前移防自旋/去重/终止/作用域）；ua_ignore_filter 5 条（source-test，钉自 `ignore-filter.test.ts`——默认覆盖/源码放行/反选/优先级/递归）；ua_theme_engine 4 条（llm-proposed 待拍板：纯函数性/hex 解析/幂等/token 完备性）
+  - **重抽保留机制**：harvest_from_url 覆盖快照前先读旧 manifest，acceptance/matches 原样继承（人工沉淀只有一份，机器可重算字段照常刷新）；单测 + 真实 wal_valve 重抽 e2e 验证（8/8 存活，closure/harvested_at 刷新）
 - 验收失败案例回流成新判据（Goodhart 解药：当验收变成目标会扭曲——判据自身必须参与进化，与"bug 变测试用例"同构）
 - 画布/渲染坐标系约定写显式文档（语义锚定的最小落点，design-canvas 内一份即可）
 

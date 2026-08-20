@@ -171,6 +171,35 @@ describe('harvest_from_url 积木抽取编排', () => {
     expect(manifest.name).toBe('demo_brick');
   });
 
+  it('重抽保留：acceptance/matches 人工沉淀不随快照覆盖丢失', async () => {
+    const root = makeTsProject();
+    const box = tmpDir('brick-box-');
+    const bricks = [{ name: 'demo_brick', seeds: ['src/a.ts'] }];
+
+    await harvestFromUrl({ source: root, bricks, box_dir: box });
+
+    // 人工沉淀（Phase 2.8 验收判据 + 匹配历史）
+    const mf = path.join(box, 'demo_brick', 'manifest.json');
+    const m1: BrickManifest = JSON.parse(fs.readFileSync(mf, 'utf-8'));
+    m1.acceptance = {
+      invariants: [{ name: 'pure-fn', assertion: 'helperB(x)===x*2 对任意整数 x', source: 'source-test', ref: 'src/b.test.ts' }],
+      effect_check: '眼见 mainA 输出以路径分隔符开头',
+    };
+    m1.matches = [{ port: 'helperB', verdict: 'exact', at: '2026-08-20T00:00:00Z' }];
+    fs.writeFileSync(mf, JSON.stringify(m1, null, 2), 'utf-8');
+
+    const r2 = await harvestFromUrl({ source: root, bricks, box_dir: box });
+
+    expect(r2.bricks[0].replaced).toBe(true);
+    const m2: BrickManifest = JSON.parse(fs.readFileSync(mf, 'utf-8'));
+    // 人工沉淀原样继承
+    expect(m2.acceptance).toEqual(m1.acceptance);
+    expect(m2.matches).toEqual(m1.matches);
+    // 机器可重算字段照常刷新
+    expect(m2.closure.internal.sort()).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(m2.provenance?.harvested_at).toBeTruthy();
+  });
+
   it('种子不在索引中：跳过', async () => {
     const root = makeTsProject();
     const box = tmpDir('brick-box-');
