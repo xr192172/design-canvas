@@ -172,7 +172,7 @@ export interface BrickManifest {
     files: Array<{
       file: string;
       confirmed: string[];
-      unobserved: Array<{ target: string; note: string }>;
+      unobserved: Array<{ target: string; note?: string }>;
     }>;
     known_blind_spots?: string[];
   };

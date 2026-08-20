@@ -305,6 +305,14 @@ interface BrickManifest {
 - 复跑对账：**转正 7/10**（+`file:r.basePath` hold acquire ×6 精确命中），probe_gap 归零；剩余 3 个未观测全为 not_triggered×2（轮转阈值未达）+ static_only×1（包级字面量噪声）——诚实归因
 - 对账脚本修正：hold 类匹配（此前只匹配 write）；已转正 runtime 的命中只计数不重复转正
 
+**3R-5 reconcile_brick MCP 工具化（"入盒→驱动→对账→转正"成为标准流程）** ✅ 2026-08-20：
+- tmp-brick-reconcile.ts 一次性脚本 → 正式 MCP 工具 `reconcile_brick`（第 14 个主工具，server_registry 注册）
+- 与 reconcile_effects（DSL 契约版）判定规则同源：候选命中→origin ast→runtime 转正；候选外新观测→补进契约+incomplete 告警；未触发保持 ast 不证伪；hold 泛型名兜底（file-handle ↔ file:*，旧探针兼容）
+- 对账对象：积木盒 contracts.json + manifest.effect_verification（证据档案含 gap_notes 归因、known_blind_spots、method——重抽保留字段）
+- 参数设计：brick_dir 或 brick_name+box_dir 定位；events_files 显式 / verify_dir 自动发现；gap_notes 是人工归因输入（机器不臆造，如实登记）；write=false 预演
+- 单测 5 场景（转正/新观测/归因/预演/无事件/缺参）+ 端到端实测：go_logging 真盒跑通（7 转正/3 归因/0 新观测，与手工脚本结果一致）；全量 836 测绿
+- BrickManifest.effect_verification.files[].unobserved[].note 改可选（无归因的未观测候选合法存在）
+
 ### Phase 4：跨项目统一索引 + 摘要层
 - 统一命名空间（多 cache.db 聚合或联邦检索）
 - 积木货架：可浏览的接口契约目录（拎之前先看它要什么、给什么）

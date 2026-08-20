@@ -36,6 +36,8 @@ import { extractContracts } from './tools/extract_contracts.js';
 import type { ExtractContractsInput } from './tools/extract_contracts.js';
 import { reconcileEffects } from './tools/reconcile_effects.js';
 import type { ReconcileEffectsInput } from './tools/reconcile_effects.js';
+import { reconcileBrick } from './tools/reconcile_brick.js';
+import type { ReconcileBrickInput } from './tools/reconcile_brick.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -765,6 +767,35 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await harvestFromUrl(a as unknown as HarvestFromUrlInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'reconcile_brick',
+    title: 'Reconcile brick-box contracts with camera runtime observation',
+    description:
+      '积木盒动静对账（Brick Harvest Phase 3R-C 工具化）：读 camera effect 事件，与积木盒 contracts.json 对账——' +
+      '候选命中观测 → origin ast→runtime 转正；候选外新观测 → 补进契约 + incomplete 告警（静态漏了）；' +
+      '未触发候选保持 ast（不证伪），gap_notes 登记人工归因（not_triggered/probe_gap/static_only）。' +
+      '证据档案写 manifest.effect_verification（重抽保留字段——快照可重抽，运行证据只有一份）。' +
+      '与 reconcile_effects（DSL 契约版）判定规则同源，对账对象是积木盒。' +
+      '前置链：harvest_from_url 入盒 → instrument --effects 插桩积木快照 → 驱动运行 → 本工具。',
+    inputSchema: {
+      brick_dir: z.string().optional().describe('积木目录（含 contracts.json；与 brick_name 二选一）'),
+      brick_name: z.string().optional().describe('积木名（搭配 box_dir：<box_dir>/<brick_name>）'),
+      box_dir: z.string().optional().describe('积木盒根目录（默认 <cwd>/.design-canvas/bricks）'),
+      events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
+      verify_dir: z.string().optional().describe('验证项目根目录（自动发现其 .agent/camera/events-*.jsonl）'),
+      gap_notes: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe('未观测候选归因（键=<文件名>|<target>，值=归因说明：not_triggered/probe_gap/static_only）'),
+      known_blind_spots: z.array(z.string()).optional().describe('已知盲区（写入证据档案）'),
+      method: z.string().optional().describe('对账方法描述（写入证据档案，如"instrument --effects + golog-verify 驱动"）'),
+      write: z.boolean().optional().describe('false=只对账预演不写回，默认 true'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await reconcileBrick(a as unknown as ReconcileBrickInput);
       return { message: r.message, data: r };
     }),
   },
