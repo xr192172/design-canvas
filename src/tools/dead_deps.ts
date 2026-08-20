@@ -21,8 +21,9 @@
  *     目录内文件的空/点导入（import 即执行的副作用）。死包（闭包整目录
  *     端走的无关文件——同目录里种子够不到的兄弟、只被死代码引用的整个包）
  *     的包级代码永不执行，其依赖按死候选报告
- *   - TS 裸副作用导入 `import 'x'` / 顶层 const → 依赖活（TS 闭包逐文件沿
- *     import 边收集，文件可达 = 模块必加载，模块级代码恒执行）
+ *   - TS 裸副作用导入 `import 'x'` / 顶层 const → 依赖活——但 const 的
+ *     "模块级代码恒执行"特权只对值可达文件成立（valueFiles 输入）：type 边
+ *     拉进闭包的纯类型文件运行时不加载，其 const 不执行、依赖按死候选报告
  *   - 限定符提取失败（语法不认识）→ 依赖活
  *   - 活跃类型的方法（parent 挂靠）随类型一起活——接口方法集/反射调用
  *     静态看不见，宁可多活
@@ -66,7 +67,7 @@ interface SymbolRow {
 
 const LIMITATIONS = [
   '静态可达性看不见反射/接口动态分发/字符串引用符号——瘦身为行动前必须过编译+源测试+camera 四层验证',
-  'Go init/包级初始化按"包活才活"判定（目录内有 live 符号或被存活空/点导入）；TS 模块级代码闭包内恒活——符号 span 判定仍有近似',
+  'Go init/包级初始化按"包活才活"判定（目录内有 live 符号或被存活空/点导入）；TS 顶层 const 按值可达文件判活（type 边拉进闭包的纯类型文件运行时不加载）——符号 span 判定仍有近似',
   'Go 跨文件引用边由源码扫描补齐（包限定符/同包兄弟符号）——字符串里的同名出现会保守多活；TS 跨文件边依赖索引期解析',
 ];
 
@@ -242,9 +243,15 @@ export function analyzeDeadThirdParty(opts: {
   seedFiles: string[];
   /** 闭包外部依赖（harvest_closure 结果，只取 third_party 类） */
   external: ExternalDep[];
+  /** 值可达文件集（harvest_closure.value_files）：从种子只沿值 import 边可达。
+   *  TS 顶层 const 的"模块初始化即执行"特权只对值可达文件生效——type 边拉进
+   *  闭包的纯类型文件运行时不加载，其 const 不执行、三方依赖判死候选。
+   *  缺省 = 全部闭包文件按值可达处理（向后兼容旧调用方） */
+  valueFiles?: string[];
 }): DeadDepsResult {
   const { db, projectDir, closureFiles, seedFiles } = opts;
   const seedSet = new Set(seedFiles);
+  const valueSet = new Set(opts.valueFiles ?? closureFiles);
   const goDir = (f: string): string => (f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '');
 
   // ── 1. 闭包符号装载 ──
@@ -266,16 +273,17 @@ export function analyzeDeadThirdParty(opts: {
   }
 
   // ── 2. 可达性 BFS ──
-  // 根：种子文件全部符号 + TS 顶层 const（模块初始化即执行——TS 闭包按
-  //     import 边逐文件收集，文件可达 = 模块必加载；Go 包级 var 不进符号
-  //     索引，落在符号 span 外由包活性规则 2.6 管理）。
+  // 根：种子文件全部符号 + 值可达文件的 TS 顶层 const（模块初始化即执行
+  //     ——但只在运行时真加载的模块里成立：type 边拉进闭包的纯类型文件
+  //     （configs/registry 全家）不加载，其 const 不进根、其三方依赖判死；
+  //     Go 包级 var 不进符号索引，落在符号 span 外由包活性规则 2.6 管理）。
   //     Go init 不进根：包活才活（2.6）——死包的 init 永不执行
   const live = new Set<string>();
   const queue: string[] = [];
   for (const s of symbols) {
     const isTsTopConst =
       s.kind === 'const' && s.parent === null && /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(s.file_path);
-    if (seedSet.has(s.file_path) || isTsTopConst) {
+    if (seedSet.has(s.file_path) || (isTsTopConst && valueSet.has(s.file_path))) {
       live.add(s.id);
       queue.push(s.id);
     }

@@ -87,6 +87,10 @@ export interface ParsedTypeRef {
 function nodeTypeToKind(nodeType: string, parent?: string): ParsedSymbol['kind'] {
   if (nodeType.includes('class')) return 'class';
   if (nodeType.includes('interface')) return 'interface';
+  // enum 是类型也是值：映射 'type' 才能被跨文件 type_ref 解析命中
+  // （resolveCrossFileCalls 的 typeNamesByFile 只认 interface/type/class；
+  // 落到末尾的 'function' 会漏——v7 清库重解析后生效）
+  if (nodeType.includes('enum')) return 'type';
   if (nodeType.includes('method')) return 'method';
   if (nodeType.includes('struct') || nodeType.includes('trait') || nodeType.includes('impl')) return 'type';
   if (nodeType === 'function_definition' || nodeType === 'function_declaration' || nodeType === 'function_item' || nodeType === 'FnDecl' || nodeType === 'proc_def' || nodeType === 'method' || nodeType === 'sub' || nodeType === 'proc') {
@@ -275,7 +279,7 @@ function traverseAndExtract(
       if (body) {
         for (let i = 0; i < body.childCount; i++) {
           const child = body.child(i);
-          if (child) traverseAndExtract(child, lang, symbols, name, depth + 1);
+          if (child) traverseAndExtract(child, lang, symbols, qn, depth + 1);
         }
         return;
       }
@@ -283,7 +287,7 @@ function traverseAndExtract(
       if (node.type === 'class_definition' || node.type === 'class_declaration') {
         for (let i = 0; i < node.childCount; i++) {
           const child = node.child(i);
-          if (child) traverseAndExtract(child, lang, symbols, name, depth + 1);
+          if (child) traverseAndExtract(child, lang, symbols, qn, depth + 1);
         }
         return;
       }
@@ -588,8 +592,10 @@ function parseViaCallback(parser: ParserLike, content: string): TreeLike {
   });
 }
 
-/** 统一 parse 入口：小文件走快速 string 路径，大文件走 callback 路径 */
-function parseContent(parser: ParserLike, content: string): TreeLike {
+/** 统一 parse 入口：小文件走快速 string 路径，大文件走 callback 路径。
+ *  导出供 ts_slim 等工具复用——剪刀直接 parser.parse(string) 会踩
+ *  node-tree-sitter 的 2^15 字符上限（EINVAL，directory.ts 37K 实证）。 */
+export function parseContent(parser: ParserLike, content: string): TreeLike {
   if (content.length < STRING_PARSE_LIMIT) {
     return parser.parse(content);
   }

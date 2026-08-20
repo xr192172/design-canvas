@@ -72,9 +72,14 @@ export interface HarvestClosureResult {
   internal_files: ClosureFile[];
   /** 闭包全体文件的 package 级依赖（去重，按 class+source 排序） */
   external: ExternalDep[];
+  /** 值可达文件集（运行时真相）：从种子只沿值 import 边可达——type 边拉进
+   *  闭包的纯类型文件不在内。dead_deps 判 TS 顶层 const 活性、剪刀 const
+   *  判活、失控限额都以此为准 */
+  value_files: string[];
   stats: {
     seed_count: number;
     internal_count: number;
+    value_reachable_count: number;
     max_depth_reached: number;
     stdlib_count: number;
     third_party_count: number;
@@ -88,7 +93,7 @@ export interface HarvestClosureResult {
 // TS/JS：node: 前缀或 Node 内置模块名 → 标准库；其余（含 @scope/name）→ npm 三方。
 // Python：常见标准库清单（尽力而为，未收录且无点号的按三方处理——宁可报三方也不吞依赖）。
 
-const NODE_BUILTINS = new Set([
+export const NODE_BUILTINS = new Set([
   'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console', 'constants',
   'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain', 'events', 'fs', 'http',
   'http2', 'https', 'inspector', 'module', 'net', 'os', 'path', 'perf_hooks', 'process',
@@ -178,7 +183,7 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
 
   // ── 文件级 import 邻接表（与 extract_contracts 共用 buildImportGraph，单一真相源）──
   // edges 表已解析边 ∪ 原始 imports 权威解析（Go 包路径/Python 模块不进 edges 表）
-  const { importeeOf, importerOf, packageResolved } = buildImportGraph(db, root);
+  const { importeeOf, importeeOfValue, importerOf, packageResolved } = buildImportGraph(db, root);
 
   // ── Go 同包 sibling 目录索引：Go 包语义是目录内聚——同目录文件共享符号但无 import 边 ──
   // 闭包只沿 import 边走会漏抽（ocr_diff_resolver 案例：resolver.go 与 hunk.go
@@ -235,6 +240,35 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
       if (include_callers) expand(importerOf, true);
     }
     frontier = next;
+  }
+
+  // ── 值可达集：从种子只沿值 import 边（+Go 同包 sibling——包是编译单元整体
+  // 加载）BFS。TS `import type` 编译期擦除后运行时不存在：type 边拉进闭包的
+  // 纯类型文件（configs/registry 全家）运行时不加载——它们里面的顶层 const
+  // /副作用导入不执行，其三方依赖是死候选。闭包（全视图）仍按编译期语义
+  // 收集（tsc 需要类型文件），值可达是剪刀与 dead_deps 的运行时真相层。
+  const valueReach = new Set<string>(seedCachePaths);
+  {
+    const vq = [...seedCachePaths];
+    while (vq.length > 0) {
+      const f = vq.pop()!;
+      if (f.endsWith('.go')) {
+        const i = f.lastIndexOf('/');
+        const dir = i < 0 ? '' : f.slice(0, i);
+        for (const sib of goDirFiles.get(dir) ?? []) {
+          if (sib !== f && !valueReach.has(sib)) {
+            valueReach.add(sib);
+            vq.push(sib);
+          }
+        }
+      }
+      for (const t of importeeOfValue.get(f) || []) {
+        if (!valueReach.has(t.to)) {
+          valueReach.add(t.to);
+          vq.push(t.to);
+        }
+      }
+    }
   }
 
   // ── go:embed 资源补全：闭包内 .go 文件的 embed 指令引用的资源文件必须随包走 ──
@@ -371,9 +405,11 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
   const maxDepthReached = internal_files.reduce((m, f) => Math.max(m, f.depth), 0);
 
   const tpList = third.slice(0, 8).map((e) => e.source).join('、');
+  const valueCount = [...valueReach].filter((p) => reached.has(p)).length;
   const message =
     `拎取闭包：种子 ${seedCachePaths.length} 个 → 项目内 ${closurePaths.length} 个文件` +
-    `（最深层 ${maxDepthReached}）+ 外部依赖 ${external.length} 项` +
+    `（其中值可达 ${valueCount} 个——运行时实际加载；其余为类型/资产伴随）` +
+    `，最深层 ${maxDepthReached}，外部依赖 ${external.length} 项` +
     `（标准库 ${stdlib.length} / 三方 ${third.length} / 未归类 ${unresolved.length}）。` +
     (third.length > 0 ? `三方依赖：${tpList}${third.length > 8 ? ' 等' : ''}。` : '') +
     (warnings.length > 0 ? `注意：${warnings.join(' ')}` : '');
@@ -385,9 +421,11 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
     warnings,
     internal_files,
     external,
+    value_files: [...valueReach].filter((p) => reached.has(p)).sort(),
     stats: {
       seed_count: seedCachePaths.length,
       internal_count: closurePaths.length,
+      value_reachable_count: valueCount,
       max_depth_reached: maxDepthReached,
       stdlib_count: stdlib.length,
       third_party_count: third.length,

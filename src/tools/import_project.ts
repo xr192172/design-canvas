@@ -318,7 +318,10 @@ export function resolveImport(
 
   if (imp.kind === 'relative') {
     let target: string;
-    if (/^\.+$/.test(imp.source) || /^\.+[^/]/.test(imp.source)) {
+    // [^./] 而非 [^/]：'../types.js' 在回溯下会被误判成 Python 前导点形式
+    // （`\.` 吃一个点、`[^/]` 吃第二个点）→ 走错分支解析成 types/js。
+    // 排除点号后：'..' 纯点走第一支，'.pkg'/'..pkg' 走 Python 支，'./x'/'../x' 走 TS 支。
+    if (/^\.+$/.test(imp.source) || /^\.+[^./]/.test(imp.source)) {
       // Python 前导点形式：'.'=当前目录 '..'=上一级，后续点分模块转路径
       const m = imp.source.match(/^(\.+)(.*)$/);
       const dots = m ? m[1] : '.';

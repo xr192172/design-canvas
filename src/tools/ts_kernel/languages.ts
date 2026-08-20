@@ -38,8 +38,12 @@ export interface LanguageEntry {
 /** 150+ 语言注册表（npm 包名已与官方仓库对齐） */
 export const LANGUAGES: LanguageEntry[] = [
   // === Web/JS 生态 ===
-  { name: 'typescript', pkg: 'typescript', exts: ['.ts'], symbol_nodes: ['function_declaration', 'class_declaration', 'interface_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
-  { name: 'tsx', pkg: 'tsx', exts: ['.tsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  // TS 符号宇宙 v6 扩容：type_alias/enum/abstract class 进 nodes——
+  // 跨文件 type_ref 解析（resolveCrossFileCalls 的 typeNamesByFile 只认
+  // interface/type/class 节点）此前定位不到 type alias，dead_deps live 集
+  // 永远缺它们 → 剪刀误剪（ua_theme_engine 的 PresetId/HeadingFont 实证）
+  { name: 'typescript', pkg: 'typescript', exts: ['.ts'], symbol_nodes: ['function_declaration', 'class_declaration', 'abstract_class_declaration', 'interface_declaration', 'type_alias_declaration', 'enum_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  { name: 'tsx', pkg: 'tsx', exts: ['.tsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'abstract_class_declaration', 'interface_declaration', 'type_alias_declaration', 'enum_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
   { name: 'javascript', pkg: 'javascript', exts: ['.js', '.mjs', '.cjs'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'jsx', pkg: 'jsx', exts: ['.jsx'], symbol_nodes: ['function_declaration', 'class_declaration', 'method_definition'], import_nodes: ['import_statement', 'export_statement'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'vue', pkg: 'vue', exts: ['.vue'], symbol_nodes: ['export_statement'], field_map: { name: 'name' } },

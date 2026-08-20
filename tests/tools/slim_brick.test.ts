@@ -337,13 +337,16 @@ describe.skipIf(!goOk)('slim_brick 积木瘦身编排（Go 工具链集成）', 
     expect(fs.readdirSync(box)).toEqual(['go_clean']);
   });
 
-  it('非 Go 积木拒绝：剪刀只支持 Go', async () => {
-    // TS fixture 入盒（无 .go 文件）
+  it('干净 TS 积木：TS 路径已开通，无可剪内容不生成衍生积木', async () => {
+    // TS fixture 入盒（无 .go 文件）——Phase 7 前 TS 积木被拒绝，现在走 ts-slim 路径
     const root = tmpDir('slim-ts-');
     put(root, 'src/a.ts', 'export function mainA(): string {\n  return "a";\n}\n');
     const box = tmpDir('slim-box-');
     await harvestFromUrl({ source: root, bricks: [{ name: 'ts_brick', seeds: ['src/a.ts'] }], box_dir: box });
 
-    await expect(slimBrick({ brick_name: 'ts_brick', box_dir: box })).rejects.toThrow('非 Go 积木');
+    const r = await slimBrick({ brick_name: 'ts_brick', box_dir: box });
+    expect(r.written).toBe(false);
+    expect(r.message).toContain('无可剪内容');
+    expect(fs.readdirSync(box)).toEqual(['ts_brick']);
   });
 });

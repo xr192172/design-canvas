@@ -278,10 +278,13 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
         skipped.push({ seeds: spec.seeds, reason: '闭包为空' });
         continue;
       }
-      if (closure.internal_files.length > maxClosure) {
+      // 失控限额按值可达数判：运行时足迹失控（值可达超限）才是"整个项目被
+      // 端走"；type 边拉进的类型膨胀交给剪刀瘦身（dead_deps 按值可达判 const
+      // 活性 → 纯类型文件的 const/三方依赖判死 → ts_slim 剪掉）
+      if (closure.stats.value_reachable_count > maxClosure) {
         skipped.push({
           seeds: spec.seeds,
-          reason: `闭包 ${closure.internal_files.length} 文件超上限 ${maxClosure}（疑似整个项目被端走）`,
+          reason: `值可达 ${closure.stats.value_reachable_count} 文件超上限 ${maxClosure}（运行时足迹失控，疑似整个项目被端走；闭包总数 ${closure.internal_files.length}）`,
         });
         continue;
       }
@@ -341,8 +344,11 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
 
       // 死依赖检测（瘦身事实层）：种子不可达代码引入的三方依赖 = 死候选。
       // Camera 宪法同构——只报告不剔除；机器可重算，重抽刷新。
+      // 门槛：有源码文件即跑（不再要求三方依赖存在）——live 明细档案
+      // （live_symbols_by_file）是剪刀的 keep 集，零三方积木的符号级剪枝
+      // （剪死函数）同样需要它
       let slimCandidates: BrickManifest['slim_candidates'];
-      if (closure.external.some((e) => e.class === 'third_party')) {
+      if (closure.internal_files.some((f) => /\.(go|ts|tsx|js|jsx|mjs|cjs)$/.test(f.path))) {
         try {
           const dd = analyzeDeadThirdParty({
             db: getProjectCacheDb(root),
@@ -352,6 +358,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
               .filter((f) => f.depth === 0)
               .map((f) => f.path),
             external: closure.external,
+            valueFiles: closure.value_files,
           });
           slimCandidates = {
             computed_at: new Date().toISOString(),

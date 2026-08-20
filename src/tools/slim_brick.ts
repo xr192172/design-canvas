@@ -36,6 +36,8 @@ import { getStorageRoot } from '../storage.js';
 import { resolveGoThirdParty } from './go_mod.js';
 import { parseGoImportQualifiers } from './dead_deps.js';
 import { aggregateContracts } from './harvest_from_url.js';
+import { slimTsFile, type TsSlimResult } from './ts_slim.js';
+import { NODE_BUILTINS } from './harvest_closure.js';
 import type { BrickContract, BrickManifest } from '../dsl/contract.js';
 
 export interface SlimBrickInput {
@@ -75,7 +77,7 @@ export interface SlimBrickResult {
   unresolved_imports: string[];
   files: SlimFileReport[];
   go_slim_errors: string[];
-  build_verification?: { status: 'pass' | 'fail'; at: string; detail?: string };
+  build_verification?: { status: 'pass' | 'fail' | 'skipped'; at: string; detail?: string };
   written: boolean;
   message: string;
 }
@@ -333,8 +335,22 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
   const allFiles = walkRelative(filesRoot);
   const diskGoFiles = allFiles.filter((f) => f.endsWith('.go'));
   const nonGoFiles = allFiles.filter((f) => !f.endsWith('.go'));
-  if (diskGoFiles.length === 0) {
-    throw new Error('非 Go 积木：go-slim 剪刀只支持 Go（TS 剪刀未实现）');
+  const diskTsFiles = allFiles.filter((f) => TS_SRC_RE.test(f));
+  if (diskGoFiles.length > 0 && diskTsFiles.length > 0) {
+    throw new Error('混合语言积木（Go + TS 同盒）：剪刀按单语言工作，请分开抽取');
+  }
+  if (diskGoFiles.length === 0 && diskTsFiles.length === 0) {
+    throw new Error('积木内无可剪源码文件（.go/.ts）：剪刀无事可做');
+  }
+  const slimName = input.name ?? `${input.brick_name}-slim`;
+  const slimDir = path.join(boxDir, slimName);
+  if (fs.existsSync(slimDir)) {
+    throw new Error(`衍生积木已存在：${slimDir}（机器产物可重生成：删除该目录后重跑 slim_brick）`);
+  }
+  const write = input.write !== false;
+  if (diskTsFiles.length > 0) {
+    // TS 路径：tree-sitter 剪刀（进程内）——见文末 slimTsBrickCore
+    return slimTsBrickCore(input, manifest, brickDir, filesRoot, allFiles, diskTsFiles, slimName, slimDir, write);
   }
 
   const slimCandidates = manifest.slim_candidates;
@@ -355,13 +371,6 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
     );
   }
 
-  const slimName = input.name ?? `${input.brick_name}-slim`;
-  const slimDir = path.join(boxDir, slimName);
-  if (fs.existsSync(slimDir)) {
-    throw new Error(`衍生积木已存在：${slimDir}（机器产物可重生成：删除该目录后重跑 slim_brick）`);
-  }
-
-  const write = input.write !== false;
   const outRoot = write ? path.join(slimDir, 'files') : fs.mkdtempSync(path.join(os.tmpdir(), 'slim-dry-'));
   try {
     // ── ① 剪刀 ──
@@ -591,6 +600,580 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
         `（文件 ${filesBefore}→${filesAfter}，顶层声明 ${symbolsBefore}→${symbolsAfter}，` +
         `剔除三方依赖 ${depsRemoved.length} 个${depsRemoved.length ? `：${depsRemoved.join(', ')}` : ''}）${verifyNote}。` +
         `原积木未动；四层验证剩余三层（源测试/camera/效果验收）未做——剔除生效前请人工补验。`,
+    };
+  } finally {
+    if (!write) fs.rmSync(outRoot, { recursive: true, force: true });
+  }
+}
+
+// ── TS 路径（Phase 7：tree-sitter 剪刀，进程内）────────────────
+
+const TS_SRC_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+const TS_RESOLVE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json'];
+
+interface TsFileOutcome {
+  path: string;
+  dropped: boolean;
+  /** 剪后零保留内容（候选整文件剔除，终判后回填 dropped） */
+  empty: boolean;
+  kept_decls: string[];
+  dropped_decls: string[];
+  kept_imports: string[];
+  /** kept_imports 中无绑定子句的副作用导入（空壳终判依据：副作用引用→空壳，
+   *  具名引用→档案缺口保原文） */
+  side_effect_imports: string[];
+  dropped_imports: string[];
+}
+
+function unquote(spec: string): string {
+  return spec.replace(/^['"]|['"]$/g, '');
+}
+
+/** 源码 import/export specifier 提取（正则近似，误方向=多保依赖，安全） */
+export function tsImportSpecifiers(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;\n]*?from\s*['"]([^'"]+)['"]/g)) {
+    out.push(m[1]);
+  }
+  for (const m of src.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)) {
+    out.push(m[1]); // 副作用导入
+  }
+  return out;
+}
+
+/** 副作用导入 specifier（`import 'x'` 无绑定子句形态；gap 保留原文时用） */
+function tsSideEffectSpecifiers(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
+/** import 绑定明细（正则近似；mark-sweep 需求闭包与回滚文件的绑定提取用）。
+ *  named 的 names 取导出名（alias 前）；default/namespace 标 whole 需求 */
+export interface TsImportBinding {
+  module: string;
+  kind: 'named' | 'default' | 'namespace' | 'side-effect';
+  names: string[];
+}
+
+export function tsImportBindings(src: string): TsImportBinding[] {
+  const out: TsImportBinding[] = [];
+  for (const m of src.matchAll(/(?:^|\n)\s*import\s+([^;\n]*?)\s*from\s*['"]([^'"]+)['"]/g)) {
+    const clause = m[1].trim();
+    const module = m[2];
+    if (!clause) {
+      out.push({ module, kind: 'side-effect', names: [] });
+      continue;
+    }
+    const namedMatch = clause.match(/\{([^}]*)\}/);
+    if (namedMatch) {
+      const names = namedMatch[1]
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => s.split(/\s+as\s+/)[0].trim())
+        .filter(Boolean);
+      if (names.length > 0) out.push({ module, kind: 'named', names });
+      const pre = clause.slice(0, clause.indexOf('{')).replace(/,\s*$/, '').trim();
+      if (pre && !pre.startsWith('*')) out.push({ module, kind: 'default', names: [] });
+    } else if (/^\*\s+as\s+\S+$/.test(clause)) {
+      out.push({ module, kind: 'namespace', names: [] });
+    } else {
+      out.push({ module, kind: 'default', names: [] });
+    }
+  }
+  for (const m of src.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)) {
+    out.push({ module: m[1], kind: 'side-effect', names: [] });
+  }
+  return out;
+}
+
+/** 相对 specifier → 积木内相对路径（Node 解析规则：原样/补扩展名/index；
+ *  exists 回调查存在性——目标可能是未写盘的待终判空文件） */
+export function resolveTsSpecifier(
+  fromRel: string,
+  spec: string,
+  exists: (p: string) => boolean,
+): string | null {
+  if (!spec.startsWith('.')) return null;
+  const fromDir = fromRel.includes('/') ? fromRel.slice(0, fromRel.lastIndexOf('/')) : '';
+  const parts = (fromDir ? fromDir.split('/') : []).concat(spec.split('/'));
+  const stack: string[] = [];
+  for (const p of parts) {
+    if (p === '' || p === '.') continue;
+    if (p === '..') {
+      stack.pop();
+      continue;
+    }
+    stack.push(p);
+  }
+  const base = stack.join('/');
+  if (base === '' || base.startsWith('..')) return null;
+  if (exists(base)) return base;
+  for (const ext of TS_RESOLVE_EXTS) if (exists(base + ext)) return base + ext;
+  // TS ESM 惯例：'./x.js' 导入在盘上是 x.ts（tsc 编译期重写扩展名）——
+  // mark-sweep 依赖 resolve 命中，漏映射会让类型文件不被 mark 而误剔
+  if (/\.(js|jsx|mjs|cjs)$/.test(base)) {
+    const stem = base.slice(0, base.lastIndexOf('.'));
+    for (const e of ['.ts', '.tsx', '.mts', '.cts']) if (exists(stem + e)) return stem + e;
+  }
+  for (const ext of TS_RESOLVE_EXTS) if (exists(base + '/index' + ext)) return base + '/index' + ext;
+  return null;
+}
+
+/** TS 贫困编译验证：tsc noEmit（进程内动态加载）。贫困口径：
+ *  TS2307 且非相对路径 = 三方类型缺失（无 node_modules，预期）；
+ *  相对路径 2307 / 其他诊断 = 真错误。typescript 不可用 → skipped 降级。 */
+async function verifyTsBuild(
+  filesRoot: string,
+): Promise<{ status: 'pass' | 'fail' | 'skipped'; at: string; detail?: string }> {
+  const at = new Date().toISOString();
+  let ts: typeof import('typescript');
+  try {
+    ts = (await import('typescript')) as typeof import('typescript');
+  } catch {
+    return { status: 'skipped', at, detail: 'typescript 包不可用——跳过贫困编译验证（源测试/效果验收层把关）' };
+  }
+  const files = walkRelative(filesRoot)
+    .filter((f) => TS_SRC_RE.test(f))
+    .map((f) => path.join(filesRoot, ...f.split('/')));
+  if (files.length === 0) return { status: 'skipped', at, detail: '无 TS 源文件' };
+  const program = ts.createProgram(files, {
+    noEmit: true,
+    skipLibCheck: true,
+    allowJs: true,
+    strict: false,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    esModuleInterop: true,
+    // 源项目风格各异（ua_theme_engine 用 './presets.ts' 扩展名导入）——
+    // noEmit 下合法，不开则贫困编译误报 TS5097
+    allowImportingTsExtensions: true,
+  });
+  const real: string[] = [];
+  for (const d of ts.getPreEmitDiagnostics(program)) {
+    const msg = ts.flattenDiagnosticMessageText(d.messageText, ' ');
+    if (d.code === 2307 && !/'?\.{1,2}\//.test(msg)) continue; // 三方缺类型 = 贫困预期
+    const loc = d.file
+      ? `${path.basename(d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start ?? 0).line + 1}`
+      : '?';
+    real.push(`${loc} TS${d.code}: ${msg}`);
+  }
+  return real.length === 0
+    ? { status: 'pass', at }
+    : { status: 'fail', at, detail: real.slice(0, 30).join('\n') };
+}
+
+async function slimTsBrickCore(
+  input: SlimBrickInput,
+  manifest: BrickManifest,
+  brickDir: string,
+  filesRoot: string,
+  allFiles: string[],
+  diskTsFiles: string[],
+  slimName: string,
+  slimDir: string,
+  write: boolean,
+): Promise<SlimBrickResult> {
+  const slimCandidates = manifest.slim_candidates;
+  if (!slimCandidates?.live_symbols_by_file) {
+    throw new Error(
+      '积木缺 live 明细档案（slim_candidates.live_symbols_by_file）：请重抽（harvest_from_url）刷新死依赖分析后再瘦身',
+    );
+  }
+  const liveByFile = slimCandidates.live_symbols_by_file;
+  const liveKeys = Object.keys(liveByFile);
+  const hitCount = diskTsFiles.filter((f) => liveByFile[f] !== undefined).length;
+  if (liveKeys.length > 0 && hitCount === 0) {
+    throw new Error(
+      `live 明细（${liveKeys.length} 文件）与盒内 TS 文件（${diskTsFiles.length} 个）零命中——路径形态漂移，拒绝执行剪刀；请重抽刷新档案`,
+    );
+  }
+
+  const outRoot = write ? path.join(slimDir, 'files') : fs.mkdtempSync(path.join(os.tmpdir(), 'slim-dry-'));
+  try {
+    // ── ① 逐文件剪刀（产物暂存内存，mark-sweep 终判后统一落盘）──
+    interface Outcome {
+      path: string;
+      dropped: boolean;
+      /** 当前产物源码（null = 剪后空）；终判迭代中被重剪/回滚更新 */
+      outSrc: string | null;
+      /** 需求闭包注入的 keep 名（档案缺口自愈；单调增） */
+      keepExtra: Set<string>;
+      /** 已回滚原文（default/namespace 需求、种子空文件、形态未覆盖兜底） */
+      rolledBack: boolean;
+      kept_decls: string[];
+      dropped_decls: string[];
+      kept_imports: string[];
+      side_effect_imports: string[];
+      dropped_imports: string[];
+      /** 当前产物源码的 import 绑定（需求闭包输入） */
+      bindings: TsImportBinding[];
+    }
+    const outcomes: Outcome[] = [];
+    const tsSlimErrors: string[] = [];
+    const byPath = new Map<string, Outcome>();
+    const readBrickSrc = (rel: string): string =>
+      fs.readFileSync(path.join(filesRoot, ...rel.split('/')), 'utf-8');
+    const applyResult = (o: Outcome, r: TsSlimResult): void => {
+      o.outSrc = r.out;
+      o.kept_decls = r.kept_decls;
+      o.dropped_decls = r.dropped_decls;
+      o.kept_imports = r.kept_imports.map(unquote);
+      o.side_effect_imports = r.side_effect_imports.map(unquote);
+      o.dropped_imports = r.dropped_imports.map(unquote);
+      o.bindings = r.kept_import_bindings;
+    };
+    const rollback = (o: Outcome, why: string): void => {
+      const src = readBrickSrc(o.path);
+      o.outSrc = src;
+      o.rolledBack = true;
+      o.kept_decls = [...o.kept_decls, ...o.dropped_decls];
+      o.dropped_decls = [];
+      o.dropped_imports = [];
+      const b = tsImportBindings(src);
+      o.bindings = b;
+      o.kept_imports = [...new Set(b.map((x) => x.module))];
+      o.side_effect_imports = b.filter((x) => x.kind === 'side-effect').map((x) => x.module);
+      tsSlimErrors.push(`${o.path}: ${why}——已保留原文件`);
+    };
+    for (const rel of diskTsFiles) {
+      const src = readBrickSrc(rel);
+      const ext = rel.slice(rel.lastIndexOf('.'));
+      try {
+        const r = await slimTsFile(src, liveByFile[rel] ?? [], ext);
+        const o: Outcome = {
+          path: rel,
+          dropped: false,
+          outSrc: null,
+          keepExtra: new Set<string>(),
+          rolledBack: false,
+          kept_decls: [],
+          dropped_decls: [],
+          kept_imports: [],
+          side_effect_imports: [],
+          dropped_imports: [],
+          bindings: [],
+        };
+        applyResult(o, r);
+        outcomes.push(o);
+        byPath.set(rel, o);
+      } catch (e) {
+        // 解析失败：原样保留（盘上真相优先），绑定从原文提取防误报"已剔除"
+        tsSlimErrors.push(`${rel}: ${(e as Error).message}`);
+        const o: Outcome = {
+          path: rel,
+          dropped: false,
+          outSrc: src,
+          keepExtra: new Set<string>(),
+          rolledBack: true,
+          kept_decls: [],
+          dropped_decls: [],
+          kept_imports: [],
+          side_effect_imports: [],
+          dropped_imports: [],
+          bindings: [],
+        };
+        const b = tsImportBindings(src);
+        o.bindings = b;
+        o.kept_imports = [...new Set(b.map((x) => x.module))];
+        o.side_effect_imports = b.filter((x) => x.kind === 'side-effect').map((x) => x.module);
+        outcomes.push(o);
+        byPath.set(rel, o);
+      }
+    }
+
+    // ── ② mark-sweep 终判 + 跨文件导出需求闭包（不动点）──
+    // 文件级活性（mark）：种子恒活；活文件【保留的】import（解析到闭包内）
+    //   → 目标活。死文件（闭包内、非 mark）剔除——其 import 不计引用
+    //   （防注释词法误保活连锁：language-registry.ts 剪剩注释，注释里的
+    //   "LanguageConfig" 字样曾保活 import 再连锁拽住 types.ts）。
+    // 导出需求（需求闭包）：活文件 A 保留 import 的绑定名 → 目标 B 必须提供：
+    //   named 缺失 → 注入 B 的 keep 集重剪（精确复活，live 档案缺口自愈——
+    //     跨文件 type_ref 边缺失导致 keep 集漏名的主通道）；
+    //   default/namespace → B 回滚原文（整文件导出面被需要，保守）。
+    // keep 集与 mark 集单调增 → 收敛（轮数上限防呆）。
+    const allRelSet = new Set(allFiles);
+    const resolve = (fromRel: string, spec: string): string | null =>
+      resolveTsSpecifier(fromRel, spec, (p) => allRelSet.has(p));
+    // 种子判定：manifest.seed_files 与盒内路径形态对齐（src/ 前缀变体）
+    const seedVariants = new Set<string>();
+    for (const s of manifest.seed_files ?? []) {
+      seedVariants.add(s);
+      seedVariants.add(s.replace(/^src\//, ''));
+      seedVariants.add(`src/${s}`);
+    }
+    const markRoots = diskTsFiles.filter((f) => seedVariants.has(f));
+    const markRootSet = new Set(markRoots);
+    // 种子零命中（路径形态漂移）→ 全部按种子处理（宁多保不误删）
+    if (markRootSet.size === 0) for (const f of diskTsFiles) markRootSet.add(f);
+
+    for (let round = 0; round < 12; round++) {
+      // mark：从种子沿存活文件的保留 import BFS（type 文件也走——编译期需要）
+      const marked = new Set<string>();
+      const queue = [...markRootSet];
+      while (queue.length > 0) {
+        const f = queue.pop()!;
+        if (marked.has(f)) continue;
+        const o = byPath.get(f);
+        if (!o || o.dropped) continue;
+        marked.add(f);
+        for (const spec of o.kept_imports) {
+          const t = resolve(f, spec);
+          if (t && byPath.has(t) && !marked.has(t)) queue.push(t);
+        }
+      }
+      // 需求收集（只看 mark 文件——死文件的 import 不计引用）
+      const demands = new Map<string, { named: Set<string>; whole: boolean }>();
+      for (const f of marked) {
+        const o = byPath.get(f)!;
+        for (const b of o.bindings) {
+          if (b.kind === 'side-effect') continue;
+          const t = resolve(f, b.module);
+          if (!t || !byPath.has(t)) continue;
+          const d = demands.get(t) ?? { named: new Set<string>(), whole: false };
+          if (b.kind === 'named') for (const n of b.names) d.named.add(n);
+          else d.whole = true;
+          demands.set(t, d);
+        }
+      }
+      // gap 修复 + sweep
+      let changed = false;
+      for (const o of outcomes) {
+        if (!marked.has(o.path)) {
+          if (!o.dropped) {
+            o.dropped = true;
+            changed = true;
+          }
+          continue;
+        }
+        if (o.dropped) {
+          o.dropped = false;
+          changed = true;
+        }
+        if (o.outSrc === null && markRootSet.has(o.path) && !o.rolledBack) {
+          rollback(o, '种子文件剪后为空（live 档案缺口）');
+          changed = true;
+          continue;
+        }
+        const d = demands.get(o.path);
+        if (!d) continue;
+        if (d.whole && !o.rolledBack) {
+          rollback(o, '被 default/namespace import 引用（整文件导出面被需要）');
+          changed = true;
+          continue;
+        }
+        const missing = [...d.named].filter((n) => !o.kept_decls.includes(n));
+        if (missing.length > 0) {
+          for (const n of missing) o.keepExtra.add(n);
+          const ext = o.path.slice(o.path.lastIndexOf('.'));
+          const r = await slimTsFile(readBrickSrc(o.path), [...(liveByFile[o.path] ?? []), ...o.keepExtra], ext);
+          applyResult(o, r);
+          const still = [...d.named].filter((n) => !o.kept_decls.includes(n));
+          if (still.length > 0) {
+            rollback(o, `需求导出 ${still.join(', ')} 不在该文件声明集（re-export/形态未覆盖）`);
+          }
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+
+    // 副作用空壳终判：mark 文件剪后空——被副作用 import 引用写空模块保路径
+    // （import 即执行的模块不能 404）；无引用的空文件剔除
+    for (const o of outcomes) {
+      if (o.dropped || o.outSrc !== null) continue;
+      const sideRef = outcomes.some(
+        (other) =>
+          other !== o &&
+          !other.dropped &&
+          other.bindings.some((b) => b.kind === 'side-effect' && resolve(other.path, b.module) === o.path),
+      );
+      if (sideRef) o.outSrc = '';
+      else o.dropped = true;
+    }
+
+    // ── ③ 落盘：存活文件写剪后产物（空壳写空模块）──
+    for (const o of outcomes) {
+      if (o.dropped || o.outSrc === null) continue;
+      const dest = path.join(outRoot, ...o.path.split('/'));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, o.outSrc, 'utf-8');
+    }
+
+    // ── ④ 非 TS 资产按需搬运：存活产物 import 引用的资产（css/json 等）──
+    // 与 Go 的 embed 按需同构：静态可见引用（import specifier）之外的资产不搬；
+    // 运行时 fs.readFile 读的资产静态看不见——源测试/效果验收层把关
+    const keptAssets = new Set<string>();
+    for (const o of outcomes) {
+      if (o.dropped) continue;
+      for (const spec of o.kept_imports) {
+        const t = resolve(o.path, spec);
+        if (t && !TS_SRC_RE.test(t)) keptAssets.add(t);
+      }
+    }
+    const nonTsFiles = allFiles.filter((f) => !TS_SRC_RE.test(f));
+    for (const rel of keptAssets) {
+      const dest = path.join(outRoot, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(path.join(filesRoot, ...rel.split('/')), dest);
+    }
+
+    // ── ④ 统计与依赖对账（原始路径口径：TS 无版本档案）──
+    const produced = walkRelative(outRoot);
+    const producedSet = new Set(produced);
+    const surviving = outcomes.filter((o) => !o.dropped && producedSet.has(o.path));
+    const droppedFiles = outcomes.filter((o) => o.dropped).map((o) => o.path);
+    const filesBefore = allFiles.length;
+    const filesAfter = produced.length;
+    const symbolsBefore = outcomes.reduce((n, f) => n + f.kept_decls.length + f.dropped_decls.length, 0);
+    const symbolsAfter = surviving.reduce((n, f) => n + f.kept_decls.length, 0);
+
+    const keptImports = new Set<string>();
+    for (const o of surviving) for (const imp of o.kept_imports) keptImports.add(imp);
+    const isTsStdlib = (p: string): boolean => p.startsWith('node:') || NODE_BUILTINS.has(p.split('/')[0]);
+    const externalImports = [...keptImports].filter((p) => !p.startsWith('.')).sort();
+    const stdlibImports = externalImports.filter(isTsStdlib);
+    const thirdPartyImports = externalImports.filter((p) => !isTsStdlib(p));
+    const beforeSources = (manifest.closure.external ?? [])
+      .filter((e) => e.class === 'third_party')
+      .map((e) => e.source);
+    const depsBefore = [...new Set(beforeSources)].sort();
+    const depsAfter = thirdPartyImports;
+    const unresolvedImports: string[] = [];
+    const depsRemoved = depsBefore.filter((d) => !depsAfter.includes(d));
+
+    // ── ⑤ 无可剪内容：不生成空壳衍生积木 ──
+    const nothingToSlim =
+      symbolsAfter === symbolsBefore &&
+      droppedFiles.length === 0 &&
+      tsSlimErrors.length === 0 &&
+      depsRemoved.length === 0 &&
+      outcomes.every((o) => o.dropped_imports.length === 0) &&
+      nonTsFiles.every((f) => keptAssets.has(f));
+    if (nothingToSlim) {
+      if (write) fs.rmSync(slimDir, { recursive: true, force: true });
+      return {
+        brick: input.brick_name,
+        slim_name: slimName,
+        slim_dir: '',
+        files_before: filesBefore,
+        files_after: filesAfter,
+        dropped_files: [],
+        symbols_before: symbolsBefore,
+        symbols_after: symbolsAfter,
+        deps_before: depsBefore,
+        deps_after: depsAfter,
+        deps_removed: [],
+        kept_imports_stdlib: stdlibImports,
+        unresolved_imports: unresolvedImports,
+        files: outcomes.map(({ path: p, dropped, kept_decls, dropped_decls, dropped_imports }) => ({
+          path: p,
+          dropped,
+          kept_decls,
+          dropped_decls,
+          dropped_imports,
+        })),
+        go_slim_errors: tsSlimErrors,
+        written: false,
+        message: `无可剪内容（${symbolsBefore} 声明全部存活、无文件/依赖/资产可剔），未生成衍生积木`,
+      };
+    }
+
+    // ── ⑥ 贫困编译验证（可选；tsc 进程内）──
+    let buildVerification: SlimBrickResult['build_verification'];
+    if (input.verify_build) {
+      buildVerification = await verifyTsBuild(outRoot);
+    }
+
+    // ── ⑦ 落盘：contracts.json + manifest.json ──
+    if (write) {
+      let contractsByPath: Record<string, BrickContract> = {};
+      try {
+        contractsByPath = JSON.parse(fs.readFileSync(path.join(brickDir, 'contracts.json'), 'utf-8')) as Record<
+          string,
+          BrickContract
+        >;
+      } catch {
+        // contracts.json 缺失/损坏：聚合退化为空（衍生积木仍可拼装，货架卡片薄）
+      }
+      const slimContracts: Record<string, BrickContract> = {};
+      for (const [p, c] of Object.entries(contractsByPath)) {
+        if (producedSet.has(p)) slimContracts[p] = c;
+      }
+      fs.writeFileSync(path.join(slimDir, 'contracts.json'), JSON.stringify(slimContracts, null, 2), 'utf-8');
+
+      const slimManifest: BrickManifest = {
+        name: slimName,
+        schema_version: 1,
+        description: `${manifest.description ? `${manifest.description}；` : ''}瘦身衍生积木（ts-slim 按 live 集剪枝：${filesBefore}→${filesAfter} 文件 / ${symbolsBefore}→${symbolsAfter} 声明 / 剔除三方依赖 ${depsRemoved.length} 个）`,
+        seed_files: manifest.seed_files,
+        closure: {
+          internal: [...producedSet].sort(),
+          external: [
+            ...stdlibImports.map((s) => ({ source: s, class: 'stdlib' as const })),
+            ...depsAfter.map((m) => ({ source: m, class: 'third_party' as const })),
+          ],
+        },
+        aggregate: aggregateContracts(Object.values(slimContracts)),
+        acceptance: manifest.acceptance,
+        derived_from: {
+          brick: input.brick_name,
+          slimmed_at: new Date().toISOString(),
+          files_before: filesBefore,
+          files_after: filesAfter,
+          symbols_before: symbolsBefore,
+          symbols_after: symbolsAfter,
+          deps_before: depsBefore,
+          deps_after: depsAfter,
+        },
+        slim_verification: buildVerification ? { build: buildVerification } : undefined,
+        provenance: manifest.provenance
+          ? {
+              source_project: manifest.provenance.source_project,
+              commit: manifest.provenance.commit,
+              harvested_at: manifest.provenance.harvested_at,
+            }
+          : undefined,
+      };
+      fs.writeFileSync(path.join(slimDir, 'manifest.json'), JSON.stringify(slimManifest, null, 2), 'utf-8');
+    }
+
+    const verifyNote = buildVerification
+      ? `；贫困编译验证 ${buildVerification.status === 'pass' ? '通过' : buildVerification.status === 'skipped' ? '跳过' : '失败（详见 slim_verification.build）'}`
+      : '';
+    return {
+      brick: input.brick_name,
+      slim_name: slimName,
+      slim_dir: write ? slimDir : '',
+      files_before: filesBefore,
+      files_after: filesAfter,
+      dropped_files: droppedFiles,
+      symbols_before: symbolsBefore,
+      symbols_after: symbolsAfter,
+      deps_before: depsBefore,
+      deps_after: depsAfter,
+      deps_removed: depsRemoved,
+      kept_imports_stdlib: stdlibImports,
+      unresolved_imports: unresolvedImports,
+      files: outcomes.map(({ path: p, dropped, kept_decls, dropped_decls, dropped_imports }) => ({
+        path: p,
+        dropped,
+        kept_decls,
+        dropped_decls,
+        dropped_imports,
+      })),
+      go_slim_errors: tsSlimErrors,
+      build_verification: buildVerification,
+      written: write,
+      message:
+        `瘦身${write ? '完成' : '预演'}：${input.brick_name} → ${slimName}` +
+        `（文件 ${filesBefore}→${filesAfter}，顶层声明 ${symbolsBefore}→${symbolsAfter}，` +
+        `剔除三方依赖 ${depsRemoved.length} 个${depsRemoved.length ? `：${depsRemoved.join(', ')}` : ''}）${verifyNote}。` +
+        `原积木未动；四层验证剩余层（源测试/camera/效果验收）未做——剔除生效前请人工补验。`,
     };
   } finally {
     if (!write) fs.rmSync(outRoot, { recursive: true, force: true });

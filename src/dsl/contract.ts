@@ -225,9 +225,10 @@ export interface BrickManifest {
     deps_before: string[];
     deps_after: string[];
   };
-  /** 瘦身验证档案（四层验证渐进填充：build=slim_brick --verify_build；源测试/camera/效果验收后续） */
+  /** 瘦身验证档案（四层验证渐进填充：build=slim_brick --verify_build；源测试/camera/效果验收后续）。
+   *  skipped = TS 贫困编译降级（typescript 包不可用/无源文件）——工具链缺席不是产物失败 */
   slim_verification?: {
-    build?: { status: 'pass' | 'fail'; at: string; detail?: string };
+    build?: { status: 'pass' | 'fail' | 'skipped'; at: string; detail?: string };
   };
   /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
   provenance?: {

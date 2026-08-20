@@ -347,6 +347,13 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     db.prepare("DELETE FROM edges WHERE source LIKE ? AND kind = 'call'").run(`${rel}#%`);
     db.prepare("DELETE FROM unresolved_refs WHERE from_node_id LIKE ?").run(`${rel}#%`);
     const idOf = (qn: string) => `${rel}#${qn}`;
+    // FK 防御：插边前校验两端 id 已在 nodes——符号提取器与调用边提取器的 qn
+    // 算法曾不一致（FOREIGN KEY 炸整文件事务、符号零写入，2026-08-20
+    // NodeSqliteAdapter.prepare.run 实证）。kernel v7 已对齐 qn，此处防御性
+    // 兜底：坏边跳过，不再牵连整文件事务
+    const nodeIdSet = new Set(
+      (db.prepare('SELECT id FROM nodes WHERE file_path = ?').all(rel) as Array<{ id: string }>).map((r) => r.id),
+    );
     const insCall = db.prepare(
       'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, \'call\', ?, NULL, NULL)',
     );
@@ -357,7 +364,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     let callCount = 0;
     for (const c of parsed.calls) {
       const srcId = idOf(c.caller);
-      if (c.resolved && c.callee_qn) {
+      if (!nodeIdSet.has(srcId)) continue; // qn 漂移坏边：跳过不炸事务
+      if (c.resolved && c.callee_qn && nodeIdSet.has(idOf(c.callee_qn))) {
         insCall.run(srcId, idOf(c.callee_qn), c.line);
         callCount++;
       } else {
@@ -381,7 +389,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     );
     for (const t of parsed.type_refs) {
       const srcId = idOf(t.referrer);
-      if (t.resolved && t.target_qn) {
+      if (!nodeIdSet.has(srcId)) continue; // 同上：qn 漂移坏边防御
+      if (t.resolved && t.target_qn && nodeIdSet.has(idOf(t.target_qn))) {
         insTypeRef.run(srcId, idOf(t.target_qn), t.line);
       } else {
         insUnresolvedType.run(srcId, t.type_name, t.line, rel, ext, t.type_name);

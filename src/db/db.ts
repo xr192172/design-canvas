@@ -29,7 +29,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 7;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */
 export function getDbFile(): string {
@@ -81,7 +81,7 @@ export function openDb(dbFile: string = getDbFile()): Database {
   }
   db.prepare(
     'INSERT OR IGNORE INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)',
-  ).run(SCHEMA_VERSION, Date.now(), 'v5: imports.type_only（TS import type 运行时擦除——依赖图/闭包不算边；清库补齐 imports 表）');
+  ).run(SCHEMA_VERSION, Date.now(), 'v7: 嵌套符号 qualified_name 全链化（类方法体内嵌套符号 prepare.run → NodeSqliteAdapter.prepare.run，与 calls/type_refs 提取器对齐——qn 漂移曾致 FK 炸库整文件丢符号；清库重解析）');
   return db;
 }
 
