@@ -289,6 +289,15 @@ interface BrickManifest {
 - 绞杀处置：go-lab 是 gitignore 的 go-trace 插桩实验环境（README 记录用途），不删；其作为积木来源的资格已被 3R-1 过滤规则消除——盒中快照成为唯一事实源，go-lab 仅保留插桩实验用途
 - 待做：go-lab 与活仓库的漂移监控（当前零漂移）；agent-shell 侧是否反向引用盒中积木（Go module 语义下需 publish 路径，暂缓）
 
+**3R-3 go_logging 动静对账（camera 验证积木契约）** ✅ 2026-08-20：
+- 方法：积木盒快照 4 文件 → golog-verify 临时项目（module 名对齐 agent-shell + replace 指向本地 go-camera）→ 驱动 main.go 覆盖全 API 路径（InitFileLogger/SetCurrentSession/SetVerbose/SetDebug/五级日志/路由分流/批量写/Reset/Close）→ `instrument --effects` 插桩（instrument.exe 重编译）→ 运行收集 1983 行事件（含 7 类 effect）→ 对账回写
+- **转正 6/10**：globalFileLogger、currentSession（file.go）+ Verbose、Debug、lastSeen、lastSeen[]（logging.go）origin ast→runtime；contracts.json 各文件填 runtime（call_count/top_callers/last_seen）
+- **未观测 4/10 全部归因**（诚实分类，不硬凑）：file:filepath.Join(delete)+goroutine = not_triggered（100MB 轮转阈值未达，`go cleanupExpired` 仅在 rotateLocked 内启动）；file:r.basePath = **probe_gap**（插桩器四类检测点不含 os.Create 文件句柄——静态候选有、探针无检测点，工具改进项）；routeTable = **static_only**（包级字面量初始化被静态扫描记 write 候选，运行时只读——静态候选固有噪声）
+- 已知盲区（记入档案）：Go init() 先于 main 执行，logging.init 的 3 个 effect 探针点在 sink 注册前运行观测不到（驱动侧 sink 初始化时机固有限制）
+- 机制落地：BrickManifest 新增 `effect_verification` 槽（证据档案：verified_at/method/events/stats/files/known_blind_spots，未观测候选带归因 note）；harvest_from_url 重抽保留扩展（acceptance/matches/**effect_verification**——运行证据只有一份，快照可重抽证据不可重放）；contracts.json 转正 + runtime 字段照常重算
+- 工程细节：插桩代码 import go-camera/probe 需 go.mod replace 指向本地模块；sink 须在驱动 main 里自初始化（`camprobe.NewSink` + `SetGlobalSink`，自引探针包用 camprobe 别名——instrument 对已 import 的文件跳过 import 注入）
+- 产出：验证驱动环境保留于 `.design-canvas/tmp/golog-verify/`（可复跑）；对账脚本 `scripts/tmp-brick-reconcile.ts`（go_logging 首例，流程验证后可工具化）
+
 ### Phase 4：跨项目统一索引 + 摘要层
 - 统一命名空间（多 cache.db 聚合或联邦检索）
 - 积木货架：可浏览的接口契约目录（拎之前先看它要什么、给什么）

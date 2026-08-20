@@ -159,6 +159,23 @@ export interface BrickManifest {
     adapter_file?: string;
     at: string;
   }>;
+  /**
+   * camera 动静对账证据档案（重抽保留字段——运行证据只有一份）。
+   * 命中候选在 contracts.json 里 origin ast→runtime；本槽是全量证据：
+   * 含未观测候选的覆盖缺口归因（probe_gap / not_triggered / static_only）。
+   */
+  effect_verification?: {
+    verified_at: string;
+    method: string;
+    events: number;
+    stats: { confirmed: number; unobserved: number };
+    files: Array<{
+      file: string;
+      confirmed: string[];
+      unobserved: Array<{ target: string; note: string }>;
+    }>;
+    known_blind_spots?: string[];
+  };
   /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
   provenance?: {
     source_project?: string;

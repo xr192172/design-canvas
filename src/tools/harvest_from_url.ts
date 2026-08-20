@@ -290,9 +290,10 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       const brickDir = path.join(boxDir, name);
       const replaced = fs.existsSync(path.join(brickDir, 'manifest.json'));
 
-      // 重抽保留：acceptance/matches 是人工沉淀（验收判据、匹配历史），
-      // 不随快照覆盖丢失——契约/闭包/文件由重抽重算，人的判断只有一份。
-      let preserved: Pick<BrickManifest, 'acceptance' | 'matches'> = {};
+      // 重抽保留：acceptance/matches/effect_verification 是人工沉淀（验收判据、
+      // 匹配历史、camera 动静对账证据档案），不随快照覆盖丢失——契约/闭包/文件
+      // 由重抽重算，人的判断与运行证据只有一份。
+      let preserved: Pick<BrickManifest, 'acceptance' | 'matches' | 'effect_verification'> = {};
       if (replaced) {
         try {
           const old = JSON.parse(
@@ -300,6 +301,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
           ) as BrickManifest;
           if (old.acceptance) preserved.acceptance = old.acceptance;
           if (old.matches) preserved.matches = old.matches;
+          if (old.effect_verification) preserved.effect_verification = old.effect_verification;
         } catch {
           // 旧 manifest 损坏：按全新入盒处理，保留逻辑静默跳过
         }
