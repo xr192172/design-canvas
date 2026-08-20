@@ -44,6 +44,8 @@ import { assembleBricks } from './tools/assemble_bricks.js';
 import type { AssembleBricksInput } from './tools/assemble_bricks.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
+import { slimBrick } from './tools/slim_brick.js';
+import type { SlimBrickInput } from './tools/slim_brick.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -856,6 +858,32 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await assembleBricks(a as unknown as AssembleBricksInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'slim_brick',
+    title: 'Slim a Go brick into a derived -slim brick (compiler-style dead-code pruning)',
+    description:
+      '积木瘦身（Brick Harvest Phase 6：效仿 Go 编译器的死代码消除）——按入盒时存档的 live 集' +
+      '（slim_candidates.live_symbols_by_file，种子可达性 BFS 的事实档案）调用 go-slim 剪刀' +
+      '（go/ast 声明过滤 + 包内不动点 + import 剪枝），把盒内 Go 积木剪成 <brick>-slim 衍生积木回盒。' +
+      '纪律：原积木永不覆盖（衍生积木是机器产物，删除后重跑本工具可再生成）；非 Go 文件原样搬运' +
+      '（embed 资产等）；无可剪内容不生成空壳。可选 verify_build：临时目录 go build ./... 当场编译验证' +
+      '（需 Go 工具链+网络），结果写 slim_verification.build。四层验证剩余三层（源测试/camera/效果验收）' +
+      '由人后续补——剔除生效前请人工补验。',
+    inputSchema: {
+      brick_name: z.string().describe('原积木名（盒内 <box_dir>/<brick_name>；须为 Go 积木且带 slim_candidates live 档案）'),
+      box_dir: z.string().optional().describe('积木盒根目录（默认 <dataHome>/.design-canvas/bricks）'),
+      name: z.string().optional().describe('衍生积木名（默认 <brick_name>-slim）'),
+      verify_build: z
+        .boolean()
+        .optional()
+        .describe('true：临时目录 go build ./... 编译验证（需 Go 工具链与网络拉依赖），结果写 slim_verification.build（默认 false）'),
+      write: z.boolean().optional().describe('false 只预演不落盘（剪刀跑进临时目录，产出仅进报告；默认 true）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = await slimBrick(a as unknown as SlimBrickInput);
       return { message: r.message, data: r };
     }),
   },

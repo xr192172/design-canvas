@@ -204,6 +204,30 @@ export interface BrickManifest {
     }>;
     /** 静态可达性分析的已知盲区（读报告前必看） */
     limitations: string[];
+    /** live 符号明细（file → 顶层符号名）——go-slim 剪刀的 keep 集；重抽刷新 */
+    live_symbols_by_file?: Record<string, string[]>;
+    /** live 类型名全集——剪刀侧方法挂靠规则输入（类型的全部方法随类型活） */
+    live_type_names?: string[];
+  };
+  /**
+   * -slim 衍生积木溯源（slim_brick 产出，Phase 6）。
+   * 原积木永不覆盖；衍生积木是机器产物，可随时重生成（删除后重跑 slim_brick）。
+   */
+  derived_from?: {
+    brick: string;
+    slimmed_at: string;
+    files_before: number;
+    files_after: number;
+    /** 顶层声明数（go-slim 报告口径，≈符号口径） */
+    symbols_before: number;
+    symbols_after: number;
+    /** go.mod require 模块清单前后对比 */
+    deps_before: string[];
+    deps_after: string[];
+  };
+  /** 瘦身验证档案（四层验证渐进填充：build=slim_brick --verify_build；源测试/camera/效果验收后续） */
+  slim_verification?: {
+    build?: { status: 'pass' | 'fail'; at: string; detail?: string };
   };
   /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
   provenance?: {

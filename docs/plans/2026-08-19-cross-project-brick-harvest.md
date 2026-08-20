@@ -417,6 +417,30 @@ interface BrickManifest {
 
 测试：dead_deps 11 用例（Go/TS 可达性 BFS、import 解析、死候选聚合、保守规则、stripTsImportLines）+ harvest_from_url/search_bricks/assemble_bricks 集成用例；全量 882/882 绿。
 
+### Phase 6：积木瘦身剪刀 ✅ 2026-08-20 完成（-slim 衍生积木 + 编译验证）
+
+**触发与思路**（用户定论）：无关依赖拼进积木"除了拖性能和拖源码属性没有任何作用，拖累还很严重"；效仿 Go 编译器——它只编译被引用的部分，我们也只读取活跃的部分，重新链成新文件（源码级 DCE，Phase 5++ 处理分级的剔除层实现）。
+
+落地三件：
+1. **go-slim Go 剪刀**（go-slim/，独立 Go 程序）：go/ast 声明级过滤——按活跃符号集保留函数/类型/常量/变量，包内引用不动点迭代（被保留声明引用的符号连带保留），import 剪枝（多候选限定符匹配），go/format 输出保证 gofmt 风格，doc 注释按行范围随声明保留
+2. **slim_brick MCP 工具**（第 17 个主工具，src/tools/slim_brick.ts）：编排器——读原积木 live 档案（dead_deps 的 live_symbols_by_file + live_type_names）→ 调 go-slim 剪 files/ → 依赖对账（deps_before/after 统一口径含归并失败原始路径、内部包过滤）→ 编译验证 → 落 `-slim` 衍生积木三件套（derived_from 溯源 + slim_verification 档案）
+3. **衍生积木纪律**：原积木永不覆盖（剔除=改写=风险，走副本——Camera 宪法同构）；-slim 是机器产物可删可重生成；已存在拒绝不静默覆盖、缺 live 档案拒绝（提示重抽）、live 明细零命中拒绝（路径漂移防线）、无可剪不落空壳、非 Go 积木拒绝
+
+**实战抓到的索引盲区（皆已修复 + 回归测试钉死）**：
+1. **Go 索引器跨包类型引用边缺失**：Go 包导入 kind='package' 不进 edges 表（只有 TS 相对导入建边），跨包类型引用（`GetUser() *model.User`）无 type_ref 边 → BFS 激活不了目标包符号 → model.go 整文件误剪。修复：dead_deps.ts 补 Go 跨文件符号边（deriveGoModule 最长后缀匹配识别内部 import + 源码扫描限定符成员引用 Q.Name 建边）
+2. **版本后缀路径限定符**：`github.com/bmatcuk/doublestar/v4` 包名是 doublestar 不是 v4——只认末段则 `doublestar.Match` 永不命中，活 import 被误剪 → 编译 undefined: doublestar。修复：多候选限定符（末段 + 主版本前一段 + 点分/连字符切分），命中任一即引用——宁多留（编译器 imported and not used 兜底）不误剪（undefined 是硬错）
+3. **编译验证 module 路径**：固定 module 名与积木内部 import 的原始 module 路径冲突。修复：deriveGoModule 从剪后文件反推源 module（内部 import 剥目录后缀得候选，能覆盖全部内部 import 者即真身；git 抽取的自包含积木同样适用）
+
+工程修复：盒目录默认值统一 getStorageRoot()——曾 harvest/slim 用 dataHome、assemble/search/reconcile 用 cwd，测试环境（DESIGN_CANVAS_HOME 重定向）下读写分裂成两个盒，拼到过期残废产物；剪刀细节（JSON BOM 容错、nil 切片序列化防御、GenDecl 重建带 TokPos 否则 doc 注释冲进 const 与声明名之间、多行 doc 按 endLine 判定保留）。
+
+**实战验证**（ocr_diff_resolver，真实盒已刷新）：
+- 文件 50→41（剔除 9 个死文件）、顶层声明 394→279、剔除三方依赖 8 个（otel 全家：otel + otlp 4 导出器 + stdout 2 导出器 + trace）
+- 保留 7 个活依赖：anthropic-sdk-go / doublestar/v4 / openai-go/v3 / tiktoken-go / otel/metric / otel/sdk / otel/sdk/metric
+- 编译验证 pass；拼装验证：-slim 衍生积木 → 拼装区 → go mod tidy + go build 无错误
+- 原积木零改动；四层验证只做了第一层（编译），源测试/camera 行为对比/效果验收三层未做——剔除生效前需人工补验（slim_verification 档案如实记录）
+
+测试：slim_brick 8 用例（全链/版本后缀回归/dry-run/已存在拒绝/缺档案拒绝/路径漂移防线/无可剪/非 Go 拒绝）+ dead_deps 扩至 14 用例（新增跨包类型引用、版本后缀候选限定符回归）；全量 899/899 绿。
+
 ## 六、验收标准（Phase 3 试验）
 
 用户应能看到：

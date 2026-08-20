@@ -34,6 +34,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { BrickManifest } from '../dsl/contract.js';
 import type { EffectTarget } from '../dsl/contract.js';
+import { getStorageRoot } from '../storage.js';
 
 export interface ReconcileBrickInput {
   /** 积木目录（含 contracts.json + manifest.json；或传 brick_name + box_dir 让工具拼） */
@@ -101,9 +102,9 @@ interface FileObservation {
   lastSeen: string;
 }
 
-/** 默认积木盒根：<cwd>/.design-canvas/bricks（与 harvest_from_url 一致由调用方传 box_dir 时以显式为准） */
+/** 默认积木盒根：与 harvest_from_url / slim_brick 同源（getStorageRoot；调用方传 box_dir 时以显式为准） */
 function defaultBoxDir(): string {
-  return path.resolve(process.cwd(), '.design-canvas', 'bricks');
+  return path.resolve(path.join(getStorageRoot(), 'bricks'));
 }
 
 /** 自动发现事件文件：.agent/camera/events-*.jsonl（含裸 events.jsonl） */

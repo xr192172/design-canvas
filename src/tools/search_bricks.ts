@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrickManifest, ShapeSchema } from '../dsl/contract.js';
+import { getStorageRoot } from '../storage.js';
 
 export interface SearchBricksInput {
   /** 关键词检索：匹配积木名/形状名/字段名/description，多词独立打分求和 */
@@ -40,7 +41,7 @@ export interface SearchBricksInput {
   name?: string;
   /** query 命中时也输出完整契约（默认列表模式只给概况） */
   detail?: boolean;
-  /** 积木盒根目录（默认 <cwd>/.design-canvas/bricks） */
+  /** 积木盒根目录（默认 <dataHome>/.design-canvas/bricks，与 harvest/slim 同源） */
   box_dir?: string;
 }
 
@@ -206,7 +207,8 @@ function buildEntry(
 }
 
 export async function searchBricks(input: SearchBricksInput): Promise<SearchBricksResult> {
-  const boxDir = path.resolve(input.box_dir ?? path.join(process.cwd(), '.design-canvas', 'bricks'));
+  // 盒根默认与 harvest_from_url / slim_brick 同源（getStorageRoot）
+  const boxDir = path.resolve(input.box_dir ?? path.join(getStorageRoot(), 'bricks'));
   if (!fs.existsSync(boxDir)) {
     throw new Error(`积木盒不存在：${boxDir}（先 harvest_from_url 入盒）`);
   }

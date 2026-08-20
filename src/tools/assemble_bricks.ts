@@ -43,6 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { BrickManifest } from '../dsl/contract.js';
 import { resolveGoThirdParty, compareGoVersion } from './go_mod.js';
+import { getStorageRoot } from '../storage.js';
 
 export interface AssembleBricksInput {
   /** 要拼装的积木名列表（须已在盒中） */
@@ -53,7 +54,7 @@ export interface AssembleBricksInput {
   module?: string;
   /** go.mod 的 go 版本（默认 1.25.5；只是最低版本声明） */
   go_version?: string;
-  /** 积木盒根目录（默认 <cwd>/.design-canvas/bricks） */
+  /** 积木盒根目录（默认 <dataHome>/.design-canvas/bricks，与 harvest/slim 同源） */
   box_dir?: string;
   /** false 只预演：输出搬运计划与 import 重写预览，不落盘（默认 true） */
   write?: boolean;
@@ -189,7 +190,10 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
   if (!input.bricks?.length) {
     throw new Error('bricks 不能为空：至少指定一个积木名（search_bricks 可查盒内清单）');
   }
-  const boxDir = path.resolve(input.box_dir ?? path.join(process.cwd(), '.design-canvas', 'bricks'));
+  // 盒根默认与 harvest_from_url / slim_brick 同源（getStorageRoot）：曾用
+  // <cwd>/.design-canvas/bricks，测试环境（DESIGN_CANVAS_HOME 重定向）下
+  // 与写入方分裂——slim 写临时盒、拼装读持久盒，拼到过期残废产物
+  const boxDir = path.resolve(input.box_dir ?? path.join(getStorageRoot(), 'bricks'));
   if (!fs.existsSync(boxDir)) {
     throw new Error(`积木盒不存在：${boxDir}（先 harvest_from_url 入盒）`);
   }

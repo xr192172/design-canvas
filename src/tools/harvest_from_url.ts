@@ -141,7 +141,7 @@ function shallowClone(url: string): string {
 }
 
 /** 聚合闭包契约：并集 + 不可逆 effect 计数 */
-function aggregateContracts(contracts: BrickContract[]): BrickManifest['aggregate'] {
+export function aggregateContracts(contracts: BrickContract[]): BrickManifest['aggregate'] {
   const byName = new Map<string, ShapeSchema>();
   const consumeByName = new Map<string, ShapeSchema>();
   const emits = new Set<string>();
@@ -359,6 +359,8 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
             total_symbols: dd.total_symbols,
             dead_third_party: dd.dead,
             limitations: dd.limitations,
+            live_symbols_by_file: dd.live_symbols_by_file,
+            live_type_names: dd.live_type_names,
           };
         } catch {
           // 分析失败不阻塞入盒：slim_candidates 缺省 = 未检测

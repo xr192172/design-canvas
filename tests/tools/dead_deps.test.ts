@@ -23,6 +23,7 @@ import {
   parseGoImportQualifiers,
   parseTsImportQualifiers,
   qualifierLines,
+  qualifierMemberLines,
 } from '../../src/tools/dead_deps';
 
 const roots: string[] = [];
@@ -44,7 +45,7 @@ function put(root: string, rel: string, content: string): void {
 }
 
 describe('parseGoImportQualifiers', () => {
-  it('块导入：alias 优先，无 alias 取路径末段', () => {
+  it('块导入：alias 优先（唯一候选），无 alias 为路径派生候选集', () => {
     const src = [
       'package svc',
       '',
@@ -55,17 +56,37 @@ describe('parseGoImportQualifiers', () => {
       ')',
     ].join('\n');
     const m = parseGoImportQualifiers(src);
-    expect(m.get('fmt')).toBe('fmt');
-    expect(m.get('github.com/live/livedep')).toBe('live');
-    expect(m.get('github.com/dead/deaddep')).toBe('deaddep');
+    expect(m.get('fmt')).toEqual(['fmt']);
+    expect(m.get('github.com/live/livedep')).toEqual(['live']);
+    expect(m.get('github.com/dead/deaddep')).toEqual(['deaddep']);
   });
 
   it('单行导入 + 空导入/点导入标记', () => {
     const src = 'package p\n\nimport "github.com/x/y"\nimport _ "github.com/side/effect"\nimport . "github.com/dot/dotdep"\n';
     const m = parseGoImportQualifiers(src);
-    expect(m.get('github.com/x/y')).toBe('y');
-    expect(m.get('github.com/side/effect')).toBe('_');
-    expect(m.get('github.com/dot/dotdep')).toBe('.');
+    expect(m.get('github.com/x/y')).toEqual(['y']);
+    expect(m.get('github.com/side/effect')).toEqual(['_']);
+    expect(m.get('github.com/dot/dotdep')).toEqual(['.']);
+  });
+
+  it('版本后缀/连字符/gopkg.in 路径的候选限定符（doublestar/v4 → doublestar）', () => {
+    // 回归：ocr_diff_resolver 真实事故——限定符只认路径末段 v4，`v4.` 在源码
+    // 里永不命中，活依赖被误判死候选、剪刀误剪 import → 编译报 undefined: doublestar
+    const src = [
+      'package p',
+      '',
+      'import (',
+      '\t"github.com/bmatcuk/doublestar/v4"',
+      '\t"gopkg.in/yaml.v2"',
+      '\t"github.com/pkoukk/tiktoken-go"',
+      '\topenai "github.com/openai/openai-go/v3"',
+      ')',
+    ].join('\n');
+    const m = parseGoImportQualifiers(src);
+    expect(m.get('github.com/bmatcuk/doublestar/v4')).toEqual(['v4', 'doublestar']);
+    expect(m.get('gopkg.in/yaml.v2')).toEqual(['yaml.v2', 'yaml']);
+    expect(m.get('github.com/pkoukk/tiktoken-go')).toEqual(['tiktoken-go', 'tiktoken', 'go']);
+    expect(m.get('github.com/openai/openai-go/v3')).toEqual(['openai']); // alias 唯一
   });
 });
 
@@ -92,6 +113,21 @@ describe('parseTsImportQualifiers', () => {
   });
   it('未出现的模块返回 null', () => {
     expect(parseTsImportQualifiers(src, 'not-imported')).toBeNull();
+  });
+});
+
+describe('qualifierMemberLines', () => {
+  it('Q.Name 行 + 成员名；行注释剔除；URL 字符串里的 // 不当注释', () => {
+    const src = [
+      'package p', // 1
+      'u := model.User{}', // 2 命中
+      '// model.Old() 注释不算', // 3 剔除
+      'v := w.Get("https://a") + model.New()', // 4 命中（URL 后的真引用）
+    ].join('\n');
+    expect(qualifierMemberLines(src, 'model')).toEqual([
+      { line: 2, member: 'User' },
+      { line: 4, member: 'New' },
+    ]);
   });
 });
 
@@ -237,6 +273,60 @@ describe('analyzeDeadThirdParty 集成', () => {
       expect(r.total_symbols).toBeGreaterThan(0);
       expect(r.live_symbols).toBeGreaterThan(0);
       expect(r.limitations.length).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('Go：跨包类型引用（model.User）激活目标包符号——live 明细跨文件传播', async () => {
+    // 回归：edges 表只有同文件边，Go 跨包引用若不补边，model.go keep 集
+    // 全空 → go-slim 整文件误剪（GetUser() *model.User 曾把 User 判死）
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dead-deps-go-xpkg-'));
+    roots.push(root);
+    put(root, 'go.mod', 'module example.com/demo\n\ngo 1.21\n');
+    put(root, 'pkg/model/model.go', 'package model\n\ntype User struct {\n\tName string\n}\n');
+    put(
+      root,
+      'pkg/svc/svc.go',
+      [
+        'package svc',
+        '',
+        'import "example.com/demo/pkg/model"',
+        '',
+        'func GetUser() *model.User {',
+        '\treturn &model.User{Name: "alice"}',
+        '}',
+      ].join('\n'),
+    );
+    put(
+      root,
+      'pkg/svc/extra.go',
+      ['package svc', '', 'func Extra() string {', '\treturn "x"', '}'].join('\n'),
+    );
+    const db0 = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    await importProject({ project_dir: root, feature: 'dead-deps-go-xpkg', cache_db: db0 });
+    db0.close();
+
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    try {
+      const closure = harvestClosure({ project_dir: root, files: ['pkg/svc/svc.go'] });
+      const closureFiles = closure.internal_files.map((f) => f.path);
+      expect(closureFiles).toContain('pkg/model/model.go'); // 文件级闭包经 resolveImport
+      expect(closureFiles).toContain('pkg/svc/extra.go'); // 同包目录端走
+
+      const r = analyzeDeadThirdParty({
+        db,
+        projectDir: root,
+        closureFiles,
+        seedFiles: ['pkg/svc/svc.go'],
+        external: closure.external,
+      });
+
+      // 符号级：跨包边补齐后 User 随种子活；同包 Extra 仍不可达
+      expect(r.live_symbols_by_file['pkg/model/model.go']).toEqual(['User']);
+      expect(r.live_symbols_by_file['pkg/svc/svc.go']).toContain('GetUser');
+      expect(r.live_symbols_by_file['pkg/svc/extra.go']).toBeUndefined();
+      expect(r.live_type_names).toContain('User');
     } finally {
       db.close();
     }
