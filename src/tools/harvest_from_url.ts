@@ -49,6 +49,8 @@ export interface HarvestFromUrlInput {
     max_bricks?: number;
     /** 种子最低 fan_in（默认 2——被至少 2 个文件复用才算"值得拎"） */
     min_fan_in?: number;
+    /** 额外排除的路径子串（vendored 克隆之外调用方自定义排除） */
+    exclude?: string[];
   };
   /** 单积木闭包文件数上限（默认 50；超限跳过该积木并告警） */
   max_closure?: number;
@@ -161,6 +163,30 @@ function aggregateContracts(contracts: BrickContract[]): BrickManifest['aggregat
   };
 }
 
+/**
+ * 判断相对路径是否落在 vendored 第三方项目克隆内（如 research/amazon-extensions/nodriver，
+ * 或 gitignore 的 go-lab/agent-shell 实验克隆——嵌套 go.mod = 独立 module）。
+ * 信号：某个祖先目录（非项目根）携带独立项目全套标记——
+ *   Go 嵌套 module（go.mod）、Python 打包件（pyproject.toml/setup.py/setup.cfg）、
+ *   或 LICENSE+README 并存（完整镜像特征；单 package.json 不算——monorepo 子包是一方代码）。
+ * 这类目录的 fan_in 是库内部引用，不是宿主项目的复用信号，auto 选种必须排除；
+ * 显式 seeds 不拦（人的判断优先，如刻意要抽 vendored 里的东西）。
+ */
+function underVendoredRoot(root: string, rel: string): boolean {
+  const segs = rel.split(/[\\/]+/);
+  for (let i = 1; i < segs.length; i++) {
+    const dir = path.join(root, segs.slice(0, i).join(path.sep));
+    if (!fs.existsSync(dir)) continue;
+    const has = (m: string) => fs.existsSync(path.join(dir, m));
+    const pyMarker = ['pyproject.toml', 'setup.py', 'setup.cfg'].some(has);
+    const goModule = has('go.mod');
+    const license_ = ['LICENSE', 'LICENSE.txt', 'COPYING'].some(has);
+    const readme = ['README.md', 'README.rst', 'README.txt'].some(has);
+    if (goModule || pyMarker || (license_ && readme)) return true;
+  }
+  return false;
+}
+
 // ── 主流程 ──────────────────────────────────────────────
 
 export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<HarvestFromUrlResult> {
@@ -197,6 +223,9 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
     const contractsByPath = ec.contracts ?? {};
     const reportByPath = new Map<string, FileContractReport>(ec.files.map((f) => [f.path, f]));
 
+    // auto 模式被排除的候选（vendored/调用方 exclude）——进 skipped 报告，不静默消失
+    const vendoredSkipped: Array<{ seeds: string[]; reason: string }> = [];
+
     // ③ 选积木
     let specs: BrickSpec[];
     if (input.bricks?.length) {
@@ -204,6 +233,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
     } else {
       const maxBricks = input.auto?.max_bricks ?? 5;
       const minFanIn = input.auto?.min_fan_in ?? 2;
+      const excludes = input.auto?.exclude ?? [];
       specs = ec.files
         .filter(
           (f) =>
@@ -213,6 +243,19 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
             !f.path.endsWith('_test.go') &&
             !/\.(test|spec)\.[jt]sx?$/.test(f.path),
         )
+        .filter((f) => {
+          // vendored 第三方克隆：fan_in 是库内部引用而非宿主复用信号，auto 不选
+          if (underVendoredRoot(root, f.path)) {
+            vendoredSkipped.push({ seeds: [f.path], reason: 'vendored 第三方项目克隆（fan_in=库内部引用，非宿主复用）' });
+            return false;
+          }
+          const hit = excludes.find((p) => f.path.includes(p));
+          if (hit) {
+            vendoredSkipped.push({ seeds: [f.path], reason: `调用方 exclude 命中：${hit}` });
+            return false;
+          }
+          return true;
+        })
         .sort((a, b) => b.fan_in - a.fan_in)
         .slice(0, maxBricks)
         .map((f) => ({ seeds: [f.path] }));
@@ -336,10 +379,11 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
     }
 
     const written = input.write !== false && reports.length > 0;
+    const allSkipped = [...skipped, ...vendoredSkipped];
     const message =
       `积木抽取：${repoName}${commit ? `@${commit.slice(0, 8)}` : ''} 索引 ${indexed} 文件，` +
       `入盒 ${reports.length} 块${reports.length ? `（${reports.map((r) => `${r.name}×${r.closure_count}`).join(', ')}）` : ''}` +
-      (skipped.length ? `；跳过 ${skipped.length}（${skipped.map((s) => s.reason.split('（')[0]).join('; ')}）` : '') +
+      (allSkipped.length ? `；跳过 ${allSkipped.length}（${allSkipped.map((s) => s.reason.split('（')[0]).join('; ')}）` : '') +
       (written ? `，盒：${boxDir}` : '（dry-run 预演）') +
       `。`;
 
@@ -350,7 +394,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       commit,
       indexed_files: indexed,
       bricks: reports,
-      skipped,
+      skipped: allSkipped,
       box_dir: boxDir,
       written,
       message,

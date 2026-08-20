@@ -272,10 +272,22 @@ interface BrickManifest {
 - 工程细节：extract_contracts/harvest_closure 经 getProjectCacheDb 连接池占住 cache.db 句柄，harvest 收尾必须 closeProjectCacheDb 释放（Windows 删临时目录 EBUSY 实测踩坑）
 - 7 单测全绿：本地全链三件套/auto 选积木（fan_in=3 util 唯一够格）/dry-run/闭包超限跳过/重抽替换/种子缺失/git URL e2e（file:// 浅克隆 + commit 记录 + 临时目录清理）
 
-**三项目试验**（待做）：
-- 试验场：design-canvas（TS）+ agent-shell（Go）+ cross-border-scout（TS/Node），三种异构真库
-- 流程：导入三项目 → 建索引 → 用户指定功能（如"LLM 调用封装"，三项目各有实现，顺便验语义去重）→ 检索、算闭包、出契约清单 → 拼新 DSL → 思维导图验收新积木盒
-- 可选加验：指定一个老依赖，演示契约匹配 + 适配器替换全过程
+**三项目试验 → Phase 3R 重构实验**（2026-08-20 启动，按重构思路推进）：
+
+试验场改为重构视角：design-canvas（TS）+ agent-shell（Go）+ cross-border-scout（Python），三种异构真库；目标从"拼新项目"扩展为"重复检测 + 积木拎取 + 胶水绞杀盘点"（用户定位：重构出更科学的、有时空/空间连续性运行层的结构——空间连续性 = 闭包自包含拎走即跑，时空连续性 = provenance 溯源链 + 重抽保留）。
+
+**3R-1 vendored 过滤规则** ✅ 2026-08-20：
+- 问题：auto 选种混入 vendored 第三方克隆（scout 的 nodriver/crawlee-python）与 gitignore 实验克隆（design-canvas 的 go-lab/agent-shell）——前者的 fan_in 是库内部引用而非宿主复用信号，后者是索引污染（agent-shell 代码被当成 design-canvas 积木候选）
+- 实现：`underVendoredRoot`（harvest_from_url.ts）——祖先目录（非项目根）携带嵌套 `go.mod`（独立 Go module，100% 信号）/ `pyproject.toml`·`setup.py`·`setup.cfg`（Python 打包件）/ LICENSE+README 并存（完整镜像特征；单 package.json 不算——monorepo 子包是一方代码）即判 vendored
+- 纪律：**显式 seeds 不拦**（人的判断优先），仅 auto 机器自选受约束；被排除候选进 skipped 报告（带原因），不静默消失
+- 效果：三项目候选全部换血——design-canvas 从 go-lab 假候选换成本体真候选（db/symbols.ts exposes=16、ts_kernel、llm_focus 等）；scout 从 nodriver 换成 src/llm.py（closure=12、不可逆=0）
+- 单测 8/8 全绿 + tsc 通过
+
+**3R-2 重复事实证明 + go_logging 入盒** ✅ 2026-08-20：
+- 首个跨项目重复实证：agent-shell `internal/logging/` 四件套（file/logging/rotate/router.go）在 design-canvas `go-lab/agent-shell/internal/logging/` 有手工副本，四文件 MD5 **逐字节相同**——"重复不是巧合，是积木该被抽走的信号"
+- `go_logging` 积木从 agent-shell 活仓库正式入盒（provenance=agent-shell@040843fc）：closure=4、exposes=5、纯 stdlib（ext 8/0/0，零三方依赖=拎走即跑）、不可逆=10（写日志天然副作用重，回收清单在契约里）
+- 绞杀处置：go-lab 是 gitignore 的 go-trace 插桩实验环境（README 记录用途），不删；其作为积木来源的资格已被 3R-1 过滤规则消除——盒中快照成为唯一事实源，go-lab 仅保留插桩实验用途
+- 待做：go-lab 与活仓库的漂移监控（当前零漂移）；agent-shell 侧是否反向引用盒中积木（Go module 语义下需 publish 路径，暂缓）
 
 ### Phase 4：跨项目统一索引 + 摘要层
 - 统一命名空间（多 cache.db 聚合或联邦检索）

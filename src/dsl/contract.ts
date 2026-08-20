@@ -141,9 +141,12 @@ export interface BrickManifest {
       name: string;
       /** 可执行断言描述（属性测试源） */
       assertion: string;
-      /** 断言来源：source-test=源项目测试钉死 / llm-proposed=LLM 提议待人确认 */
-      source: 'source-test' | 'llm-proposed';
-      /** 源测试文件路径（source-test 时，重抽可回溯） */
+      /**
+       * 断言来源：source-test=源项目测试钉死 / test-verified=在盒快照上执行过断言
+       * （LLM 提议 → 可执行测试跑通后转正）/ llm-proposed=LLM 提议待验证
+       */
+      source: 'source-test' | 'test-verified' | 'llm-proposed';
+      /** 断言出处文件（source-test=源测试 / test-verified=本仓库验证测试，重抽可回溯） */
       ref?: string;
     }>;
     /** 人类效果验收锚点（"左移10厘米后，眼见物体在原位置左侧10cm"）——语义层专属，LLM 不可代判 */
