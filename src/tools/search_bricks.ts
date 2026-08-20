@@ -66,6 +66,8 @@ export interface BrickShelfEntry {
   invariants?: number;
   /** invariant 来源分布（source-test/test-verified/llm-proposed 计数） */
   invariant_sources?: Record<string, number>;
+  /** 死三方依赖候选数（slim_candidates 档案；缺省 = 未检测） */
+  dead_third_party?: number;
   provenance: { source_project?: string; commit?: string; harvested_at?: string };
   /** query 检索得分（浏览模式无此字段） */
   score?: number;
@@ -83,6 +85,8 @@ export interface SearchBricksResult {
   effects_detail?: Record<string, unknown>;
   /** 详情模式：contracts.json 原文（完整形状/契约） */
   contracts?: unknown;
+  /** 详情模式：死依赖候选档案（slim 前 fixture，含 limitations 必读） */
+  slim_candidates?: BrickManifest['slim_candidates'];
 }
 
 /** 闭包文件扩展名投票推断语言 */
@@ -190,6 +194,7 @@ function buildEntry(
     confirmed_effects: manifest.effect_verification?.stats?.confirmed,
     invariants: invariants.length || undefined,
     invariant_sources: invariants.length > 0 ? invariantSources : undefined,
+    dead_third_party: manifest.slim_candidates?.dead_third_party.length || undefined,
     provenance: {
       source_project: manifest.provenance?.source_project,
       commit: manifest.provenance?.commit,
@@ -292,9 +297,15 @@ export async function searchBricks(input: SearchBricksInput): Promise<SearchBric
         `（不可逆 ${entry.effects.irreversible}）` +
         (entry.verified ? `，camera 已验证（转正 ${entry.confirmed_effects} 条）` : '，未做 camera 验证') +
         (entry.invariants ? `，不变量 ${entry.invariants} 条` : '') +
+        (entry.dead_third_party
+          ? `，死依赖候选 ${entry.dead_third_party}/${entry.third_party} 项（slim 前须四层验证）`
+          : '') +
         `。盒内路径 ${hit.dir}`,
       ...(effectsDetail ? { effects_detail: effectsDetail } : {}),
       ...(fullContracts ? { contracts: fullContracts } : {}),
+      ...(hit.manifest.slim_candidates
+        ? { slim_candidates: hit.manifest.slim_candidates }
+        : {}),
     };
   }
 

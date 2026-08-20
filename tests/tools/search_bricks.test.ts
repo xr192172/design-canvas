@@ -201,6 +201,37 @@ describe('searchBricks', () => {
     expect(r.message).toContain('不变量 2 条');
   });
 
+  it('死依赖候选透出：列表计数 + 详情档案（slim_candidates 原文）', async () => {
+    f.brick('dirty_demo', {
+      lang: 'go',
+      manifest: {
+        slim_candidates: {
+          computed_at: '2026-08-20T00:00:00Z',
+          live_symbols: 12,
+          total_symbols: 40,
+          dead_third_party: [
+            { source: 'github.com/unused/deadlib', files: ['internal/x.go'], reason: 'unreachable_only' },
+            { source: 'gopkg.in/ghost.v2', files: ['internal/y.go'], reason: 'no_reference' },
+          ],
+          limitations: ['静态可达性看不见反射…'],
+        },
+      },
+    });
+    // 列表/检索模式：计数透出
+    const list = await searchBricks({ box_dir: f.boxDir });
+    const entry = list.entries.find((e) => e.name === 'dirty_demo')!;
+    expect(entry.dead_third_party).toBe(2);
+    // 详情模式：计数 + slim_candidates 档案原文 + message 提示
+    const detail = await searchBricks({ box_dir: f.boxDir, name: 'dirty_demo' });
+    expect(detail.entries[0].dead_third_party).toBe(2);
+    expect(detail.slim_candidates?.dead_third_party).toHaveLength(2);
+    expect(detail.slim_candidates?.dead_third_party[0].source).toBe('github.com/unused/deadlib');
+    expect(detail.message).toContain('死依赖候选 2/');
+    // 无档案积木：计数缺省
+    const clean = list.entries.find((e) => e.name === 'go_logging')!;
+    expect(clean.dead_third_party).toBeUndefined();
+  });
+
   it('异常：盒不存在 / name 不在盒', async () => {
     await expect(searchBricks({ box_dir: 'D:/definitely/not/exist' })).rejects.toThrow('积木盒不存在');
     await expect(searchBricks({ box_dir: f.boxDir, name: 'ghost' })).rejects.toThrow('ghost');

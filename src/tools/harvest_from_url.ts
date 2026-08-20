@@ -24,12 +24,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { getStorageRoot } from '../storage.js';
-import { openDb, closeProjectCacheDb } from '../db/db.js';
+import { openDb, closeProjectCacheDb, getProjectCacheDb } from '../db/db.js';
 import { syncProject } from '../db/symbols.js';
 import { walkFiles } from './import_project.js';
 import { extractContracts, type FileContractReport } from './extract_contracts.js';
 import { harvestClosure } from './harvest_closure.js';
 import { parseGoModRequires, resolveGoThirdParty } from './go_mod.js';
+import { analyzeDeadThirdParty } from './dead_deps.js';
 import type { BrickContract, BrickManifest, ShapeSchema } from '../dsl/contract.js';
 
 export interface BrickSpec {
@@ -338,6 +339,32 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
         }
       }
 
+      // 死依赖检测（瘦身事实层）：种子不可达代码引入的三方依赖 = 死候选。
+      // Camera 宪法同构——只报告不剔除；机器可重算，重抽刷新。
+      let slimCandidates: BrickManifest['slim_candidates'];
+      if (closure.external.some((e) => e.class === 'third_party')) {
+        try {
+          const dd = analyzeDeadThirdParty({
+            db: getProjectCacheDb(root),
+            projectDir: root,
+            closureFiles: closure.internal_files.map((f) => f.path),
+            seedFiles: closure.internal_files
+              .filter((f) => f.depth === 0)
+              .map((f) => f.path),
+            external: closure.external,
+          });
+          slimCandidates = {
+            computed_at: new Date().toISOString(),
+            live_symbols: dd.live_symbols,
+            total_symbols: dd.total_symbols,
+            dead_third_party: dd.dead,
+            limitations: dd.limitations,
+          };
+        } catch {
+          // 分析失败不阻塞入盒：slim_candidates 缺省 = 未检测
+        }
+      }
+
       if (input.write !== false) {
         // files/：闭包文件内容快照
         fs.rmSync(brickDir, { recursive: true, force: true });
@@ -366,6 +393,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
           },
           aggregate: agg,
           go_mod_requires: goModRequires,
+          slim_candidates: slimCandidates,
           ...preserved,
           provenance: {
             source_project: source,

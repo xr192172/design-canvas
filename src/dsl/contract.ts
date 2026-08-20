@@ -184,6 +184,27 @@ export interface BrickManifest {
    * 机器可重算字段——重抽时从源项目 go.mod 重新提取刷新（不进重抽保留列表）。
    */
   go_mod_requires?: Record<string, string>;
+  /**
+   * 死依赖候选档案（积木瘦身事实层 Phase 5+）。Camera 宪法同构：只报告偏差，
+   * 绝不自动改写——剔除=改写=风险，须人拍板 + 四层验证（编译/源测试/camera/效果验收）
+   * 后产出 -slim 衍生积木，原积木永不覆盖。
+   * 机器可重算字段——重抽时重新分析刷新（不进重抽保留列表）。
+   */
+  slim_candidates?: {
+    computed_at: string;
+    /** 种子可达符号数 / 闭包符号总数（可达率的分母） */
+    live_symbols: number;
+    total_symbols: number;
+    /** 死三方依赖候选（仅供参考；reason 见 DeadDepReason） */
+    dead_third_party: Array<{
+      source: string;
+      /** import 了它的闭包文件 */
+      files: string[];
+      reason: 'no_reference' | 'unreachable_only';
+    }>;
+    /** 静态可达性分析的已知盲区（读报告前必看） */
+    limitations: string[];
+  };
   /** 来源溯源（冷记录：重抽凭 URL+commit，不保留原项目工作副本） */
   provenance?: {
     source_project?: string;

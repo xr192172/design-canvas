@@ -397,4 +397,52 @@ describe('assembleBricks', () => {
     const goMod = fs.readFileSync(path.join(target, 'go.mod'), 'utf8');
     expect(goMod).not.toContain('require (');
   });
+
+  it('死候选投影：require 项里跨积木全死的 module 进 dead_require_candidates', async () => {
+    // 积木 A：anthropic 被死候选覆盖
+    f.goBrick('demo_go_dead', {
+      manifest: {
+        go_mod_requires: { 'github.com/anthropics/anthropic-sdk-go': 'v1.66.0' },
+        slim_candidates: {
+          computed_at: '2026-08-20T00:00:00Z',
+          live_symbols: 3,
+          total_symbols: 10,
+          dead_third_party: [
+            { source: 'github.com/anthropics/anthropic-sdk-go', files: ['internal/a.go'], reason: 'unreachable_only' },
+          ],
+          limitations: ['…'],
+        },
+      },
+    });
+    // 积木 B：同一 anthropic 库被活用（不同 source 子路径）
+    f.goBrick('demo_go_alive', {
+      manifest: {
+        closure: {
+          internal: ['internal/diff/resolver.go', 'internal/model/types.go'],
+          external: [{ source: 'github.com/anthropics/anthropic-sdk-go/option', class: 'third_party' }],
+        },
+        go_mod_requires: { 'github.com/anthropics/anthropic-sdk-go': 'v1.66.0' },
+      },
+    });
+    // 单拼死积木：anthropic 进死候选
+    const r1 = await assembleBricks({
+      bricks: ['demo_go_dead'],
+      target_dir: f.targetDir(),
+      module: 'example.com/asm-006',
+      box_dir: f.boxDir,
+    });
+    expect(r1.dead_require_candidates).toEqual(['github.com/anthropics/anthropic-sdk-go']);
+    expect(r1.message).toContain('死依赖候选 1 项');
+    const asm1 = JSON.parse(fs.readFileSync(path.join(r1.target_dir, 'assembly.json'), 'utf8'));
+    expect(asm1.dead_require_candidates).toEqual(['github.com/anthropics/anthropic-sdk-go']);
+
+    // 死+活同拼：任一积木活用即保留 → 不进死候选
+    const r2 = await assembleBricks({
+      bricks: ['demo_go_dead', 'demo_go_alive'],
+      target_dir: f.targetDir(),
+      module: 'example.com/asm-007',
+      box_dir: f.boxDir,
+    });
+    expect(r2.dead_require_candidates).toEqual([]);
+  });
 });

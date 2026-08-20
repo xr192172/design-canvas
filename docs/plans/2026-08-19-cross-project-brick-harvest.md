@@ -391,6 +391,32 @@ interface BrickManifest {
 
 测试：go_mod 12 用例（解析/归并/版本比较）+ assemble_bricks 新增 4 用例（自动 require/MVS 冲突留档/子路径归并/无存档退化）+ harvest_from_url 新增 3 用例（Go 入盒存档/TS 缺省/重抽刷新）；全量 873/873 绿。
 
+### Phase 5++：死依赖检测层 ✅ 2026-08-20 完成（slim_candidates 事实存档）
+
+**原则**（用户定论）：完整积木默认保留，非必要不做剔除；检测到死依赖不自动改——剔除=改写=风险，Camera 宪法同构（只报告偏差，绝不自动改写）。
+
+处理分级：
+1. **检测层（本次落地）**：入盒自动算死候选、货架/拼装透出——零风险，纯事实存档
+2. **剔除层（按需触发，暂缓）**：触发条件=拼装出现实际痛点（依赖冲突/版本矛盾/体积臃肿）→ 人拍板 → LLM 执行剔除 → 四层验证（编译/源测试/camera 行为对比/效果验收）→ 产出 `-slim` 衍生积木，原积木永不覆盖
+3. 无痛点不触发：拼装无冲突时死依赖只是档案数字，不构成行动项
+
+新模块 src/tools/dead_deps.ts（符号级可达性分析）：
+- 种子文件符号沿 call/type_ref 边 BFS → 活跃符号集；import 限定符解析（Go/TS）→ 引用归属 → 死候选聚合（该依赖所有引用皆死才标记，`unreachable_only`；import 了但零引用是 `no_reference`）
+- 保守规则防误判：Go init 函数/包级 var、TS 顶层 const 视为活跃（副作用不猜）
+
+链路：
+1. **入盒存档**（harvest_from_url）：manifest 新字段 `slim_candidates`（live/total 符号数、死三方列表、limitations 必读）；机器可重算字段——重抽刷新；分析失败不阻塞入盒（缺省=未检测）
+2. **货架透出**（search_bricks）：列表带 dead_third_party 计数；详情模式返回完整档案
+3. **拼装投影**（assemble_bricks）：`dead_require_candidates`——自动 require 项里跨积木全部用途皆死的 module
+
+**实战验证**（重抽 ocr_diff_resolver，真实盒已刷新）：
+- live 13/296 符号（4.4% 可达率）——resolver 是纯字符串定位器，闭包拖入的 llm/telemetry 生态对种子全不可达
+- 25 个三方依赖入口里 **22 个死候选**：anthropic/openai SDK（5 子包）/tiktoken/otel 全家（11 项）皆 unreachable_only；doublestar 是 no_reference（import 了但零引用）
+- description 人工沉淀保留
+- 诚实边界：静态可达性有盲区（反射/接口动态分派），所以只叫"候选"——剔除前必须四层验证，这正是检测层与剔除层分离的原因
+
+测试：dead_deps 11 用例（Go/TS 可达性 BFS、import 解析、死候选聚合、保守规则、stripTsImportLines）+ harvest_from_url/search_bricks/assemble_bricks 集成用例；全量 882/882 绿。
+
 ## 六、验收标准（Phase 3 试验）
 
 用户应能看到：

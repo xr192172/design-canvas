@@ -87,6 +87,8 @@ export interface AssembleBricksResult {
   go_requires: Record<string, string>;
   /** 多积木同库不同版本的冲突记录（MVS 取高，决策留档） */
   version_conflicts: string[];
+  /** 自动 require 项中的死依赖候选（slim_candidates 档案投影——剔除前须四层验证） */
+  dead_require_candidates: string[];
   go_mod_written: boolean;
   assembly_manifest_written: boolean;
   written: boolean;
@@ -251,6 +253,8 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
   const goRequires = new Map<string, string>();
   const modOwner = new Map<string, string>();
   const versionConflicts: string[] = [];
+  // module root → 跨积木使用统计（live/dead 计数；全 dead 才进 dead_require_candidates）
+  const moduleUse = new Map<string, { live: number; dead: number }>();
   for (const { manifest, dir } of loaded) {
     const internal = manifest.closure?.internal ?? [];
     const dirs = closureDirs(internal);
@@ -306,6 +310,27 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
           goRequires.set(mod, pick);
         }
       }
+      // 死候选聚合：source → module root 映射，按"任一积木活用即保留"取交集
+      const deadSources = new Set(
+        (manifest.slim_candidates?.dead_third_party ?? []).map((d) => d.source),
+      );
+      for (const src of thirdParty) {
+        let cur = src;
+        for (;;) {
+          if (manifest.go_mod_requires[cur] !== undefined) break;
+          const i = cur.lastIndexOf('/');
+          if (i < 0) {
+            cur = '';
+            break;
+          }
+          cur = cur.slice(0, i);
+        }
+        if (!cur) continue;
+        const agg = moduleUse.get(cur) ?? { live: 0, dead: 0 };
+        if (deadSources.has(src)) agg.dead += 1;
+        else agg.live += 1;
+        moduleUse.set(cur, agg);
+      }
     } else {
       for (const t of thirdParty) thirdPartyPending.add(t);
     }
@@ -342,6 +367,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
 
   // ── assembly.json 出生证明 ──
   let manifestWritten = false;
+  // 死依赖候选投影（提前算：assembly.json 与返回值共用）
+  const deadRequireCandidates = [...moduleUse.entries()]
+    .filter(([, u]) => u.dead > 0 && u.live === 0)
+    .map(([m]) => m)
+    .sort();
   if (write) {
     const assembly = {
       assembled_at: new Date().toISOString(),
@@ -358,6 +388,7 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
       third_party_pending: [...thirdPartyPending],
       go_requires: goRequiresObj,
       version_conflicts: versionConflicts,
+      dead_require_candidates: deadRequireCandidates,
       overlaps,
     };
     fs.writeFileSync(path.join(targetDir, 'assembly.json'), JSON.stringify(assembly, null, 2), 'utf-8');
@@ -371,6 +402,9 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     `（${totalFiles} 文件${totalRewrites ? `，Go import 重写 ${totalRewrites} 处` : ''}）` +
     (goModWritten ? `，go.mod module=${input.module}` : '') +
     (goRequires.size ? `，三方依赖自动 require ${goRequires.size} 项（版本来自源项目 go.mod 存档）` : '') +
+    (deadRequireCandidates.length
+      ? `，其中死依赖候选 ${deadRequireCandidates.length} 项（slim 前须四层验证，见 dead_require_candidates）`
+      : '') +
     (thirdPartyPending.size ? `；无版本存档待补 ${thirdPartyPending.size} 项（见 third_party_pending）` : '') +
     (versionConflicts.length ? `；版本冲突 ${versionConflicts.length} 处（MVS 取高，见 version_conflicts）` : '') +
     (overlaps.length ? `；重叠警告 ${overlaps.length} 条` : '') +
@@ -385,6 +419,7 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
     third_party_pending: [...thirdPartyPending],
     go_requires: goRequiresObj,
     version_conflicts: versionConflicts,
+    dead_require_candidates: deadRequireCandidates,
     go_mod_written: goModWritten,
     assembly_manifest_written: manifestWritten,
     written: write,

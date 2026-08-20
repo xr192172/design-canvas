@@ -106,6 +106,20 @@ function makeGoProjectWithMod(): string {
       '}',
     ].join('\n'),
   );
+  // 同包 sibling：不可达函数引死三方（slim_candidates 检测目标）
+  put(
+    root,
+    'pkg/svc/extra.go',
+    [
+      'package svc',
+      '',
+      'import "github.com/unused/deadlib"',
+      '',
+      'func Extra() string {',
+      '\treturn deadlib.Thing()',
+      '}',
+    ].join('\n'),
+  );
   return root;
 }
 
@@ -269,6 +283,15 @@ describe('harvest_from_url 积木抽取编排', () => {
     expect(manifest.go_mod_requires).toEqual({
       'github.com/openai/openai-go/v3': 'v3.52.0',
     });
+    // 死依赖候选：sibling 不可达函数引的 deadlib；openai（种子活用）不死
+    expect(manifest.slim_candidates).toBeDefined();
+    const deadSources = manifest.slim_candidates!.dead_third_party.map((d) => d.source);
+    expect(deadSources).toEqual(['github.com/unused/deadlib']);
+    expect(manifest.slim_candidates!.dead_third_party[0].reason).toBe('unreachable_only');
+    expect(manifest.slim_candidates!.dead_third_party[0].files).toEqual(['pkg/svc/extra.go']);
+    expect(manifest.slim_candidates!.total_symbols).toBeGreaterThan(0);
+    expect(manifest.slim_candidates!.live_symbols).toBeGreaterThan(0);
+    expect(manifest.slim_candidates!.limitations.length).toBeGreaterThan(0);
   });
 
   it('TS 项目入盒：无 go.mod → go_mod_requires 缺省', async () => {
@@ -281,6 +304,9 @@ describe('harvest_from_url 积木抽取编排', () => {
       fs.readFileSync(path.join(box, r.bricks[0].name, 'manifest.json'), 'utf-8'),
     );
     expect(manifest.go_mod_requires).toBeUndefined();
+    // TS 积木同样做死依赖检测：react 被 mainA 活用 → 死候选为空但有档案
+    expect(manifest.slim_candidates).toBeDefined();
+    expect(manifest.slim_candidates!.dead_third_party).toEqual([]);
   });
 
   it('重抽刷新：go_mod_requires 机器可重算字段随源项目 go.mod 变化更新', async () => {
