@@ -77,6 +77,27 @@ describe('findSimilarNames - 相似名聚类', () => {
     expect(findCluster(clusters, 'count2').basis).toBe('count');
     expect(findCluster(clusters, 'totla').basis).toBe('total');
   });
+
+  it('单复数对（node/nodes、chunk/chunks）属正常英文，不当作相似名', async () => {
+    const src = 'function f() {\n  const node = 1;\n  const nodes = [node];\n  const chunk = [];\n  const chunks = [chunk];\n  return [nodes, chunks];\n}\n';
+    const clusters = await findSimilarNames(src);
+    expect(clusters).toHaveLength(0);
+  });
+
+  it('公共前缀不足2的"单字符巧合"（node/mode）不判为相似', async () => {
+    const src = 'function f() {\n  const node = 1;\n  const mode = 2;\n  return node + mode;\n}\n';
+    const clusters = await findSimilarNames(src);
+    expect(clusters).toHaveLength(0);
+  });
+
+  it('无关短名（out/outs/cur/cut）非传递聚类：只把真孪生 cu→cut 聚出，其余不串联', async () => {
+    const src = 'function f() {\n  const out = 1;\n  const outs = out + 1;\n  const cur = 3;\n  const cut = cur + 1;\n  return [outs, cut];\n}\n';
+    const clusters = await findSimilarNames(src);
+    // out/outs 是单复数对→滤掉；out/cur/out/cut 起手不同→不串
+    // 仅 cur/cut（公共前缀 cu=2、1 字符差异）成簇
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].entries.map((e) => e.name).sort()).toEqual(['cur', 'cut']);
+  });
 });
 
 describe('suggestDisambiguations - LLM 消歧命名（可注入）', () => {

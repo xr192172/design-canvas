@@ -12,11 +12,15 @@
  *     无 LLM / 调用失败 → 如实降级只列聚类（suggested 留空）。
  *   - disambiguationItems：把消歧结果转成 renameMany 可消费的 items。
  *
- * 相似判定（confusable）：
+ * 相似判定（confusable，宁漏不误）：
  *   - 仅大小写不同（userData/userdata）
  *   - 数字后缀孪生（count/count2，基础名 ≥2 字符）
  *   - 相邻换位 typo（total/totla，长度 ≥4）
- *   或编辑距离 ≤1（长度 3-5）/ ≤2（长度 ≥6）
+ *   或编辑距离 ≤1（长度 3-5）/ ≤2（长度 ≥6），且**公共前缀 ≥2**（挡掉 node/mode、outs/cut 等
+ *   只是单字符碰巧相近但起手即不同的短名）
+ * 聚合成簇为**质心星系（非传递）**：每个名字只直接依附到一个 basis，不因中间相似节点链式串联，
+ * 杜绝无关岛（out/outs/cur/cut）被并进同一簇。
+ * 过滤：**单复数对**（chunk/chunks、node/nodes 属正常英文习惯）不作疑似相似名。
  * 边界：长度 <3 的短名不在此处理（归 suggest_renames）；`_` 忽略。
  */
 
@@ -113,6 +117,18 @@ function isAdjacentSwap(a: string, b: string): boolean {
   return false;
 }
 
+/** 单复数对（一个 = 另一个 + 's'）：正常英文习惯，非易看错孪生名，应当放过 */
+function isPluralPair(a: string, b: string): boolean {
+  return a === b + 's' || b === a + 's';
+}
+
+/** 公共前缀长度（小编辑距离相似的先决门槛，挡掉 node/mode、outs/cut 等起手即不同的短名） */
+function commonPrefixLen(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
 /** 两名字是否"易看错"（互不为空串、不相等、非 `_`） */
 function confusable(a: string, b: string): boolean {
   if (!a || !b || a === '_' || b === '_' || a === b) return false;
@@ -120,6 +136,8 @@ function confusable(a: string, b: string): boolean {
   const bl = b.toLowerCase();
   // 仅大小写不同
   if (al === bl) return true;
+  // 单复数对（chunk/chunks、node/nodes）——正常习惯，不作为死神代码
+  if (isPluralPair(al, bl)) return false;
   // 数字后缀孪生（count / count2）：基础名 ≥2 字符才纳入，否则太容易误报
   const ab = stripTrailingDigits(al);
   const bb = stripTrailingDigits(bl);
@@ -128,6 +146,8 @@ function confusable(a: string, b: string): boolean {
   if (al.length < 3 || bl.length < 3) return false;
   // 相邻换位（典型 typo：total/totla），长度≥4 才纳入避免误报
   if (al.length >= 4 && isAdjacentSwap(al, bl)) return true;
+  // 小编辑距离：先决公共前缀≥2，否则 node/mode（0）、outs/cut（0）这类只是"单字符碰巧相近"的短名不判为相似
+  if (commonPrefixLen(al, bl) < 2) return false;
   const dist = levenshtein(al, bl);
   const len = Math.max(al.length, bl.length);
   return len >= 6 ? dist <= 2 : dist <= 1;
@@ -186,35 +206,34 @@ export async function findSimilarNames(
     const names = [...byName.keys()];
     if (names.length < 2) continue;
 
-    // 并查集：相似名连通块
-    const parent = new Map<string, string>();
-    const find = (x: string): string => {
-      let r = x;
-      while (parent.get(r) !== r) r = parent.get(r) ?? r;
-      return r;
-    };
-    const union = (a: string, b: string): void => {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra !== rb) parent.set(ra, rb);
-    };
-    for (const x of names) if (!parent.has(x)) parent.set(x, x);
-
-    for (let i = 0; i < names.length; i++) {
-      for (let j = i + 1; j < names.length; j++) {
-        if (confusable(names[i], names[j])) union(names[i], names[j]);
+    // 质心星系聚类（非传递，宁漏不误）：每个名字只直接依附到一个 basis；
+    // 不因为"中间有相似节点"链式串联，杜绝 outs/out/cur/cut 这类无关岛被并进同一簇。
+    const bases: string[] = [];
+    const basisOf = new Map<string, string>();
+    for (const name of names) {
+      let attached = '';
+      for (const b of bases) {
+        if (confusable(name, b)) {
+          attached = b;
+          break;
+        }
+      }
+      if (attached) basisOf.set(name, attached);
+      else {
+        bases.push(name);
+        basisOf.set(name, name);
       }
     }
 
-    // 每个≥2不同名的连通块 → 一个 cluster
-    const comp = new Map<string, string[]>();
+    // 每个 basis → 直接依附其上的名字（非传递）
+    const basisToNames = new Map<string, string[]>();
     for (const n of names) {
-      const r = find(n);
-      const arr = comp.get(r);
+      const b = basisOf.get(n)!;
+      const arr = basisToNames.get(b);
       if (arr) arr.push(n);
-      else comp.set(r, [n]);
+      else basisToNames.set(b, [n]);
     }
-    for (const memberNames of comp.values()) {
+    for (const [bName, memberNames] of basisToNames) {
       if (memberNames.length < 2) continue;
       const entries: SimilarNameEntry[] = [];
       for (const name of memberNames) {
