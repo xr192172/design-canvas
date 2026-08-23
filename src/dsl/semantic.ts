@@ -7,6 +7,8 @@ import type { BrickContract } from './contract.js';
 
 /** 预期 API */
 export interface ExpectedApi {
+  /** 函数名（extractApis/opl 写入 actual_apis 时填充） */
+  name?: string;
   /** 函数签名，如 "User.Login() (token string, err error)" */
   signature: string;
   /** 函数起始行号（import_project 扫描时填充，LLM 拿到后直接 read 定位） */

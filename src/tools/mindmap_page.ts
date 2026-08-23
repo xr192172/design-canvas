@@ -35,6 +35,7 @@ export function renderMindmapPage(feature: string): string {
       <span id="save-state"></span>
     </div>
   </div>
+  <div id="plinebar" style="display:none; position:fixed; left:16px; bottom:16px; z-index:97; background:#e3fafc; color:#0b7285; border:1px solid #15aabf; border-radius:10px; padding:8px 14px; font:12px/1.5 system-ui,sans-serif; box-shadow:0 4px 14px rgba(21,170,191,.18); max-width:min(56vw,560px);"></div>
   <div id="canvas-wrap">
     <svg id="mm" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -58,6 +59,19 @@ export function renderMindmapPage(feature: string): string {
     <input id="inline-text" placeholder="输入文字，Enter 确定 · Esc 取消">
   </div>
   <div id="detail" style="display:none;"></div>
+  <div id="docpanel" style="display:block; position:fixed; top:52px; right:16px; bottom:16px; width:300px; z-index:25; background:#ffffff; border:1px solid #dee2e6; border-top:4px solid #1971c2; border-radius:14px; box-shadow:0 10px 30px rgba(30,60,100,.16); overflow:auto; font-size:13px; color:#343a40; line-height:1.7;">
+    <div id="docpanel-hd" style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px 8px; position:sticky; top:0; background:#fff; border-bottom:1px solid #e9ecef; cursor:pointer;">
+      <b style="font-size:14px; color:#1c7ed6;">📋 项目导读</b>
+      <span id="docpanel-fold" style="color:#868e96; font-size:12px; border:1px solid #ced4da; border-radius:8px; padding:2px 9px;">收起</span>
+    </div>
+    <div id="docpanel-body" style="padding:12px 16px 20px; overflow:auto; max-height:calc(100vh - 140px);">
+      <div id="dp-one" style="font-size:14px; font-weight:700; color:#1e1e1e; margin-bottom:6px;">…</div>
+      <div id="dp-brief" style="color:#495057; margin-bottom:10px;">…</div>
+      <div id="dp-feats" style="margin-bottom:6px;">…</div>
+      <div id="dp-steps" style="color:#868e96; font-size:12px;">…</div>
+    </div>
+  </div>
+  <div id="docpanel-hint" style="display:none; position:fixed; top:64px; right:16px; z-index:26; background:#e7f5ff; color:#0b7285; border:1px solid #74c0fc; border-radius:10px; padding:7px 13px; font-size:12.5px; cursor:pointer; box-shadow:0 4px 14px rgba(25,113,194,.15);">📋 项目导读</div>
   <div id="editor" style="display:none;">
     <div class="ed-title">✏️ 批注 <em id="ed-target"></em></div>
     <textarea id="ed-text" placeholder="写你的理解、纠正、问题……&#10;例如：这一步其实先查缓存；这个功能应该叫配置中心"></textarea>
@@ -115,14 +129,50 @@ export function renderMindmapPage(feature: string): string {
     .ed-btns .primary { background: #a5d8ff; color: #1864ab; border-color: #4dabf7; font-weight: 700; }
     #hint { position: fixed; right: 20px; bottom: 20px; font-size: 11.5px; color: #5c6770; opacity: .92; background: rgba(255,255,255,.94); border: 1px solid #e9ecef; border-radius: 8px; padding: 5px 12px; z-index: 15; max-width: 460px; box-shadow: 0 2px 8px rgba(50,60,80,.08); }
     #hint b { color: #6741d9; }
+    /* ── 工厂产线视图（PL 确认的步骤组：工序盒+针脚+正交连线）── */
+    .fac-mach { fill: #fff; stroke: #0c8599; stroke-width: 1.8; }
+    .fac-mach-hd { fill: #e6f4f6; }
+    .fac-mach-title { font-weight: 700; fill: #0b7285; font-size: 12px; }
+    .fac-pin-name { font-size: 11px; fill: #334155; }
+    .fac-pin-type { font-size: 10px; fill: #0b7285; font-family: ui-monospace, Consolas, monospace; }
+    .fac-pin-type-out { text-anchor: end; }
+    .fac-pin-sq { fill: #0c8599; stroke: #fff; stroke-width: 1.2; }
+    .fac-file { font-size: 10px; fill: #94a3b8; font-family: ui-monospace, Consolas, monospace; }
+    .fac-detail { font-size: 10.5px; fill: #475569; }
+    .fac-narr-hd { font-size: 9.5px; font-weight: 600; fill: #1f2937; }
+    .fac-narr-title { font-size: 10.5px; font-weight: 600; fill: #155e75; }
+    .fac-narr-detail { font-size: 10px; fill: #475569; }
+    .fac-narr-facts { font-size: 9px; fill: #94a3b8; font-family: ui-monospace, Consolas, monospace; }
+    .fac-wire { fill: none; stroke: #0c8599; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+    .fac-wirehead { fill: #0c8599; }
+    .fac-slot-in { fill: #fff; stroke: #64748b; stroke-width: 1.5; }
+    .fac-slot-out { fill: #eef6ff; stroke: #3b82f6; stroke-width: 1.4; }
+    .fac-slot-t { font-weight: 700; font-size: 12px; fill: #334155; }
+    .fac-slot-out .fac-slot-t { fill: #1d4ed8; }
+    .fac-slot-sub { font-size: 10.5px; fill: #64748b; }
+    .fac-bound { fill: none; stroke: #94b8c4; stroke-width: 1.2; stroke-dasharray: 4 5; }
+    .fac-floor-bg { fill: #faf6ed; }
+    .fac-btn { font-size: 11px; fill: #0369a1; cursor: pointer; font-weight: 700; }
+    .fac-btn:hover { fill: #0c8599; }
+    .fac-seq { font-size: 10px; font-weight: 700; fill: #fff; }
+    .fac-seq-bg { fill: #0c8599; }
+    /* 待做灰块 */
+    .fac-todo { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.6; stroke-dasharray: 5 4; }
+    .fac-todo-hd { fill: #f1f5f9; }
+    .fac-todo .fac-mach-title { fill: #64748b; }
+    .fac-todo .fac-pin-name { fill: #94a3b8; }
+    .fac-todo .fac-pin-type { fill: #94a3b8; }
+    .fac-todo .fac-pin-sq { fill: #cbd5e1; stroke: #f8fafc; }
+    .fac-todo .fac-file { fill: #94a3b8; }
   </style>`;
 
   const script = `
   var FEATURE = ${JSON.stringify(feature)};
-  var OV = null, ANNS = [], UNODES = [], DEPS = [], FOUNDATIONS = [];
+  var OV = null, ANNS = [], UNODES = [], DEPS = [], FOUNDATIONS = [], FLOWS = [], PL = {}, PLP = {};
   var TREE = null, NODE_BY_ID = {}, SEL = null, DIRTY = false;
   var VIEW = { tx: 0, ty: 0, s: 1 };
   var COLLAPSED = {};   // 会话级折叠状态：id -> true
+  var DOC_W = 0;        // 右侧导读面板占位宽度（面板可见时=面板宽，收起=0）
   var INLINE = null;    // inline 编辑状态：{ parentId, editId, x, y }
 
   // ── 数据加载 ──
@@ -133,12 +183,73 @@ export function renderMindmapPage(feature: string): string {
     DEPS = ((OV.mind_map && OV.mind_map.deps) || []).slice();
     FOUNDATIONS = (OV.mind_map && OV.mind_map.foundations) || [];
     FLOWS = ((OV.mind_map && OV.mind_map.flows) || []).slice();
+    // 产线视图确认表（主人拍板）+ LLM 提议（候选，确认前不影响渲染）
+    PL = (OV.mind_map && OV.mind_map.pipeline_like) || {};
+    PLP = (OV.mind_map && OV.mind_map.pipeline_like_proposals) || {};
     // 构想的预判依赖：紫色"预判"弧（区别于真实调用证据的橙色弧）
     ((OV.mind_map && OV.mind_map.proposals) || []).forEach(function(pp){
       (pp.depends_on || []).forEach(function(d){ DEPS.push({ from: pp.title, to: d, weight: 0, _pred: true }); });
     });
-    rebuild(); fitView();
+    rebuild();
+    setDepthLevel(1); // 默认展开到功能层：各功能先折叠为卡片，点开某个功能才展开其工厂流水线（工序盒+针脚+连线）。
+    // 这样大项目首屏不渲染全部工序，避免切到其它项目时卡顿；产线仍是功能展开时的固定呈现。
+    renderPipelineBar();
     pollSharedDesc();
+    fillDocPanel();
+    wireDocPanelToggle();
+  }
+  // ── 右侧导读面板 收起/唤醒 切换 ──
+  function wireDocPanelToggle(){
+    var p = document.getElementById('docpanel'), hint = document.getElementById('docpanel-hint');
+    function showPanel(show){
+      p.style.display = show ? 'block' : 'none';
+      hint.style.display = show ? 'none' : 'block';
+      DOC_W = show ? (p.offsetWidth + 24) : 0;
+      requestAnimationFrame(fitView); // 面板宽度变化 → 重新计算可用画布
+    }
+    DOC_W = p.offsetWidth + 24;
+    document.getElementById('docpanel-hd').onclick = function(){ showPanel(false); };
+    hint.onclick = function(){ showPanel(true); };
+    fillDocPanel();
+  }
+  // ── 右侧项目导读面板：填全局介绍（summary）+ 模块清单 + 上手步骤；点模块名定位导图 ──
+  function fillDocPanel(){
+    var one = OV && OV.summary && OV.summary.one_liner;
+    var brief = OV && OV.summary && OV.summary.brief;
+    document.getElementById('dp-one').textContent = one || FEATURE;
+    document.getElementById('dp-brief').textContent = brief || '（暂无项目介绍）';
+    var mm = OV && OV.mind_map;
+    var feats = mm && mm.root ? (mm.root.children || []) : [];
+    var fhtml = '<div style="font-weight:700;color:#1971c2;margin-top:4px;">🧩 项目模块</div>'
+      + feats.map(function(f, i){
+          var lab = esc(f.label), desc = esc((f.description || '').slice(0, 60));
+          return '<div data-jump="'+i+'" style="display:flex;align-items:center;gap:8px;padding:7px 9px;margin:4px 0;border:1px solid #e7f0fa;border-radius:9px;cursor:pointer;background:#f7fbff;">'
+            + '<span style="width:20px;height:20px;flex:0 0 20px;border-radius:50%;background:#1971c2;color:#fff;font-size:11px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;">'+(i+1)+'</span>'
+            + '<div style="flex:1;min-width:0;"><div style="font-weight:600;color:#1e3a5f;">'+lab+'</div>'
+            + '<div style="font-size:11px;color:#868e96;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+desc+'</div></div>'
+            + (feats.length>1 ? '<span style="font-size:11px;color:#15aabf;">' + (i+1) + '</span>' : '')
+            + '</div>';
+        }).join('');
+    document.getElementById('dp-feats').innerHTML = fhtml + '<div style="font-size:11px;color:#868e96;margin-top:6px;">点模块跳到导图 · 点模块左侧圆点在本图展开</div>';
+    var st = (OV && OV.first_steps) || [];
+    document.getElementById('dp-steps').innerHTML = st.length
+      ? '<div style="font-weight:700;color:#0b7285;margin-top:6px;">🪜 上手步骤</div>' + st.slice(0,5).map(function(s,i){ return '<div style="padding:3px 0;">'+(i+1)+'. '+esc(s.label)+'</div>'; }).join('')
+      : '';
+    document.querySelectorAll('#dp-feats [data-jump]').forEach(function(el){
+      el.onclick = function(){
+        var i = parseInt(el.getAttribute('data-jump'), 10);
+        var fn = TREE && TREE.children ? TREE.children[i] : null;
+        if(!fn) return;
+        // 收起其他模块、展开目标模块，并居中定位
+        for(var k in COLLAPSED) delete COLLAPSED[k];
+        TREE.children.forEach(function(other){ if(other !== fn && other.children.length) COLLAPSED[other.kind==='feature'?other.id:(other.id||'')] = true; });
+        delete COLLAPSED[fn.id];
+        layoutTree(); renderAll();
+        var b = { x: fn._x, y: fn._y - 40 };
+        VIEW = { tx: window.innerWidth/2 - b.x*VIEW.s, ty: 52 + (window.innerHeight-52)/2 - b.y*VIEW.s, s: VIEW.s };
+        applyView();
+      };
+    });
   }
   function fetchAll(){
     return Promise.all([
@@ -177,6 +288,99 @@ export function renderMindmapPage(feature: string): string {
     if(SEL && NODE_BY_ID[SEL] && NODE_BY_ID[SEL].kind === 'shared') select(SEL);
   }
 
+  // ── 产线骨架注入：把功能的步骤组升级为工厂产线（工序盒+针脚+正交连线）。
+  // 默认所有功能直接走产线视图——工厂流水线就是分镜的标准呈现，无需逐一拍板；
+  // 仅当主人显式点过「✗ 否」（PL[label] === false）才回落为普通步骤列表。
+  // 顺序就是分镜顺序（LLM 已按真实调用/数据流排出），不再用 FLOWS 重算。
+  function markPipeline(){
+    var fn, k, n;
+    for(k in NODE_BY_ID){ n = NODE_BY_ID[k];
+      if(n.kind === 'feature' && PL[n.raw.label] !== false){
+        n.children.forEach(function(g){
+          if(g.kind === 'stepgroup'){
+            g._manualFlow = 1;
+            g._factory = true;
+            var st = (g.children || []).filter(function(c){ return c.kind === 'step'; });
+            st.forEach(function(s, i){
+              s._flowSeq = i + 1;
+              s._facStep = true;
+              prepareFacPins(s, i, st.length, g);
+            });
+          }
+        });
+      }
+    }
+  }
+
+  // ── 工厂产线几何配置 ──
+  var FAC = {
+    machW: 280, hdH: 26, pinStart: 36, pinRowH: 20, pinSize: 9,
+    fileH: 22, detailPadTop: 8, detailLineH: 15, detailPadBot: 10,
+    padL: 12, padR: 12, machGap: 64, slotW: 100, slotH: 48, slotGap: 36,
+    floorPadX: 16, floorPadTop: 40, floorPadBot: 20
+  };
+  // 针脚数据准备：优先用契约投影（后端从 actual_apis 签名推导、非 LLM 编造），
+  // 再读 raw.inputs/outputs（未来 LLM 直接生成），否则按步骤顺序自动推导
+  function prepareFacPins(s, idx, total, group){
+    var raw = s.raw || {};
+    var meta = raw.meta || {};
+    var ins = meta.inputs || raw.inputs, outs = meta.outputs || raw.outputs;
+    if(!ins || !ins.length){
+      if(idx === 0) ins = [{ n: '原材料', t: 'input' }];
+      else {
+        var prev = group.children.filter(function(c){ return c.kind === 'step'; })[idx - 1];
+        var prevOut = (prev && prev._facOuts) || [{ n: '上一步产出', t: 'data' }];
+        ins = prevOut.map(function(p){ return { n: p.n, t: p.t }; });
+      }
+    }
+    if(!outs || !outs.length){
+      var outName = s.label ? s.label.replace(/[了着过]$/, '') + '结果' : '输出';
+      outs = [{ n: outName, t: 'data' }];
+    }
+    s._facIns = ins;
+    s._facOuts = outs;
+  }
+  function facPinCount(s){
+    return Math.max((s._facIns || []).length, (s._facOuts || []).length, 1);
+  }
+  function facBaseH(s){
+    var n = facPinCount(s);
+    return FAC.hdH + (FAC.pinStart - FAC.hdH) + n * FAC.pinRowH + FAC.fileH;
+  }
+  function facMachH(s){
+    var h = facBaseH(s);
+    if(s._facOpen && s.raw){
+      var d = String(s.raw.detail || s.raw.description || '');
+      if(d){
+        var ls = wrap(d, 20);
+        h += FAC.detailPadTop + ls.length * FAC.detailLineH + FAC.detailPadBot;
+      }
+      // 叙事分镜面板高度：进料口/工序/出料口 三个场景，每个标题行+正文换行+事实小字
+      var narr = (s.raw.meta && s.raw.meta.narration) || [];
+      if(narr.length){
+        narr.forEach(function(sc){
+          var dl = wrap(sc.detail, 22);
+          var fl = sc.facts.length ? 1 : 0; // 事实合并为一行小字
+          h += 24 + dl.length * FAC.detailLineH + fl * FAC.detailLineH;
+        });
+        h += FAC.detailPadBot;
+      }
+    }
+    return h;
+  }
+  function facPinY(m, idx){ return m.y + FAC.pinStart + idx * FAC.pinRowH + FAC.pinRowH / 2 - 2; }
+  function facInX(m){ return m.x; }
+  function facOutX(m){ return m.x + m.w; }
+  // 工厂产线 floor 尺寸：IN槽 + 工序列 + OUT槽 水平排列
+  function facFloorSize(group){
+    var steps = (group.children || []).filter(function(c){ return c.kind === 'step'; });
+    var maxH = 0;
+    steps.forEach(function(s){ var h = facMachH(s); if(h > maxH) maxH = h; s._facH = h; });
+    var n = steps.length;
+    var w = FAC.slotW + FAC.slotGap + n * FAC.machW + (n - 1) * FAC.machGap + FAC.slotGap + FAC.slotW;
+    var h = maxH;
+    return { w: w + FAC.floorPadX * 2, h: h + FAC.floorPadTop + FAC.floorPadBot, steps: steps, maxH: maxH };
+  }
   // ── 合成树：AI 树（root→功能→步骤）+ 用户节点（含嵌套、索引漂移按 label 兜底） ──
   function rebuild(){
     var feats = (OV.mind_map && OV.mind_map.root && OV.mind_map.root.children) || [];
@@ -187,7 +391,8 @@ export function renderMindmapPage(feature: string): string {
       var fn = { id: 'f' + i, label: f.label, kind: 'feature', children: [], raw: f };
       NODE_BY_ID[fn.id] = fn;
       if(f.children && f.children.length){
-        // 真三层：功能 → [🎬 分镜组 | 🧩 子模块(社区)] → [步骤 | 文件]——结构层与讲解层分开
+        // 真三层：功能 → [🎬 分镜组 | 🧩 子模块(社区)] → [步骤 | 文件]——结构层与讲解层分开。
+        // 已确认产线的功能：steps 升级为工序盒，涉及文件入住为子卡片（第四级）
         f.children.forEach(function(g){
           var gn = { id: g.id, label: g.label, kind: g.kind, children: [], raw: g, owner: f };
           NODE_BY_ID[gn.id] = gn;
@@ -195,6 +400,11 @@ export function renderMindmapPage(feature: string): string {
             var cn = { id: c.id, label: c.label, kind: c.kind, children: [], raw: c, owner: f,
               _host: f, _comm: g.kind === 'community' ? g.label : null };
             NODE_BY_ID[c.id] = cn;
+            (c.children || []).forEach(function(cc){
+              var ccn = { id: cc.id, label: cc.label, kind: cc.kind, children: [], raw: cc, owner: f, _host: f };
+              NODE_BY_ID[cc.id] = ccn;
+              cn.children.push(ccn);
+            });
             gn.children.push(cn);
           });
           fn.children.push(gn);
@@ -261,6 +471,7 @@ export function renderMindmapPage(feature: string): string {
     }
     pending.forEach(function(u){ root.children.push(uNodeById[u.id]); NODE_BY_ID[u.id] = uNodeById[u.id]; u._anchor = root; }); // 孤儿挂 root，不丢数据
     TREE = root;
+    markPipeline();      // 产线工序盒：注入步骤序号 + 青色连线
     layoutTree(); renderAll();
   }
   function resolveTarget(u, uNodeById){
@@ -284,7 +495,7 @@ export function renderMindmapPage(feature: string): string {
     if(!d) return [];
     var segs = String(d).split('\\n').map(function(s){ return s.trim(); }).filter(Boolean);
     var per = nodePer(n) + 4;
-    var budget = (n.kind === 'feature' || n.kind === 'proposal') ? 3 : 2;
+    var budget = (n.kind === 'feature' || n.kind === 'proposal' || n.kind === 'brick') ? 3 : 2;
     var out = [];
     for(var i = 0; i < segs.length && out.length < budget; i++){
       var isDelta = segs[i].charAt(0) === '→';
@@ -314,7 +525,7 @@ export function renderMindmapPage(feature: string): string {
     if(ch.length < 2 || !FLOWS.length) return;
     var owner = {};   // 文件 id → 所属子卡 id
     ch.forEach(function(c){
-      (function col(m){ owner[m.id] = c.id; visChildren(m).forEach(col); })(c);
+      (function col(m){ owner[m.id] = c.id; (m.children || []).forEach(col); })(c);
     });
     var edges = [], inChain = {}, outs = {};
     FLOWS.forEach(function(f){
@@ -344,6 +555,9 @@ export function renderMindmapPage(feature: string): string {
   }
   // 全树逐层应用：功能层（跨功能流转）→ 子模块层（本项目的核心场景）→ 文件层，同一算法分形复用
   function orderAll(n){
+    if(n._manualFlow){ // 产线工序盒：步骤序号与连线已手动注入，不再用 FLOWS 重算
+      visChildren(n).forEach(orderAll); return;
+    }
     delete n._flowEdges;
     var vc = visChildren(n);
     vc.forEach(function(c){ delete c._flowSeq; });
@@ -583,7 +797,7 @@ export function renderMindmapPage(feature: string): string {
   // 归属关系完全由嵌套表达（盒内不画父子线）；行间 gap=线槽（gutter），给 FLOWS 电工布线留通道。
   // 深度分级参数：越深的盒 padding/间距越小，视觉层层收敛。
   var DEPTH_PAD = [
-    { x: 22, head: 30, gap: 44, col: 18, b: 26, maxRow: 1500 }, // depth0 root 大容器
+    { x: 22, head: 30, gap: 46, col: 22, b: 26, maxRow: 700 }, // depth0 root 大容器（模块矩阵排布）
     { x: 16, head: 34, gap: 56, col: 14, b: 36, maxRow: 660 },  // depth1 功能盒
     { x: 10, head: 18, gap: 40, col: 10, b: 16, maxRow: 620 }   // depth2 子模块盒
   ];
@@ -597,6 +811,20 @@ export function renderMindmapPage(feature: string): string {
       var kids = visChildren(n);
       if(!kids.length){ n._box = null; return { w: hw, h: hh }; }
       var P = padOf(depth);
+      // 工厂产线布局：步骤水平排列为工序盒，IN/OUT 槽在两端
+      if(n._factory){
+        var ff = facFloorSize(n);
+        ff.steps.forEach(function(s){
+          s._w = FAC.machW;
+          s._h = s._facH || facMachH(s);
+          s._facBaseH = facBaseH(s);
+          s._box = null;
+        });
+        n._facFloor = ff;
+        var fiW = ff.w, fiH = ff.h;
+        n._box = { w: Math.max(hw, fiW) + P.x * 2, h: hh + P.head + fiH + P.b, factory: true, rows: [], hh: hh, hw: hw };
+        return { w: n._box.w, h: n._box.h };
+      }
       var rows = [{ items: [], w: 0, h: 0 }];
       kids.forEach(function(c){
         var cb = boxSize(c, depth + 1);
@@ -619,13 +847,36 @@ export function renderMindmapPage(feature: string): string {
       var b = n._box;
       if(!b){ n._x = left + n._w / 2; n._y = top + n._h / 2; return; }
       n._x = left + b.w / 2;
-      n._y = top + b.hh / 2; // 头卡中心 = 盒顶 + hh/2（geo 约定）
+      n._y = top + b.hh / 2;
       var P = padOf(depth);
       var ry = top + b.hh + P.head;
+      // 工厂产线放置：工序水平排列
+      if(b.factory){
+        var ff = n._facFloor;
+        var floorX = left + (b.w - ff.w) / 2 + FAC.floorPadX;
+        var floorTop = ry + FAC.floorPadTop;
+        n._facFloorX = floorX;
+        n._facFloorTop = floorTop;
+        // IN 槽
+        n._facInSlot = { x: floorX, y: floorTop + (ff.maxH - FAC.slotH) / 2, w: FAC.slotW, h: FAC.slotH };
+        // 工序机
+        var firstMachX = floorX + FAC.slotW + FAC.slotGap;
+        ff.steps.forEach(function(s, i){
+          var mh = s._facH || facMachH(s);
+          var m = { x: firstMachX + i * (FAC.machW + FAC.machGap), y: floorTop + (ff.maxH - mh) / 2, w: FAC.machW, h: mh, baseH: facBaseH(s) };
+          s._facMach = m;
+          s._x = m.x + m.w / 2;
+          s._y = m.y + m.h / 2;
+        });
+        // OUT 槽
+        var lastRight = firstMachX + (ff.steps.length - 1) * (FAC.machW + FAC.machGap) + FAC.machW;
+        n._facOutSlot = { x: lastRight + FAC.slotGap, y: floorTop + (ff.maxH - FAC.slotH) / 2, w: FAC.slotW, h: FAC.slotH };
+        return;
+      }
       b.rows.forEach(function(row){
         var cx = left + (b.w - row.w) / 2;
         row.items.forEach(function(it){
-          boxPlace(it.c, cx, ry, depth + 1); // 行内顶对齐：同一行头卡同高，布线"行"语义稳定
+          boxPlace(it.c, cx, ry, depth + 1);
           cx += it.w + P.col;
         });
         ry += row.h + P.gap;
@@ -644,6 +895,137 @@ export function renderMindmapPage(feature: string): string {
     return out;
   }
   function cssId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
+
+  // ── 工厂产线渲染：工序机（标题带+针脚行+文件底栏+展开详情）──
+  function facPinSq(x, y){
+    return '<rect class="fac-pin-sq" x="'+(x-FAC.pinSize/2)+'" y="'+(y-FAC.pinSize/2)+'" width="'+FAC.pinSize+'" height="'+FAC.pinSize+'" rx="2"/>';
+  }
+  function renderFacMachine(s){
+    var m = s._facMach; if(!m) return '';
+    var isOpen = !!s._facOpen;
+    var ins = s._facIns || [], outs = s._facOuts || [];
+    var involves = (s.raw && s.raw.meta && s.raw.meta.involves) || s.raw.involves || [];
+    var g = '<g class="mnode fac-mnode'+(SEL===s.id?' sel':'')+'" data-id="'+esc(s.id)+'">';
+    // 机器框
+    g += '<rect class="fac-mach" x="'+m.x+'" y="'+m.y+'" width="'+m.w+'" height="'+m.h+'" rx="9"/>';
+    // 标题带
+    g += '<path class="fac-mach-hd" d="M'+(m.x+9)+' '+(m.y+1)+' h'+(m.w-18)+' a8 8 0 0 1 8 8 v'+(FAC.hdH-10)+' h'+(-m.w)+' v'+(-(FAC.hdH-10))+' a8 8 0 0 1 8-8 z"/>';
+    g += '<text class="fac-mach-title" x="'+(m.x+12)+'" y="'+(m.y+17)+'">'+esc(s.label)+'</text>';
+    // 展开按钮
+    if(s.raw && (s.raw.detail || s.raw.description)){
+      g += '<text class="fac-btn" data-fac="'+esc(s.id)+'" x="'+(m.x+m.w-10)+'" y="'+(m.y+17)+'" text-anchor="end">'+(isOpen?'△ 收纳':'▽ 展开')+'</text>';
+    }
+    // IN 针脚：方块贴左边框，名字 : 类型紧跟右侧
+    ins.forEach(function(p, i){
+      var py = facPinY(m, i);
+      g += facPinSq(facInX(m), py);
+      g += '<text x="'+(m.x+FAC.padL+FAC.pinSize)+'" y="'+(py+4)+'">'
+        + '<tspan class="fac-pin-name">'+esc(p.n)+'</tspan>'
+        + '<tspan class="fac-pin-type"> : '+esc(p.t)+'</tspan></text>';
+    });
+    // OUT 针脚：方块贴右边框，类型 : 名字右对齐
+    outs.forEach(function(p, i){
+      var py = facPinY(m, i);
+      g += facPinSq(facOutX(m), py);
+      g += '<text class="fac-pin-type-out" x="'+(m.x+m.w-FAC.padR-FAC.pinSize)+'" y="'+(py+4)+'">'
+        + '<tspan class="fac-pin-type">'+esc(p.t)+' : </tspan>'
+        + '<tspan class="fac-pin-name">'+esc(p.n)+'</tspan></text>';
+    });
+    // 文件底栏分隔线 + 文件名
+    var fileY = m.y + m.baseH - FAC.fileH + 4;
+    g += '<line x1="'+(m.x+10)+'" y1="'+fileY+'" x2="'+(m.x+m.w-10)+'" y2="'+fileY+'" stroke="#e2e8f0"/>';
+    var fileText = involves.length ? involves.join(' · ') : '—';
+    g += '<text class="fac-file" x="'+(m.x+12)+'" y="'+(m.y+m.baseH-7)+'">'+esc(fileText)+'</text>';
+    // 展开详情
+    if(isOpen && s.raw){
+      var dy = m.y + m.baseH;
+      g += '<line x1="'+(m.x+10)+'" y1="'+dy+'" x2="'+(m.x+m.w-10)+'" y2="'+dy+'" stroke="#cde6ea"/>';
+      var d = String(s.raw.detail || s.raw.description || '');
+      var ls = wrap(d, 20);
+      ls.forEach(function(ln, li){
+        g += '<text class="fac-detail" x="'+(m.x+14)+'" y="'+(dy+FAC.detailPadTop+11+li*FAC.detailLineH)+'">· '+esc(ln)+'</text>';
+      });
+      // 叙事分镜折叠面板（manim 式：进料口→工序→出料口；facts 逐条来自契约投影、非 LLM 编造）
+      var narr = (s.raw.meta && s.raw.meta.narration) || [];
+      if(narr.length){
+        var nY = dy + FAC.detailPadTop + ls.length * FAC.detailLineH + FAC.detailPadBot;
+        g += '<line x1="'+(m.x+10)+'" y1="'+nY+'" x2="'+(m.x+m.w-10)+'" y2="'+nY+'" stroke="#e8f0f2"/>';
+        g += '<text class="fac-narr-hd" x="'+(m.x+14)+'" y="'+(nY+17)+'">▍讲述（叙事砖 · 数据=契约投影）</text>';
+        nY += 24;
+        narr.forEach(function(sc){
+          var dl = wrap(sc.detail || '', 22);
+          g += '<text class="fac-narr-title" x="'+(m.x+16)+'" y="'+(nY+11)+'">◆ '+esc(sc.title)+'</text>';
+          nY += FAC.detailLineH + 2;
+          dl.forEach(function(ln, li){
+            g += '<text class="fac-narr-detail" x="'+(m.x+28)+'" y="'+(nY+11)+'">'+esc(ln)+'</text>';
+            nY += FAC.detailLineH;
+          });
+          if(sc.facts.length){
+            g += '<text class="fac-narr-facts" x="'+(m.x+28)+'" y="'+(nY+11)+'">'+esc(sc.facts.join('　'))+'</text>';
+            nY += FAC.detailLineH + 5;
+          }
+        });
+      }
+    }
+    // 序号徽标（左上角）
+    if(s._flowSeq){
+      g += '<g transform="translate('+(m.x+2)+','+(m.y-8)+')">'
+        + '<circle class="fac-seq-bg" r="9"/>'
+        + '<text class="fac-seq" y="3.5" text-anchor="middle">'+s._flowSeq+'</text></g>';
+    }
+    g += '</g>';
+    return g;
+  }
+
+  // ── 工厂产线正交连线：水平连接（左→右），线只连针脚方块，无文字 ──
+  function facOrthWire(x1, y1, x2, y2){
+    var mx = (x1 + x2) / 2;
+    return '<path class="fac-wire" d="M'+x1+' '+y1+' L'+mx+' '+y1+' L'+mx+' '+y2+' L'+x2+' '+y2+'"/>'
+      + '<polygon class="fac-wirehead" points="'+x2+','+y2+' '+(x2-6)+','+(y2-3.5)+' '+(x2-6)+','+(y2+3.5)+'"/>';
+  }
+  // ── 工厂产线渲染：连线层（底板+IN/OUT槽+正交线，在节点下方）──
+  function renderFactoryWires(group){
+    var ff = group._facFloor; if(!ff) return '';
+    var inSlot = group._facInSlot, outSlot = group._facOutSlot;
+    var steps = ff.steps;
+    var out = '';
+    // 产线底板虚线（不透明背景在 wbox 中画，层级更高可遮挡穿线）
+    var bx = group._facFloorX - FAC.floorPadX, by = group._facFloorTop - FAC.floorPadTop;
+    out += '<rect class="fac-bound" x="'+bx+'" y="'+by+'" width="'+ff.w+'" height="'+ff.h+'" rx="10"/>';
+    // IN 槽
+    out += '<g><rect class="fac-slot-in" x="'+inSlot.x+'" y="'+inSlot.y+'" width="'+inSlot.w+'" height="'+inSlot.h+'" rx="9"/>'
+      + '<text class="fac-slot-t" x="'+(inSlot.x+12)+'" y="'+(inSlot.y+20)+'">投料口</text>'
+      + '<text class="fac-slot-sub" x="'+(inSlot.x+12)+'" y="'+(inSlot.y+38)+'">IN</text></g>';
+    // OUT 槽
+    out += '<g><rect class="fac-slot-out" x="'+outSlot.x+'" y="'+outSlot.y+'" width="'+outSlot.w+'" height="'+outSlot.h+'" rx="9"/>'
+      + '<text class="fac-slot-t" x="'+(outSlot.x+12)+'" y="'+(outSlot.y+20)+'">成品出口</text>'
+      + '<text class="fac-slot-sub" x="'+(outSlot.x+12)+'" y="'+(outSlot.y+38)+'">OUT</text></g>';
+    // 正交连线
+    if(steps.length){
+      var m0 = steps[0]._facMach;
+      out += facOrthWire(inSlot.x + inSlot.w, inSlot.y + inSlot.h / 2, facInX(m0), facPinY(m0, 0));
+      for(var i = 0; i < steps.length - 1; i++){
+        var a = steps[i]._facMach, b = steps[i+1]._facMach;
+        var sa = steps[i]._facOuts || [], sb = steps[i+1]._facIns || [];
+        var cnt = Math.min(sa.length, sb.length);
+        if(!cnt) cnt = 1;
+        for(var k = 0; k < cnt; k++){
+          out += facOrthWire(facOutX(a), facPinY(a, k), facInX(b), facPinY(b, k));
+        }
+      }
+      var last = steps[steps.length - 1]._facMach;
+      out += facOrthWire(facOutX(last), facPinY(last, 0), outSlot.x, outSlot.y + outSlot.h / 2);
+    }
+    return out;
+  }
+  // ── 工厂产线渲染：机器层（工序卡白底盖住连线末端）──
+  function renderFactoryMachines(group){
+    var ff = group._facFloor; if(!ff) return '';
+    var out = '';
+    ff.steps.forEach(function(s){ out += renderFacMachine(s); });
+    return out;
+  }
+
   function renderAll(){
     var E = document.getElementById('edges'), N = document.getElementById('nodes'), G = document.getElementById('notes'), FL = document.getElementById('flowlayer');
     E.innerHTML = ''; N.innerHTML = ''; G.innerHTML = ''; FL.innerHTML = '';
@@ -654,26 +1036,40 @@ export function renderMindmapPage(feature: string): string {
       if(n._box){ // root 大容器也画底板（最外层包裹：项目 → 功能盒 → 子模块盒 → 文件卡）
         var bx = n._x - n._box.w / 2, by = n._y - n._box.hh / 2;
         var st, rx, sw;
-        if(depth <= 0){ // root 大容器
+        if(n._factory){
+          // 工厂产线步骤组：不画黄色收纳盒，改用米色不透明底板遮挡穿线
+          var fbx = n._facFloorX - FAC.floorPadX, fby = n._facFloorTop - FAC.floorPadTop;
+          var ff = n._facFloor;
+          if(ff) boxes += '<rect class="fac-floor-bg" x="'+fbx+'" y="'+fby+'" width="'+ff.w+'" height="'+ff.h+'" rx="10"/>';
+        } else if(depth <= 0){ // root 大容器
           st = 'fill="rgba(159,176,255,.05)" stroke="#91a7ff" stroke-dasharray="14 8"'; rx = 24; sw = 2;
-        } else if(depth === 1){ // 功能盒：构想=紫虚线、共享=绿、功能=蓝
+        } else if(depth === 1){ // 功能盒：构想=紫虚线、共享=绿、积木区=紫实线、功能=蓝
           rx = 16; sw = 1.6;
           st = n.kind === 'proposal'
             ? 'fill="rgba(208,191,255,.16)" stroke="#9775fa" stroke-dasharray="10 6"'
-            : (n.kind === 'shared'
-              ? 'fill="rgba(211,249,216,.20)" stroke="#69db7c"'
-              : 'fill="rgba(165,216,255,.13)" stroke="#74c0fc"');
+            : ((n.raw && n.raw.id === 'bricks')
+              ? 'fill="rgba(208,191,255,.16)" stroke="#9775fa"'
+              : (n.kind === 'shared'
+                ? 'fill="rgba(211,249,216,.20)" stroke="#69db7c"'
+                : 'fill="rgba(165,216,255,.13)" stroke="#74c0fc"'));
         } else { // 子模块盒：社区=青、步骤组=黄
           rx = 10; sw = 1.3;
           st = n.kind === 'stepgroup'
             ? 'fill="rgba(255,243,191,.22)" stroke="#f59f00"'
             : 'fill="rgba(197,246,250,.16)" stroke="#3bc9db"';
         }
-        boxes += '<rect x="'+bx+'" y="'+by+'" width="'+n._box.w+'" height="'+n._box.h+'" rx="'+rx+'" '+st+' stroke-width="'+sw+'"/>';
+        if(st) boxes += '<rect x="'+bx+'" y="'+by+'" width="'+n._box.w+'" height="'+n._box.h+'" rx="'+rx+'" '+st+' stroke-width="'+sw+'"/>';
       }
       visChildren(n).forEach(function(c){ wbox(c, depth + 1); });
     })(TREE, 0);
     (function walk(n, parent, noEdge){
+      // 工厂产线步骤组：渲染产线底板+槽+连线（在 edges 层，节点之下）+ 工序机（在 nodes 层）
+      if(n._factory){
+        nodes += renderNode(n); // 步骤组自身的标题卡
+        edges += renderFactoryWires(n);
+        nodes += renderFactoryMachines(n);
+        return; // 子步骤已作为工序机渲染，不再递归
+      }
       if(parent && !noEdge){
         var x1 = parent._x + parent._w / 2, y1 = parent._y, x2 = n._x - n._w / 2, y2 = n._y;
         var mx = (x1 + x2) / 2;
@@ -826,12 +1222,20 @@ export function renderMindmapPage(feature: string): string {
           + '<rect x="0" y="-10" width="62" height="18" rx="9" fill="#ffd8a8" stroke="#e8590c" stroke-width="1.2"/>'
           + '<text x="31" y="3" text-anchor="middle" font-size="10" font-weight="700" fill="#a33d00">🧱 底座</text></g>';
       }
+      // 分镜权威标记：pending=尚未生成 AI 分镜（占位），必须醒目提示，绝不平铺成已完成的科普
+      if(n.meta && n.meta.storyboard === 'pending'){
+        s += '<g transform="translate('+(w/2-74)+','+(-h/2-9)+')">'
+          + '<rect x="0" y="-10" width="72" height="18" rx="9" fill="#fff5f5" stroke="#e03131" stroke-width="1.3"/>'
+          + '<text x="36" y="2.5" text-anchor="middle" font-size="9.5" font-weight="700" fill="#c92a2a">🤖 待AI讲解</text></g>';
+      }
     } else if(n.kind === 'step'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="#ffec99" stroke="#f08c00" stroke-width="1.4"/>';
     } else if(n.kind === 'stepgroup'){
       // 工作步骤组：把"怎么实现的"归成一组，与结构层（子模块/文件）分开
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="#fff3bf" stroke="#f59f00" stroke-width="1.5"/>'
-        + '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a06200">⚙️ 步骤</text>';
+        + (n.meta && n.meta.pending
+          ? '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#e03131">🤖 待生成分镜</text>'
+          : '<text y="'+(-h/2+12)+'" text-anchor="middle" font-size="8.5" fill="#a06200">⚙️ 步骤</text>');
     } else if(n.kind === 'community'){
       // 子模块（聚类社区）：功能的真实构成单元，文件挂在它下面
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="11" fill="#c5f6fa" stroke="#0c8599" stroke-width="1.5"/>'
@@ -839,6 +1243,10 @@ export function renderMindmapPage(feature: string): string {
     } else if(n.kind === 'shared'){
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="'+(h/2)+'" fill="#d3f9d8" stroke="#2f9e44" stroke-width="1.6"/>'
         + '<text y="'+(-h/2+13)+'" text-anchor="middle" font-size="8.5" fill="#2b8a3e">🔧 共享</text>';
+    } else if(n.kind === 'brick'){
+      // 积木黑盒卡：治理好的外购件（紫实线——与 proposal 虚线紫区分：已存在 vs 构想）
+      s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="9" fill="#e5dbff" stroke="#6741d9" stroke-width="1.8"/>'
+        + '<text y="'+(-h/2+11)+'" text-anchor="middle" font-size="8" fill="#5f3dc4">🧱 积木</text>';
     } else if(n.kind === 'file'){
       // 关键文件：功能内调用热度 top 的实际功能单元，小号青蓝、左上 📄 标
       s += '<rect x="'+(-w/2)+'" y="'+(-h/2)+'" width="'+w+'" height="'+h+'" rx="8" fill="#ffffff" stroke="#94a8bd" stroke-width="1.3"/>'
@@ -856,7 +1264,7 @@ export function renderMindmapPage(feature: string): string {
     // 文字：标题（有介绍行时整体上移）
     var fs = n.kind === 'root' ? 14 : ((n.kind === 'feature' || n.kind === 'proposal') ? 13 : 12);
     var fw = (n.kind === 'root' || n.kind === 'feature' || n.kind === 'proposal') ? ' font-weight="700"' : '';
-    var fillc = n.kind === 'user' ? '#664d00' : (n.kind === 'proposal' ? '#503c95' : (n.kind === 'root' || n.kind === 'feature' ? '#1864ab' : '#343a40'));
+    var fillc = n.kind === 'user' ? '#664d00' : (n.kind === 'proposal' ? '#503c95' : (n.kind === 'brick' ? '#5f3dc4' : (n.kind === 'root' || n.kind === 'feature' ? '#1864ab' : '#343a40')));
     var lift = ds.length ? (ds.length * 12.5 + 5) / 2 : 0;
     s += ls.map(function(ln, li){
       return '<text y="'+(5 - lift + (li-(ls.length-1)/2)*15)+'" text-anchor="middle" font-size="'+fs+'"'+fw+' fill="'+fillc+'">'+esc(ln)+'</text>';
@@ -917,6 +1325,14 @@ export function renderMindmapPage(feature: string): string {
     });
     document.querySelectorAll('.note').forEach(function(el){
       el.addEventListener('click', function(ev){ ev.stopPropagation(); showNote(el.getAttribute('data-id')); });
+    });
+    document.querySelectorAll('.fac-btn').forEach(function(el){
+      el.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var id = el.getAttribute('data-fac');
+        var n = NODE_BY_ID[id];
+        if(n){ n._facOpen = !n._facOpen; layoutTree(); renderAll(); }
+      });
     });
   }
   function toggleFold(id){ if(COLLAPSED[id]) delete COLLAPSED[id]; else COLLAPSED[id] = true; layoutTree(); renderAll(); }
@@ -1050,6 +1466,20 @@ export function renderMindmapPage(feature: string): string {
         + parentHtml + depP + stepsHtml
         + '<p style="font-size:11px;color:#868e96;">你的原话：「' + esc(pp.raw) + '」——改原话：删除这个构想节点重写；要细化：给它加子节点后保存。</p>'
         + myNoteHtml;
+    } else if(n.kind === 'brick'){
+      // 积木黑盒卡详情：人话（盒内 manifest 快照）+ 暴露接口清单（契约投影）
+      var apis = (n.raw.meta && n.raw.meta.apis) || [];
+      var apisHtml = apis.length
+        ? '<p style="margin-top:6px;"><b style="color:#5f3dc4;">对外暴露：</b></p>' + apis.map(function(a){
+            return '<p class="files">▸ ' + esc(a) + '</p>';
+          }).join('') + (n.raw.meta.symbols > apis.length ? '<p class="files">… 共 ' + n.raw.meta.symbols + ' 项</p>' : '')
+        : '';
+      det.innerHTML = '<b style="color:#5f3dc4;">🧱 ' + esc(n.label) + '</b><span class="tag">已验证积木</span>'
+        + '<p style="color:#495057;">' + esc(n.raw.description || '治理好的黑盒积木') + '</p>'
+        + (n.raw.meta && n.raw.meta.lines ? '<p class="files">' + n.raw.meta.lines + ' 行（盒内全体成员）</p>' : '')
+        + apisHtml
+        + '<p style="font-size:11px;color:#868e96;">治理好的黑盒资产：契约与行为验证记录在盒内 manifest；内部实现不进导图——出异常时再回盒深挖。</p>'
+        + myNoteHtml;
     } else if(n.kind === 'shared'){
       var ub = n.raw.used_by || [];
       det.innerHTML = '<b style="color:#2b8a3e;">🔧 ' + esc(n.label) + '</b><span class="tag">共享能力</span>'
@@ -1157,6 +1587,48 @@ export function renderMindmapPage(feature: string): string {
     setTimeout(updateSaveState, 3600);
   }
 
+  // ── 产线视图开关条：默认所有功能都直接是工厂流水线（工序盒+针脚+连线）。
+  // 主人可点「✗ 否」把某个功能关回普通步骤列表；点「✓ 是」可改回产线。
+  // 选项目前产线中的全部功能（含 LLM 提议作为判断依据展示）。
+  function renderPipelineBar(){
+    var bar = document.getElementById('plinebar');
+    if(!bar) return;
+    // 收集所有功能名：提议表的键 ∪ 树上 feature 节点（确保每个功能都能开/关产线）
+    var labels = Object.keys(PLP || {});
+    if(TREE){
+      (function walk(ns){ (ns||[]).forEach(function(n){
+        if(n.kind === 'feature' && labels.indexOf(n.raw.label) < 0) labels.push(n.raw.label);
+        if(n.children) walk(n.children);
+      }); })(TREE.children);
+    }
+    if(!labels.length){ bar.style.display = 'none'; return; }
+    // 曾明确「否」的功能：给「✓ 改回产线」；从未拍板或默认产线的：给「✗ 否」关闭
+    var chips = labels.map(function(l){
+      var likeBtn = PL[l] === false
+        ? '<button data-pl="' + esc(l) + '" data-like="1">✓ 改回产线</button>'
+        : '<button data-pl="' + esc(l) + '" data-like="0">✗ 否</button>';
+      return '<span style="margin:2px 6px 2px 0; display:inline-block;"><b>「' + esc(l) + '」</b>'
+        + (PLP[l] ? '<span style="color:#1864ab;"> ' + esc(PLP[l]) + '</span>' : '')
+        + ' ' + likeBtn + '</span>';
+    }).join(' ');
+    bar.innerHTML = '🏭 工厂流水线：以下功能默认已按产线呈现（工序盒+针脚+连线），可点时关闭： ' + chips;
+    bar.style.display = 'block';
+    var btns = bar.querySelectorAll('button[data-pl]');
+    btns.forEach(function(b){
+      b.onclick = function(ev){
+        ev.stopPropagation();
+        var label = b.getAttribute('data-pl'), like = b.getAttribute('data-like') === '1';
+        b.disabled = true;
+        fetch('/api/pipeline-like', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feature: FEATURE, label: label, like: like }),
+        }).then(function(r){ return r.json(); })
+          .then(function(j){ if(j.success){ PL[label] = like; renderPipelineBar(); rebuild(); fitView(); } else flash('保存失败：' + (j.error || '')); })
+          .catch(function(e){ b.disabled = false; flash('保存失败：' + e.message); });
+      };
+    });
+  }
+
   // ── 视图：平移 / 缩放 / 自适应 / 便签拖动 ──
   var svg = document.getElementById('mm'), vp = document.getElementById('vp');
   function applyView(){ vp.setAttribute('transform','translate('+VIEW.tx+','+VIEW.ty+') scale('+VIEW.s+')'); }
@@ -1180,8 +1652,10 @@ export function renderMindmapPage(feature: string): string {
     if(DEPS.length) b.minY -= 70 + Math.min(DEPS.length, 5) * 22; // 依赖弧扇形绕 root 大容器上方，视口为其留位
     var w = window.innerWidth, h = window.innerHeight - 52;
     var pad = 40;
-    var s = Math.min((w - pad*2) / (b.maxX - b.minX), (h - pad*2) / (b.maxY - b.minY), 1.15);
-    VIEW = { s: s, tx: pad - b.minX * s + (w - pad*2 - (b.maxX - b.minX) * s) / 2, ty: 52 + (h - (b.maxY - b.minY) * s) / 2 - b.minY * s };
+    var rightInset = DOC_W;
+    var effW = Math.max(100, w - rightInset);
+    var s = Math.min((effW - pad*2) / (b.maxX - b.minX), (h - pad*2) / (b.maxY - b.minY), 1.15);
+    VIEW = { s: s, tx: pad - b.minX * s + (effW - pad*2 - (b.maxX - b.minX) * s) / 2, ty: 52 + (h - (b.maxY - b.minY) * s) / 2 - b.minY * s };
     svg.setAttribute('viewBox','0 0 '+w+' '+h);
     applyView();
   }

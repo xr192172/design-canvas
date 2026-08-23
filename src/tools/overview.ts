@@ -327,7 +327,11 @@ async function enrichSharedDesc(
 export async function getOverview(input: GetOverviewInput): Promise<OverviewResult> {
   const { feature, refresh = false, refresh_llm = false, first_steps = 3 } = input;
   const dsl = getDSL(feature);
-  if (!dsl) throw new Error(`feature "${feature}" 不存在`);
+  if (!dsl) {
+    const err = new Error(`feature "${feature}" 不存在`) as Error & { status?: number };
+    err.status = 404;
+    throw err;
+  }
   const title = dsl.title || feature;
   let dslRev = dsl._dsl_rev ?? 0;
 

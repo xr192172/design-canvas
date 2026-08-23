@@ -41,6 +41,8 @@ import type { ReconcileBrickInput } from './tools/reconcile_brick.js';
 import { searchBricks } from './tools/search_bricks.js';
 import type { SearchBricksInput } from './tools/search_bricks.js';
 import { assembleBricks } from './tools/assemble_bricks.js';
+import { narrateStep } from './tools/narrate_step.js';
+import type { NarrateStepInput } from './tools/narrate_step.js';
 import type { AssembleBricksInput } from './tools/assemble_bricks.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
@@ -884,6 +886,28 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => {
       const r = await slimBrick(a as unknown as SlimBrickInput);
+      return { message: r.message, data: r };
+    }),
+  },
+  {
+    name: 'narrate_step',
+    title: 'Narrate a production-line step as a governed narrative brick',
+    description:
+      '叙事砖（设计观察：吸收 manim 的"声明式分镜"——一个工序只讲一件事、靠连续进/出过渡连起来）。' +
+      '给定一个产线工序文件，生成"进料口→工序→出料口"分镜序列：数据形态（input/output 针脚）由契约投影' +
+      '（actual_apis[0] 签名）产生，是代码事实、非 LLM 编造；分镜 facts 逐条引用真实针脚。' +
+      'write=true 时用自有 MCP 抽成砖接入体系：盒内写 manifest.json（可被 search_bricks 检索）' +
+      '+ DSL semantic 落 brick_narr_* 条目（思维导图「🧱 已验证积木」区出卡）。防编造纪律同契约提取：' +
+      'LLM 结论只进 role.reasons/notes，不产生数据事实。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      file: z.string().describe('工序涉及文件（相对路径，语义层锚点）；从 actual_apis[0] 契约投影取输入/输出针脚'),
+      title: z.string().optional().describe('工序名（缺省取该文件 responsibility）'),
+      detail: z.string().optional().describe('工序人话（缺省取该文件 responsibility）'),
+      write: z.boolean().optional().describe('false 只预演不落盘（不写砖不登记，默认 true）'),
+    },
+    handler: wrapData(async (a) => {
+      const r = narrateStep(a as unknown as NarrateStepInput);
       return { message: r.message, data: r };
     }),
   },

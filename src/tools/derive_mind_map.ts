@@ -16,20 +16,22 @@
  *
  * 锚点：文件节点 id 与 L2 共享（file_xxx），保证思维导图 → 设计图 → 代码可追溯。
  *
- * 产出：
- *   - L3 思维导图 JSON（<dataHome>/.design-canvas/mindmap/<feature>.json）
- *   - 自包含 HTML 查看器（output/mind_map_<feature>.html），浏览器直接打开
+ * 产出（单一路径：最终交互页统一为 /mindmap/<feature>，本层只产中间数据）：
+ *   - structure 骨架 JSON：<storageRoot>/mindmap/<feature>.json（中间步骤，不作为交付物）
+ *   - teach 科普导图 JSON：<storageRoot>/mindmap/<feature>.teach.json（/mindmap/ 交互页的数据源）
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getDSL, getStorageRoot, getDataHome } from '../storage.js';
+import { getDSL, getStorageRoot, getPackageRoot } from '../storage.js';
 import { extractJsonObject } from './explain_gen.js';
-import { loadAgentConfig } from './llm_focus.js';
+import { loadAgentConfig, callChat } from './llm_focus.js';
+import type { ChatMessage } from './llm_focus.js';
 import { openDb } from '../db/db.js';
 import type { Database } from '../db/db.js';
-import type { DesignDSL, FeatureTree } from '../dsl/types.js';
-import type { MindMap, MindMapNode, TeachStep, ProposalFeature } from '../dsl/mindmap.js';
+import type { DesignDSL, FeatureNode, FeatureTree, SemanticFile } from '../dsl/types.js';
+import type { MindMap, MindMapNode, TeachStep, TeachPin, ProposalFeature } from '../dsl/mindmap.js';
+import { buildScenes } from '../dsl/narration.js';
 
 export interface DeriveMindMapInput {
   /** feature 名（必填） */
@@ -44,6 +46,9 @@ export interface DeriveMindMapInput {
    *  structure = 结构树（功能→社区→文件，开发者下钻用）
    *  teach     = 科普教学（功能 + 实现原理分镜 steps，像科普视频讲解，小白用） */
   view?: 'structure' | 'teach';
+  /** 局部触发式更新：上次导图已生成人话描述的未变更文件，直接复用旧描述、不进 LLM 重算；
+   *  结构仍从活 DSL 重建（结构层始终是代码事实）。dirty_paths = 本次实际变更/新增的相对路径。 */
+  incremental?: { dirty_paths?: string[] };
 }
 
 export interface DeriveMindMapResult {
@@ -53,8 +58,6 @@ export interface DeriveMindMapResult {
   mind_map: MindMap;
   /** JSON 落盘路径 */
   jsonFile: string;
-  /** HTML 查看器路径 */
-  htmlFile: string;
   message: string;
 }
 
@@ -64,18 +67,13 @@ export function getMindMapFile(feature: string, view: 'structure' | 'teach' = 's
   return path.join(getStorageRoot(), 'mindmap', `${feature}${suffix}.json`);
 }
 
-/** 默认 HTML 输出路径：<dataHome>/output/mind_map_<feature>.html */
-function defaultHtmlPath(feature: string): string {
-  return path.join(getDataHome(), 'output', `mind_map_${feature}.html`);
-}
-
 /** 取文件名（去掉路径），用于文件节点标题 */
 function basename(p: string): string {
   const seg = p.split(/[\\/]/);
   return seg[seg.length - 1] || p;
 }
 
-interface FileInfo {
+export interface FileInfo {
   id: string;
   path: string;
   responsibility: string;
@@ -86,10 +84,13 @@ interface FileInfo {
   apis?: string[];
 }
 
+/** 文件索引：exact（path 精确）+ bySuffix（≥2 段后缀匹配），契约投影的输入 */
+export type FileIndex = { exact: Map<string, FileInfo>; bySuffix: Map<string, FileInfo> };
+
 /** 从语义层构建 文件路径 → FileInfo 索引，并保留 id（= geometry node id）。
  *  另建后缀索引（≥2 段）：功能树社区的 files 相对 cache.db 项目根，
  *  DSL 路径相对导入快照根，前缀可能不一致（如 camera/internal/… vs internal/…）。 */
-function buildFileIndex(dsl: DesignDSL): { exact: Map<string, FileInfo>; bySuffix: Map<string, FileInfo> } {
+export function buildFileIndex(dsl: DesignDSL): FileIndex {
   const exact = new Map<string, FileInfo>();
   const bySuffix = new Map<string, FileInfo>();
   for (const f of dsl.semantic?.files ?? []) {
@@ -123,6 +124,163 @@ function lookupFile(idx: { exact: Map<string, FileInfo>; bySuffix: Map<string, F
     if (s) return s;
   }
   return undefined;
+}
+
+// ── 契约投影 · 数据形态（纯规则，零 LLM）─────────────────────────
+// 从函数的 actual_apis 签名投影"这一步吃什么数据 / 吐什么数据"：
+//   结构层（数量/方向）是代码事实，任何上下文都不允许改。
+//   命名层（人话名）优先用参数名/类型名，规则词典压成可读名词。
+//   控制类（ctx / error）不是业务数据形态，不投影成针脚。
+//   集合类（[]T / []*T / map[..]T）提质为"一条数据形态"，而非 N 条。
+
+// 类型 → 人话名词的规则词典（命名层锚：查不到才用参数名兜底）
+const TYPE_HUMAN: Array<[RegExp, string]> = [
+  [/raw\s*event/i, '原始事件'],
+  [/event/i, '事件'],
+  [/probe\s*(point)?/i, '探针点位'],
+  [/config/i, '配置'],
+  [/file/i, '文件'],
+  [/result/i, '结果'],
+  [/log|entry/i, '日志'],
+  [/query|search/i, '查询'],
+  [/request|req\b/i, '请求'],
+  [/response|resp\b/i, '响应'],
+  [/id\b/i, '标识'],
+  [/time|stamp/i, '时间'],
+  [/str(ing)?$|text/i, '文本'],
+  [/path\b/i, '路径'],
+  [/json/i, 'JSON'],
+  [/map\s*\[/i, '映射'],
+];
+
+// 参数名去修饰提纯：去掉前缀接口/类型名，给一个可读名
+function pinNameFromParam(name: string): string {
+  let s = name.trim();
+  // `a, b int` 这类共享类型：只看其中一个即可，前端按数量展开
+  s = s.split(/[\s,]+/).pop() ?? s; // 取最后一个标识符
+  s = s.replace(/[^A-Za-z0-9_]/g, '');
+  return s;
+}
+
+// 把类型 token 压成人话名词（集合→单条语义、指针→元素、dict 保留；查不到返回空=用参数名）
+function humanizeType(t: string): string {
+  let ty = t.trim();
+  ty = ty.replace(/^\[\]\*?/, '').replace(/^\*/, ''); // []T / []*T / *T → T
+  const mapMatch = ty.match(/^map\s*\[\s*[^\]]+\]\s*(.+)$/); // map[K]V → V
+  if (mapMatch) ty = mapMatch[1].trim();
+  ty = ty.replace(/[<].*?[>]/g, ''); // 泛型参数剥离：List[Event] → List
+  ty = ty.split('.').pop() ?? ty; // 取包内简名：RawEvent 而非 pkg.RawEvent
+  for (const [re, human] of TYPE_HUMAN) {
+    if (re.test(ty)) return human;
+  }
+  // 单词/驼峰 → 中文分词兜底（如 RawEvent → 事件）：退化为用人话接口，认不出则空
+  const words = ty.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  for (const [, human] of TYPE_HUMAN) {
+    if (words.indexOf(human) >= 0) return human;
+  }
+  return '';
+}
+
+/** 单条签名 → {参数入针脚, 返回值出针脚}；解析失败返回 null（调用方回落到顺序推导） */
+export function projectSignature(sig: string): { ins: TeachPin[]; outs: TeachPin[] } | null {
+  // 从签名里定位参数表与返回区：Go `f(a int) (b string, err error)`
+  // / TS `f(a: string): Event[]` / Python `def f(a, b: int) -> str`
+  const open = sig.indexOf('(');
+  if (open < 0) return null;
+  const depthScan = (() => {
+    let d = 0, end = -1;
+    for (let i = open; i < sig.length; i++) {
+      const c = sig[i];
+      if (c === '(') d++;
+      else if (c === ')') { d--; if (d === 0) { end = i; break; } }
+    }
+    return end;
+  })();
+  const close = depthScan;
+  if (close < 0) return null;
+  const paramsRaw = sig.slice(open + 1, close);
+  const after = sig.slice(close + 1).trim();
+  // 返回区：Go `(a,b) error` / `T`（无括号单返回） / TS `: T` / Python `-> T`
+  let retStr = '';
+  const arrowAfter = after.match(/^->\s*(.*)$/);
+  if (arrowAfter) retStr = arrowAfter[1];
+  else if (after.startsWith(':')) retStr = after.replace(/^:\s*/, '');
+  else if (after.startsWith('(')) { const o = after.indexOf('('), c2 = after.indexOf(')'); retStr = o >= 0 && c2 > o ? after.slice(o + 1, c2) : ''; }
+  else {
+    // Go 单返回无括号：`f(...) T` → after 直接就是类型；剔除函数体残留 `{...}` / `;`
+    const cut = after.replace(/;.*$/, '').replace(/\{.*$/, '').trim();
+    if (cut && !cut.startsWith('{')) retStr = cut; // 否则视为无返回值
+  }
+
+  const splitTop = (src: string): string[] => {
+    const out: string[] = []; let d = 0, cur = '';
+    for (const ch of src) {
+      if (ch === '(' || ch === '[' || ch === '<' || ch === '{') d++;
+      else if (ch === ')' || ch === ']' || ch === '>' || ch === '}') d--;
+      if (ch === ',' && d === 0) { out.push(cur); cur = ''; } else cur += ch;
+    }
+    if (cur.trim()) out.push(cur);
+    return out.map((x) => x.trim()).filter(Boolean);
+  };
+
+  // ── 输入针脚：参数表分格，格内取"类型"（跳过控制/上下文）──
+  const ins: TeachPin[] = [];
+  for (const seg of splitTop(paramsRaw)) {
+    // Go: `a, b int`（多参共享类型）→ 类型=最后一个词，名=前面所有；TS: `a: int`；Python: `a: int = 1`
+    if (/\bfunc\s*\(/i.test(seg)) continue; // 函数类型参数（回调/谓词/闭包）：内部数据流，不是可投影的数据形态
+    const colon = seg.lastIndexOf(':');
+    let typeToken = ''; let namesPart = '';
+    if (colon >= 0) { typeToken = seg.slice(colon + 1).replace(/=.*$/, '').trim(); namesPart = seg.slice(0, colon).trim(); }
+    else { const m = seg.match(/^(.*?)\s+(\S+)$/); if (m) { namesPart = m[1].trim(); typeToken = m[2].trim(); } else { namesPart = seg; } }
+    if (!typeToken) continue; // 无类型标注（罕见），跳过
+    if (/\bcontext\.Context\b|\bctx\b/i.test(typeToken)) continue;   // 控制上下文，非业务数据
+    if (/\berror\b/i.test(typeToken)) continue;                       // 错误不是数据形态
+    const cleanType = typeToken.replace(/^\[\]\*?/, '').replace(/^\*/, '').replace(/\*$/, '').split('.').pop() || typeToken;
+    // 多参数共享一个类型 `a, b int` → namesPart 有多个名字 → 展开为多条针脚
+    const names = namesPart ? namesPart.split(',').map((x) => pinNameFromParam(x)).filter(Boolean) : [];
+    if (names.length === 0) { ins.push({ n: humanizeType(cleanType) || cleanType, t: cleanType }); continue; }
+    for (const nm of names) ins.push({ n: toHumanName(nm, cleanType), t: cleanType });
+  }
+
+  // ── 输出针脚：返回区格内取"类型"，控制类同剔除 ──
+  const outs: TeachPin[] = [];
+  for (const seg of splitTop(retStr)) {
+    const ty = seg.trim().replace(/^[*.]/, '');
+    if (!ty || /\berror\b/i.test(ty)) continue;
+    if (/\bcontext\.Context\b|\bctx\b/i.test(ty)) continue;
+    const ct = ty.replace(/^\[\]\*?/, '').replace(/^\*/, '').replace(/\*$/, '').split('.').pop() || ty;
+    outs.push({ n: humanizeType(ct) || ct, t: ct });
+  }
+
+  if (ins.length === 0 && outs.length === 0) return null;
+  return { ins, outs };
+}
+
+/** 参数名优先：入针脚用人话名承载作者意图（root/args/sender 这种业务标签），
+ *  短到无信息量的单字母参数（s/r）退化为类型人或类型本身。出针脚（无参数名）走类型人。 */
+function toHumanName(param: string, typeToken: string): string {
+  if (param && param.length >= 2) return param; // 参数名优先：作者笔下的业务含义，最忠实
+  const h = humanizeType(typeToken);
+  return h || param || typeToken;
+}
+
+/**
+ * 契约投影主入口：拿步骤的 involves 文件 → actual_apis 签名 → 汇总针脚。
+ * 多文件签名取第一个成功投影的结果（同一步通常一个入口函数主宰该步数据流）。
+ * 返回 {inputs, outputs}；无任何投影成功返回 null（前端回落到顺序推导，宁缺毋滥）。
+ */
+export function projectStepDataShape(
+  involves: string[] | undefined,
+  fileIndex: FileIndex,
+): { inputs: TeachPin[]; outputs: TeachPin[] } | null {
+  if (!involves || involves.length === 0) return null;
+  for (const rel of involves) {
+    const info = lookupFile(fileIndex, rel);
+    if (!info || !info.apis || info.apis.length === 0) continue;
+    const shape = projectSignature(info.apis[0]);
+    if (shape) return { inputs: shape.ins, outputs: shape.outs }; // 一步一个主导签名：取首个可投影文件
+  }
+  return null;
 }
 
 /** 规则描述：功能节点 */
@@ -225,9 +383,123 @@ async function llmEnrichDescriptions(
   return merged.size > 0 ? merged : null;
 }
 
+// ─────────────────────────────────────────────────────────────
+// 能力支柱合成：把代码自动聚出的"细功能"归并成"这个项目能干嘛"的业务能力
+// 上下文来源 = MCP 工具注册表（server_registry）——比目录聚类更能回答"能干嘛"
+// ─────────────────────────────────────────────────────────────
+
+/** 从工程的 MCP 工具注册文件提取"能力清单"（工具名 + 一句话），供能力合成作上下文 */
+function extractToolContext(dsl: DesignDSL): string {
+  // source_root 在 live 快照上可能缺省，回退到包根；server_registry.ts 就在 <包根>/src/。
+  // 不要在语义文件路径里猜：其基准常是 src/ 且旧正则易误配 daemon/server.ts 等，
+  // 直接按包根实际搜索真实存在的注册文件，找不到即跳过能力合成。
+  const base = (dsl.source_root && dsl.source_root.trim()) || getPackageRoot();
+  if (!base) return '';
+  try {
+    let abs = '';
+    // 兜底候选（文件已存在才作数）：先 server_registry，其次任意 registry/server.ts
+    const names = ['server_registry.ts', 'server_registry.tsx', 'registry.ts', 'server.ts'];
+    for (const n of names) {
+      const p = path.join(base, 'src', n);
+      if (fs.existsSync(p)) { abs = p; break; }
+    }
+    if (!abs) return '';
+    const text = fs.readFileSync(abs, 'utf-8');
+    const tools: string[] = [];
+    // 逐块抓 tool 定义（name + description），正则防御性、失败即止
+    const re = /name:\s*'([a-zA-Z0-9_]+)'[\s\S]*?description:\s*([\s\S]*?)(?:inputSchema:|handler:)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null && tools.length < 40) {
+      const desc = m[2]
+        .replace(/['"`]|\s*\+\s*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+      if (m[1] && desc) tools.push(`${m[1]}：${desc}`);
+    }
+    return tools.map((t) => `- ${t}`).join('\n');
+  } catch {
+    return '';
+  }
+}
+
+/** 用 LLM 把细功能归并成几个业务能力支柱：返回 [{name, explanation, features}] 或 null */
+async function llmSynthesizeCapabilities(
+  features: FeatureNode[],
+  toolContext: string,
+  title: string,
+): Promise<Array<{ name: string; explanation: string; features: string[] }> | null> {
+  const cfg = loadAgentConfig();
+  if (!cfg || features.length === 0) return null;
+  // 能力归并只需功能名即可，不带子模块细节（那会令输入膨胀、拖慢冷启动数十秒）
+  const list = features.map((f) => `-「${f.name}」`).join('\n');
+  const contextBlock = toolContext
+    ? `\n这个项目是一个 MCP server，注册了以下工具（即它能提供的能力）：\n${toolContext}\n` +
+      `请以这些能力为准来命名/归并下面的功能。\n`
+    : '';
+  const prompt =
+    `下面是一个软件项目导图里自动聚类出的 ${features.length} 个太过细致的"功能"。${contextBlock}\n` +
+    `请把它们归并成 **3-5 个业务能力支柱**，每个支柱是"这个项目给用户/开发者解决什么问题"这件事。\n` +
+    `命名要像"重构屎山""剥离积木块""摄像头自动测试"这种**面向使用场景的能力动宾短语**（2-6 字），` +
+    `不要用"渲染能力""可观测性""服务治理"这类技术分类词。\n` +
+    `每个支柱给出：\n` +
+    `1) 简短中文能力名（2-6 字，动宾、面向场景）；\n` +
+    `2) 一句**对普通人友好**的能力说明（用它做什么、解决什么问题，避免堆技术名词）；\n` +
+    `3) features 数组：包含哪些功能（必须**原样**用上面给定的功能名）。\n` +
+    `要求：\n` +
+    `- 每个功能必须且只能归入一个支柱；\n` +
+    `- 归并依据是"用户要它解决什么问题"，不是目录名或技术分类；\n` +
+    `- 提供工具上下文时，命名优先贴合工具体现的做事场景；\n` +
+    `- 信息不足时不要发明清单里没有的功能或能力。\n` +
+    `只输出紧凑 JSON：{"capabilities":[{"name":"重构屎山","explanation":"一句话说明","features":["功能A","功能B"]}]}`;
+  // 冷启动兜底：端点首个 LLM 调用常达 30+s（随后热缓存秒回）。超时放大到 180s，
+  // 失败时重试一次以命中热缓存——否则冷启动必触发 90s 超时，能力支柱层"静默消失"。
+  const messages: ChatMessage[] = [
+    { role: 'system', content: '你是软件架构的"能力翻译官"：把代码聚出的细粒度功能，转成业务负责人一眼看懂的能力导图。' },
+    { role: 'user', content: `项目：${title}\n功能清单：\n${list}\n\n${prompt}` },
+  ];
+  let content = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      content = await callChat(cfg, messages, 0.4, 180_000);
+      break; // 成功即出
+    } catch (e) {
+      console.error(`[cap] llmSynthesizeCapabilities attempt${attempt + 1} fail:`, (e as Error).message?.slice(0, 160));
+      if (attempt === 1) return null; // 两次都失败 → 回退规则
+    }
+  }
+  try {
+    const parsed = extractJsonObject(content);
+    const raw = parsed?.capabilities;
+    if (!Array.isArray(raw) || raw.length === 0) { console.error('[cap] llm 无 capabilities 字段, raw=', JSON.stringify(parsed).slice(0, 200)); return null; }
+    const nameSet = new Set(features.map((f) => f.name));
+    const used = new Set<string>();
+    const out: Array<{ name: string; explanation: string; features: string[] }> = [];
+    for (const c of raw.slice(0, 8)) {
+      const name = typeof c?.name === 'string' ? c.name.trim().slice(0, 10) : '';
+      const explanation = typeof c?.explanation === 'string' ? c.explanation.trim() : '';
+      if (!name) continue;
+      const refs = Array.isArray(c?.features)
+        ? (c.features as unknown[]).filter((r): r is string => typeof r === 'string' && nameSet.has(r.trim()))
+        : [];
+      const feats = (refs.length ? refs : []).map(String);
+      if (feats.length === 0) continue;
+      out.push({ name, explanation, features: feats });
+      feats.forEach((x) => used.add(x));
+    }
+    // 未被任何支柱收纳的功能 → 归入"其他"
+    const missing = features.map((f) => f.name).filter((n) => !used.has(n));
+    if (missing.length > 0) out.push({ name: '其他', explanation: '未归入上述能力的功能', features: missing });
+    return out.length > 0 ? out : null;
+  } catch (e) {
+    console.error('[cap] llmSynthesizeCapabilities exception:', (e as Error).name, (e as Error).message?.slice(0, 200));
+    return null;
+  }
+}
+
 /** 递归统计子树文件数 */
 function countFiles(n: MindMapNode): number {
-  if (!n.children || n.children.length === 0) return n.kind === 'file' ? 1 : 0;
+  if (!n.children || n.children.length === 0) return n.kind === 'file' || n.kind === 'brick' ? 1 : 0;
   return n.children.reduce((s, c) => s + countFiles(c), 0);
 }
 
@@ -241,6 +513,8 @@ function countFiles(n: MindMapNode): number {
 interface TeachScript {
   what: string;
   steps: TeachStep[];
+  /** 产线判定提议：该功能是否像一条产线/流水线（数据有单向先后流向）。LLM 只出候选，人确认后才成为事实 */
+  pipeline_like?: { like?: boolean; why?: string };
 }
 
 /** 定位 feature 对应的 cache.db（与 overview/feature_tree 同一套候选逻辑） */
@@ -463,8 +737,11 @@ async function llmTeachFeature(material: string, featureName = ''): Promise<Teac
     '   - title：≤12 字动宾短语（如「埋下探针」「比对流水账」）；\n' +
     '   - detail：1-2 句纯人话，讲清这步发生什么、数据从哪来到哪去。**严禁**出现函数名、文件名、路径、英文驼峰词——技术细节只许放进 involves；\n' +
     '   - involves：这步依据的关键文件（只能从【职责】清单的文件里选，给想深挖的工程师看）。\n' +
+    '3. pipeline_like（可选）：这个功能整体是否像一条**产线/流水线**？\n' +
+    '   - 判断标准：数据有**单向先后流向**——上一道工序的产物（返回值/结果）喂给下一道，前后有明确先后，如 埋针→采集→传输→入库→查询。若符合，输出 {"like":true,"why":"一句话依据（如 数据沿调用链单向流动）"}。\n' +
+    '   - 不符合则输出 {"like":false,"why":"一句话依据"}。\n' +
     '只基于给定材料，不得编造。只输出 JSON（无其他文字）：\n' +
-    '{"what":"...","steps":[{"title":"...","detail":"...","involves":["a.ts"]}]}';
+    '{"what":"...","steps":[...],"pipeline_like":{"like":true,"why":"..."}}';
   const callOnce = async (
     userContent: string,
   ): Promise<{ ok: boolean; status: number; content: string; finishReason: string; retryable: boolean; err?: string }> => {
@@ -524,7 +801,19 @@ async function llmTeachFeature(material: string, featureName = ''): Promise<Teac
       steps.push({ title: t.slice(0, 24), detail: d.slice(0, 300), involves: inv });
     }
     if (!what || steps.length === 0) return { script: null, violations };
-    return { script: { what: what.slice(0, 200), steps: steps.slice(0, 8) }, violations };
+    // 产线判定提议（可选）：like 必须是布尔量；why 限一句话，非法则丢弃（宁缺毋滥，不替主人拍板）
+    let pipeline_like: TeachScript['pipeline_like'];
+    const pl = parsed.pipeline_like as { like?: unknown; why?: unknown } | undefined;
+    if (pl && typeof pl.like === 'boolean') {
+      pipeline_like = {
+        like: pl.like,
+        why: typeof pl.why === 'string' && pl.why.trim() ? pl.why.slice(0, 80) : undefined,
+      };
+    }
+    return {
+      script: { what: what.slice(0, 200), steps: steps.slice(0, 8), pipeline_like },
+      violations,
+    };
   };
 
   try {
@@ -617,6 +906,45 @@ function buildTeachMaterial(
  * useLlm=true 时各功能并行调科普编剧；失败/未配置降级规则版（无分镜，仅描述）。
  * teach 只落 JSON（小白入口是项目页圆框图，不需要独立 HTML 查看器）。
  */
+/**
+ * 积木黑盒卡（semantic 条目 → MindMapNode kind='brick'）。
+ * 数据事实：import_project 折叠时写入的 semantic 条目（id=brick_* 锚点、
+ * path=dest_root、responsibility=盒内人话+黑盒注记、expected_apis=契约投影）。
+ * 纪律：description 直接用盒内 manifest 的快照——不由 LLM 重述（盒内事实只有一份）。
+ */
+function brickCardFromSemantic(sf: SemanticFile): MindMapNode {
+  // responsibility 格式 "{盒内人话}（积木黑盒：N 文件折叠，契约投影自 assembly.json）"
+  const desc = (sf.responsibility ?? '').split('（积木黑盒：')[0] || '治理好的黑盒积木';
+  return {
+    id: sf.id,
+    label: (sf.path ?? '').replace(/\/$/, '') || sf.id,
+    description: desc,
+    kind: 'brick',
+    meta: {
+      lines: sf.lines,
+      symbols: sf.expected_apis?.length,
+      l2_ref: sf.id,
+      apis: sf.expected_apis?.map((a) => a.signature).slice(0, 12),
+    },
+  };
+}
+
+/** 根下补挂积木区（structure/teach × 功能树/平铺 全路径共用）：
+ *  积木折叠后盒内文件不进 feature_tree/社区/平铺——不补位则导图上积木整体消失。
+ *  积木卡与功能平级（"项目用了哪些标准件"），工厂产线视图里它就是产线上的外购件工位。 */
+function appendBrickZone(root: MindMapNode, dsl: DesignDSL): void {
+  const brickEntries = (dsl.semantic?.files ?? []).filter((sf) => sf.id.startsWith('brick_') && sf.path);
+  if (brickEntries.length === 0) return;
+  (root.children ??= []).push({
+    id: 'bricks',
+    label: '🧱 已验证积木',
+    description: `${brickEntries.length} 块治理好的黑盒资产：拎自其他项目、契约已登记、行为已验证。点卡片看它对外暴露什么`,
+    kind: 'feature',
+    meta: { files: brickEntries.length },
+    children: brickEntries.map(brickCardFromSemantic),
+  });
+}
+
 async function buildTeachMindMap(
   dsl: DesignDSL,
   feature: string,
@@ -627,6 +955,21 @@ async function buildTeachMindMap(
   const ft = dsl.feature_tree;
   const jsonFile = getMindMapFile(feature, 'teach');
 
+  // 旧 teach JSON 保留主人资产（在下方 feature 遍历之前读取，避免 TDZ）：
+  //  - prevProposals：placeProposals 写入的构想分镜，重建不能抹掉
+  //  - prevPipelineLike：主人已拍板的"是/否产线"，重建只允许 LLM 再出提议、绝不覆盖确认
+  let prevProposals: MindMap['proposals'];
+  let prevPipelineLike: MindMap['pipeline_like'];
+  try {
+    if (fs.existsSync(jsonFile)) {
+      const prev = JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap;
+      prevProposals = prev.proposals;
+      prevPipelineLike = prev.pipeline_like;
+    }
+  } catch {
+    /* 旧文件损坏则忽略 */
+  }
+
   // 平铺兜底：无功能树（早期数据）——诚实降级，与 structure 一致
   if (!ft || ft.features.length === 0) {
     const root: MindMapNode = {
@@ -635,7 +978,8 @@ async function buildTeachMindMap(
       description: '项目总览（未生成功能树，按文件平铺）',
       kind: 'root',
       children: (dsl.semantic?.files ?? [])
-        .filter((f) => f.path)
+        // 积木条目（brick_*）不进平铺：统一进根下积木区（appendBrickZone）
+        .filter((f) => f.path && !f.id.startsWith('brick_'))
         .slice(0, 30)
         .map((f) => ({
           id: f.id,
@@ -644,6 +988,7 @@ async function buildTeachMindMap(
           kind: 'file' as const,
         })),
     };
+    appendBrickZone(root, dsl);
     const mindMap: MindMap = {
       feature,
       mode: 'rule',
@@ -654,7 +999,7 @@ async function buildTeachMindMap(
     };
     fs.mkdirSync(path.dirname(jsonFile), { recursive: true });
     fs.writeFileSync(jsonFile, JSON.stringify(mindMap, null, 2), 'utf-8');
-    return { feature, mode: 'rule', mind_map: mindMap, jsonFile, htmlFile: '', message: mindMap.note ?? '' };
+    return { feature, mode: 'rule', mind_map: mindMap, jsonFile, message: mindMap.note ?? '' };
   }
 
   // LLM 科普编剧：各功能并行（材料含真实调用链证据）
@@ -727,9 +1072,17 @@ async function buildTeachMindMap(
   try {
     if (fs.existsSync(jsonFile)) {
       const old = JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap;
-      for (const c of old.root?.children ?? []) {
-        if (c.steps?.length && c.description) prevScripts.set(c.label, { what: c.description, steps: c.steps });
-      }
+      // 递归收集所有 feature 节点的分镜缓存——feature 可能直接挂 root.children，
+      // 也可能被能力支柱（capability）顶层收纳在下级（teach 自定义路径）。只扫顶层会把分镜缓存全丢，
+      // 导致重建时全量重调 LLM、遇 AGNES 抖动就整批退回占位（"中间产物"事故根因之一）。
+      const collectFeatures = (nodes: MindMapNode[]): void => {
+        for (const c of nodes) {
+          if (c.kind === 'feature' && c.steps?.length && c.description)
+            prevScripts.set(c.label, { what: c.description, steps: c.steps });
+          if (c.children?.length) collectFeatures(c.children);
+        }
+      };
+      collectFeatures(old.root?.children ?? []);
       if (old.community_zh && typeof old.community_zh === 'object') communityZh = old.community_zh;
       if (old.desc_cache && typeof old.desc_cache === 'object') descCache = old.desc_cache;
     }
@@ -784,11 +1137,17 @@ async function buildTeachMindMap(
     ? await mapLimit(
         ft.features,
         3,
-        (f, i) =>
-          llmTeachFeature(
+        async (f, i) => {
+          // 已有有效分镜（≥3 步）直接复用，避免每次重建全量重调 LLM；
+          // 只对缺失/占位（steps<3，如"AI 分镜暂不可用"/"材料不足"）的功能重新生成——
+          // 支持逐步补齐：掉了哪个功能，重跑一次只需补那一个。
+          const prev = prevScripts.get(f.name);
+          if (prev && prev.steps.length >= 3) return prev;
+          return llmTeachFeature(
             buildTeachMaterial(title, f.name, f.communities, fileIndex, callEdgeLists[i], notesPerFeature[i]),
             f.name,
-          ),
+          );
+        },
       )
     : ft.features.map((f) => prevScripts.get(f.name) ?? (null as TeachScript | null));
   const anyLlm = scripts.some((s) => s !== null);
@@ -802,6 +1161,8 @@ async function buildTeachMindMap(
 
   // 社区/文件专属描述生成目标：构建树时收集（带稳定 key + 材料 hint），树成型后统一补描述
   const descTargets: Array<{ node: MindMapNode; key: string; kind: 'community' | 'file'; hint: string; owner: string }> = [];
+  // 产线判定提议：功能名 → 一句话依据。LLM 只出候选，确认前不影响渲染（机器不代主人拍板）
+  const pipelineProposals: Record<string, string> = {};
   const root: MindMapNode = {
     id: 'root',
     label: title,
@@ -812,6 +1173,7 @@ async function buildTeachMindMap(
       const rels = featureRels[i];
       const script = scripts[i];
       const hasEdges = callEdgeLists[i].length > 0;
+      if (script?.pipeline_like?.like) pipelineProposals[f.name] = script.pipeline_like.why ?? '';
       // 真三层下钻：功能 → 子模块（社区=聚类真实产物，按内部热度 top3）→ 关键文件（每社区热度 top4）。
       // 分镜单独成组（🎬 stepgroup），不再与文件混在功能下一级——结构层与讲解层分开。
       const heat = fileHeat[i] ?? new Map<string, number>();
@@ -885,18 +1247,56 @@ async function buildTeachMindMap(
           involves: rels.slice(0, 3),
         },
       ];
+      // 产线视图：默认所有功能直接走工厂流水线（工序盒+针脚+涉及文件入住为子卡片）。
+      // 工厂流水线就是分镜的标准呈现，无需逐一拍板；仅主人显式点过「✗ 否」才回落普通步骤。
+      const isLine = !(prevPipelineLike && prevPipelineLike[f.name] === false);
+      // 产线内涉及文件的去重集合：一个文件只入住首个引用它的工序盒
+      const usedInLine = new Set<string>();
       const stepGroup: MindMapNode = {
         id: `f${i}:sg`,
         label: '工作步骤',
         description: `${steps.length} 步讲清这个功能怎么跑起来`,
         kind: 'stepgroup',
-        children: steps.map((s, j) => ({
-          id: `f${i}:${j}`,
-          label: s.title,
-          description: s.detail,
-          kind: 'step' as const,
-          meta: { involves: s.involves },
-        })),
+        // pending 标记：分镜是"AI 分镜暂不可用/材料不足"占位（script 为空）时挂上，前端据此显示待生成态、不伪装成品
+        meta: { pending: !script },
+        children: steps.map((s, j) => {
+          // 契约投影·数据形态（仅产线步骤才需要，但统一投影成本低且无害）：
+          // 从涉及文件的 actual_apis 签名推导 inputs/outputs（非 LLM 编造）。
+          const shape = projectStepDataShape(s.involves, fileIndex);
+          const stepNode: MindMapNode = {
+            id: `f${i}:${j}`,
+            label: s.title,
+            description: s.detail,
+            kind: 'step',
+            meta: {
+              involves: s.involves,
+              inputs: shape?.inputs,
+              outputs: shape?.outputs,
+              // 叙事分镜（manim 式：进料口→工序→出料口）：针脚即契约投影的代码事实，
+              // 前端点开工序盒折叠面板即可看这步"吃了什么/做什么/吐出什么"
+              narration: buildScenes(shape ?? undefined, s.title, s.detail),
+            },
+          };
+          // 已确认产线的功能：把 steps 升级为骨架（工序盒）——涉及文件入住为工序的子卡片。
+          // 共享文件不重复入住（一个文件只住进首个引用它的工序盒，其余工序仅画连线）。
+          if (isLine && s.involves?.length) {
+            const kids: MindMapNode[] = [];
+            for (const p of s.involves) {
+              if (usedInLine.has(p)) continue;
+              usedInLine.add(p);
+              const info = lookupFile(fileIndex, p);
+              kids.push({
+                id: `f${i}:sg:${j}:${kids.length}`,
+                label: basename(p),
+                description: info?.responsibility ?? '涉及文件',
+                kind: 'file',
+                meta: { l2_ref: p },
+              });
+            }
+            if (kids.length) stepNode.children = kids;
+          }
+          return stepNode;
+        }),
       };
       return {
         id: `f${i}`,
@@ -905,10 +1305,63 @@ async function buildTeachMindMap(
         description: script?.what ?? `由 ${f.communities.length} 个子模块协作完成的业务功能`,
         steps,
         children: [stepGroup, ...communityChildren],
-        meta: { files: rels.length },
+        // storyboard 权威标记：LLM 分镜是唯一最终产物——有有效分镜(done) vs 占位(pending)。前端据此判定是否已完成科普
+        meta: { files: rels.length, storyboard: script ? 'done' : 'pending' },
       };
     }),
   };
+
+  // ── 能力支柱顶层（teach 视图）──
+  // 与 structure 一致：把根下平铺的功能用 MCP 工具上下文归并成 2-6 个"这项目能干嘛"的支柱，
+  // 每个支柱挂回原功能子树（feature 节点 id 不改，批注/用户节点锚点不漂移）。
+  let capGroups: Array<{ name: string; explanation: string; features: string[] }> | null = null;
+  // 能力合成与分镜描述解耦：只要配置了 LLM 即合成（功能名都够），
+  // 不依赖 useLlm/gen_descriptions——避免 overview 默认不传 gen_descriptions 时"能干嘛"层静默缺失。
+  if (loadAgentConfig()) {
+    const toolCtx = extractToolContext(dsl);
+    capGroups = toolCtx ? await llmSynthesizeCapabilities(ft.features, toolCtx, title) : null;
+  }
+  if (capGroups && capGroups.length > 0) {
+    // root.children 已按 order 排好序；按 ft.features[order[i]].name → root.children[i] 建映射
+    const nameToNode = new Map<string, MindMapNode>();
+    order.forEach((i, idx) => {
+      const node = root.children?.[idx];
+      if (node) nameToNode.set(ft.features[i].name, node);
+    });
+    const usedNode = new Set<MindMapNode>();
+    const capKids: MindMapNode[] = [];
+    for (const g of capGroups) {
+      const kids: MindMapNode[] = [];
+      for (const ref of g.features ?? []) {
+        const nn = nameToNode.get(ref);
+        if (nn && !usedNode.has(nn)) { usedNode.add(nn); kids.push(nn); }
+      }
+      if (kids.length === 0) continue;
+      capKids.push({
+        id: `cap_teach_${capKids.length}`,
+        label: g.name,
+        description: g.explanation,
+        kind: 'capability' as const,
+        meta: { files: kids.reduce((s, n) => s + ((n.meta?.files as number) || 0), 0) },
+        children: kids,
+      } as MindMapNode);
+    }
+    const leftover = (root.children ?? []).filter((n) => !usedNode.has(n));
+    if (leftover.length > 0) {
+      capKids.push({
+        id: 'cap_teach_other',
+        label: '其他',
+        description: '未归入上述能力支柱的功能',
+        kind: 'capability' as const,
+        meta: { files: leftover.reduce((s, n) => s + ((n.meta?.files as number) || 0), 0) },
+        children: leftover,
+      } as MindMapNode);
+    }
+    if (capKids.length > 0) root.children = capKids;
+  }
+
+  // ── 积木区（拼装区黑盒资产的一等公民呈现）──
+  appendBrickZone(root, dsl);
 
   // 社区/文件专属描述：缓存未命中的批量 LLM 生成，命中的直接复用——
   // 通用模板（"X 个文件约 Y 行"/导入期批量职责）只作兜底，LLM 描述按各自材料定制
@@ -927,16 +1380,6 @@ async function buildTeachMindMap(
       t.node.description = d;
       descHit++;
     }
-  }
-
-  // 旧 teach JSON 里 placeProposals 写入的构想分支：重建分镜不能抹掉主人的构想
-  let prevProposals: MindMap['proposals'];
-  try {
-    if (fs.existsSync(jsonFile)) {
-      prevProposals = (JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as MindMap).proposals;
-    }
-  } catch {
-    /* 旧文件损坏则忽略 */
   }
 
   // 文件流转链：设计图层的手绘边（geometry.edges，file→file）透传给思维导图——
@@ -958,6 +1401,8 @@ async function buildTeachMindMap(
     community_zh: Object.keys(communityZh).length > 0 ? communityZh : undefined,
     desc_cache: Object.keys(descCache).length > 0 ? descCache : undefined,
     proposals: prevProposals,
+    pipeline_like: prevPipelineLike,
+    pipeline_like_proposals: Object.keys(pipelineProposals).length > 0 ? pipelineProposals : undefined,
     generated_at: new Date().toISOString(),
     note: anyLlm
       ? `已用 LLM（${loadAgentConfig()?.model ?? ''}）生成科普分镜；子模块/文件专属描述 ${descHit}/${descTargets.length} 条`
@@ -970,7 +1415,6 @@ async function buildTeachMindMap(
     mode: mindMap.mode,
     mind_map: mindMap,
     jsonFile,
-    htmlFile: '',
     message: `科普教学导图（teach）已生成：${jsonFile}\n说明：${mindMap.note}`,
   };
 }
@@ -1111,14 +1555,16 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   const title = dsl.title || feature;
 
   // teach 模式独立分支：科普教学导图（功能 + 实现原理分镜）
+  // 分镜是小白真正看的"表达产物"——只要配了 LLM 就默认生成（与 structure 一致），
+  // 不依赖调用方传 gen_descriptions，避免默认路径生成"空分镜"并长期缓存。
   if ((input.view ?? 'structure') === 'teach') {
-    return buildTeachMindMap(dsl, feature, title, gen_descriptions);
+    return buildTeachMindMap(dsl, feature, title, gen_descriptions || !!loadAgentConfig());
   }
   const fileIndex = buildFileIndex(dsl);
   const ft: FeatureTree | undefined = dsl.feature_tree;
 
-  // 记录已尝试 LLM 提炼的节点，供批量生成描述
-  const llmTargets: Array<{ id: string; label: string; kind: 'feature' | 'community' | 'file'; hint: string }> = [];
+  // 记录已尝试 LLM 提炼的节点，供批量生成描述（增量局部更新时可收窄）
+  let llmTargets: Array<{ id: string; label: string; kind: 'feature' | 'community' | 'file'; hint: string }> = [];
   /** 改名/迁移遗留空壳：无导出 API 且个位数行（如 l3.go 仅剩 3 行注释占位）——
    *  导图不收，避免以"独立卡片"误导（其业务本体已改名迁走、在链上） */
   const isHuskFile = (f: { lines?: number; actual_apis?: unknown[]; expected_apis?: unknown[] }): boolean =>
@@ -1146,11 +1592,14 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
     const short = note.length > 56 ? note.slice(0, 56) + '…' : note;
     return `${base}\n→ ${short}`;
   };
+  let mode: 'llm' | 'rule' = 'rule';
+  let note: string | undefined;
   let root: MindMapNode;
 
   if (ft && ft.features.length > 0) {
-    // ── 有功能树：root → 功能 → 社区 → 文件 ──
+    // ── 有功能树：先建"功能 → 社区 → 文件"子树，能力合成可行时再在顶上套能力支柱 ──
     root = { id: 'root', label: title, description: `项目总览：${ft.features.length} 个功能`, kind: 'root', children: [] };
+    const featureSubtrees: MindMapNode[] = [];
     for (const f of ft.features) {
       const communityIds = new Set<string>();
       let fFileCount = 0;
@@ -1175,13 +1624,16 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
         for (const rel of files) {
           const info = lookupFile(fileIndex, rel);
           if (!info) continue;
-          fileNodes.push({
+          const fNode: MindMapNode = {
             id: info.id,
             label: basename(rel),
             description: fileDesc(semById.get(info.id) ?? { id: info.id, responsibility: info.responsibility }),
             kind: 'file',
             meta: { lines: info.lines, l2_ref: info.id },
-          });
+          };
+          fileNodes.push(fNode);
+          // 文件节点也进 LLM 目标，使 feature_tree 分支的增量局部更新（dirty_paths 复用人话描述）同样生效
+          llmTargets.push({ id: fNode.id, label: fNode.label, kind: 'file', hint: fNode.description });
         }
         // 超出上限时折叠成"…更多文件"占位
         if (c.files.length > max_files_per_community) {
@@ -1203,7 +1655,56 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
         llmTargets.push({ id: cNode.id, label: c.name, kind: 'community', hint: ruleCommunityDesc(c) });
         fNode.children!.push(cNode);
       }
-      root.children!.push(fNode);
+      featureSubtrees.push(fNode);
+    }
+
+    // 能力支柱合成：把细功能归并成"这个项目能干嘛"的业务能力。
+    // 只要配置了 LLM 即启用（单次调用、便宜），不依赖 gen_descriptions——
+    let capGroups: Array<{ name: string; explanation: string; features: string[] }> | null = null;
+    if (loadAgentConfig()) {
+      const toolCtx = extractToolContext(dsl);
+      capGroups = toolCtx ? await llmSynthesizeCapabilities(ft.features, toolCtx, title) : null;
+    }
+    if (capGroups && capGroups.length > 0) {
+      // 功能名/id → 子树节点 映射（能力支柱把它下面的功能子树整棵搬进去）
+      const nameToNode = new Map<string, MindMapNode>();
+      ft.features.forEach((f, i) => {
+        const n = featureSubtrees[i];
+        if (!n) return;
+        nameToNode.set(f.name, n);
+        if (f.id) nameToNode.set(f.id, n);
+      });
+      const usedNode = new Set<string>();
+      root.children = capGroups.map((g, i) => {
+        const kids: MindMapNode[] = [];
+        for (const ref of (g.features ?? [])) {
+          const nn = nameToNode.get(ref);
+          if (nn && !usedNode.has(nn.id)) { usedNode.add(nn.id); kids.push(nn); }
+        }
+        return {
+          id: `cap_${i}`,
+          label: g.name,
+          description: g.explanation,
+          kind: 'capability',
+          meta: { files: kids.reduce((s, n) => s + ((n.meta?.files as number) || 0), 0) },
+          children: kids,
+        } as MindMapNode;
+      });
+      // 未被任何支柱收纳的功能 → 兜底挂"其他"
+      const leftover = featureSubtrees.filter((n) => !usedNode.has(n.id));
+      if (leftover.length > 0) {
+        root.children!.push({
+          id: 'cap_other',
+          label: '其他',
+          description: '未归入上述能力支柱的功能',
+          kind: 'capability',
+          meta: { files: leftover.reduce((s, n) => s + ((n.meta?.files as number) || 0), 0) },
+          children: leftover,
+        } as MindMapNode);
+      }
+      mode = 'llm';
+    } else {
+      root.children = featureSubtrees;
     }
   } else {
     // ── 无功能树兜底（两级）──
@@ -1219,7 +1720,8 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
       if (n.type === 'file' && typeof n.swimlane === 'string') laneOf.set(n.id, n.swimlane);
     }
 
-    const semanticFiles = (dsl.semantic?.files ?? []).filter((f) => f.path && !isHuskFile(f));
+    // 积木条目（brick_*）不进分组/平铺：折叠资产统一进根下积木区（appendBrickZone）
+    const semanticFiles = (dsl.semantic?.files ?? []).filter((f) => f.path && !isHuskFile(f) && !f.id.startsWith('brick_'));
     const grouped = new Map<string, typeof semanticFiles>(modules.map((m) => [m.id as string, []]));
     const ungrouped: typeof semanticFiles = [];
     for (const f of semanticFiles) {
@@ -1300,6 +1802,9 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
     }
   }
 
+  // ── 积木区（拼装区黑盒资产的一等公民呈现，与 teach 路径同一份逻辑）──
+  appendBrickZone(root, dsl);
+
   // 汇总文件数（root/feature 层）
   const fillCounts = (n: MindMapNode): void => {
     if (n.children) {
@@ -1320,15 +1825,53 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
       if (n.meta?.lines) parts.push(`约 ${n.meta.lines} 行`);
       if (n.meta?.symbols) parts.push(`${n.meta.symbols} 个符号`);
     }
-    if (n.kind === 'file') {
+    if (n.kind === 'file' || n.kind === 'brick') {
       if (n.meta?.lines) parts.push(`${n.meta.lines} 行`);
     }
+    if (n.kind === 'brick' && n.meta?.symbols) parts.push(`${n.meta.symbols} 项契约`);
     return parts.join(' · ');
   };
 
   // LLM 提炼描述（可选）
-  let mode: 'llm' | 'rule' = 'rule';
-  let note: string | undefined;
+
+  // 局部触发式更新：只对 dirty_paths 涉及的文件重提炼；其余文件复用上次导图的人话描述、踢出 LLM 目标
+  const dirty = new Set(input.incremental?.dirty_paths ?? []);
+  if (dirty.size > 0) {
+    const pathById = new Map((dsl.semantic?.files ?? []).map((sf) => [sf.id, sf.path] as const));
+    const isDirty = (n: MindMapNode): boolean => {
+      const p = pathById.get(n.id);
+      return p !== undefined && (dirty.has(p) || dirty.has(basename(p)));
+    };
+    let old: MindMap | null = null;
+    try {
+      const file = getMindMapFile(feature, 'structure');
+      if (fs.existsSync(file)) old = JSON.parse(fs.readFileSync(file, 'utf-8')) as MindMap;
+    } catch {
+      old = null; // 旧导图损坏/缺失 → 全部重算
+    }
+    if (old?.root) {
+      const oldDesc = new Map<string, string>();
+      const walk = (n: MindMapNode): void => {
+        if (n.kind === 'file' && n.description) oldDesc.set(n.id, n.description);
+        if (n.children) for (const c of n.children) walk(c);
+      };
+      walk(old.root);
+      const targetIds = new Set(llmTargets.map((t) => t.id));
+      const reuse = (n: MindMapNode): void => {
+        if (n.kind === 'file' && !isDirty(n)) {
+          const d = oldDesc.get(n.id);
+          if (d && targetIds.has(n.id)) {
+            n.description = d; // 复用已提炼人话，不重算
+            targetIds.delete(n.id);
+          }
+        }
+        if (n.children) for (const c of n.children) reuse(c);
+      };
+      reuse(root);
+      if (targetIds.size !== llmTargets.length) llmTargets = llmTargets.filter((t) => targetIds.has(t.id));
+    }
+  }
+
   if (gen_descriptions && llmTargets.length > 0) {
     const enriched = await llmEnrichDescriptions(llmTargets, title);
     if (enriched) {
@@ -1366,346 +1909,12 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   fs.mkdirSync(path.dirname(jsonFile), { recursive: true });
   fs.writeFileSync(jsonFile, JSON.stringify(mindMap, null, 2), 'utf-8');
 
-  // 生成自包含 HTML 查看器
-  const htmlFile = path.resolve(input.output_path ?? defaultHtmlPath(feature));
-  fs.mkdirSync(path.dirname(htmlFile), { recursive: true });
-  fs.writeFileSync(htmlFile, renderMindMapHtml(mindMap, title), 'utf-8');
-
-  const fileUrl = `file:///${htmlFile.replace(/\\/g, '/')}`;
   const message = [
-    `L3 思维导图已生成（${mode === 'llm' ? 'LLM 提炼' : '规则骨架'}）：${jsonFile}`,
-    `HTML 查看器：${htmlFile}`,
-    `（浏览器打开 ${fileUrl} 查看）`,
+    `L3 结构骨架已生成（${mode === 'llm' ? 'LLM 提炼' : '规则骨架'}）：${jsonFile}`,
+    `（本路径只产中间骨架数据，最终交互导图统一由 /mindmap/${feature} 提供，不再产出独立 HTML）`,
     note ? `说明：${note}` : '',
   ].filter(Boolean).join('\n');
 
-  return { feature, mode, mind_map: mindMap, jsonFile, htmlFile, message };
+  return { feature, mode, mind_map: mindMap, jsonFile, message };
 }
 
-// ─────────────────────────────────────────────────────────────
-// 自包含 HTML 查看器
-// ─────────────────────────────────────────────────────────────
-
-/** 转义 HTML 特殊字符（防注入/显示安全） */
-function esc(s: string): string {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/** 生成自包含思维导图查看器 HTML */
-export function renderMindMapHtml(mindMap: MindMap, title: string): string {
-  const json = JSON.stringify(mindMap).replace(/</g, '\\u003c');
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>思维导图 · ${esc(title)}</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-         background: #0a0f1e; color: #dbe7ff; height: 100vh; overflow: hidden; }
-  .head { display: flex; align-items: center; gap: 12px; padding: 10px 18px;
-          border-bottom: 1px solid rgba(125,211,252,.15); background: rgba(6,11,31,.9); }
-  .head .ftitle { font-size: 15px; font-weight: 700; color: #7dd3fc; }
-  .head .fchip { font-size: 11px; padding: 2px 8px; border-radius: 10px;
-                 background: rgba(125,211,252,.12); border: 1px solid rgba(125,211,252,.2); color: #7dd3fc; }
-  .head .mode { margin-left: auto; font-size: 12px; opacity: .7; }
-  .head .search input { background: rgba(125,211,252,.08); border: 1px solid rgba(125,211,252,.2);
-                        color: #dbe7ff; border-radius: 8px; padding: 5px 10px; font-size: 12px; outline: none; }
-  .head .search input:focus { border-color: rgba(125,211,252,.5); }
-  .stage { position: relative; height: calc(100vh - 51px); overflow: hidden; background:
-           radial-gradient(1200px 600px at 20% 20%, rgba(59,130,246,.08), transparent 60%),
-           radial-gradient(900px 500px at 80% 80%, rgba(29,201,129,.06), transparent 60%); }
-  .tree { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
-  .node-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 8px;
-              cursor: pointer; white-space: nowrap; }
-  .node-row:hover { background: rgba(125,211,252,.08); }
-  .node-row .tog { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
-                   font-size: 10px; color: #7dd3fc; border-radius: 4px; flex: none; }
-  .node-row .tog.leaf { visibility: hidden; }
-  .node-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-  .node-row .lbl { font-size: 13px; color: #e6efff; }
-  .node-row .meta { font-size: 11px; color: #7d8db0; margin-left: 4px; }
-  .nl-root { font-weight: 800; font-size: 15px; color: #7dd3fc; }
-  .nl-root .dot { background: #7dd3fc; box-shadow: 0 0 8px rgba(125,211,252,.8); }
-  .nl-feature { font-weight: 700; color: #a5b4fc; }
-  .nl-feature .dot { background: #818cf8; }
-  .nl-community { font-weight: 600; color: #6ee7b7; }
-  .nl-community .dot { background: #34d399; }
-  .nl-file { color: #dbe7ff; }
-  .nl-file .dot { background: #64748b; }
-  .nl-note { color: #fbbf24; font-style: italic; }
-  .nl-note .dot { background: #f59e0b; }
-  .children { margin-left: 22px; border-left: 1px solid rgba(125,211,252,.12); padding-left: 6px; }
-  .bubble { position: absolute; max-width: 340px; background: rgba(10,16,34,.96); border: 1px solid rgba(125,211,252,.25);
-            border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.6; color: #dbe7ff;
-            box-shadow: 0 8px 30px rgba(0,0,0,.5); z-index: 20; display: none; pointer-events: none; }
-  .bubble .b-title { font-weight: 700; color: #7dd3fc; margin-bottom: 4px; font-size: 13px; }
-  .bubble .b-meta { font-size: 11px; color: #7d8db0; margin-top: 6px; }
-  .hint { position: absolute; bottom: 12px; left: 18px; font-size: 11px; opacity: .5; }
-  .zoom { position: absolute; bottom: 12px; right: 18px; display: flex; gap: 6px; }
-  .zoom button { width: 30px; height: 30px; background: rgba(125,211,252,.1); border: 1px solid rgba(125,211,252,.2);
-                 color: #7dd3fc; border-radius: 8px; font-size: 16px; cursor: pointer; }
-  .zoom button:hover { background: rgba(125,211,252,.2); }
-  .empty { padding: 60px; text-align: center; color: #7d8db0; font-size: 14px; }
-  /* ── 右侧对话面板 ── */
-  .mmd-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; display: flex;
-                flex-direction: column; background: rgba(6,11,31,.92); border-left: 1px solid rgba(125,211,252,.15);
-                font-size: 12px; z-index: 30; }
-  .mmd-panel.hidden { display: none; }
-  .mmd-toggle { position: absolute; top: 12px; right: 14px; z-index: 40; background: rgba(125,211,252,.12);
-                border: 1px solid rgba(125,211,252,.25); color: #7dd3fc; border-radius: 8px; padding: 5px 10px;
-                font-size: 12px; cursor: pointer; }
-  .mmd-head { padding: 10px 12px; border-bottom: 1px solid rgba(125,211,252,.15); font-weight: 700; color: #7dd3fc; }
-  .mmd-msgs { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
-  .mmd-msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
-  .mmd-msg.user { align-self: flex-end; background: rgba(59,130,246,.25); border: 1px solid rgba(59,130,246,.3); color: #dbe7ff; }
-  .mmd-msg.bot { align-self: flex-start; background: rgba(6,11,31,.6); border: 1px solid rgba(125,211,252,.2); color: #dbe7ff; }
-  .mmd-msg.step { align-self: flex-start; background: rgba(125,211,252,.06); border-left: 2px solid #7dd3fc; color: #7d8db0; font-size: 11px; }
-  .mmd-msg.err { align-self: flex-start; background: rgba(232,70,58,.12); border: 1px solid rgba(232,70,58,.3); color: #fca5a5; }
-  .mmd-input { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid rgba(125,211,252,.15); }
-  .mmd-input input { flex: 1; background: rgba(125,211,252,.08); border: 1px solid rgba(125,211,252,.2); color: #dbe7ff;
-                     border-radius: 8px; padding: 7px 10px; font-size: 12px; outline: none; }
-  .mmd-input input:focus { border-color: rgba(125,211,252,.5); }
-  .mmd-input button { background: rgba(59,130,246,.3); border: 1px solid rgba(59,130,246,.4); color: #e0ecff;
-                      border-radius: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer; }
-  .mmd-input button:disabled { opacity: .5; cursor: not-allowed; }
-  .mmd-stage { margin-left: 0; transition: margin-left .18s ease; }
-</style>
-</head>
-<body>
-<div class="head">
-  <span class="ftitle">🧠 ${esc(title)}</span>
-  <span class="fchip">L3 LLM 思维导图</span>
-  <span class="mode" id="modeChip"></span>
-  <div class="search"><input id="search" placeholder="搜索节点…"></div>
-</div>
-<div class="stage mmd-stage">
-  <div class="empty" id="empty">加载中…</div>
-  <div class="tree" id="tree"></div>
-  <div class="hint">点击节点展开/折叠 · 悬停查看说明 · 滚轮缩放 · 可拖动</div>
-  <div class="zoom">
-    <button id="zin">+</button>
-    <button id="zout">−</button>
-    <button id="zreset">⟲</button>
-  </div>
-</div>
-<button class="mmd-toggle" id="mmdToggle">💬 讲解</button>
-<div class="mmd-panel hidden" id="mmdPanel">
-  <div class="mmd-head">💬 思维导图管理助手</div>
-  <div class="mmd-msgs" id="mmdMsgs"></div>
-  <div class="mmd-input">
-    <input id="mmdInput" placeholder="问项目 / 让它重新生成导图…">
-    <button id="mmdSend">发送</button>
-  </div>
-</div>
-<div class="bubble" id="bubble">
-  <div class="b-title" id="bTitle"></div>
-  <div id="bDesc"></div>
-  <div class="b-meta" id="bMeta"></div>
-</div>
-<script>
-(function(){
-  var DATA = ${json};
-  var tree = document.getElementById('tree');
-  var empty = document.getElementById('empty');
-  var bubble = document.getElementById('bubble');
-  var modeChip = document.getElementById('modeChip');
-  modeChip.textContent = DATA.mode === 'llm' ? '✨ LLM 提炼' : '📄 规则骨架';
-
-  var ROOT_MODEL = DATA.root;
-  var state = {}; // id -> collapsed
-  var expandedSeed = new Set();
-
-  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-  var KIND_COLOR = { root:'#7dd3fc', feature:'#818cf8', community:'#34d399', file:'#64748b', note:'#f59e0b' };
-
-  function countFiles(n){ if(n.children && n.children.length) return n.children.reduce(function(s,c){return s+countFiles(c);},0); return n.kind==='file'?1:0; }
-
-  // 默认展开到功能层（root + 一级），折叠社区/文件，保持整体可读
-  function defaultExpandDepth(n, depth){
-    if(depth < 2) expandedSeed.add(n.id);
-    (n.children||[]).forEach(function(c){ defaultExpandDepth(c, depth+1); });
-  }
-  defaultExpandDepth(ROOT_MODEL, 0);
-
-  function render(){
-    tree.innerHTML = '';
-    var html = buildNode(ROOT_MODEL, 0);
-    tree.innerHTML = html;
-    bind();
-    empty.style.display = 'none';
-  }
-  function buildNode(n, depth){
-    var isCollapsed = state[n.id] === true;
-    var hasKids = n.children && n.children.length;
-    var defaultOpen = expandedSeed.has(n.id);
-    var open = hasKids && !isCollapsed && (defaultOpen || state[n.id] === false);
-    if(hasKids && state[n.id] === undefined) open = defaultOpen;
-    var tog = hasKids ? '<span class="tog" data-tog="'+n.id+'">'+(open?'−':'+')+'</span>' : '<span class="tog leaf">·</span>';
-    var files = n.meta && n.meta.files ? ' · '+n.meta.files+' 文件' : '';
-    var metaHtml = n.meta && (n.meta.lines!==undefined || files) ? '<span class="meta">'+(n.meta.lines!==undefined?('~'+n.meta.lines+' 行'):'')+files+'</span>' : '';
-    // 气泡用纯文本 meta（不含 HTML），避免悬停显示标签源码
-    var metaText = '';
-    if(n.kind==='root'||n.kind==='feature'){ if(n.meta&&n.meta.files) metaText=(n.meta.files+' 个文件'); }
-    else if(n.kind==='community'){ var mp=[]; if(n.meta&&n.meta.files)mp.push(n.meta.files+' 个文件'); if(n.meta&&n.meta.lines)mp.push('约 '+n.meta.lines+' 行'); if(n.meta&&n.meta.symbols)mp.push(n.meta.symbols+' 个符号'); metaText=mp.join(' · '); }
-    else if(n.kind==='file'){ if(n.meta&&n.meta.lines) metaText=n.meta.lines+' 行'; }
-    var row = '<div class="node-row '+clsName(n.kind)+'" data-id="'+n.id+'" data-desc="'+esc(n.description||'')+'" data-kind="'+n.kind+'" data-label="'+esc(n.label||'')+'" data-meta="'+esc(metaText)+'">'
-      + tog
-      + '<span class="dot"></span>'
-      + '<span class="lbl">'+esc(n.label||'')+'</span>'
-      + metaHtml
-      + '</div>';
-    if(hasKids && open){
-      var kids = '<div class="children">';
-      (n.children||[]).forEach(function(c){ kids += buildNode(c, depth+1); });
-      kids += '</div>';
-      return row + kids;
-    }
-    return row;
-  }
-  function clsName(k){ return 'nl-'+k; }
-
-  function bind(){
-    tree.querySelectorAll('.node-row').forEach(function(row){
-      row.addEventListener('click', function(e){
-        var id = row.getAttribute('data-id');
-        var tog = row.querySelector('[data-tog]');
-        if(!tog){ return; }
-        e.stopPropagation();
-        state[id] = state[id] === true ? false : true;
-        render();
-      });
-      row.addEventListener('mouseenter', function(e){
-        var id = row.getAttribute('data-id');
-        var label = row.getAttribute('data-label');
-        var desc = row.getAttribute('data-desc');
-        var meta = row.getAttribute('data-meta');
-        if(!desc && !meta) return;
-        bubble.style.display = 'block';
-        document.getElementById('bTitle').textContent = label;
-        document.getElementById('bDesc').textContent = desc || '（无说明）';
-        document.getElementById('bMeta').textContent = (meta||'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&amp;/g,'&');
-        var r = row.getBoundingClientRect();
-        var stageR = row.parentElement.closest('.stage');
-        var maxX = bubble.offsetWidth;
-        bubble.style.left = Math.min(r.right + 12, window.innerWidth - bubble.offsetWidth - 10) + 'px';
-        bubble.style.top = Math.min(r.top + window.scrollY, window.innerHeight - bubble.offsetHeight - 10) + 'px';
-      });
-      row.addEventListener('mouseleave', function(){ bubble.style.display = 'none'; });
-    });
-  }
-
-  // 缩放 + 拖动
-  var scale = 1, tx = 20, ty = 20;
-  function applyTransform(){ tree.style.transform = 'translate('+tx+'px,'+ty+'px) scale('+scale+')'; }
-  document.getElementById('zin').onclick = function(){ scale = Math.min(2.5, scale*1.2); applyTransform(); };
-  document.getElementById('zout').onclick = function(){ scale = Math.max(.4, scale/1.2); applyTransform(); };
-  document.getElementById('zreset').onclick = function(){ scale=1; tx=20; ty=20; applyTransform(); };
-  tree.addEventListener('wheel', function(e){ e.preventDefault(); scale = Math.max(.4, Math.min(2.5, scale * (e.deltaY<0?1.1:.9))); applyTransform(); }, {passive:false});
-  var dragging=false, sx=0, sy=0;
-  tree.addEventListener('mousedown', function(e){ dragging=true; sx=e.clientX; sy=e.clientY; });
-  window.addEventListener('mousemove', function(e){ if(dragging){ tx += e.clientX-sx; ty += e.clientY-sy; sx=e.clientX; sy=e.clientY; applyTransform(); }});
-  window.addEventListener('mouseup', function(){ dragging=false; });
-
-  // 搜索：展开匹配节点并高亮
-  var searchInput = document.getElementById('search');
-  var searchTimer;
-  searchInput.addEventListener('input', function(){
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(function(){ doSearch(searchInput.value.trim().toLowerCase()); }, 200);
-  });
-  function flatten(n, acc){ acc.push(n); (n.children||[]).forEach(function(c){ flatten(c, acc); }); return acc; }
-  function doSearch(q){
-    if(!q){ render(); return; }
-    var all = flatten(ROOT_MODEL, []);
-    var matchIds = new Set(all.filter(function(n){ return (n.label||'').toLowerCase().indexOf(q)!==-1 || (n.description||'').toLowerCase().indexOf(q)!==-1; }).map(function(n){return n.id;}));
-    // 展开所有祖先路径
-    all.forEach(function(n){
-      if(matchIds.has(n.id)){
-        var cur = ROOT_MODEL;
-        state[n.id] = false;
-        (function walk(p){
-          if(p.id===n.id) return;
-          (p.children||[]).forEach(function(c){ if(matchIds.has(c.id) || (function contains(x){ return (x.children||[]).some(function(y){ return y.id===n.id || contains(y); }); })(c)){ state[c.id]=false; walk(c); } });
-        })(ROOT_MODEL);
-      }
-    });
-    render();
-    // 高亮命中
-    tree.querySelectorAll('.node-row').forEach(function(row){
-      var id = row.getAttribute('data-id');
-      if(matchIds.has(id)) row.style.background = 'rgba(245,158,11,.18)';
-    });
-  }
-
-  render();
-  applyTransform();
-
-  // ── 右侧对话面板：只读问答 Agent ──
-  var panel = document.getElementById('mmdPanel');
-  var toggle = document.getElementById('mmdToggle');
-  var msgs = document.getElementById('mmdMsgs');
-  var input = document.getElementById('mmdInput');
-  var sendBtn = document.getElementById('mmdSend');
-  var mmdHistory = [];
-  var FEATURE = DATA.feature;
-
-  function addMsg(text, cls){
-    var d = document.createElement('div');
-    d.className = 'mmd-msg ' + cls;
-    d.textContent = text;
-    msgs.appendChild(d);
-    msgs.scrollTop = msgs.scrollHeight;
-    return d;
-  }
-  toggle.addEventListener('click', function(){
-    var hidden = panel.classList.contains('hidden');
-    panel.classList.toggle('hidden');
-    document.querySelectorAll('.mmd-stage')[0].style.marginLeft = hidden ? '320px' : '0';
-    if(hidden) input.focus();
-  });
-  function send(){
-    var text = input.value.trim();
-    if(!text) return;
-    addMsg(text, 'user');
-    input.value = '';
-    sendBtn.disabled = true;
-    var waiting = addMsg('…正在请讲解助手分析', 'step');
-    var payload = { feature: FEATURE, message: text, history: mmdHistory };
-    fetch('/api/mmd/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(function(r){ return r.json(); }).then(function(res){
-      waiting.remove();
-      if(!res.success){
-        addMsg('请求失败：' + (res.error || '未知错误'), 'err');
-        return;
-      }
-      if(res.note) addMsg(res.note, 'step');
-      if(res.step) addMsg('🔧 ' + res.step.action + (res.step.observation ? '\\n' + res.step.observation.slice(0, 300) : ''), 'step');
-      var answer = res.answer || '（无回答）';
-      addMsg(answer, 'bot');
-      mmdHistory.push({ role: 'user', content: text });
-      mmdHistory.push({ role: 'assistant', content: answer });
-    }).catch(function(e){
-      waiting.remove();
-      addMsg('请求失败：' + (e && e.message ? e.message : e), 'err');
-    }).finally(function(){
-      sendBtn.disabled = false;
-      input.focus();
-    });
-  }
-  sendBtn.addEventListener('click', send);
-  input.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ send(); } });
-})();
-</script>
-</body>
-</html>`;
-}

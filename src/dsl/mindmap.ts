@@ -11,8 +11,23 @@
  * 保证"思维导图 → 设计图 → 实际代码"可追溯；无法精确对齐时用 l2_ref 显式引用。
  */
 
+import type { NarrScene } from './narration.js';
+
 /** 思维导图节点类型 */
-export type MindMapKind = 'root' | 'feature' | 'community' | 'file' | 'note' | 'stepgroup' | 'step' | 'shared' | 'proposal';
+export type MindMapKind =
+  | 'root'
+  | 'feature'
+  | 'community'
+  | 'file'
+  | 'note'
+  | 'stepgroup'
+  | 'step'
+  | 'shared'
+  | 'proposal'
+  /** 积木黑盒卡（拼装区折叠资产）：契约投影自出生证明，内部不进导图 */
+  | 'brick'
+  /** 能力支柱（"这个项目能干嘛"的业务能力，LLM 把细功能归并成支柱后出现在根下） */
+  | 'capability';
 
 /** 科普分镜步骤（teach 模式 feature 节点专用，像科普视频的镜头脚本） */
 export interface TeachStep {
@@ -22,6 +37,19 @@ export interface TeachStep {
   detail: string;
   /** 这步涉及的关键文件/模块（技术锚点，供下钻追溯，可选） */
   involves?: string[];
+  /**
+   * 产线针脚·数据形态投影（契约投影自 actual_apis 签名，非 LLM 编造）。
+   * in/out 的数量与方向即代码事实——控制类（ctx/error）不投影，集合类提质为单针脚。
+   * 供工厂产线视图在工序盒左右边缘渲染入/出针脚；无投影时前端回落到按步骤顺序推导。
+   */
+  inputs?: TeachPin[];
+  outputs?: TeachPin[];
+}
+
+/** 产线针脚：一个数据形态（n=人话名，t=来源类型简写） */
+export interface TeachPin {
+  n: string;
+  t: string;
 }
 
 /** 思维导图节点 */
@@ -46,6 +74,17 @@ export interface MindMapNode {
     l2_ref?: string;
     /** 该步涉及的关键文件（step 节点挂载，供面板展示技术锚点） */
     involves?: string[];
+    /** 产线针脚·数据形态（step 节点挂载，契约投影自 actual_apis 签名，非 LLM 编造） */
+    inputs?: TeachPin[];
+    outputs?: TeachPin[];
+    /** 叙事分镜（step 节点挂载：进料口→工序→出料口，facts 逐条来自契约投影，前端点开工序盒折叠面板展示） */
+    narration?: NarrScene[];
+    /** 暴露接口签名清单（brick 节点挂载：契约投影自盒内 manifest） */
+    apis?: string[];
+    /** 分镜权威标记（feature 节点挂载）：done=已有≥3步有效 LLM 分镜；pending=占位（AI 分镜暂不可用/材料不足）。最终产物=分镜，pending 绝不冒充成品 */
+    storyboard?: 'done' | 'pending';
+    /** 分镜是否占位（stepgroup 节点挂载）：即 feature.storyboard==='pending' 的冗余投影，前端渲染待生成态 */
+    pending?: boolean;
   };
   /** 实现原理分镜（teach 模式功能节点：像科普视频一步步讲"这是怎么实现的"） */
   steps?: TeachStep[];
@@ -129,6 +168,15 @@ export interface MindMap {
 
   /** 用户的新功能构想（根级 user_nodes 经 LLM 定位融入）：🔮 虚线分支，与已实现功能区分 */
   proposals?: ProposalFeature[];
+
+  /** 产线视图确认表（key = 功能 label → 是否已由主人确认为"管线型产线视图"）：
+   * 仅写入保留 JSON（teach 文件），重建不重算、不覆盖。默认缺省 = 不产线（保持社区视图） */
+  pipeline_like?: Record<string, boolean>;
+
+  /** LLM 分镜生成时顺带输出的产线提议（key = 功能 label → 一句话依据，如"数据沿调用链单向流动"）：
+   * 仅展示给主人确认用，确认前不影响渲染。机器不代主人拍板 */
+  pipeline_like_proposals?: Record<string, string>;
+
   /** 生成时间 */
   generated_at: string;
   /** 说明（生成方式/降级原因） */

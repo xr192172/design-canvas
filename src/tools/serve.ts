@@ -43,11 +43,12 @@ import { renderHomePage, renderProjectPage } from './hub_page.js';
 import { renderMindmapPage } from './mindmap_page.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
-import { deriveMindMap, renderMindMapHtml } from './derive_mind_map.js';
+import { deriveMindMap } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
 import { getMindMapFile } from './derive_mind_map.js';
-import { runMindmapAgent } from './mindmap_agent.js';
+import type { MindMap } from '../dsl/mindmap.js';
+import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
@@ -774,7 +775,7 @@ async function handleApiMindMap(req: http.IncomingMessage, res: http.ServerRespo
   }
 }
 
-/** GET /api/mind-map?feature=&html=1：读取已生成的思维导图 JSON；html=1 返回查看器页面 */
+/** GET /api/mind-map?feature=：读取已生成的结构骨架 JSON（中间数据） */
 function handleApiMindMapGet(req: http.IncomingMessage, res: http.ServerResponse): void {
   try {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -789,12 +790,6 @@ function handleApiMindMapGet(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
     const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    if (url.searchParams.get('html') === '1') {
-      const html = renderMindMapHtml(mindMap, mindMap.feature || feature);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(html);
-      return;
-    }
     sendJson(res, 200, { success: true, mind_map: mindMap });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
@@ -833,26 +828,9 @@ async function handleApiOverview(
     const result = await getOverview({ feature, refresh, refresh_llm: refreshLlm, first_steps: firstSteps });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
-    sendError(res, 500, (e as Error).message);
-  }
-}
-
-/** POST /api/mmd/chat：L3 思维导图只读问答 Agent（SSE 流式进度） */
-async function handleApiMmdChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  try {
-    const body = await readBody(req);
-    const params = JSON.parse(body.toString('utf-8'));
-    const feature = (params.feature || '').trim();
-    const message = (params.message || '').trim();
-    if (!feature || !message) {
-      sendError(res, 400, '缺少 feature/message 参数');
-      return;
-    }
-    const history = Array.isArray(params.history) ? params.history : [];
-    const result = await runMindmapAgent({ feature, message, history });
-    sendJson(res, 200, { success: true, ...result });
-  } catch (e) {
-    sendError(res, 500, (e as Error).message);
+    // 支持带语义错误码的异常（如 feature 不存在 → 404），其余默认 500
+    const status = (e as Error & { status?: number }).status;
+    sendError(res, status && status >= 400 && status < 600 ? status : 500, (e as Error).message);
   }
 }
 
@@ -972,6 +950,63 @@ async function handleApiUserNodes(
     dsl.user_nodes = cleaned;
     saveDSL(dsl, 'browser');
     sendJson(res, 200, { success: true, count: cleaned.length });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/opl：待改进闭环流水线（人加待改进→下探→设计DSL→改真实文件→真DSL比较→接入导图）
+ *  op: add | locate | declare | implement | check | integrate | list | get */
+async function handleApiOpl(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    const feature = String(params.feature || '').trim();
+    const op = String(params.op || '').trim();
+    const id = String(params.id || '').trim();
+    if (!feature || !op) {
+      sendError(res, 400, '缺少 feature 或 op 参数');
+      return;
+    }
+    let result;
+    switch (op) {
+      case 'add':
+        if (!String(params.idea || '').trim()) {
+          sendError(res, 400, '缺少 idea 参数');
+          return;
+        }
+        result = oplAdd(feature, String(params.idea || ''));
+        break;
+      case 'auto':
+        // 一键自驱闭环：无 id 传 idea 自动 add，有 id 从现有状态续推
+        result = await oplAuto(feature, id || undefined, String(params.idea || ''));
+        break;
+      case 'locate':
+        result = await oplLocate(feature, id);
+        break;
+      case 'declare':
+        result = oplDeclare(feature, id, { files: params.files });
+        break;
+      case 'implement':
+        result = oplImplement(feature, id);
+        break;
+      case 'check':
+        result = oplCheck(feature, id);
+        break;
+      case 'integrate':
+        result = await oplIntegrate(feature, id);
+        break;
+      case 'list':
+        result = oplList(feature);
+        break;
+      case 'get':
+        result = oplGet(feature, id);
+        break;
+      default:
+        sendError(res, 400, `不支持的操作：${op}`);
+        return;
+    }
+    sendJson(res, 200, { success: true, result });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1915,7 +1950,6 @@ export async function startServer(port?: number): Promise<void> {
       (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
         url.startsWith('/api/registry') || url.startsWith('/api/import') ||
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
-        url.startsWith('/api/mmd/chat') ||
         url.startsWith('/api/mind-map'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
@@ -2046,6 +2080,39 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
+    // 产线视图确认/拒绝：主人对 LLM 的产线提议（pipeline_like）拍板 → 写保留 JSON（teach 文件）
+    if (url.startsWith('/api/pipeline-like') && method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req);
+          const params = JSON.parse(body.toString('utf-8') || '{}');
+          const feature = String(params.feature || '').trim();
+          const label = String(params.label || '').trim();
+          if (!feature || !label) {
+            sendError(res, 400, '缺少 feature 或 label 参数');
+            return;
+          }
+          if (typeof params.like !== 'boolean') {
+            sendError(res, 400, 'like 必须是布尔量（是/否产线视图）');
+            return;
+          }
+          const file = getMindMapFile(feature, 'teach');
+          if (!fs.existsSync(file)) {
+            sendError(res, 404, 'teach 导图未生成，请先调用 derive_mind_map 生成科普分镜');
+            return;
+          }
+          const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8')) as MindMap;
+          mindMap.pipeline_like = mindMap.pipeline_like ?? {};
+          mindMap.pipeline_like[label] = params.like;
+          fs.writeFileSync(file, JSON.stringify(mindMap, null, 2), 'utf-8');
+          sendJson(res, 200, { success: true, like: params.like, pipeline_like: mindMap.pipeline_like });
+        } catch (e) {
+          sendError(res, 500, (e as Error).message);
+        }
+      })();
+      return;
+    }
+
     if (url.startsWith('/api/overview') && (method === 'GET' || method === 'POST')) {
       void handleApiOverview(req, res, method);
       return;
@@ -2059,12 +2126,13 @@ export async function startServer(port?: number): Promise<void> {
       void handleApiAnnotations(req, res, method);
       return;
     }
-    if (url.startsWith('/api/mind-map') && method === 'GET') {
-      handleApiMindMapGet(req, res);
+    if (url.startsWith('/api/opl') && method === 'POST') {
+      void handleApiOpl(req, res);
       return;
     }
-    if (url.startsWith('/api/mmd/chat') && method === 'POST') {
-      handleApiMmdChat(req, res);
+
+    if (url.startsWith('/api/mind-map') && method === 'GET') {
+      handleApiMindMapGet(req, res);
       return;
     }
 

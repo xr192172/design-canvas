@@ -178,6 +178,33 @@ describe('import_project', () => {
     expect(result.skipped[0]).toContain('max_files');
   });
 
+  it('max_files 截断后无悬空边：被截断文件的导入关系应被过滤', async () => {
+    const tinyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'import-tiny-'));
+    const putTiny = (rel: string, content: string) => {
+      const abs = path.join(tinyRoot, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content, 'utf-8');
+    };
+    putTiny('importer.ts', `import { helper } from './truncated';\nexport function main(): void { helper(); }\n`);
+    putTiny('truncated.ts', `export function helper(): void {}\n`);
+
+    const result = await importProject({
+      project_dir: tinyRoot,
+      feature: 'tiny_truncated',
+      max_files: 1,
+    });
+    expect(result.files_parsed).toBe(1);
+
+    const dsl = getDSL('tiny_truncated')!;
+    const nodeIds = new Set(dsl.geometry.nodes.map((n) => n.id));
+    expect(nodeIds.has('file_truncated_ts')).toBe(false);
+    for (const e of dsl.geometry.edges) {
+      expect(nodeIds.has(e.from), `边 ${e.id} 的 from=${e.from} 悬空`).toBe(true);
+      expect(nodeIds.has(e.to), `边 ${e.id} 的 to=${e.to} 悬空`).toBe(true);
+    }
+    fs.rmSync(tinyRoot, { recursive: true, force: true });
+  });
+
   it('design_mode：仅生成顶级目录节点，无文件节点、无悬空边', async () => {
     await importProject({
       project_dir: fixtureRoot,

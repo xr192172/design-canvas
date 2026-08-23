@@ -1137,6 +1137,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
 
   // 3. 依赖边（文件级，去重，去自环）
   const byRel = new Map(files.map((f) => [f.rel, f]));
+  const fileRelSet = new Set(byRel.keys());
   const depEdgeSet = new Set<string>();
   const fileDeps: Array<[string, string]> = [];
   for (const f of files) {
@@ -1148,6 +1149,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       const targets = resolveImport(imp, f, index, goModules);
       for (const t of targets) {
         if (t.rel === f.rel) continue;
+        // 防止悬空边：max_files 截断后目标文件不在当前文件集，跳过（无节点则无合法边）
+        if (!fileRelSet.has(t.rel)) continue;
         const key = `${f.rel}|${t.rel}`;
         if (depEdgeSet.has(key)) continue;
         depEdgeSet.add(key);

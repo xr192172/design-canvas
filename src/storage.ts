@@ -13,17 +13,49 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DesignDSL } from './dsl/types.js';
+
+/**
+ * design-canvas 包根：从模块自身位置（dist/src/storage.js 或 src/storage.ts）
+ * 向上找最近的 package.json 且 name==="design-canvas" 的目录。
+ *
+ * 与 cwd 无关：MCP server / serve / daemon 可能由任意 cwd 拉起
+ * （TRAE/Claude 等 client 常以工作区根为用户目录作为 stdio 子进程 cwd），
+ * 若 dataHome 裸依赖 process.cwd()，会把 features 存档 + 活态 DSL 错位写到
+ * 工作区根，甚至把其它项目的 go-* 文件并进本 feature 的边（"146 条 flows 污染"根因）。
+ * 这里自省锚定，保证设计数据永远落在 design-canvas 自身安装根。
+ */
+export function getPackageRoot(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  while (dir !== path.dirname(dir)) {
+    const pkg = path.join(dir, 'package.json');
+    if (fs.existsSync(pkg)) {
+      try {
+        const j = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as { name?: string };
+        if (j.name === 'design-canvas') return dir;
+      } catch {
+        /* 忽略损坏的 package.json */
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  return process.cwd();
+}
 
 /**
  * 数据主目录：所有持久化路径的根
  *
- * 默认 = process.cwd()。测试通过 DESIGN_CANVAS_HOME 指向临时目录，
- * 避免 saveDSL / renderDsl 覆盖项目根目录的活态 design-canvas.json。
+ * 优先级：
+ *   1. DESIGN_CANVAS_HOME（测试/显式覆盖用，最高优先）
+ *   2. design-canvas 包根（getPackageRoot，从模块位置自省，cwd 无关，稳定）
+ *   3. process.cwd()（自省失败的最末端兜底）
+ *
  * 注意：必须在调用时读取 env（不能模块加载时缓存），保证 vitest setup 生效。
  */
 export function getDataHome(): string {
-  return process.env.DESIGN_CANVAS_HOME || process.cwd();
+  if (process.env.DESIGN_CANVAS_HOME) return process.env.DESIGN_CANVAS_HOME;
+  return getPackageRoot();
 }
 
 /** 设计存储根目录：<dataHome>/.design-canvas */

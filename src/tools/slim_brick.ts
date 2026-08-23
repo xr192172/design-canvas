@@ -327,7 +327,12 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
   if (!fs.existsSync(manifestPath)) {
     throw new Error(`积木不存在：${manifestPath}（search_bricks 可查盒内清单）`);
   }
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as BrickManifest;
+  let manifest: BrickManifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as BrickManifest;
+  } catch {
+    throw new Error(`积木 manifest.json 损坏：${manifestPath}（请检查文件是否为有效 JSON）`);
+  }
 
   const filesRoot = path.join(brickDir, 'files');
   if (!fs.existsSync(filesRoot)) {

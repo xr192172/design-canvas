@@ -13,6 +13,7 @@
     "serve": "node dist/src/tools/serve.js",
     "daemon": "node dist/src/daemon/daemon.js",
     "instrument": "node dist/src/camera/instrument_cli.js",
+    "rebuild": "node scripts/rebuild_feature.mjs",
     "dogfood": "node dist/src/tools/dogfood_stats.js",
     "test": "vitest run",
     "test:watch": "vitest",

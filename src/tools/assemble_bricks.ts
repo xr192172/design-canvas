@@ -175,14 +175,14 @@ export function rewriteGoFile(
         inBlock = false;
         continue;
       }
-      const m = line.match(/^\s*(?:[A-Za-z_][A-Za-z0-9_.]*\s+)?"([^"]+)"/);
+      const m = line.match(/^\s*(?:(?:[A-Za-z_][A-Za-z0-9_.]*|\.)\s+)?"([^"]+)"/);
       if (m) {
         const nl = tryRemap(line, m[1]);
         if (nl) lines[i] = nl;
       }
       continue;
     }
-    const single = line.match(/^import\s+(?:[A-Za-z_][A-Za-z0-9_.]*\s+)?"([^"]+)"/);
+    const single = line.match(/^import\s+(?:(?:[A-Za-z_][A-Za-z0-9_.]*|\.)\s+)?"([^"]+)"/);
     if (single) {
       const nl = tryRemap(line, single[1]);
       if (nl) lines[i] = nl;
@@ -225,7 +225,11 @@ export async function assembleBricks(input: AssembleBricksInput): Promise<Assemb
       missing.push(name);
       continue;
     }
-    loaded.push({ manifest: JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as BrickManifest, dir });
+    try {
+      loaded.push({ manifest: JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as BrickManifest, dir });
+    } catch {
+      missing.push(`${name}（manifest.json 损坏）`);
+    }
   }
   if (missing.length) {
     const existing = fs

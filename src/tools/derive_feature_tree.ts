@@ -18,7 +18,7 @@
  */
 
 import { analyzeMonolith } from './analyze_monolith.js';
-import { getDSL, saveDSL } from '../storage.js';
+import { getDSLByView, saveDSL } from '../storage.js';
 import { loadLlmConfig, callChat } from './llm_focus.js';
 import { loadExplainConfig } from './explain_gen.js';
 import type { FeatureTree, FeatureNode, FeatureCommunity } from '../dsl/types.js';
@@ -283,8 +283,11 @@ export async function deriveFeatureTree(
     return undefined;
   }
   const fileMap: Record<string, { feature_id: string; community_id: number }> = {};
-  const dsl = input.feature ? getDSL(input.feature) : null;
-  const semanticFiles = dsl?.semantic?.files ?? [];
+  // 功能树是"实际代码结构"的产物，语义基准必须对齐 cache.db 索引的代码快照（live 视图）。
+  // 不能用设计视图（design）：设计视图是人工/历史拼装态，可能混入跨项目残留文件
+  //（曾因 cwd 漂移把 go-camera、camera-conformance 等并进来），命中率闸门会误判"不相关"而拒生成。
+  const liveDsl = input.feature ? getDSLByView(input.feature, 'live') : null;
+  const semanticFiles = liveDsl?.semantic?.files ?? [];
   for (const sf of semanticFiles) {
     const cid = fileToCommunity.get(sf.path) ?? communityOf(sf.path);
     if (cid === undefined) continue;
@@ -328,10 +331,10 @@ export async function deriveFeatureTree(
     scoped = features.filter((f) => mappedFids.has(f.id));
   }
 
-  // 6. 落盘
-  if (input.feature && dsl) {
-    dsl.feature_tree = { features: scoped, file_map: fileMap, source: usedLlm ? 'llm' : 'rule' };
-    saveDSL(dsl, 'feature_tree');
+  // 6. 落盘（写回 live 快照；saveDSL 同时同步设计视图文件，使结构图与功能树对齐）
+  if (input.feature && liveDsl) {
+    liveDsl.feature_tree = { features: scoped, file_map: fileMap, source: usedLlm ? 'llm' : 'rule' };
+    saveDSL(liveDsl, 'feature_tree');
   }
 
   const total = semanticFiles.length;

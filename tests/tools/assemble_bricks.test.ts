@@ -143,6 +143,25 @@ describe('rewriteGoFile（import 重写状态机）', () => {
     expect(aliased.text).toContain('m "m/x/model"');
   });
 
+  it('dot import（import . "path"）与 blank import（import _ "path"）均重写', () => {
+    const dotSrc = `package p\n\nimport . "github.com/alibaba/open-code-review/internal/model"\n`;
+    const dotResult = rewriteGoFile(dotSrc, dirs, 'm/x');
+    expect(dotResult.rewritten.length).toBeGreaterThan(0);
+    expect(dotResult.text).toContain(`. "m/x/model"`);
+
+    const blankSrc = `package p\n\nimport _ "github.com/alibaba/open-code-review/internal/model"\n`;
+    const blankResult = rewriteGoFile(blankSrc, dirs, 'm/x');
+    expect(blankResult.rewritten.length).toBeGreaterThan(0);
+    expect(blankResult.text).toContain(`_ "m/x/model"`);
+
+    // 块内 dot import 也需重写
+    const blockDotSrc = `package p\n\nimport (\n\t. "github.com/alibaba/open-code-review/internal/model"\n\t"fmt"\n)\n`;
+    const blockDotResult = rewriteGoFile(blockDotSrc, dirs, 'm/x');
+    expect(blockDotResult.rewritten.length).toBeGreaterThan(0);
+    expect(blockDotResult.text).toContain(`. "m/x/model"`);
+    expect(blockDotResult.text).toContain(`"fmt"`); // stdlib 不动
+  });
+
   it('最长后缀优先：闭包有嵌套目录时不误配短后缀', () => {
     const nested = new Set(['internal/model', 'internal/model/sub']);
     const src = `package p
@@ -241,6 +260,16 @@ describe('assembleBricks', () => {
     await expect(
       assembleBricks({ bricks: ['nope'], target_dir: f.targetDir(), box_dir: f.boxDir }),
     ).rejects.toThrow(/不在盒中.*demo_go、demo_ts/);
+  });
+
+  it('manifest 损坏：报错提示而不崩溃', async () => {
+    // 写入无效 JSON 作为 manifest.json
+    const corruptDir = path.join(f.boxDir, 'corrupt_brick');
+    fs.mkdirSync(corruptDir, { recursive: true });
+    fs.writeFileSync(path.join(corruptDir, 'manifest.json'), '{invalid json!!', 'utf-8');
+    await expect(
+      assembleBricks({ bricks: ['corrupt_brick', 'demo_go'], target_dir: f.targetDir(), box_dir: f.boxDir }),
+    ).rejects.toThrow(/manifest.json 损坏/);
   });
 
   it('Go 积木缺 module 报错', async () => {
