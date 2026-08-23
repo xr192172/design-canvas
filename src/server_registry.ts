@@ -48,6 +48,9 @@ import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
+import { renameMany, type RenameItem } from './tools/ast_rename.js';
+import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
+import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -64,7 +67,7 @@ import {
   restoreInstrumented,
 } from './camera/instrument.js';
 import path from 'node:path';
-import { statSync } from 'node:fs';
+import { statSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // ─────────────────────────────────────────────────────────────
@@ -1002,6 +1005,112 @@ const TOOL_DEFS: ToolDef[] = [
       code: z.string().optional().describe('replace/insert 的新代码（完整符号定义，含声明；insert 到新文件=全文）'),
     },
     handler: wrap(async (a) => editCode(a as never)),
+  },
+  {
+    name: 'rename_many',
+    title: 'Batch-rename local variables with scope isolation',
+    description:
+      '作用域感知的批量重命名：一次解析源码、合并多处编辑偏移后逆序统一生成，避免串行改名导致的偏移错位。' +
+      '对文件中多个局部变量（含形参）同时改名，自动保证同作用域不撞名（clash 项按 changed=0 跳过并列出）。' +
+      '输入 items=[{id,to}]，id 来自 suggest_renames / analyze_locals 的 LocalBinding.id，to 为合法标识符。' +
+      '写盘前自动检查语法的工具请配合 edit_code；本品为纯表 → 只做折叠改写并写回原文件。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
+      file: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
+      items: z
+        .array(
+          z.object({
+            id: z.number().describe('LocalBinding.id（来自 suggest_renames 的 candidate.id 或 analyze_locals）'),
+            to: z.string().describe('新变量名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
+          }),
+        )
+        .describe('待重命名的目标数组'),
+    },
+    handler: wrap(async (a) => {
+      const { project_dir, file, items } = a;
+      const absPath = path.isAbsolute(file as string) ? (file as string) : path.resolve(String(project_dir), String(file));
+      const src = readFileSync(absPath, 'utf-8');
+      const { out, applied } = await renameMany(src, items as RenameItem[], absPath);
+      const done = applied.filter((x) => x.changed > 0);
+      if (done.length > 0) writeFileSync(absPath, out, 'utf-8');
+      const skipped = applied.filter((x) => x.changed === 0);
+      return {
+        message:
+          `批量重命名完成：成功 ${done.length} 项${skipped.length > 0 ? `，跳过 ${skipped.length} 项（非法名/撞名/原名相同）` : ''}。` +
+          (skipped.length > 0 ? ` 跳过的项：${skipped.map((s) => `${s.from}→${s.to}`).join(', ')}` : ''),
+        data: applied,
+      };
+    }),
+  },
+  {
+    name: 'suggest_renames',
+    title: 'Suggest semantic names for short/unmeaningful variables',
+    description:
+      '智能化改名建议：识别文件中短名/无意义局部变量（含形参），结合纯逻辑候选识别 + LLM 命名建议，' +
+      '为每个候选给出 suggested（建议新名）与 reason（理由）。' +
+      'use_llm=true（默认）调 LLM 建议；false 或未配置 LLM 时降级为仅候选识别（suggested 留空）。' +
+      '返回 candidates 含 id/name/kind/parentFunction/refs/declLine/suggested/reason，' +
+      '可直接把 {id, suggested} 数组传给 rename_many 完成批量改名。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
+      file: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
+      min_len: z.number().optional().default(2).describe('短名长度阈值（默认 2，≤min_len 视为短名候选）'),
+      max: z.number().optional().default(40).describe('LLM 建议的候选数量上限（其余只识别不取名）'),
+      use_llm: z.boolean().optional().default(true).describe('是否用 LLM 生成命名建议（默认 true；false/未配置 LLM 则降级为仅候选识别）'),
+    },
+    handler: wrapData(async (a) => {
+      const { project_dir, file, min_len, max, use_llm } = a;
+      const absPath = path.isAbsolute(file as string) ? (file as string) : path.resolve(String(project_dir), String(file));
+      const src = readFileSync(absPath, 'utf-8');
+      const opts: SuggestOptions = {
+        max: typeof max === 'number' ? max : undefined,
+        minLen: typeof min_len === 'number' ? min_len : undefined,
+        llm: use_llm === false ? null : undefined,
+      };
+      const result = await suggestRenames(src, absPath, opts);
+      return {
+        message:
+          `识别到 ${result.candidates.length} 个短名/无意义变量候选；` +
+          `LLM 建议：${result.llm ? '已启用' : '未启用/降级'}${result.note ? `（${result.note}）` : ''}。` +
+          `建议名可直接作为 rename_many 的 items 使用。`,
+        data: result,
+      };
+    }),
+  },
+  {
+    name: 'find_similar_names',
+    title: 'Detect confusable similar names and disambiguate',
+    description:
+      '相似名称检测与一键消歧：识别同一函数内"易看错"的孪生名（仅大小写不同 / 数字后缀 count-count2 / ' +
+      '相邻换位 typo total-totla / 小编辑距离），按相似度连通块聚类。每个 cluster 保留最清晰名 basis，' +
+      '其余为待改名 offenders；use_llm=true（默认）请 LLM 为每个 offender 建议语义化且与 basis 明显区分的新名。' +
+      'use_llm=false 或未配置 LLM 时降级为仅聚类（suggested 留空）。' +
+      '返回 clusters（含 offenders.suggested 与 reason）+ 可直接喂给 rename_many 的 items 数组，' +
+      '实现"检测→建议→批量改名"闭环。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
+      file: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
+      max_clusters: z.number().optional().default(20).describe('LLM 处理的最大聚类数（其余仅检测不取名）'),
+      use_llm: z.boolean().optional().default(true).describe('是否用 LLM 生成消歧新名（默认 true；false/未配置 LLM 则降级为仅聚类）'),
+    },
+    handler: wrapData(async (a) => {
+      const { project_dir, file, max_clusters, use_llm } = a;
+      const absPath = path.isAbsolute(file as string) ? (file as string) : path.resolve(String(project_dir), String(file));
+      const src = readFileSync(absPath, 'utf-8');
+      const opts = {
+        maxClusters: typeof max_clusters === 'number' ? max_clusters : undefined,
+        llm: use_llm === false ? null : undefined,
+      };
+      const result = await suggestDisambiguations(src, absPath, opts);
+      const items = disambiguationItems(result);
+      return {
+        message:
+          `识别到 ${result.clusters.length} 个相似名聚类；` +
+          `LLM 消歧：${result.llm ? '已启用' : '未启用/降级'}${result.note ? `（${result.note}）` : ''}；` +
+          `可直接改名的项 ${items.length} 条，已附在 data.items 供 rename_many 使用。`,
+        data: { ...result, items },
+      };
+    }),
   },
 ];
 

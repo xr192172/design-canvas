@@ -17,7 +17,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import { parseFileFull, type ParsedSymbol } from './ts_kernel/index.js';
 
@@ -218,17 +217,12 @@ function runSubprocess(cmd: string, args: string[], stdin: string, timeoutMs = 1
   });
 }
 
-/** Python：临时脚本 exec（参数 **kwargs，stdlib 可用），stdin 传输入 JSON。
- *  临时文件按内容 hash 命名并复用（不删除）：每次新建文件会被 Defender 等
- *  实时扫描间歇性锁住（观测到 15s+），同名复用让扫描只发生在首次。 */
+/** Python：通过 `python -c` 内联脚本执行（参数 **kwargs，stdlib 可用），stdin 传输入 JSON。
+ *  不用临时文件：新写临时 py 会被 Defender 等实时扫描间歇性锁住（观测到 15s+），
+ *  导致子进程挂起到超时——脚本经 `-c` 直传即绕开文件系统竞态，稳定可复现。 */
 async function execPy(codeText: string, entryName: string, kwargs: Record<string, unknown>): Promise<unknown> {
   const script = `${codeText}\nimport json, sys\n_result = ${entryName}(**json.loads(sys.stdin.read()))\nprint(json.dumps(_result, default=str))`;
-  const tmp = path.join(
-    os.tmpdir(),
-    `dc_exec_${createHash('sha1').update(script).digest('hex').slice(0, 16)}.py`,
-  );
-  fs.writeFileSync(tmp, script, 'utf-8');
-  const out = await runSubprocess('python', [tmp], JSON.stringify(kwargs));
+  const out = await runSubprocess('python', ['-c', script], JSON.stringify(kwargs));
   return JSON.parse(out.trim());
 }
 
