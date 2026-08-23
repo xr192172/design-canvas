@@ -1328,6 +1328,12 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       saveLiveFeature(layered, input.live_dir);
     } else {
       saveDSL(layered);
+      // 同时写入 live 代码快照：功能树聚类（derive_feature_tree）以 live 视图的
+      // semantic.files 为语义基准做命中率闸门。手动导入的项目若只有设计 DSL 而无
+      // live 快照，换项目后聚类会因语义基准为空被判"db 不相关"而拒生成 → 导图平铺。
+      // 导入即落一份 live，保证换项目后功能树可稳定聚类。（live_dir 缺省 = 默认 dataHome，
+      // 与 getLiveFeature 默认读取路径一致。）
+      saveLiveFeature(layered, input.live_dir);
     }
 
     const dirCount = nodes.filter((n) => n.type === 'module').length;
