@@ -97,8 +97,9 @@ const LAYER_DEFS: LayerDef[] = [
 /** 未匹配任何模式的兜底层 */
 const CORE_DEF: LayerDef = { id: 'core', name: '核心层', desc: '核心/未归类文件', color: '#65707e', patterns: [] };
 
-/** 目录段/文件名段和其复数形式做匹配（借用 vendor 的 segment === pattern || segment === pattern + 's' 思路） */
-function matchLayer(rel: string): string {
+/** 目录段/文件名段和其复数形式做匹配（借用 vendor 的 segment === pattern || segment === pattern + 's' 思路）。
+ * 由文件相对路径推断架构层 id。导出以便 feature_map 直接复用（避免重复实现分层判定）。 */
+export function matchLayer(rel: string): string {
   const segments = rel.replace(/\\/g, '/').split('/');
   for (const L of LAYER_DEFS) {
     for (const segRaw of segments) {
