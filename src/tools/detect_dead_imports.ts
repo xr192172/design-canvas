@@ -82,10 +82,13 @@ export function scanProjectSourceFiles(project_dir: string, files?: string[]): s
       return;
     }
     for (const ent of entries) {
-      if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist') continue;
+      // 递归跳过：依赖/版本控制/构建产物；以及 vendor/（第三方 vendored 代码）——
+      // 它们绝不可能算"自研积木"，不参与死 import 扫描，避免把 vendored 依赖误报为下线候选。
+      if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist' || ent.name === 'vendor') continue;
       const p = path.join(dir, ent.name);
+      // 跳过生成的源码产物（*.gen.ts 等），不参与"自研源码"判定
       if (ent.isDirectory()) walkDir(p);
-      else if (langOf(ent.name)) targets.push(p);
+      else if (langOf(ent.name) && !/\.gen\.(ts|tsx|js|jsx|mjs|cjs)$/.test(ent.name)) targets.push(p);
     }
   };
   walkDir(proj);
