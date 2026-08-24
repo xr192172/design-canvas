@@ -15,8 +15,8 @@
  * 回到上一步的绿点。串行步的 originals 自然后退一步，无需全局快照回溯。
  *
  * 步骤模型：
- *   - 内置可见步骤：dead_statements（自动扫全目录，真相源最干净）、
- *     dead_imports（接受已检测的 dead 清单，源 self 扫复用 removeImportsFromSource）。
+ *   - 内置可见步骤：dead_imports（未给 dead 清单时自动调 detectDeadImports 文件级
+ *     检测 → 一键真相源）、dead_statements（自动扫全目录）。
  *   - 步骤可插拔：传入自定 compute 即扩展；当前未接入 rename（需人工候选）。
  */
 
@@ -25,6 +25,7 @@ import path from 'node:path';
 import { defaultVerifyCommands, runVerification, type VerifyCommand, type VerificationOutcome } from './verify_refactor.js';
 import { flagDeadStatements, applyReachabilityRuns } from './dead_statements.js';
 import { removeImportsFromSource } from './remove_dead_imports.js';
+import { detectDeadImports, type DeadImportCandidate } from './detect_dead_imports.js';
 
 // ─────────────────────────────────────────────
 // 类型
@@ -36,6 +37,8 @@ export interface RunningChangePlan {
   absToNew: Map<string, string>;
   /** 预读的原始内容（apply 前盘上内容；non-plan 阶段为空） */
   originals: Map<string, string>;
+  /** 删除的单位数（死 import 语句条数 / 死语句文件数）；缺省由 runStage 按步退化 */
+  units?: number;
 }
 
 export type StageOutcome =
@@ -68,7 +71,7 @@ export interface PipelineOptions {
   steps: {
     /** 死语句自动删除（flagDeadStatements 自动扫目录）。可选 files 收敛范围 */
     dead_statements?: { enabled?: boolean; files?: string[] };
-    /** 死 import 移除：接受已检测的 dead 清单 */
+    /** 死 import 移除：未给 dead 清单时自动文件级检测（一键）；给了则用给定清单 */
     dead_imports?: {
       enabled?: boolean;
       dead?: Array<{ source: string; files: string[] }>;
@@ -116,9 +119,17 @@ async function computeDeadStatementsPlan(proj: string, files?: string[]): Promis
 }
 
 // ─────────────────────────────────────────────
-// 死 import 步骤：纯计算（接受 dead 清单，复用 removeImportsFromSource）
+// 死 import 步骤：纯计算（复用 removeImportsFromSource）
+// 未提供 dead 清单时自动调用 detectDeadImports —— 一键（无需先跑检测）。
 // ─────────────────────────────────────────────
 function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; files: string[] }>): RunningChangePlan {
+  // 一键：未显式给出清单 → 自动文件级检测（同 dead_statements 的"自动扫"语义）
+  let resolved = dead ?? [];
+  if (resolved.length === 0) {
+    const det = detectDeadImports({ project_dir: proj });
+    resolved = det.dead.map((c) => ({ source: c.source, files: c.files }));
+  }
+
   const absToNew = new Map<string, string>();
   const originals = new Map<string, string>();
   const fileEntry = new Map<string, { lang: 'go' | 'ts'; sources: string[] }>();
@@ -127,7 +138,7 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
     if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel)) return 'ts';
     return null;
   };
-  for (const d of dead ?? []) {
+  for (const d of resolved) {
     for (const f of d.files ?? []) {
       const lang = langOfFile(f);
       if (!lang) continue;
@@ -149,12 +160,14 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
       continue;
     }
   }
+  let units = 0;
   for (const [abs, en] of fileEntry) {
     let src = sources.get(abs)!;
     let changed = false;
     for (const source of en.sources) {
       const res = removeImportsFromSource(src, source, en.lang);
       if (res.changed) changed = true;
+      units += res.removed;
       src = res.output;
     }
     if (changed) {
@@ -162,7 +175,7 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
       originals.set(abs, sources.get(abs)!);
     }
   }
-  return { absToNew, originals };
+  return { absToNew, originals, units };
 }
 
 // ─────────────────────────────────────────────
@@ -234,15 +247,10 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     }
 
     // 落盘（基于当前盘上内容——上一步已绿）
-    let units = 0;
     for (const abs of plan.absToNew.keys()) {
       fs.writeFileSync(abs, plan.absToNew.get(abs)!, 'utf-8');
     }
-    if (id === 'dead_statements') {
-      units = plan.absToNew.size; // 有改动的死语句文件数（行级明细略）
-    } else if (id === 'dead_imports') {
-      units = (opts.steps.dead_imports?.dead ?? []).reduce((s, d) => s + d.files.length, 0);
-    }
+    const units = plan.units ?? (id === 'dead_statements' ? plan.absToNew.size : 0);
 
     r.total_files_changed += plan.absToNew.size;
     r.total_units_removed += units;

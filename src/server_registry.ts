@@ -1163,8 +1163,8 @@ const TOOL_DEFS: ToolDef[] = [
       '确定性重构管线：把可自动执行的瘦身改写串成一条链，一次调用按序执行、统一增量验证、失败只回滚到最近绿点。' +
       '入口只跑一次改前基线（build+test），其后每步基于上一步已绿的内容只跑一次改后验证——不改动的步骤不验证（性能友好）。' +
       '内置步骤：' +
-      '  1) dead_imports：接受已检测的死依赖清单（source + files，可直接用 dead_deps 的 dead 数组或自行构造），' +
-      '     复用 removeDeadImports 同源规则删除指向死源的 import/require/re-export 语句。' +
+      '  1) dead_imports：一键自动检测并删除死 import——未给 dead 清单时自动调用 detect_dead_imports 做文件级扫描；' +
+      '     给了清单则用给定清单（可直接用 dead_deps 的 dead 数组）。复用 removeDeadImports 同源规则删除指向死源的 import/require/re-export 语句。' +
       '  2) dead_statements：自动扫描（可选 files 收敛范围）删除 return/throw/continue 后不可达语句与死分支（TS/Go）。' +
       '失败语义：某步改后验证回归 → 只还原该步预读的原始内容，回到上一步绿点，前面已绿的改动保留；管线结果 ok=false。' +
       '基线失败 → 一个文件都不改。verify=true 启用验证；{commands} 自定义命令组；缺省/verify=false 仅落盘不验证（not_verifiable）。' +
@@ -1185,7 +1185,7 @@ const TOOL_DEFS: ToolDef[] = [
                   }),
                 )
                 .optional()
-                .describe('已检测的死依赖清单；可直接用 dead_deps 结果 dead 数组'),
+                .describe('已检测的死依赖清单；直接用 dead_deps 结果 dead 数组，或省略（缺省自动文件级检测死 import，实现一键）'),
             })
             .optional(),
           dead_statements: z

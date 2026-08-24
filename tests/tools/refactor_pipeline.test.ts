@@ -153,6 +153,28 @@ describe('runRefactorPipeline 增量验证与绿点回滚', () => {
     expect(fs.readFileSync(stmtFile, 'utf-8')).toContain('const ghost');
   });
 
+  it('dead_imports 不提供 dead 清单 → 自动检测并删除（一键）', async () => {
+    const dir = tempRoot();
+    // 死 lodash import + 一个活 import：一键应只删死者
+    fs.writeFileSync(path.join(dir, 'a.ts'), "import _ from 'lodash';\nimport { orderBy } from 'underscore';\nexport const use = orderBy([1], ['x']);\n", 'utf-8');
+
+    const s = spy(['pass', 'pass']); // 基线 + dead_imports 改后
+    const res = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { dead_imports: { enabled: true } }, // 不给 dead，触发自动检测
+      verify: true,
+      verifyImpl: s,
+    });
+
+    const di = res.stages.find((x) => x.id === 'dead_imports');
+    expect(di?.outcome).toBe('applied');
+    expect(di!.units_removed).toBe(1); // 删除 1 条 import 语句
+    const after = fs.readFileSync(path.join(dir, 'a.ts'), 'utf-8');
+    expect(after).not.toContain('lodash');
+    expect(after).toContain('underscore'); // 活的保留
+    expect(asSpy(s).calls.length).toBe(2); // 基线 + 1 改后
+  });
+
   it('dead_imports 无 dead 清单 → 该 stage no_change，不触发验证', async () => {
     const dir = tempRoot();
     fs.writeFileSync(path.join(dir, 'a.ts'), 'const x = 1;\n', 'utf-8');
