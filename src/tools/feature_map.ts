@@ -193,6 +193,9 @@ export function buildFeatureMap(opts: FeatureMapOptions): FeatureMapResult {
   const rels = scanSourceFiles(sourceRoot);
 
   // 1) 收集既有的废弃证据（TS/Go 死 import + py 死 import），文件→功能下钻
+  // 将 rels (相对于 sourceRoot) 转换为相对于 proj 的路径，确保 detectDeadImports 只扫描 sourceRoot 内的文件
+  const relsInProj = rels.map((r) => path.relative(proj, path.resolve(sourceRoot, r))).filter((r) => !r.startsWith('..'));
+  
   const deadBySource = new Map<string, string[]>();
   const collectDead = (deadList: Array<{ source: string; files: string[] }>): void => {
     for (const d of deadList) {
@@ -205,8 +208,8 @@ export function buildFeatureMap(opts: FeatureMapOptions): FeatureMapResult {
       deadBySource.set(d.source, list);
     }
   };
-  collectDead(detectDeadImports({ project_dir: proj }).dead);
-  const pyDead = detectDeadPyImports({ project_dir: proj });
+  collectDead(detectDeadImports({ project_dir: proj, files: relsInProj }).dead);
+  const pyDead = detectDeadPyImports({ project_dir: proj, files: relsInProj });
   collectDead(pyDead.dead.map((c) => ({ source: c.source, files: c.files })));
 
   // 反查：文件 → 死 import 源清单（废弃证据落到文件级）

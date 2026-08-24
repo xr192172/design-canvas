@@ -76,6 +76,11 @@ export interface DeriveSplitInput {
   /** 测试级验收（P3 收尾）：编译级验收通过后，跑该语言的项目测试命令（go test/pytest/npm test），
    *  验证拆分后功能正确性，失败同样自动回滚。默认 = verify_compile；显式传 false 可关闭。 */
   verify_test?: boolean;
+  /** 是否让原文件对被抽取符号保留再导出（export { X } from './new'）。
+   *  仅对 TS/JS 生效（Go 同包符号共享、Python 命名空间天然再暴露，均无需）。
+   *  用途：被拆分符号存在**外部跨文件消费者**（如别处 import { getDbFile } from './db'）时，
+   *  拆走后必须保留再导出，否则外部引用断裂。默认 false（保持既有拆分语义）。 */
+  re_export_extracted?: boolean;
   /** 社区内子拆分计划（P3）：提供后进入编排模式，对每个 splittable 社区的每个类型单元
    *  自动按 owner 拆到独立文件。此时 target_file/symbols/new_file 由编排内部生成。 */
   subsplit?: CommunitySubSplitPlan[];
@@ -841,6 +846,16 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
   if (wiring.needsCrossImport) {
     origContentWithImport = insertImport(originalContent, wiring.importFromNewLine);
   }
+  // 向后兼容再导出（re_export_extracted=true && TS/JS）：原文件对被抽取符号保留
+  // `export { X } from './new'`，保证外部跨文件消费者（别处 import { X } from 本文件）
+  // 拆走后引用不中断。与上方 import 并存：import 供本文件内部使用，export from 供外部再导出。
+  const reExportAdded: string[] = [];
+  if (input.re_export_extracted && lang === 'ts') {
+    const newBase = path.posix.basename(newRel.replace(/\\/g, '/')).replace(/\.[^.]+$/, '');
+    const reExportLine = `export { ${extractedNames.join(', ')} } from './${newBase}';`;
+    origContentWithImport = insertImport(origContentWithImport, reExportLine);
+    reExportAdded.push(reExportLine);
+  }
 
   // 原文件里指向被抽取符号的引用（在非抽取文本中扫描）
   const keptLines = content.split('\n').filter((_, i) => {
@@ -919,6 +934,7 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
   if (wiring.importFromOriginalNames.length > 0) lines.push(`  new ${newRel} ← 从原文件补 import ${wiring.importFromOriginalNames.join(', ')}`);
   if (wiring.needsCrossImport) lines.push(`  ${targetRel} ← 补 import { ${extractedNames.join(', ')} }`);
   else lines.push(`  ${targetRel} / ${newRel}：同包共享，无需补 import`);
+  if (reExportAdded.length > 0) lines.push(`  ${targetRel} ← 补再导出（外部消费者保持可用）${reExportAdded[0]}`);
   if (referencesToExtracted.length > 0) {
     lines.push('', `原文件中 ${referencesToExtracted.length} 处指向被抽取符号${lang === 'go' ? '（同包直接可见，无需改动）' : '（拆后走新文件 import）'}：`);
     for (const r of referencesToExtracted.slice(0, 15)) lines.push(`  L${r.line} · ${r.ref}`);
@@ -971,7 +987,7 @@ async function splitOnce(input: DeriveSplitInput): Promise<DeriveSplitResult> {
       lines: s.end_line - s.start_line + 1,
     })),
     imports_copied: copiedImports,
-    imports_added_original: wiring.needsCrossImport ? [wiring.importFromNewLine] : [],
+    imports_added_original: [...(wiring.needsCrossImport ? [wiring.importFromNewLine] : []), ...reExportAdded],
     imports_added_new: wiring.importFromOriginalLine ? [wiring.importFromOriginalLine] : [],
     references_to_extracted: referencesToExtracted,
     new_content: newContent,
