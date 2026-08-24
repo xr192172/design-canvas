@@ -13,7 +13,7 @@ import { afterAll, describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveConsumerSource, aggregateProjectSources, remainingImporters } from '../../src/tools/deprecate_offline';
+import { resolveConsumerSource, aggregateProjectSources, remainingImporters, hasActiveReference } from '../../src/tools/deprecate_offline';
 import type { DeadDepCandidate } from '../../src/tools/dead_deps';
 
 function tmp(): string {
@@ -102,6 +102,52 @@ describe('remainingImporters（物理下线硬闸门）', () => {
     fs.writeFileSync(path.join(dir, 'legacy', 'old.ts'), 'export const O = 1;');
     const scanned = ['legacy/old.ts'];
     expect(remainingImporters(dir, 'legacy/old.ts', scanned)).toBe(0);
+  });
+});
+
+describe('hasActiveReference（活跃消费确认，候选清单可信任的闸门）', () => {
+  it('被别处真正使用（活 import）→ true，不是可下线积木', () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'renderers'));
+    fs.writeFileSync(path.join(dir, 'renderers', 'ImageRenderer.tsx'), 'export const ImageRenderer = () => null;');
+    // 活跃消费者：在规约文件里把它加进注册表使用 → 模块有活跃消费
+    fs.writeFileSync(
+      path.join(dir, 'PetManager.ts'),
+      "import { ImageRenderer } from './renderers/ImageRenderer';\nexport const R = { img: ImageRenderer };\n",
+    );
+    const scanned = ['renderers/ImageRenderer.tsx', 'PetManager.ts'];
+    expect(hasActiveReference(dir, 'renderers/ImageRenderer.tsx', scanned)).toBe(true);
+  });
+
+  it('仅被死引用（import 但未使用）→ false，真可下线', () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'legacy'));
+    fs.writeFileSync(path.join(dir, 'legacy', 'old.ts'), 'export const O = 1;');
+    fs.writeFileSync(path.join(dir, 'use.ts'), "import { O } from './legacy/old';\nexport const tag = 1;\n");
+    const scanned = ['legacy/old.ts', 'use.ts'];
+    expect(hasActiveReference(dir, 'legacy/old.ts', scanned)).toBe(false);
+  });
+
+  it('scanned 传绝对路径时仍能判定活跃消费（回归：path.join 对绝对路径不重置，漏归一化曾死亡路径读不到文件 → 闸门恒 false）', () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'renderers'));
+    fs.writeFileSync(path.join(dir, 'renderers', 'ImageRenderer.tsx'), 'export const ImageRenderer = () => null;');
+    fs.writeFileSync(
+      path.join(dir, 'PetManager.ts'),
+      "import { ImageRenderer } from './renderers/ImageRenderer';\nexport const R = { img: ImageRenderer };\n",
+    );
+    // 模拟 scanProjectSourceFiles 无 files 时返回的绝对路径形式
+    const scanned = [path.join(dir, 'renderers', 'ImageRenderer.tsx'), path.join(dir, 'PetManager.ts')];
+    expect(hasActiveReference(dir, 'renderers/ImageRenderer.tsx', scanned)).toBe(true);
+  });
+
+  it('无任何引用 → false（自身文件不算）', () => {
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'legacy'));
+    fs.writeFileSync(path.join(dir, 'legacy', 'old.ts'), 'export const O = 1;');
+    fs.writeFileSync(path.join(dir, 'a.ts'), 'export const A = 1;');
+    const scanned = ['legacy/old.ts', 'a.ts'];
+    expect(hasActiveReference(dir, 'legacy/old.ts', scanned)).toBe(false);
   });
 });
 

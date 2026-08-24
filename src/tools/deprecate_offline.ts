@@ -25,7 +25,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { detectDeadImports, scanProjectSourceFiles } from './detect_dead_imports.js';
 import { removeDeadImportsWithVerify } from './remove_dead_imports.js';
-import type { DeadDepCandidate } from './dead_deps.js';
+import { parseTsImportQualifiers, stripTsImportLines, qualifierLines, type DeadDepCandidate } from './dead_deps.js';
 import { defaultVerifyCommands, runVerification } from './verify_refactor.js';
 
 const SOURCE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.go'];
@@ -56,8 +56,10 @@ export interface DeprecateOfflineOptions {
 }
 
 export type DeprecateOutcome =
-  | 'candidate' // dry-run 预览：未落盘的候选
+  | 'candidate' // dry-run 预览：无活跃消费、真可下线的候选
+  | 'has_active_consumer' // 有活跃消费（被使用）：非下线候选，仅可清理其死引用
   | 'offlined' // 死 import 已移除且编译通过（无活跃消费）
+  | 'pruned' // 仅清理了死引用，但模块仍有活跃消费（保留，不物理下线）
   | 'file_removed' // 且源文件本体已物理删除（remove_file 且通过删后验收）
   | 'rolled_back' // 移除死 import 触发编译回归 → 已回滚（判定有活跃消费）
   | 'baseline_fail' // 地基黄：一个都不动
@@ -139,7 +141,11 @@ export function remainingImporters(
   const proj = path.resolve(project_dir);
   const mod = moduleRel.replace(/\\/g, '/');
   let n = 0;
-  for (const rel of scannedFiles) {
+  for (const raw of scannedFiles) {
+    // scannedFiles 可能来自 scanProjectSourceFiles（无 files 时返回绝对路径）——
+    // 归一化为相对 proj 后再拼读，否则 path.join(proj, 绝对路径) 拼出无效路径读不到文件，
+    // 让护栏退化为恒 0（硬闸门失效）。相对入参原样保留。
+    const rel = path.isAbsolute(raw) ? path.relative(proj, raw) : raw;
     if (rel.replace(/\\/g, '/') === mod) continue; // 自身不算
     let src: string;
     try {
@@ -168,6 +174,43 @@ function enumerateDeriveSources(src: string): Set<string> {
   return out;
 }
 
+/**
+ * 模块是否在项目内存在"活跃消费引用"——任意文件对它有被真正使用（活 import）的引用。
+ * 候选框架的关键闸门：detectDeadImports 只报"死引用"，但一个模块可能既有死引用又有
+ * 活跃消费（被广泛使用、仅个别文件忘用）。后者绝不是"可下线积木"，必须排除出候选——
+ * 否则会把 pet 系渲染器这类核心模块误标为下线候选（肉眼不可信）。
+ * 判定独立于 detectDeadImports：直接对每个引用该模块的文件做"该 import 是否被使用"的
+ * 文件级判定（parseTsImportQualifiers + qualifierLines）。Go：保守视为有活跃引用
+ * （与 remainingImporters 的 Go 策略一致，不判可下线）。返回 true = 有活跃消费。
+ */
+export function hasActiveReference(project_dir: string, moduleRel: string, scannedFiles: string[]): boolean {
+  const proj = path.resolve(project_dir);
+  const mod = moduleRel.replace(/\\/g, '/');
+  for (const raw of scannedFiles) {
+    // scannedFiles 可能来自 scanProjectSourceFiles（无 files 时返回绝对路径），而
+    // path.join 对绝对路径不重置（不同于 path.resolve），直接拼接会死亡路径读不到文件，
+    // 让本闸门退化为恒 false（活跃消费判不出 → 候选清单不可信）。须先归一化为相对 proj。
+    const rel = path.isAbsolute(raw) ? path.relative(proj, raw) : raw;
+    if (rel.replace(/\\/g, '/') === mod) continue; // 自身不算
+    if (/\.go$/.test(rel)) continue; // Go：保守跳过（不判可下线）
+    let src: string;
+    try {
+      src = fs.readFileSync(path.join(proj, rel), 'utf-8');
+    } catch {
+      continue;
+    }
+    const scan = stripTsImportLines(src);
+    for (const source of enumerateDeriveSources(src).keys()) {
+      if (!source.startsWith('.')) continue;
+      if (resolveConsumerSource(proj, rel, source) !== mod) continue;
+      const quals = parseTsImportQualifiers(src, source);
+      if (quals === null) return true; // 副作用导入/语法不认识 → 保守当活跃
+      if (quals.some((q) => qualifierLines(scan, q, 'ts').length > 0)) return true; // 有活跃引用
+    }
+  }
+  return false;
+}
+
 // ─────────────────────────────────────────────
 // 下线执行
 // ─────────────────────────────────────────────
@@ -186,30 +229,41 @@ export async function runDeprecateOffline(opts: DeprecateOfflineOptions): Promis
   );
   const candidates = [...projectSources.entries()].filter(([s]) => want.has(s));
 
+  // 活跃消费确认：候选清单必须肉眼可信——只把"无活跃消费"的模块列为可下线候选；
+  // 被别处仍在使用的模块（即便有死引用）标为 has_active_consumer，绝不冒充下线候选。
+  const scannedFiles = scanProjectSourceFiles(proj, opts.files);
   const items: DeprecateOfflineItem[] = [];
   for (const [source, { moduleFile }] of candidates) {
     const consumers = projectSources.get(source)!.consumers;
+    const offlineable = moduleFile !== null && !hasActiveReference(proj, moduleFile, scannedFiles);
     items.push({
       source,
       module_file: moduleFile,
       consumers,
-      status: 'candidate',
-      note: '候选待执行',
+      status: offlineable ? 'candidate' : 'has_active_consumer',
+      note: offlineable
+        ? '候选待执行（无活跃消费）'
+        : '存在活跃消费：非下线候选（仅可清理该处死引用）',
     });
   }
 
   if (dryRun) {
     // 仅预览候选，不落盘、不验证
+    const offlineable = items.filter((i) => i.status === 'candidate').length;
     const lines: string[] = [
-      `deprecate_offline（dry-run，均未落盘）：扫描 ${detect.scanned} 文件 → ${detect.dead.length} 个死源 → ${candidates.length} 个自研积木候选可下线`,
+      `deprecate_offline（dry-run，均未落盘）：扫描 ${detect.scanned} 文件 → ${detect.dead.length} 个死源 → ${offlineable} 个可下线自研积木候选（${items.length - offlineable} 个有活跃消费，已排除）`,
       '以下将被"移除各消费者死 import"' + (removeFile ? ' + 物理删除源码文件' : '（--remove-file 才删文件）') + '：',
       '',
     ];
     for (const it of items) {
-      lines.push(`  [下线候选] ${it.source} / 模块 ${it.module_file} / ${it.consumers} 处死引用`);
+      if (it.status === 'candidate') {
+        lines.push(`  [下线候选] ${it.source} / 模块 ${it.module_file} / ${it.consumers} 处死引用`);
+      } else {
+        lines.push(`  [活跃消费·非下线] ${it.source} / 模块 ${it.module_file} / ${it.consumers} 处死引用 → ${it.note}`);
+      }
     }
     lines.push('', '确认后以 --apply（+ --remove-file 如需删文件）执行。');
-    return { ok: true, dry_run: true, remove_file: removeFile, candidates: items.length, offlined: 0, items, message: lines.join('\n') };
+    return { ok: true, dry_run: true, remove_file: removeFile, candidates: offlineable, offlined: 0, items, message: lines.join('\n') };
   }
 
   // ── apply：只把"自研候选源"的死 import 交给复用执行器（改前/改后编译验收 + 回滚） ──
@@ -224,7 +278,8 @@ export async function runDeprecateOffline(opts: DeprecateOfflineOptions): Promis
       it.status = 'baseline_fail';
       it.note = '地基黄（基线编译失败），一个未动'.concat(v.detail ? `：${v.detail}` : '');
     }
-    return { ok: false, dry_run: false, remove_file: removeFile, candidates: items.length, offlined: 0, items, message: 'deprecate_offline：基线编译失败，未执行任何改动。' };
+    const nCandidates = items.filter((i) => i.status === 'candidate').length;
+    return { ok: false, dry_run: false, remove_file: removeFile, candidates: nCandidates, offlined: 0, items, message: 'deprecate_offline：基线编译失败，未执行任何改动。' };
   }
 
   // 编译级可达性：移除死 import 后编译仍绿 ⇒ 无活跃消费（否则回滚并判定有活跃消费）
@@ -240,10 +295,14 @@ export async function runDeprecateOffline(opts: DeprecateOfflineOptions): Promis
       it.status = 'not_verified';
       it.note = '项目形态不可自动验证：已移除死 import，未做编译级消费确认';
     } else {
-      it.status = 'offlined';
-      offlined += 1;
-      it.note = '死 import 已移除，编译通过（无活跃消费）';
-      if (removeFile) removableFiles.add(it.module_file!);
+      // 有活跃消费的活模块：死引用被清掉，但模块必须保留（pruned），不冒充下线成功。
+      const live = it.status === 'has_active_consumer';
+      it.status = live ? 'pruned' : 'offlined';
+      it.note = live
+        ? '已清理死引用；模块仍有活跃消费（保留）'
+        : '死 import 已移除，编译通过（无活跃消费）';
+      if (!live) offlined += 1;
+      if (removeFile && !live) removableFiles.add(it.module_file!);
     }
   }
   // 未在 targeted 中落盘的候选（如无变更/no_change）如实标注

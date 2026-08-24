@@ -214,12 +214,18 @@ export function qualifierMemberLines(src: string, qualifier: string): Array<{ li
   return out;
 }
 
-/** TS/JS 源码剥离 import/require 语句行（占位换行保行号）：
+/** TS/JS 源码剥离 import/require 语句（占位换行保行号）：
  *  import 语句本身含绑定名（`import { dead } from 'deaddep'`），不剥会被
- *  当成"包级出现"误判活；解构 require 行同理 */
+ *  当成"包级出现"误判活；解构 require 行同理。
+ *  终止符用 `from '模块'` / `from "模块"`（import 语句的真实结构），**不依赖分号**——
+ *  无分号风格的项目里 `/import[^;]*?;/` 会从第一个 import 贪婪吞到远处某个 `;`，
+ *  把夹在中间的**使用行**一起抹掉（曾把 pet 渲染器 `image: ImageRenderer` 的活跃
+ *  消费误判成死、误标下线候选）。以 `from` 定界则只在 import 语句自身范围内剔除，
+ *  绝不越过模块说明符吞掉后续使用行。副作用导入 `import 'x'`（无 from）与动态
+ *  `import(...)`（无 from）不匹配 → 保守保留（安全方向）。 */
 export function stripTsImportLines(src: string): string {
   return src
-    .replace(/import\s+[^;]*?;/gs, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/^import\s+(?:type\s+)?[\s\S]*?from\s+['"][^'"]+['"]\s*;?/gm, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/^[^\S\n]*[^\n]*=\s*require\([^)]*\)[^\n]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
 }
 

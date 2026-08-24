@@ -94,6 +94,19 @@ describe('detectDeadImports：TS', () => {
     const cand = res.dead.find((c) => c.source === 'fs');
     expect(cand).toBeDefined();
   });
+
+  it('无分号风格 + 属性复用：被引用的 import → 活（回归：stripTsImportLines 曾以分号/任意 from 终止，无分号时从注释里的 "dynamic import" 吞到远处，抹掉 `image: ImageRenderer` 使用行 → 活跃模块误判死）', () => {
+    const dir = tempRoot();
+    const src =
+      '// 懒加载说明：首屏不加载这些，切换时才 dynamic import\n' +
+      "import { ImageRenderer } from './renderers/ImageRenderer'\n" +
+      'export const RENDERERS = { image: ImageRenderer }\n' +
+      'export const CNT = Object.keys(RENDERERS).length\n';
+    fs.writeFileSync(path.join(dir, 'a.ts'), src, 'utf-8');
+    const res = detectDeadImports({ project_dir: dir });
+    // 绑定 ImageRenderer 在属性值真正被用 → 该明确说明符绝不报死
+    expect(res.dead.find((c) => c.source === './renderers/ImageRenderer')).toBeUndefined();
+  });
 });
 
 describe('detectDeadImports：Go', () => {
