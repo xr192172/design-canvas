@@ -913,8 +913,8 @@ async function slimTsBrickCore(
       seedVariants.add(s.replace(/^src\//, ''));
       seedVariants.add(`src/${s}`);
     }
-    const markRoots = diskTsFiles.filter((f) => seedVariants.has(f));
-    const markRootSet = new Set(markRoots);
+    const seedRootFiles = diskTsFiles.filter((f) => seedVariants.has(f));
+    const markRootSet = new Set(seedRootFiles);
     // 种子零命中（路径形态漂移）→ 全部按种子处理（宁多保不误删）
     if (markRootSet.size === 0) for (const f of diskTsFiles) markRootSet.add(f);
 
