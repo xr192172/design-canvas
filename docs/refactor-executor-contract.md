@@ -2,7 +2,8 @@
 
 > 你现在接手的是 `design-canvas` 的确定性重构管线。管线**骨架已多语言化落地**：
 > 语言无关的执行器契约 + `RefactorLangRegistry` 注册表 + 目录语言命中探测已经就位，
-> 当前默认注册了 **TypeScript / Go**（合并为一个 `ts_go` 执行器）。
+> 默认注册了**两个独立执行器**：`ts`（TS/JS 家族）与 `go` —— **一门语言一个执行器**，
+> 它们各自只处理自己语言的源文件，共享一组可复用内核（tree-sitter 解析、死代码改写）。
 >
 > 本文档是你的**开工说明 + 目标语言开发范式**：已落地的可插拔骨架怎么用、
 > 语言无关执行器接口契约长什么样、以及一份可照着扩展的 **Python 范例实现**。
@@ -33,18 +34,18 @@
 **已落地（2026-08）的可插拔骨架**：
 - `src/tools/refactor_langs.ts` —— 语言无关契约接口 + `RefactorLangRegistry` + 目录语言命中探测 `forProject` / `dirHasSource`。
 - `src/tools/refactor_pipeline.ts` —— `collectSteps`（聚合命中语言的 stages）+ `mergeVerifyCommands`（合并去重验证命令）+ `runRefactorPipeline` 按项目探测语言路由 + 注册入口 `registerRefactorLanguage`。
-- 默认注册了一个合并执行器 `ts_go`（TS+Go 一套死代码检测/改写逻辑），`DEFAULT_LANGS` 模块级单例。
+- 默认注册了两个独立执行器 `ts` 与 `go`（一门语言一个），共享一组可复用内核，`DEFAULT_LANGS` 模块级单例。
 
-**新的默认执行器已不再是"管线内硬编码两步"**，而是 `runRefactorPipeline` 里 `langs.forProject(cwd)` → 聚合执行器各自 `stages`。新增一门语言 = 注册一个执行器，管线自动拾取。
+**新的默认架构已不再是"管线内硬编码两步"**，而是 `runRefactorPipeline` 里 `langs.forProject(cwd)` → 聚合执行器各自 `stages`。新增一门语言 = 注册一个执行器，管线自动拾取；混项目（如 TS+Go 并存）会**两个执行器都被拾取，各只动自己语言的文件**。
 
 **仍需按语言实现的部分（每次新语言都要做，对应 §3 契约四段）**：
 
 | # | 契约段 | 你要实现 | TS/Go 现状（可参照） |
 |---|---|---|---|
-| 1 | `isSourceFile` | 命中该语言源文件的扩展名判定 | `refactor_pipeline.ts` 内 `ts_go` 执行器 |
+| 1 | `isSourceFile` | 命中该语言源文件的扩展名判定 | `refactor_pipeline.ts` 内 `ts` / `go` 执行器 |
 | 2 | `detectVerifyCommands` | 依项目形态给验证命令组（`go.mod`/`pyproject.toml`/`pom.xml`…） | `defaultVerifyCommands(cwd)`（见 `verify_refactor.ts`） |
-| 3 | `stages[].kind='dead_imports'` compute | 死 import 检测 + 移除，纯计算 | `computeDeadImportsPlan`（复用 `removeImportsFromSource` / `detectDeadImports`） |
-| 4 | `stages[].kind='dead_statements'` compute | 死语句控制流分析 + 删除，纯计算 | `computeDeadStatementsPlan`（复用 `flagDeadStatements`） |
+| 3 | `stages[].kind='dead_imports'` compute | 死 import 检测 + 移除，纯计算 | `computeDeadImportsPlan`（复用 `removeImportsFromSource` / `detectDeadImports`，带语言过滤） |
+| 4 | `stages[].kind='dead_statements'` compute | 死语句控制流分析 + 删除，纯计算 | `computeDeadStatementsPlan`（复用 `flagDeadStatements`，带语言过滤） |
 
 > 关于 tree-sitter：仓库已依赖 `tree-sitter-python` / `tree-sitter-javascript` /
 > `tree-sitter-go` / `tree-sitter-typescript`，`src/tools/ts_kernel/languages.ts` 已有内核。

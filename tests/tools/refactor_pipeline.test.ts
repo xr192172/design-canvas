@@ -289,4 +289,29 @@ describe('多语言可插拔执行器契约', () => {
     ]);
     expect(merged.filter((c) => c.cmd === 'tsc')).toHaveLength(1); // 去重
   });
+
+  it('TS+Go 混项目 → 两个执行器各自只除掉自己语言的死 import（ts_go 拆分验证）', async () => {
+    const dir = tempRoot();
+    const tsFile = path.join(dir, 'a.ts');
+    fs.writeFileSync(tsFile, "import _ from 'lodash';\nexport const live = 1;\n", 'utf-8');
+    const goFile = path.join(dir, 'b.go');
+    fs.writeFileSync(goFile, 'package main\nimport "fmt"\nfunc main() {}\n', 'utf-8');
+
+    const s = spy(['pass', 'pass', 'pass']); // 基线 + ts dead_imports 改后 + go dead_imports 改后
+    const res = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { dead_imports: { enabled: true } }, // 不给定清单 → 自动检测
+      verify: true,
+      verifyImpl: s,
+    });
+
+    // 两个语言各一个 dead_imports（labels 带 [ts]/[go] 前缀）
+    const di = res.stages.filter((x) => x.id === 'dead_imports' && x.outcome === 'applied');
+    expect(di).toHaveLength(2);
+    expect(res.ok).toBe(true);
+    // 各自的文件都被清理，且互不越界
+    expect(fs.readFileSync(tsFile, 'utf-8')).not.toContain('lodash');
+    expect(fs.readFileSync(goFile, 'utf-8')).not.toContain('fmt');
+    expect(asSpy(s).calls.length).toBe(3); // 基线 + 2 次改后
+  });
 });

@@ -108,12 +108,18 @@ export interface PipelineResult {
 
 // ─────────────────────────────────────────────
 // 死语句步骤：纯计算（不落盘）
+// langFilter：'go' | 'ts' 只处理该语言的报告（多语言执行器各自只动自己的文件）
 // ─────────────────────────────────────────────
-async function computeDeadStatementsPlan(proj: string, files?: string[]): Promise<RunningChangePlan> {
+async function computeDeadStatementsPlan(
+  proj: string,
+  files: string[] | undefined,
+  langFilter?: 'go' | 'ts',
+): Promise<RunningChangePlan> {
   const absToNew = new Map<string, string>();
   const originals = new Map<string, string>();
   const reports = await flagDeadStatements({ project_dir: proj, files });
   for (const rep of reports) {
+    if (langFilter && rep.lang !== langFilter) continue; // 只处理本执行器语言
     if (!rep.runs || rep.runs.length === 0) continue;
     const abs = path.isAbsolute(rep.file) ? path.resolve(rep.file) : path.resolve(proj, rep.file);
     let src: string;
@@ -134,8 +140,13 @@ async function computeDeadStatementsPlan(proj: string, files?: string[]): Promis
 // ─────────────────────────────────────────────
 // 死 import 步骤：纯计算（复用 removeImportsFromSource）
 // 未提供 dead 清单时自动调用 detectDeadImports —— 一键（无需先跑检测）。
+// langFilter：只移除该语言源文件里的死 source（自动检测虽跨语言扫，落刀时按语言收敛）
 // ─────────────────────────────────────────────
-function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; files: string[] }>): RunningChangePlan {
+function computeDeadImportsPlan(
+  proj: string,
+  dead: Array<{ source: string; files: string[] }>,
+  langFilter?: 'go' | 'ts',
+): RunningChangePlan {
   // 一键：未显式给出清单 → 自动文件级检测（同 dead_statements 的"自动扫"语义）
   let resolved = dead ?? [];
   if (resolved.length === 0) {
@@ -155,6 +166,7 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
     for (const f of d.files ?? []) {
       const lang = langOfFile(f);
       if (!lang) continue;
+      if (langFilter && lang !== langFilter) continue; // 只落刀本执行器语言
       const abs = path.isAbsolute(f) ? path.resolve(f) : path.resolve(proj, f);
       let en = fileEntry.get(abs);
       if (!en) {
@@ -192,34 +204,67 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
 }
 
 // ─────────────────────────────────────────────
-// 内置多语言执行器注册（TS/Go）——"新语言新路径"的落点
+// 内置多语言执行器注册（TS / Go 各自一个执行器）——"新语言新路径"的落点
+// TS/Go 共享以下可复用内核（如同 tree-sitter 共享解析根基）：
+//   computeDeadImportsPlan（复用 removeImportsFromSource / detectDeadImports）、
+//   computeDeadStatementsPlan（复用 flagDeadStatements/applyReachabilityRuns）。
+// 每个执行器只处理自己语言的源文件，验证命令各自按项目形态探测。
 // ─────────────────────────────────────────────
 function buildDefaultLangs(): RefactorLangRegistry {
   const reg = new RefactorLangRegistry();
+
+  // TS 家族（含 JS/JSX/MJS/CJS）
   reg.register({
-    lang: 'ts_go',
-    isSourceFile: (rel) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel) || rel.endsWith('.go'),
+    lang: 'ts',
+    isSourceFile: (rel) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel),
     detectVerifyCommands: (cwd) => defaultVerifyCommands(cwd),
     stages: [
       {
         kind: 'dead_imports',
-        label: 'dead import 移除',
-        compute: (a) => computeDeadImportsPlan(a.project_dir, a.dead ?? []),
+        label: '[ts] dead import 移除',
+        compute: (a) => computeDeadImportsPlan(a.project_dir, a.dead ?? [], 'ts'),
         limitations: [
-          'TS/Go 保守：副作用导入 / re-export / 空点导入恒活（import 即执行副作用），绝不误删',
+          'TS 保守：副作用导入 / re-export / 语法不认识恒活（import 即执行副作用），绝不误删',
           '文件内零引用即报死，未做跨文件可达性——保守漏报多于误报；删除前请过验证闭环',
         ],
       },
       {
         kind: 'dead_statements',
-        label: '死语句删除',
-        compute: (a) => computeDeadStatementsPlan(a.project_dir, a.files),
+        label: '[ts] 死语句删除',
+        compute: (a) => computeDeadStatementsPlan(a.project_dir, a.files, 'ts'),
         limitations: [
-          '函数内部控制流：return/throw 后不可达删；跨函数/跨文件可达性不看',
+          'TS 提升（function/class/let/const/var）：return/throw 后不可达子树若含声明，需名字引用校验才删',
         ],
       },
     ],
   });
+
+  // Go
+  reg.register({
+    lang: 'go',
+    isSourceFile: (rel) => rel.endsWith('.go'),
+    detectVerifyCommands: (cwd) => defaultVerifyCommands(cwd),
+    stages: [
+      {
+        kind: 'dead_imports',
+        label: '[go] dead import 移除',
+        compute: (a) => computeDeadImportsPlan(a.project_dir, a.dead ?? [], 'go'),
+        limitations: [
+          'Go 保守：空导入 _ / 点导入 . 恒活（import 即执行副作用），绝不误删',
+          '文件内零引用即报死，未做跨文件可达性——保守漏报多于误报；删除前请过验证闭环',
+        ],
+      },
+      {
+        kind: 'dead_statements',
+        label: '[go] 死语句删除',
+        compute: (a) => computeDeadStatementsPlan(a.project_dir, a.files, 'go'),
+        limitations: [
+          'Go 终止后兄弟语句可删；唯一禁删"被可达 goto 指向"的带标签语句，遇即停',
+        ],
+      },
+    ],
+  });
+
   return reg;
 }
 
