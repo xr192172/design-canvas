@@ -50,7 +50,7 @@ import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
-import { removeDeadImports } from './tools/remove_dead_imports.js';
+import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -1086,7 +1086,12 @@ const TOOL_DEFS: ToolDef[] = [
       '具名/默认/命名空间/type/副作用 import、export * / export {...} from、CommonJS require。' +
       '保守规则：只删整条 import 语句；识别不出的形态不动；动态 import("x") 等使用点绝不碰。' +
       '原子性：预读全部待改文件，任一读取失败 → 整批中止、一个都不写。' +
-      'dead 参数可直接传 dead_deps 工具返回结果里的 dead 数组。',
+      'dead 参数可直接传 dead_deps 工具返回结果里的 dead 数组。' +
+      'verify=true（推荐）：启用改前/改后验证闭环——改写前先跑 build+test 基线，' +
+      '改写后再跑同一批验证；基线失败则一个都不改，改后回归则自动回滚原位。' +
+      'verify 也可传 { commands: [{label, cmd, args, timeoutMs}] } 自定义验证命令组（缺省按项目形态探测）' +
+      '：有 go.mod → go build ./... + go test ./...；有 package.json → tsc --noEmit + npm test。' +
+      'verify=false/缺省 = 只执行不验证。',
     inputSchema: {
       project_dir: z.string().describe('目标项目根目录（用于把 files 解析为绝对路径）'),
       dead: z
@@ -1098,16 +1103,50 @@ const TOOL_DEFS: ToolDef[] = [
           }),
         )
         .describe('dead_deps 报告的 DeadDepCandidate 列表'),
+      verify: z
+        .union([
+          z.boolean(),
+          z.object({
+            commands: z
+              .array(
+                z.object({
+                  label: z.string().describe('命令标签（写进验证详情便于排查）'),
+                  cmd: z.string().describe('可执行命令名，如 go / npm / npx'),
+                  args: z.array(z.string()).describe('命令参数'),
+                  timeoutMs: z.number().optional().describe('单命令超时（毫秒，默认 300000）'),
+                }),
+              )
+              .optional()
+              .describe('自定义验证命令组；缺省按项目形态自动探测'),
+          }),
+        ])
+        .optional()
+        .describe('true 启用改前/改后验证闭环；{commands} 自定义验证命令；缺省只执行不验证'),
     },
     handler: wrap(async (a) => {
-      const { project_dir, dead } = a;
+      const { project_dir, dead, verify } = a;
       if (!Array.isArray(dead) || dead.length === 0) {
-        return { message: '无可删除的死 import（dead 列表为空）', data: { files: [], files_changed: 0, statements_removed: 0 } };
+        return { message: '无可删除的死 import（dead 列表为空）', data: { files: [], files_changed: 0, statements_removed: 0, verification: { enabled: Boolean(verify), outcome: 'no_change', baseline: null, after: null } } };
       }
-      const r = removeDeadImports({ project_dir: String(project_dir), dead });
+      const r = removeDeadImportsWithVerify({
+        project_dir: String(project_dir),
+        dead,
+        verify: verify as RemoveDeadImportsVerifyOptions['verify'] | undefined,
+      });
       const parts = [
         `移除死 import 完成：改写 ${r.files_changed} 个文件，删除 ${r.statements_removed} 条 import 语句。`,
       ];
+      if (r.verification.enabled) {
+        const v = r.verification;
+        const kind =
+          v.outcome === 'applied_verified' ? '改前/改后验证全绿，改动落盘'
+          : v.outcome === 'baseline_fail' ? '改前基线失败——拒绝执行，未改动任何文件'
+          : v.outcome === 'regression_rolled_back' ? '改后验证回归——已自动回滚原位'
+          : v.outcome === 'no_change' ? '无实际变更，未改动文件'
+          : '项目形态不可自动验证（无 go.mod/package.json）——已执行但未验证';
+        parts.push(`\t[$kind] 基线=${v.baseline?.status ?? '-'} 改后=${v.after?.status ?? '-'}`);
+        if (v.detail) parts.push(`\t详情：${v.detail}`);
+      }
       if (r.files.length === 0) parts.push('\t没有命中任何可操作的文件（输入 dead 清单的文件均非 TS/Go 系）。');
       for (const f of r.files) {
         const detail = f.removals.filter((x) => x.changed).map((x) => `${x.source}×${x.removed}`).join('、') || '无变更';

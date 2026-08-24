@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DeadDepCandidate } from './dead_deps.js';
+import { applyWithVerify, defaultVerifyCommands, runVerification, type VerifyCommand, type VerificationOutcome, type VerifyOutcomeKind } from './verify_refactor.js';
 
 // ─────────────────────────────────────────────
 // 纯函数：单文件删除指向 target 的 import 语句
@@ -206,10 +207,16 @@ function langOfFile(rel: string): 'go' | 'ts' | null {
   return null;
 }
 
-export function removeDeadImports(opts: {
+/** 聚合 + 计算（不落盘）：返回写盘前后内容映射、统计与逐文件报告。
+ *  两处共用（纯执行器与验证闭环），保证同一条改写规则。 */
+function computeChanges(opts: {
   project_dir: string;
   dead: DeadDepCandidate[];
-}): RemoveDeadImportResult {
+}): {
+  absToNew: Map<string, string>;
+  originals: Map<string, string>;
+  result: RemoveDeadImportResult;
+} {
   const proj = path.resolve(opts.project_dir);
   const toAbs = (f: string): string => (path.isAbsolute(f) ? path.resolve(f) : path.resolve(proj, f));
 
@@ -239,8 +246,9 @@ export function removeDeadImports(opts: {
     }
   }
 
+  const originals = new Map(sources);
+  const absToNew = new Map<string, string>();
   const filesOut: FileRemoval[] = [];
-  let filesChanged = 0;
   let statementsRemoved = 0;
 
   for (const [abs, en] of fileEntry) {
@@ -252,10 +260,7 @@ export function removeDeadImports(opts: {
       src = res.output;
     }
     const changed = results.some((r) => r.changed);
-    if (changed) {
-      fs.writeFileSync(abs, src, 'utf-8');
-      filesChanged++;
-    }
+    if (changed) absToNew.set(abs, src);
     for (const r of results) statementsRemoved += r.removed;
     filesOut.push({
       file: path.relative(proj, abs) || abs,
@@ -265,5 +270,96 @@ export function removeDeadImports(opts: {
     });
   }
 
-  return { files: filesOut, files_changed: filesChanged, statements_removed: statementsRemoved };
+  return {
+    absToNew,
+    originals,
+    result: { files: filesOut, files_changed: absToNew.size, statements_removed: statementsRemoved },
+  };
+}
+
+export function removeDeadImports(opts: {
+  project_dir: string;
+  dead: DeadDepCandidate[];
+}): RemoveDeadImportResult {
+  const { absToNew, result } = computeChanges(opts);
+  for (const [abs, newSrc] of absToNew) fs.writeFileSync(abs, newSrc, 'utf-8');
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// 改前/改后验证闭环
+// ─────────────────────────────────────────────
+export interface RemoveDeadImportsVerifyResult extends RemoveDeadImportResult {
+  verification: {
+    enabled: boolean;
+    outcome: VerifyOutcomeKind;
+    baseline: VerificationOutcome | null;
+    after: VerificationOutcome | null;
+    rolled_back?: boolean;
+    /** baseline_fail / regression_rolled_back 时的失败详情 */
+    detail?: string;
+  };
+}
+
+export interface RemoveDeadImportsVerifyOptions {
+  project_dir: string;
+  dead: DeadDepCandidate[];
+  /** false/缺省 = 只执行不验证；true = 自动探测命令；{commands} = 自定义验证命令组 */
+  verify?: boolean | { commands?: VerifyCommand[] };
+  /** 单测注入的验证执行器（默认跑真命令） */
+  verifyImpl?: (o: { cwd: string; commands: VerifyCommand[] }) => VerificationOutcome;
+}
+
+export function removeDeadImportsWithVerify(opts: RemoveDeadImportsVerifyOptions): RemoveDeadImportsVerifyResult {
+  const cwd = path.resolve(opts.project_dir);
+  const enabled = opts.verify === true || (typeof opts.verify === 'object' && opts.verify !== null);
+  if (!enabled) {
+    return { ...removeDeadImports(opts), verification: { enabled: false, outcome: 'not_verifiable', baseline: null, after: null } };
+  }
+
+  const commands: VerifyCommand[] =
+    (typeof opts.verify === 'object' && opts.verify.commands) ||
+    defaultVerifyCommands(cwd);
+  if (commands.length === 0) {
+    // 探测不出项目形态 → 不可自动验证：仍执行改写，但如实标注不可验证
+    return {
+      ...removeDeadImports(opts),
+      verification: { enabled: true, outcome: 'not_verifiable', baseline: null, after: null },
+    };
+  }
+
+  const run = opts.verifyImpl ?? runVerification;
+  const c = computeChanges(opts);
+
+  const ver = applyWithVerify({
+    cwd,
+    commands,
+    verify: run,
+    apply: () => {
+      if (c.absToNew.size === 0) return false;
+      for (const [abs, newSrc] of c.absToNew) fs.writeFileSync(abs, newSrc, 'utf-8');
+      return true;
+    },
+    rollback: () => {
+      for (const [abs, orig] of c.originals) fs.writeFileSync(abs, orig, 'utf-8');
+    },
+  });
+
+  if (ver.outcome === 'baseline_fail') {
+    // 地基黄：一个都不写
+    return {
+      files: [], files_changed: 0, statements_removed: 0,
+      verification: { enabled: true, outcome: 'baseline_fail', baseline: ver.baseline, after: null, detail: ver.baseline?.detail },
+    };
+  }
+  if (ver.outcome === 'no_change') {
+    return { ...c.result, verification: { enabled: true, outcome: 'no_change', baseline: ver.baseline, after: ver.after } };
+  }
+  if (ver.outcome === 'regression_rolled_back') {
+    return {
+      ...c.result,
+      verification: { enabled: true, outcome: 'regression_rolled_back', baseline: ver.baseline, after: ver.after, rolled_back: true, detail: ver.after?.detail },
+    };
+  }
+  return { ...c.result, verification: { enabled: true, outcome: 'applied_verified', baseline: ver.baseline, after: ver.after } };
 }
