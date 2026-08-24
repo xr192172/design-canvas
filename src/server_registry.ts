@@ -1184,7 +1184,7 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'refactor_pipeline',
-    title: 'Run deterministic refactor pipeline (dead imports + dead statements)',
+    title: 'Run deterministic refactor pipeline (dead imports + dead statements + package migration)',
     description:
       '确定性重构管线：把可自动执行的瘦身改写串成一条链，一次调用按序执行、统一增量验证、失败只回滚到最近绿点。' +
       '入口只跑一次改前基线（build+test），其后每步基于上一步已绿的内容只跑一次改后验证——不改动的步骤不验证（性能友好）。' +
@@ -1192,6 +1192,8 @@ const TOOL_DEFS: ToolDef[] = [
       '  1) dead_imports：一键自动检测并删除死 import——未给 dead 清单时自动调用 detect_dead_imports 做文件级扫描；' +
       '     给了清单则用给定清单（可直接用 dead_deps 的 dead 数组）。复用 removeDeadImports 同源规则删除指向死源的 import/require/re-export 语句。' +
       '  2) dead_statements：自动扫描（可选 files 收敛范围）删除 return/throw/continue 后不可达语句与死分支（TS/Go）。' +
+      '  3) package_migration（包改名/提级）：把缺换代的包一次性涤荡干净——全项目 import 引用面重写（prefix→to）、' +
+      '     package 声明改名（v2→hub，from_test→to_test）、import 别名清洗（hubv2→hub）；可选目录物理移动。' +
       '失败语义：某步改后验证回归 → 只还原该步预读的原始内容，回到上一步绿点，前面已绿的改动保留；管线结果 ok=false。' +
       '基线失败 → 一个文件都不改。verify=true 启用验证；{commands} 自定义命令组；缺省/verify=false 仅落盘不验证（not_verifiable）。' +
       'rename 步骤需人工候选，暂不内置。' +
@@ -1218,6 +1220,41 @@ const TOOL_DEFS: ToolDef[] = [
             .object({
               enabled: z.boolean().optional().default(false).describe('是否启用死语句删除步骤（自动扫描）'),
               files: z.array(z.string()).optional().describe('收敛到指定文件（相对或绝对路径）；缺省递归扫全部 TS/Go 源'),
+            })
+            .optional(),
+          package_migration: z
+            .object({
+              enabled: z.boolean().optional().default(false).describe('是否启用包改名/提级步骤'),
+              moduleBase: z.string().describe('模块根，如 github.com/ai-base/agent-shell'),
+              prefix: z.string().describe('被改写的旧 import 前缀（相对 project_dir），如 internal/hub/v2'),
+              to: z.string().describe('新 import 前缀（相对 project_dir），如 internal/hub'),
+              packageRename: z
+                .object({
+                  from: z.string().describe('旧包名，如 v2'),
+                  to: z.string().describe('新包名，如 hub'),
+                })
+                .optional()
+                .describe('顶层源文件 package 声明改名；from_test 包自动改 to_test'),
+              packageRenameDir: z
+                .string()
+                .optional()
+                .describe('package 改名作用的物理目录（相对 project_dir）；缺省取 to'),
+              sourceExts: z.array(z.string()).optional().describe('参与改写的源文件扩展名（缺省 .go/.ts/.tsx…）'),
+              aliases: z
+                .array(
+                  z.object({
+                    importPath: z.string().describe('重写后的规范化 import 路径'),
+                    from: z.string().describe('现别名'),
+                    to: z.string().describe('清洗目标名'),
+                  }),
+                )
+                .optional()
+                .describe('import 别名清洗：声明改名 + 用法重写'),
+              skipDirs: z.array(z.string()).optional().describe('跳过目录名（缺省 node_modules/.git 等）'),
+              packageRenameTopLevelOnly: z
+                .boolean()
+                .optional()
+                .describe('只改直接位于 packageRenameDir 下的源文件（缺省 true）'),
             })
             .optional(),
         })
@@ -1248,9 +1285,22 @@ const TOOL_DEFS: ToolDef[] = [
         | {
             dead_imports?: { enabled?: boolean; dead?: Array<{ source: string; files: string[] }> };
             dead_statements?: { enabled?: boolean; files?: string[] };
+            package_migration?: {
+              enabled?: boolean;
+              moduleBase: string;
+              prefix: string;
+              to: string;
+              packageRename?: { from: string; to: string };
+              packageRenameDir?: string;
+              sourceExts?: string[];
+              aliases?: Array<{ importPath: string; from: string; to: string }>;
+              skipDirs?: string[];
+              packageRenameTopLevelOnly?: boolean;
+            };
           }
         | undefined;
       const verify = a.verify as Parameters<typeof runRefactorPipeline>[0]['verify'];
+      const migrate = steps?.package_migration;
       const r = await runRefactorPipeline({
         project_dir,
         steps: {
@@ -1259,6 +1309,22 @@ const TOOL_DEFS: ToolDef[] = [
             : undefined,
           dead_statements: steps?.dead_statements?.enabled
             ? { enabled: true, files: steps.dead_statements.files }
+            : undefined,
+          package_migration: migrate?.enabled
+            ? {
+                enabled: true,
+                migrate: {
+                  moduleBase: migrate.moduleBase,
+                  prefix: migrate.prefix,
+                  to: migrate.to,
+                  packageRename: migrate.packageRename,
+                  packageRenameDir: migrate.packageRenameDir,
+                  sourceExts: migrate.sourceExts,
+                  aliases: migrate.aliases,
+                  skipDirs: migrate.skipDirs,
+                  packageRenameTopLevelOnly: migrate.packageRenameTopLevelOnly,
+                },
+              }
             : undefined,
         },
         verify,

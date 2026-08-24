@@ -34,21 +34,65 @@ export interface DeadStatementsStepCfg {
   enabled?: boolean;
   files?: string[];
 }
+/** 包/目录迁移（提级）步骤配置：把整棵目录树提升到父级，同时改 package 声明、
+ * import 引用面、可选别名。详情见 package_migration.ts。 */
+export interface PackageMigrationStepCfg {
+  enabled?: boolean;
+  migrate?: PackageMigrationSpec;
+}
 export interface RefactorStepsCfg {
   dead_imports?: DeadImportsStepCfg;
   dead_statements?: DeadStatementsStepCfg;
+  package_migration?: PackageMigrationStepCfg;
 }
 
 // ─────────────────────────────────────────────
 // 契约接口
 // ─────────────────────────────────────────────
-export type RefactorStageKind = 'dead_imports' | 'dead_statements';
+export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_migration';
+
+/** 一次迁移参数：把 `project/<prefix>` 整棵树移动到 `project/<to>`，
+ *  顶层源文件的 `package <packageRename.from>` → `package <packageRename.to>`，
+ *  全项目源文件里所有 `"<moduleBase>/<prefix>…"` import 路径重写为 `"<moduleBase>/<to>…"`，
+ *  并按 aliases 清洗 import 别名（碰撞敏感，逐个文件守卫）。 */
+export interface PackageMigrationSpec {
+  /** 模块根，如 'github.com/ai-base/agent-shell'（配合 prefix 拼出被改写的 import 前缀） */
+  moduleBase: string;
+  /** 相对 project_dir 的被迁移目录（正斜杠），如 'internal/hub/v2' */
+  prefix: string;
+  /** 相对 project_dir 的目标目录，如 'internal/hub' */
+  to: string;
+  /** 顶层源文件 package 声明改名（应对 Go 的 package v2 → 父名）。
+   *  仅作用于 `packageRenameDir`（缺省取 `to` 相对 project_dir 的物理目录）内的
+   *  源文件；`from_test` 包自动改为 `to_test`。 */
+  packageRename?: { from: string; to: string };
+  /** package 改名作用的物理目录（相对 project_dir）。缺省 = to（即假设代码已/将
+   *  放在要提级到的目录）。多 v2 并存（如 hub 与 hubclient）时用此各自限定。
+   *  顶级源文件才改 package（子目录不碰），除非 packageRenameTopLevelOnly=false。 */
+  packageRenameDir?: string;
+  /** 源文件扩展名白名单（做内容改写：package 改名 + import 引用面 + 别名）；缺省 .go/.ts/.tsx… */
+  sourceExts?: string[];
+  /** import 别名清洗：importPath 为"重写后"的规范化路径，from 为现别名，to 为清洗目标名 */
+  aliases?: Array<{ importPath: string; from: string; to: string }>;
+  /** 移动时跳过的目录名（缺省：node_modules/.git/dist/.design-canvas/venv/__pycache__/target 等） */
+  skipDirs?: string[];
+  /** 顶层目录内是否只处理"直接位于 to 下的源文件"做 package 改名（缺省 true，子目录不碰） */
+  packageRenameTopLevelOnly?: boolean;
+}
+
+/** 单个文件移动（from 绝对路径 → to 绝对路径） */
+export interface FileMove {
+  from: string;
+  to: string;
+}
 
 export interface RunningChangePlan {
-  /** 待落盘的绝对路径 → 新源码 */
+  /** 待落盘的"最终路径" → 新源码。若该文件参与了移动，key 是其 to（移动后路径） */
   absToNew: Map<string, string>;
-  /** 预读的原始内容（apply 前盘上内容；回滚用） */
+  /** 预读的原始内容（apply 前盘上内容；回滚用）。key = 移动前/原始路径 */
   originals: Map<string, string>;
+  /** 文件移动 from→to（先移动，再写 absToNew 内容） */
+  moves?: FileMove[];
   /** 删除的单位数；缺省由管线按步骤退化 */
   units?: number;
 }
@@ -58,6 +102,7 @@ export interface RefactorStageComputeArgs {
   cwd: string;
   files?: string[];
   dead?: Array<{ source: string; files: string[] }>;
+  migrate?: PackageMigrationSpec;
 }
 
 /** 单步执行器：纯计算，绝不落盘。落盘 + 验证 + 回滚全由管线负责。 */

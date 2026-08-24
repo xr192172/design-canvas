@@ -26,6 +26,7 @@ import { defaultVerifyCommands, runVerification, type VerifyCommand, type Verifi
 import { flagDeadStatements, applyReachabilityRuns } from './dead_statements.js';
 import { removeImportsFromSource } from './remove_dead_imports.js';
 import { detectDeadImports } from './detect_dead_imports.js';
+import { computeMigrationPlan } from './package_migration.js';
 import {
   RefactorLangRegistry,
   manifestPresent,
@@ -36,6 +37,8 @@ import {
   type RefactorStepsCfg,
   type DeadImportsStepCfg,
   type DeadStatementsStepCfg,
+  type PackageMigrationStepCfg,
+  type PackageMigrationSpec,
 } from './refactor_langs.js';
 import { pythonExecutor } from './python_refactor/index.js';
 
@@ -87,6 +90,11 @@ export interface PipelineOptions {
     dead_imports?: {
       enabled?: boolean;
       dead?: Array<{ source: string; files: string[] }>;
+    };
+    /** 包改名/提级：给 migrate 参数即启用；未给 enabled 且给了 migrate 也视为启用 */
+    package_migration?: {
+      enabled?: boolean;
+      migrate?: PackageMigrationSpec;
     };
   };
   /** true = 自动探测验证命令；{commands} = 自定义命令组；false/缺省 = 不验证仅落盘 */
@@ -268,6 +276,19 @@ function buildDefaultLangs(): RefactorLangRegistry {
           'Go 终止后兄弟语句可删；唯一禁删"被可达 goto 指向"的带标签语句，遇即停',
         ],
       },
+      {
+        kind: 'package_migration',
+        label: '[go] 包改名/提级',
+        compute: (a) => {
+          if (!a.migrate) return { absToNew: new Map(), originals: new Map() };
+          return computeMigrationPlan({ project_dir: a.project_dir, migrate: a.migrate });
+        },
+        limitations: [
+          '迁移语义以 Go 为契约（package 声明 / module 路径 / 别名清洗）；TS 改名走 renameSymbol',
+          '目录移动仅当"旧逻辑目录真实存在且目标不同"才执行；已物理到位则只改内容',
+          '撞名即抛错、不落盘——改前请过验证闭环；别名清洗按包别名用法保守替换',
+        ],
+      },
     ],
   });
 
@@ -302,6 +323,7 @@ export interface ScheduledStep {
   enabled: boolean;
   files?: string[];
   dead?: Array<{ source: string; files: string[] }>;
+  migrate?: PackageMigrationSpec;
 }
 
 /**
@@ -327,6 +349,10 @@ export function collectSteps(
         dead:
           stage.kind === 'dead_imports'
             ? (cfg as DeadImportsStepCfg | undefined)?.dead
+            : undefined,
+        migrate:
+          stage.kind === 'package_migration'
+            ? (cfg as PackageMigrationStepCfg | undefined)?.migrate
             : undefined,
       });
     }
@@ -423,7 +449,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
   for (const [i, s] of stepList.entries()) {
     await runStage(i + 1, s.stage.kind, s.stage.label, s.enabled, () =>
-      s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead }),
+      s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead, migrate: s.migrate }),
     );
   }
 
@@ -443,39 +469,60 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     }
 
     const plan = await compute();
-    if (plan.absToNew.size === 0) {
+    const moves = plan.moves ?? [];
+    // 无改动判定：既没内容改写、也没文件移动，才算 no_change
+    if (plan.absToNew.size === 0 && moves.length === 0) {
       r.stages.push({ id, label, index, outcome: 'no_change', files_changed: 0, units_removed: 0 });
       return;
     }
 
-    // 落盘（基于当前盘上内容——上一步已绿）
+    // ── 落盘（基于当前盘上内容——上一步已绿）──
+    // 1) 先移动文件（先移动，absToNew 里移动后文件的 key 是其 to 路径，随后写覆盖）
+    for (const m of moves) {
+      const toDir = path.dirname(m.to);
+      if (!fs.existsSync(toDir)) fs.mkdirSync(toDir, { recursive: true });
+      if (fs.existsSync(m.to)) {
+        throw new Error(`重构撞名：移动目标已存在 ${m.to}`);
+      }
+      fs.renameSync(m.from, m.to);
+    }
+    // 2) 再写内容（含移动后文件的 to 路径）
     for (const abs of plan.absToNew.keys()) {
+      const dir = path.dirname(abs);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(abs, plan.absToNew.get(abs)!, 'utf-8');
     }
     const units = plan.units ?? (id === 'dead_statements' ? plan.absToNew.size : 0);
 
-    r.total_files_changed += plan.absToNew.size;
+    r.total_files_changed += Math.max(plan.absToNew.size, moves.length);
     r.total_units_removed += units;
 
     // 不可验证：仍已落盘，但如实标注
     if (!verifyEnabled) {
       r.stages.push({
         id, label, index, outcome: 'not_verifiable',
-        files_changed: plan.absToNew.size, units_removed: units,
+        files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
       });
       return;
     }
 
     const after = run({ cwd, commands });
     if (after.status === 'fail') {
-      // 回滚此步：还原本步预读的原始内容 → 回到上一步绿点
+      // ── 回滚此步：先逆向移动（to→from），再按原始内容还原 → 回到上一步绿点 ──
+      for (const m of [...moves].reverse()) {
+        if (fs.existsSync(m.to) && !fs.existsSync(m.from)) {
+          const fromDir = path.dirname(m.from);
+          if (!fs.existsSync(fromDir)) fs.mkdirSync(fromDir, { recursive: true });
+          fs.renameSync(m.to, m.from);
+        }
+      }
       for (const [abs, orig] of plan.originals) fs.writeFileSync(abs, orig, 'utf-8');
-      r.total_files_changed -= plan.absToNew.size;
+      r.total_files_changed -= Math.max(plan.absToNew.size, moves.length);
       r.total_units_removed -= units;
       r.ok = false;
       r.stages.push({
         id, label, index, outcome: 'rolled_back',
-        files_changed: plan.absToNew.size, units_removed: units,
+        files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
         detail: after.detail, baseline, after,
       });
       return;
@@ -483,7 +530,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
     r.stages.push({
       id, label, index, outcome: 'applied',
-      files_changed: plan.absToNew.size, units_removed: units,
+      files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
       baseline, after,
     });
   }
@@ -493,6 +540,7 @@ function countPlanned(opts: PipelineOptions): number {
   let n = 0;
   if (opts.steps.dead_imports?.enabled) n++;
   if (opts.steps.dead_statements?.enabled) n++;
+  if (opts.steps.package_migration?.enabled) n++;
   return n;
 }
 

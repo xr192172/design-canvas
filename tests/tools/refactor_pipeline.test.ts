@@ -324,6 +324,66 @@ describe('多语言可插拔执行器契约', () => {
   });
 });
 
+describe('package_migration 步骤（包改名/提级线）', () => {
+  it('包改名 + import 引用面重写 + 别名清洗经管线落盘；改后验证失败 → 整体回滚', async () => {
+    const dir = tempRoot();
+    const put = (rel: string, content: string) => {
+      const abs = path.join(dir, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content, 'utf-8');
+    };
+    put('go.mod', 'module github.com/acme/shell\n');
+    put('internal/hub/hub.go', 'package v2\n\nfunc Hub() string { return "hub" }\n');
+    put(
+      'cmd/main.go',
+      'package main\n\nimport (\n\thubv2 "github.com/acme/shell/internal/hub/v2"\n)\n\nfunc main() { _ = hubv2.Hub() }\n',
+    );
+    const origHub = fs.readFileSync(path.join(dir, 'internal/hub/hub.go'), 'utf-8');
+    const origMain = fs.readFileSync(path.join(dir, 'cmd/main.go'), 'utf-8');
+
+    const migrate = {
+      moduleBase: 'github.com/acme/shell',
+      prefix: 'internal/hub/v2',
+      to: 'internal/hub',
+      packageRename: { from: 'v2', to: 'hub' },
+      aliases: [{ importPath: 'github.com/acme/shell/internal/hub', from: 'hubv2', to: 'hub' }],
+    };
+
+    // 场景 A：改后验证 pass → applied 落盘
+    const okRun = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { package_migration: { enabled: true, migrate } },
+      verify: true,
+      verifyImpl: spy(['pass', 'pass']),
+    });
+    const st = okRun.stages.find((x) => x.id === 'package_migration');
+    expect(st?.outcome).toBe('applied');
+    expect(fs.readFileSync(path.join(dir, 'internal/hub/hub.go'), 'utf-8').startsWith('package hub')).toBe(true);
+    const mainAfter = fs.readFileSync(path.join(dir, 'cmd/main.go'), 'utf-8');
+    expect(mainAfter).toContain('"github.com/acme/shell/internal/hub"');
+    expect(mainAfter).not.toContain('hubv2');
+
+    // 场景 B：改后验证 fail → 回滚到原始内容（先还原场景 A 已落盘的迁移）
+    put('internal/hub/hub.go', 'package v2\n\nfunc Hub() string { return "hub" }\n');
+    put(
+      'cmd/main.go',
+      'package main\n\nimport (\n\thubv2 "github.com/acme/shell/internal/hub/v2"\n)\n\nfunc main() { _ = hubv2.Hub() }\n',
+    );
+    const rollRun = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { package_migration: { enabled: true, migrate } },
+      verify: true,
+      verifyImpl: spy(['pass', 'fail']), // 基线绿、改后黄
+    });
+    expect(rollRun.ok).toBe(false);
+    const rb = rollRun.stages.find((x) => x.id === 'package_migration');
+    expect(rb?.outcome).toBe('rolled_back');
+    // 回滚：hub.go 的 package 改回 v2；main.go 的 import 改回 v2
+    expect(fs.readFileSync(path.join(dir, 'internal/hub/hub.go'), 'utf-8')).toBe(origHub);
+    expect(fs.readFileSync(path.join(dir, 'cmd/main.go'), 'utf-8')).toBe(origMain);
+  });
+});
+
 describe('manifest 定主导工具链（多语言混合项目验证链归主导语言）', () => {
   it('Python 工程内嵌 JS 脚本 → 验证链归 python（py 优先级 > node），而非 JS 主导', async () => {
     const dir = tempRoot();
