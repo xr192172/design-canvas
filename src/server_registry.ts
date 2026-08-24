@@ -51,6 +51,7 @@ import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
+import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -1151,6 +1152,107 @@ const TOOL_DEFS: ToolDef[] = [
       for (const f of r.files) {
         const detail = f.removals.filter((x) => x.changed).map((x) => `${x.source}×${x.removed}`).join('、') || '无变更';
         parts.push(`\t- ${f.file}（${f.lang}）：${detail}`);
+      }
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'refactor_pipeline',
+    title: 'Run deterministic refactor pipeline (dead imports + dead statements)',
+    description:
+      '确定性重构管线：把可自动执行的瘦身改写串成一条链，一次调用按序执行、统一增量验证、失败只回滚到最近绿点。' +
+      '入口只跑一次改前基线（build+test），其后每步基于上一步已绿的内容只跑一次改后验证——不改动的步骤不验证（性能友好）。' +
+      '内置步骤：' +
+      '  1) dead_imports：接受已检测的死依赖清单（source + files，可直接用 dead_deps 的 dead 数组或自行构造），' +
+      '     复用 removeDeadImports 同源规则删除指向死源的 import/require/re-export 语句。' +
+      '  2) dead_statements：自动扫描（可选 files 收敛范围）删除 return/throw/continue 后不可达语句与死分支（TS/Go）。' +
+      '失败语义：某步改后验证回归 → 只还原该步预读的原始内容，回到上一步绿点，前面已绿的改动保留；管线结果 ok=false。' +
+      '基线失败 → 一个文件都不改。verify=true 启用验证；{commands} 自定义命令组；缺省/verify=false 仅落盘不验证（not_verifiable）。' +
+      'rename 步骤需人工候选，暂不内置。' +
+      'result.stages[] 含每步 outcome（applied/no_change/rolled_back/not_verifiable/skipped）+ baseline/after 验证状态。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录'),
+      steps: z
+        .object({
+          dead_imports: z
+            .object({
+              enabled: z.boolean().optional().default(false).describe('是否启用死 import 移除步骤'),
+              dead: z
+                .array(
+                  z.object({
+                    source: z.string().describe('死三方源（Go import 路径或 TS 模块说明符）'),
+                    files: z.array(z.string()).describe('导入该源的文件（相对 project_dir 或绝对路径）'),
+                  }),
+                )
+                .optional()
+                .describe('已检测的死依赖清单；可直接用 dead_deps 结果 dead 数组'),
+            })
+            .optional(),
+          dead_statements: z
+            .object({
+              enabled: z.boolean().optional().default(false).describe('是否启用死语句删除步骤（自动扫描）'),
+              files: z.array(z.string()).optional().describe('收敛到指定文件（相对或绝对路径）；缺省递归扫全部 TS/Go 源'),
+            })
+            .optional(),
+        })
+        .describe('按序执行的步骤开关（至少启用一个才有产出）'),
+      verify: z
+        .union([
+          z.boolean(),
+          z.object({
+            commands: z
+              .array(
+                z.object({
+                  label: z.string().describe('命令标签'),
+                  cmd: z.string().describe('可执行命令名，如 go / npm / npx'),
+                  args: z.array(z.string()).describe('命令参数'),
+                  timeoutMs: z.number().optional().describe('单命令超时（毫秒，默认 300000）'),
+                }),
+              )
+              .optional()
+              .describe('自定义验证命令组；缺省按项目形态自动探测'),
+          }),
+        ])
+        .optional()
+        .describe('true 启用统一验证闭环；{commands} 自定义命令；缺省/verify=false 仅落盘不验证'),
+    },
+    handler: wrap(async (a) => {
+      const project_dir = String(a.project_dir);
+      const steps = a.steps as
+        | {
+            dead_imports?: { enabled?: boolean; dead?: Array<{ source: string; files: string[] }> };
+            dead_statements?: { enabled?: boolean; files?: string[] };
+          }
+        | undefined;
+      const verify = a.verify as Parameters<typeof runRefactorPipeline>[0]['verify'];
+      const r = await runRefactorPipeline({
+        project_dir,
+        steps: {
+          dead_imports: steps?.dead_imports?.enabled
+            ? { enabled: true, dead: steps.dead_imports.dead ?? [] }
+            : undefined,
+          dead_statements: steps?.dead_statements?.enabled
+            ? { enabled: true, files: steps.dead_statements.files }
+            : undefined,
+        },
+        verify,
+      });
+
+      const parts = [
+        `确定性重构管线完成：全局 ${r.ok ? '通过' : '已停（存在回滚）'}，`,
+        `共 ${r.planned_steps} 步，${r.total_files_changed} 个文件被改写，`,
+        `删除 ${r.total_units_removed} 单位（import 语句×文件 / 死语句文件数）。`,
+        `基线=${r.baseline?.status ?? '未验证'}`,
+      ];
+      for (const s of r.stages) {
+        const kind =
+          s.outcome === 'applied' ? '已落盘并通过改后验证'
+          : s.outcome === 'no_change' ? '无实际改动'
+          : s.outcome === 'rolled_back' ? '改后验证回归，已回滚到绿点'
+          : s.outcome === 'not_verifiable' ? '未启用验证，已落盘'
+          : '未启用';
+        parts.push(`\t[${s.label}] ${s.outcome}——${kind}（改动 ${s.files_changed} 文件，${s.units_removed} 单位）`);
+        if (!r.ok && s.outcome === 'rolled_back') parts.push(`\t\t回滚详情：${s.detail}`);
       }
       return { message: parts.join('\n'), data: r };
     }),
