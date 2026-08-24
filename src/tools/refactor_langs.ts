@@ -1,0 +1,142 @@
+/**
+ * refactor_langs —— 多语言重构执行器契约（可插拔骨架的地基）
+ *
+ * 目标（用户洞见）：tree-sitter 是我们的共享解析根基（AST 解析是通用能力）；
+ * 但每门语言"修正屎山"的改造路径（检测规则、改写规则、验证命令）各不相同——
+ * 新语言就开发新的路径（一个 LanguageRefactorExecutor），注册进注册表即可被
+ * 管线拾取，无需改动管线主流程。
+ *
+ * 三层分工：
+ *   1. 共享内核（不动）：tree-sitter AST / ts_kernel —— 各语言 GM 统一共用。
+ *   2. 语言执行器（本文件契约）：一门语言一个 LanguageRefactorExecutor，
+ *     内含自己的源码判定、验证命令、以及顺序的 steps（dead_imports 等）。
+ *   3. 管线（refactor_pipeline）：按项目探测命中哪些语言（可能多门并存，
+ *     如 TS+Go 混项目）→ 聚合它们的 stages → 统一"基线一次 + 每步一次改后
+ *     验证 + 失败只回滚到最近绿点"。
+ *
+ * 本文件只放契约接口 + 注册表 + 目录语言命中探测，不 import refactor_pipeline
+ * （避免循环依赖）；内置 TS/Go 执行器的装配（compute 依赖 pipeline 的既有
+ * 纯计算函数）放在 refactor_pipeline.ts，经 DEFAULT_LANGS 注册。
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import type { VerifyCommand } from './verify_refactor.js';
+
+// ─────────────────────────────────────────────
+// 步骤配置（与 runRefactorPipeline.steps 对齐，供执行器判定是否启用）
+// ─────────────────────────────────────────────
+export interface DeadImportsStepCfg {
+  enabled?: boolean;
+  dead?: Array<{ source: string; files: string[] }>;
+}
+export interface DeadStatementsStepCfg {
+  enabled?: boolean;
+  files?: string[];
+}
+export interface RefactorStepsCfg {
+  dead_imports?: DeadImportsStepCfg;
+  dead_statements?: DeadStatementsStepCfg;
+}
+
+// ─────────────────────────────────────────────
+// 契约接口
+// ─────────────────────────────────────────────
+export type RefactorStageKind = 'dead_imports' | 'dead_statements';
+
+export interface RunningChangePlan {
+  /** 待落盘的绝对路径 → 新源码 */
+  absToNew: Map<string, string>;
+  /** 预读的原始内容（apply 前盘上内容；回滚用） */
+  originals: Map<string, string>;
+  /** 删除的单位数；缺省由管线按步骤退化 */
+  units?: number;
+}
+
+export interface RefactorStageComputeArgs {
+  project_dir: string;
+  cwd: string;
+  files?: string[];
+  dead?: Array<{ source: string; files: string[] }>;
+}
+
+/** 单步执行器：纯计算，绝不落盘。落盘 + 验证 + 回滚全由管线负责。 */
+export interface RefactorStageExecutor {
+  kind: RefactorStageKind;
+  /** 人类可读标题（报告展示；多语言同名步骤以语言前缀区分） */
+  label: string;
+  compute(args: RefactorStageComputeArgs): RunningChangePlan | Promise<RunningChangePlan>;
+  /** 本步保守规则说明（写进报告 / 供人审） */
+  limitations: string[];
+}
+
+/** 一门语言的完整执行器（"新语言新路径"） */
+export interface LanguageRefactorExecutor {
+  /** 语言 id，如 'ts_go' / 'py' / 'java'（注册唯一 key） */
+  lang: string;
+  /** 命中该语言源文件的扩展名判定 */
+  isSourceFile(rel: string): boolean;
+  /** 依该项目形态给验证命令组；空数组 = 不可自动验证 */
+  detectVerifyCommands(cwd: string): VerifyCommand[];
+  /** 该语言暴露的重构步骤（按声明顺序执行） */
+  stages: RefactorStageExecutor[];
+}
+
+// ─────────────────────────────────────────────
+// 注册表
+// ─────────────────────────────────────────────
+const DEFAULT_SKIP = new Set([
+  'node_modules', '.git', 'dist', '.next', 'out', 'build', 'target', // node/go/js/java
+  'venv', '.venv', '__pycache__', // python
+]);
+
+/** 递归判定目录内是否存在命中该语言判定的源文件（含路径过滤，跳过噪音目录） */
+export function dirHasSource(cwd: string, isSourceFile: (rel: string) => boolean): boolean {
+  let stack = [path.resolve(cwd)];
+  const seen = new Set<string>();
+  while (stack.length) {
+    const dir = stack.pop()!;
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (!DEFAULT_SKIP.has(ent.name)) stack.push(p);
+        continue;
+      }
+      if (isSourceFile(path.relative(cwd, p))) return true;
+    }
+  }
+  return false;
+}
+
+export class RefactorLangRegistry {
+  private m = new Map<string, LanguageRefactorExecutor>();
+
+  /** 注册一门语言的执行器（同 lang 覆盖） */
+  register(ex: LanguageRefactorExecutor): void {
+    this.m.set(ex.lang, ex);
+  }
+
+  get(lang: string): LanguageRefactorExecutor | undefined {
+    return this.m.get(lang);
+  }
+
+  all(): LanguageRefactorExecutor[] {
+    return [...this.m.values()];
+  }
+
+  /**
+   * 按项目根探测命中哪些语言：目录内存在该语言源文件 → 入选。
+   * 允许多语言并存（如 TS+Go 混项目）；空目录 / 无源码 → 空数组。
+   */
+  forProject(cwd: string): LanguageRefactorExecutor[] {
+    return this.all().filter((ex) => dirHasSource(cwd, ex.isSourceFile));
+  }
+}

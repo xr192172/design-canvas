@@ -25,21 +25,31 @@ import path from 'node:path';
 import { defaultVerifyCommands, runVerification, type VerifyCommand, type VerificationOutcome } from './verify_refactor.js';
 import { flagDeadStatements, applyReachabilityRuns } from './dead_statements.js';
 import { removeImportsFromSource } from './remove_dead_imports.js';
-import { detectDeadImports, type DeadImportCandidate } from './detect_dead_imports.js';
+import { detectDeadImports } from './detect_dead_imports.js';
+import {
+  RefactorLangRegistry,
+  type RunningChangePlan,
+  type LanguageRefactorExecutor,
+  type RefactorStageExecutor,
+  type RefactorStageKind,
+  type RefactorStepsCfg,
+  type DeadImportsStepCfg,
+  type DeadStatementsStepCfg,
+} from './refactor_langs.js';
+
+// re-export 契约类型（向后兼容：外部可从本模块取用）
+export type {
+  RunningChangePlan,
+  LanguageRefactorExecutor,
+  RefactorStageExecutor,
+  RefactorStageKind,
+  RefactorStepsCfg,
+} from './refactor_langs.js';
 
 // ─────────────────────────────────────────────
 // 类型
 // ─────────────────────────────────────────────
-export type StageId = 'renames' | 'dead_imports' | 'dead_statements';
-
-export interface RunningChangePlan {
-  /** 待落盘的绝对路径 → 新源码 */
-  absToNew: Map<string, string>;
-  /** 预读的原始内容（apply 前盘上内容；non-plan 阶段为空） */
-  originals: Map<string, string>;
-  /** 删除的单位数（死 import 语句条数 / 死语句文件数）；缺省由 runStage 按步退化 */
-  units?: number;
-}
+export type StageId = RefactorStageKind | 'renames';
 
 export type StageOutcome =
   | 'applied'
@@ -81,6 +91,9 @@ export interface PipelineOptions {
   verify?: boolean | { commands?: VerifyCommand[] };
   /** 单测注入的验证执行器（默认跑真命令） */
   verifyImpl?: (o: { cwd: string; commands: VerifyCommand[] }) => VerificationOutcome;
+  /** 多语言执行器注册表；缺省用内置 DEFAULT_LANGS（TS/Go）。新语言调用
+   *  registerRefactorLanguage 后自动被拾取，无需传此参数。 */
+  langs?: RefactorLangRegistry;
 }
 
 export interface PipelineResult {
@@ -179,19 +192,124 @@ function computeDeadImportsPlan(proj: string, dead: Array<{ source: string; file
 }
 
 // ─────────────────────────────────────────────
+// 内置多语言执行器注册（TS/Go）——"新语言新路径"的落点
+// ─────────────────────────────────────────────
+function buildDefaultLangs(): RefactorLangRegistry {
+  const reg = new RefactorLangRegistry();
+  reg.register({
+    lang: 'ts_go',
+    isSourceFile: (rel) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel) || rel.endsWith('.go'),
+    detectVerifyCommands: (cwd) => defaultVerifyCommands(cwd),
+    stages: [
+      {
+        kind: 'dead_imports',
+        label: 'dead import 移除',
+        compute: (a) => computeDeadImportsPlan(a.project_dir, a.dead ?? []),
+        limitations: [
+          'TS/Go 保守：副作用导入 / re-export / 空点导入恒活（import 即执行副作用），绝不误删',
+          '文件内零引用即报死，未做跨文件可达性——保守漏报多于误报；删除前请过验证闭环',
+        ],
+      },
+      {
+        kind: 'dead_statements',
+        label: '死语句删除',
+        compute: (a) => computeDeadStatementsPlan(a.project_dir, a.files),
+        limitations: [
+          '函数内部控制流：return/throw 后不可达删；跨函数/跨文件可达性不看',
+        ],
+      },
+    ],
+  });
+  return reg;
+}
+
+/** 默认注册表（模块级单例）。内置 TS/Go；后续语言执行器经注册入口并入。 */
+export const DEFAULT_LANGS = buildDefaultLangs();
+
+/** 多语言执行器注册入口：给"下一个接力 AI"的新语言路径挂到全局注册表，
+ *  runRefactorPipeline 每次按项目探测自动拾取，无需改管线主流程。 */
+export function registerRefactorLanguage(ex: LanguageRefactorExecutor): void {
+  DEFAULT_LANGS.register(ex);
+}
+
+// ─────────────────────────────────────────────
+// 步骤聚合 + 验证命令合并（多语言可插拔核心）
+// ─────────────────────────────────────────────
+
+export interface ScheduledStep {
+  stage: RefactorStageExecutor;
+  enabled: boolean;
+  files?: string[];
+  dead?: Array<{ source: string; files: string[] }>;
+}
+
+/**
+ * 聚合命中的多语言执行器各自的 steps（保序）→ 与用户 steps 配置对齐。
+ * 同一 kind 的步骤（如 multiple 语言都有 dead_imports）会各保留自己的
+ * compute（各自处理自己的语言），管线按顺序逐个执行。
+ */
+export function collectSteps(
+  executors: LanguageRefactorExecutor[],
+  steps: RefactorStepsCfg,
+): ScheduledStep[] {
+  const out: ScheduledStep[] = [];
+  for (const ex of executors) {
+    for (const stage of ex.stages) {
+      const cfg = steps[stage.kind];
+      out.push({
+        stage,
+        enabled: !!cfg?.enabled,
+        files:
+          stage.kind === 'dead_statements'
+            ? (cfg as DeadStatementsStepCfg | undefined)?.files
+            : undefined,
+        dead:
+          stage.kind === 'dead_imports'
+            ? (cfg as DeadImportsStepCfg | undefined)?.dead
+            : undefined,
+      });
+    }
+  }
+  return out;
+}
+
+/** 合并多语言执行器各自探测出的验证命令（按 cmd+args 去重，保序）。 */
+export function mergeVerifyCommands(executors: LanguageRefactorExecutor[], cwd: string): VerifyCommand[] {
+  const out: VerifyCommand[] = [];
+  const seen = new Set<string>();
+  for (const ex of executors) {
+    for (const c of ex.detectVerifyCommands(cwd)) {
+      const key = `${c.cmd} ${c.args.join(' ')}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────
 // 管线编排
 // ─────────────────────────────────────────────
 export async function runRefactorPipeline(opts: PipelineOptions): Promise<PipelineResult> {
   const proj = path.resolve(opts.project_dir);
   const cwd = path.resolve(opts.cwd ?? proj);
   // 显式启用验证（true 或 {commands}）才算可验证；false/缺省 = 不验证仅落盘。
-  // 命令组本由 opts.commands 或按项目形态探测给出；空命令组在真 runVerification 下
-  // 安全返回 pass（测试注入 spy 时命令组常为空、不影响调用计数）。
+  // 命令组本由调用方 commands 或按"命中语言"探测给出；空命令组在真 runVerification
+  // 下安全返回 pass（测试注入 spy 时命令组常为空、不影响调用计数）。
   const verifyEnabled = opts.verify === true || (typeof opts.verify === 'object' && opts.verify !== null);
+  const run = opts.verifyImpl ?? runVerification;
+
+  // 可插拔核心：按项目探测命中的语言执行器（允许多门并存，如 TS+Go 混项目），
+  // 聚合它们的 steps（保序）→ 统一走基线/改后验证/绿点回滚。
+  const langs = opts.langs ?? DEFAULT_LANGS;
+  const executors = langs.forProject(cwd);
+  const stepList = collectSteps(executors, opts.steps);
+  const planned = stepList.filter((s) => s.enabled).length;
+
   const commands: VerifyCommand[] =
     (typeof opts.verify === 'object' && opts.verify.commands) ||
-    (opts.verify === true ? defaultVerifyCommands(cwd) : []);
-  const run = opts.verifyImpl ?? runVerification;
+    (opts.verify === true ? mergeVerifyCommands(executors, cwd) : []);
 
   const baseline = verifyEnabled ? run({ cwd, commands }) : null;
 
@@ -205,7 +323,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
       total_files_changed: 0,
       total_units_removed: 0,
       baseline,
-      planned_steps: countPlanned(opts),
+      planned_steps: planned,
     };
   }
 
@@ -215,15 +333,14 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     total_files_changed: 0,
     total_units_removed: 0,
     baseline,
-    planned_steps: countPlanned(opts),
+    planned_steps: planned,
   };
 
-  await runStage(1, 'dead_imports', 'dead import 移除', opts.steps.dead_imports, () =>
-    computeDeadImportsPlan(proj, opts.steps.dead_imports?.dead ?? []),
-  );
-  await runStage(2, 'dead_statements', '死语句删除', opts.steps.dead_statements, () =>
-    computeDeadStatementsPlan(proj, opts.steps.dead_statements?.files),
-  );
+  for (const [i, s] of stepList.entries()) {
+    await runStage(i + 1, s.stage.kind, s.stage.label, s.enabled, () =>
+      s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead }),
+    );
+  }
 
   return r;
 
@@ -231,11 +348,11 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     index: number,
     id: StageId,
     label: string,
-    cfg: { enabled?: boolean } | undefined,
+    enabled: boolean,
     compute: () => Promise<RunningChangePlan> | RunningChangePlan,
   ): Promise<void> {
     // 未启用 → 跳过
-    if (!cfg?.enabled) {
+    if (!enabled) {
       r.stages.push({ id, label, index, outcome: 'skipped', files_changed: 0, units_removed: 0 });
       return;
     }

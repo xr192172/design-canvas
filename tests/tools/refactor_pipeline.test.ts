@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, afterAll } from 'vitest';
-import { runRefactorPipeline, type PipelineResult } from '../../src/tools/refactor_pipeline';
+import { runRefactorPipeline, collectSteps, mergeVerifyCommands, type PipelineResult } from '../../src/tools/refactor_pipeline';
+import { RefactorLangRegistry, type LanguageRefactorExecutor } from '../../src/tools/refactor_langs';
 import { type VerifyCommand } from '../../src/tools/verify_refactor';
 
 const roots: string[] = [];
@@ -233,5 +234,59 @@ describe('runRefactorPipeline 聚合', () => {
     expect(res.stages.every((x) => x.outcome === 'applied')).toBe(true);
     expect(res.total_files_changed).toBe(2); // a.ts + c.ts
     expect(asSpy(s).calls.length).toBe(3); // 基线 + 2 改后
+  });
+});
+
+describe('多语言可插拔执行器契约', () => {
+  it('按项目源文件探测语言 → 只拾取命中语言执行器，并聚合其 steps', async () => {
+    const dir = tempRoot();
+    fs.writeFileSync(path.join(dir, 'app.py'), 'x = 1\n'); // 让 py 命中
+    fs.writeFileSync(path.join(dir, 'apple.go'), 'package main\n'); // 不应命中 py
+
+    const pyRegistry = new RefactorLangRegistry();
+    pyRegistry.register({
+      lang: 'py',
+      isSourceFile: (rel) => rel.endsWith('.py'),
+      detectVerifyCommands: () => [
+        { label: 'pycheck', cmd: 'python', args: ['-m', 'py_compile'], timeoutMs: 60000 },
+      ],
+      stages: [
+        {
+          kind: 'dead_imports',
+          label: 'py dead import 移除',
+          compute: () => ({ absToNew: new Map(), originals: new Map() }),
+          limitations: ['py 范例桩：不真正删除'],
+        },
+      ],
+    });
+
+    const executors = pyRegistry.forProject(dir);
+    expect(executors.map((e) => e.lang)).toEqual(['py']); // 只命中 py
+
+    const steps = collectSteps(executors, { dead_imports: { enabled: true } });
+    expect(steps).toHaveLength(1);
+    expect(steps[0].stage.kind).toBe('dead_imports');
+    expect(steps[0].enabled).toBe(true);
+  });
+
+  it('mergeVerifyCommands 去重合并多语言各自的验证命令（保序）', () => {
+    const mk = (cmd: string, args: string[] = []): VerifyCommand => ({ label: cmd, cmd, args });
+    const a: LanguageRefactorExecutor = {
+      lang: 'a', isSourceFile: () => true,
+      detectVerifyCommands: () => [mk('tsc'), mk('x')],
+      stages: [],
+    };
+    const b: LanguageRefactorExecutor = {
+      lang: 'b', isSourceFile: () => true,
+      detectVerifyCommands: () => [mk('tsc'), mk('go', ['build', './...'])],
+      stages: [],
+    };
+    const merged = mergeVerifyCommands([a, b], '.');
+    expect(merged.map((c) => `${c.cmd} ${c.args.join(' ')}`)).toEqual([
+      'tsc ',   // a 先，保留
+      'x ',     // a 独有
+      'go build ./...', // b 独有
+    ]);
+    expect(merged.filter((c) => c.cmd === 'tsc')).toHaveLength(1); // 去重
   });
 });
