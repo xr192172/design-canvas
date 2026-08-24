@@ -51,6 +51,13 @@ describe('runVerification', () => {
     expect(r.status).toBe('pass');
   });
 
+  it.skipIf(process.platform !== 'win32')('Windows：npx 能通过 shell 解析启动（回归：spawn("npx") 不补 .cmd → ENOENT）', () => {
+    const dir = tempRoot();
+    const r = runVerification({ cwd: dir, commands: [{ label: 'npx version', cmd: 'npx', args: ['--version'] }] });
+    expect(r.status).toBe('pass');
+    expect(r.detail).toContain('pass');
+  });
+
   it('defaultVerifyCommands：有 go.mod → go build + go test', () => {
     const dir = tempRoot();
     fs.writeFileSync(path.join(dir, 'go.mod'), 'module x\n', 'utf-8');

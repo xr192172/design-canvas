@@ -50,6 +50,9 @@ export function runVerification(opts: { cwd: string; commands: VerifyCommand[] }
       timeout: c.timeoutMs ?? 300_000,
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
+      // Windows：spawn('npx')/spawn('npm') 不走 shell 解析不会自动补 .cmd 扩展名 → ENOENT。
+      // 验证命令组里 npx/npm 是缺省（不可选），必须能在这平台上真正跑起来。
+      shell: process.platform === 'win32',
     });
     if (run.error) {
       runs.push(`[${c.label}] 启动失败：${run.error.message}`);
