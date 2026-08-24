@@ -50,6 +50,7 @@ import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
+import { removeDeadImports } from './tools/remove_dead_imports.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -1071,6 +1072,46 @@ const TOOL_DEFS: ToolDef[] = [
         for (const i of r.importers) parts.push(`\t  - ${i.file}（${i.edits} 处编辑，${i.note}）`);
       } else {
         parts.push('\t无其它文件引用该符号');
+      }
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'remove_dead_imports',
+    title: 'Remove dead imports reported by dead_deps',
+    description:
+      '移除死 import 执行器：把 dead_deps 报告的死三方依赖（DeadDepCandidate 列表，含 source + files）' +
+      '从对应文件里删掉对应的 import/require/re-export 语句。Go 与 TS/JS 各形态都支持：' +
+      '单行 import、块 import（删空块壳 `import (...) `）、别名/空导入 `_`/点导入 `.`、' +
+      '具名/默认/命名空间/type/副作用 import、export * / export {...} from、CommonJS require。' +
+      '保守规则：只删整条 import 语句；识别不出的形态不动；动态 import("x") 等使用点绝不碰。' +
+      '原子性：预读全部待改文件，任一读取失败 → 整批中止、一个都不写。' +
+      'dead 参数可直接传 dead_deps 工具返回结果里的 dead 数组。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于把 files 解析为绝对路径）'),
+      dead: z
+        .array(
+          z.object({
+            source: z.string().describe('死三方源，如 Go import 路径或 TS 模块说明符'),
+            files: z.array(z.string()).describe('导入该源的闭包文件（相对 project_dir 或绝对路径）'),
+            reason: z.enum(['no_reference', 'unreachable_only']).optional().describe('dead_deps 判定的死因，仅供记录'),
+          }),
+        )
+        .describe('dead_deps 报告的 DeadDepCandidate 列表'),
+    },
+    handler: wrap(async (a) => {
+      const { project_dir, dead } = a;
+      if (!Array.isArray(dead) || dead.length === 0) {
+        return { message: '无可删除的死 import（dead 列表为空）', data: { files: [], files_changed: 0, statements_removed: 0 } };
+      }
+      const r = removeDeadImports({ project_dir: String(project_dir), dead });
+      const parts = [
+        `移除死 import 完成：改写 ${r.files_changed} 个文件，删除 ${r.statements_removed} 条 import 语句。`,
+      ];
+      if (r.files.length === 0) parts.push('\t没有命中任何可操作的文件（输入 dead 清单的文件均非 TS/Go 系）。');
+      for (const f of r.files) {
+        const detail = f.removals.filter((x) => x.changed).map((x) => `${x.source}×${x.removed}`).join('、') || '无变更';
+        parts.push(`\t- ${f.file}（${f.lang}）：${detail}`);
       }
       return { message: parts.join('\n'), data: r };
     }),
