@@ -49,6 +49,7 @@ import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
+import { renameSymbol } from './tools/rename_symbol.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { validateReason } from './tools/reason_validator.js';
@@ -1040,6 +1041,38 @@ const TOOL_DEFS: ToolDef[] = [
           (skipped.length > 0 ? ` 跳过的项：${skipped.map((s) => `${s.from}→${s.to}`).join(', ')}` : ''),
         data: applied,
       };
+    }),
+  },
+  {
+    name: 'rename_symbol',
+    title: 'Cross-file module-level symbol rename',
+    description:
+      '跨文件符号级改名：把改一个模块级导出符号从单文件局部变量升级为跨文件安全改名。' +
+      '在定义文件上发起（file 必须是该符号的声明文件），改：定义名 + 同文件内对该符号的所有引用（含 export 列表）' +
+      '+ 所有 import 该符号的文件里的 import 子句远程名与无别名使用点。' +
+      '支持 function/const/class/interface/type/enum 模块级符号；class/enum 值+类型双栖都改，interface/type 只改类型引用。' +
+      '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
+      file: z.string().describe('定义符号的文件（相对 project_dir 或绝对路径；必须是该符号的声明文件，而非 import 它的文件）'),
+      symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
+      to: z.string().describe('新符号名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
+    },
+    handler: wrap(async (a) => {
+      const { project_dir, file, symbol, to } = a;
+      const r = await renameSymbol({ project_dir: String(project_dir), file: String(file), symbol: String(symbol), to: String(to) });
+      if (!r.ok) {
+        return { message: `跨文件改名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
+      }
+      const parts = [`跨文件改名完成：${r.symbol} → ${r.to}`];
+      if (r.definition) parts.push(`\t定义文件 ${r.definition.file}（${r.definition.edits} 处编辑，${r.definition.note}）`);
+      if (r.importers && r.importers.length > 0) {
+        parts.push(`\t影响 ${r.importers.length} 个导入文件：`);
+        for (const i of r.importers) parts.push(`\t  - ${i.file}（${i.edits} 处编辑，${i.note}）`);
+      } else {
+        parts.push('\t无其它文件引用该符号');
+      }
+      return { message: parts.join('\n'), data: r };
     }),
   },
   {
