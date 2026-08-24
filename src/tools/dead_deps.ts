@@ -129,13 +129,18 @@ export function parseTsImportQualifiers(src: string, mod: string): string[] | nu
   // 具名/默认混合：import X, { a, b as c } from 'mod'
   const named = src.match(new RegExp(`import\\s+([\\w$]+)?\\s*,?\\s*\\{([^}]*)\\}\\s+from\\s+['"]${escaped}['"]`));
   if (named) {
+    // named[1] 可能是默认导入名，也可能是 `import type { ... }` 的 `type` 关键字——
+    // 后者无默认绑定，剥掉；命名项里的内联 `type X` 也剥 `type ` 前缀（否则限定符
+    // 变成 `type X`，与 `X` 的裸用法匹配不上 → 活跃类型被误判死引用）
+    const hasDefault = named[1] !== undefined && named[1] !== 'type';
     const out: string[] = [];
-    if (named[1]) out.push(named[1]);
+    if (hasDefault) out.push(named[1]);
     for (const piece of named[2].split(',')) {
       const p = piece.trim();
       if (!p) continue;
       const alias = p.match(/^[\w$]+\s+as\s+([\w$]+)$/);
-      out.push(alias ? alias[1] : p.split(/\s+as\s+/)[0]);
+      const base = (p.split(/\s+as\s+/)[0] ?? '').replace(/^type\s+/, '');
+      out.push(alias ? alias[1] : base);
     }
     return out;
   }
@@ -153,7 +158,7 @@ export function parseTsImportQualifiers(src: string, mod: string): string[] | nu
       .filter(Boolean)
       .map((p) => {
         const alias = p.match(/^[\w$]+\s+as\s+([\w$]+)$/);
-        return alias ? alias[1] : p.split(/\s+as\s+/)[0];
+        return alias ? alias[1] : (p.split(/\s+as\s+/)[0] ?? '').replace(/^type\s+/, '');
       });
   }
   return null;

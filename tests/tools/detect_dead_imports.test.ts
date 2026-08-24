@@ -56,6 +56,15 @@ describe('detectDeadImports：TS', () => {
     expect(res.dead.find((c) => c.source === 'lib')).toBeUndefined();
   });
 
+  it('内联 type 导入 `{ type Box }` 被类型引用 → 活（回归：勿把限定符解析成 "type Box" 而误判死）', () => {
+    const dir = tempRoot();
+    fs.writeFileSync(path.join(dir, 'a.ts'), "import { type Box } from 'lib';\nexport const b: Box[] = [];\n", 'utf-8');
+    fs.writeFileSync(path.join(dir, 'b.ts'), "import { v, type Box } from 'lib2';\nexport const mix: Box = v ? { w: 1 } : null;\n", 'utf-8');
+    const res = detectDeadImports({ project_dir: dir });
+    expect(res.dead.find((c) => c.source === 'lib')).toBeUndefined();
+    expect(res.dead.find((c) => c.source === 'lib2')).toBeUndefined();
+  });
+
   it('副作用导入 import "x" → 恒活（绝不报死）', () => {
     const dir = tempRoot();
     fs.writeFileSync(path.join(dir, 'a.ts'), "import 'polyfill';\nexport const x = 1;\n", 'utf-8');
