@@ -18,6 +18,7 @@
     "brickify": "node dist/src/tools/brickify_cli.js",
     "signal-review": "node dist/src/tools/signal_review_cli.js",
     "split-stage": "node dist/src/tools/split_stage_cli.js",
+    "deprecate-offline": "node dist/src/tools/deprecate_offline_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "hub": "node scripts/hub.mjs"
