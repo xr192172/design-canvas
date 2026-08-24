@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>功能社区工作台 · design-canvas</title>
+<style>
+:root{--bg:#fafafa;--card:#fff;--border:#e4e4e7;--text:#0a0a0a;--muted:#71717a;--brand:#7c3aed;--accent:#2563eb;--danger:#b91c1c;--ok:#16a34a}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Inter','Geist',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--text);background:var(--bg)}
+header{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:14px 20px;background:var(--card);border-bottom:1px solid var(--border)}
+header h1{font-size:16px;margin:0;font-weight:650}
+.meta{font-size:12px;color:var(--muted)}
+.megacount{margin-left:auto;display:flex;gap:18px;font-size:12px}
+.mc b{font-size:16px;display:block}
+main{padding:22px;max-width:1200px;margin:0 auto}
+section{margin-bottom:26px}
+h2{font-size:14px;font-weight:650;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+h2 .hint{font-size:11px;color:var(--muted);font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.c-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.c-card.self{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
+.c-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.c-id{font-weight:650;font-size:13px}
+.c-n{font-size:11px;color:var(--muted)}
+.c-coh{margin-left:auto;font-size:11px;color:var(--muted)}
+.c-bar{height:6px;background:#e4e4e7;border-radius:3px;overflow:hidden;margin-bottom:6px}
+.c-fill{height:100%;background:var(--brand)}
+.c-card.self .c-fill{background:var(--ok)}
+.c-edges{font-size:11px;color:var(--muted);margin-bottom:8px}
+.c-bricks{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-size:10.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--border);background:#fff;line-height:1}
+.bridges{display:flex;flex-wrap:wrap;gap:8px}
+.bridge{font-size:12px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px}
+.bridge .bw{color:var(--muted);font-size:11px}
+.m-file{background:var(--card);border:1px solid var(--danger);border-left:3px solid var(--danger);border-radius:0 8px 8px 0;padding:10px 12px;margin-bottom:10px}
+.m-path{font-size:13px;font-weight:600;color:var(--danger)}
+.m-clusters{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0}
+.m-clu{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+.m-reason{font-size:11px;color:var(--muted)}
+.empty{padding:16px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:12px}
+footer{padding:16px 22px;border-top:1px solid var(--border);background:var(--card)}
+footer ul{margin:0;color:var(--muted);font-size:11px;padding-left:18px;display:flex;flex-wrap:wrap;gap:4px 24px}
+</style>
+</head>
+<body>
+<header>
+  <h1>功能社区工作台 · design-canvas</h1>
+  <span class="meta">156 文件 → 7 块积木 → 1 个功能社区</span>
+  <div class="megacount"><span class="mc"><b>1</b>社区</span><span class="mc"><b>19</b>混合文件</span><span class="mc"><b>0</b>跨社区桥</span></div>
+</header>
+<main>
+  <section>
+    <h2>功能社区（依赖边连通分量，取代"按目录硬切+基名相似"）<span class="hint">积木=功能；社区内聚度 = 内部边/总边</span></h2>
+    <div class="grid"><div class="c-card self">
+        <div class="c-head">
+          <span class="c-id">camera</span>
+          <span class="c-n">7 积木</span>
+          <span class="c-coh">内聚 100%</span>
+        </div>
+        <div class="c-bar"><div class="c-fill" style="width:100%"></div></div>
+        <div class="c-edges">内部 444 · 边界 0</div>
+        <div class="c-bricks"><span class="chip">camera</span><span class="chip">daemon</span><span class="chip">db</span><span class="chip">dsl</span><span class="chip">renderer</span><span class="chip">root</span><span class="chip">tools</span></div>
+      </div></div>
+  </section>
+  <section>
+    <h2>跨社区调用（桥 = 高耦合连接点，思维导图重点）<span class="hint">桥梁通常提示应提升为共享积木</span></h2>
+    <div class="bridges"><div class="empty">✅ 社区间无调用边——各社区完全解耦（内聚 100%）。</div></div>
+  </section>
+  <section>
+    <h2>混合文件诊断（一文件多功能 = 解耦候选）</h2>
+    <div class="m-file" title="顶层 10 个功能被依赖切成 3 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">camera/export_incident.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[DEFAULT_EXPORT_PER_MIN]</span><span class="chip m-clu">[DEFAULT_MAX_INCIDENTS · AMBIENT_WINDOW · IncidentHeader · exportIncident · splitEvents · pruneIncidents · formatTimestamp · errText]</span><span class="chip m-clu">[ExportGate]</span></div>
+          <div class="m-reason">顶层 10 个功能被依赖切成 3 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 8 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">db/db.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[nodeRequire]</span><span class="chip m-clu">[SCHEMA_VERSION · getDbFile · openDb · projectCachePool · getProjectCacheDb · closeAllProjectCacheDbs · closeProjectCacheDb]</span></div>
+          <div class="m-reason">顶层 8 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">dsl/animation.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[ElementState · AnimationStage · Animation]</span><span class="chip m-clu">[AnimationTrigger · AnimationValueSchema · NodeShapes · AnimationValue · AnimationHandlerMapping · AnimationError · AnimationHandler · AnimationBranch · AnimationFlow · AnimationRuntime · AnimationSystem]</span></div>
+          <div class="m-reason">顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">dsl/simulation.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[SimulationRule · SimulationAction · SimulationStateDef · SimulationNodeMapping · Simulation · SimulationTrace]</span><span class="chip m-clu">[SimulationDepEdge]</span></div>
+          <div class="m-reason">顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">dsl/types.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[ThemeConfig]</span><span class="chip m-clu">[ArchLayer · FeatureCommunity · FeatureNode · FeatureTree · DesignDSL · UserNode]</span></div>
+          <div class="m-reason">顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 9 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">dsl/validator.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[addFormats]</span><span class="chip m-clu">[ajv · validateSchema · ValidationResult · formatAjvErrors · validateSemanticAnchoring · validateReasoningIntegrity · validateDSL · validateDSLJson]</span></div>
+          <div class="m-reason">顶层 9 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 22 个功能被依赖切成 7 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">renderer/anim_core.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[BranchLike · ErrorDeclLike · evalCondition · pickBranch · matchError · isErrorResult · ErrorClassification · classifyError · extractStringLiterals · presetCandidates · buildPresetValue]</span><span class="chip m-clu">[createMockRotator]</span><span class="chip m-clu">[resolvePath · setPath · applyInputMapping · applyOutputMapping]</span><span class="chip m-clu">[parseApiName]</span><span class="chip m-clu">[formatHandlerArgs]</span><span class="chip m-clu">[formatValueShort · ValueSchemaLike · validateValueSchema]</span><span class="chip m-clu">[makeSnapshot]</span></div>
+          <div class="m-reason">顶层 22 个功能被依赖切成 7 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 19 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">renderer/dataflow_core.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[DfNodeLike · DfEdgeLike · DfTraceStep · DfTrace · DfJudgementBranch · DfJudgement · collectJudgements · EvalResult · evaluateCond · TRUE_VIA · FALSE_VIA · DfJudgementResult · applyJudgements · mockValue · isChainEdge · isBranchEdge · buildDataTrace · buildNote]</span><span class="chip m-clu">[flattenScope]</span></div>
+          <div class="m-reason">顶层 19 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 7 个功能被依赖切成 4 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">renderer/i18n.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[detectLang]</span><span class="chip m-clu">[UI_DICT · t · applyStaticI18n]</span><span class="chip m-clu">[pick]</span><span class="chip m-clu">[contentAttrs · escapeAttr]</span></div>
+          <div class="m-reason">顶层 7 个功能被依赖切成 4 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/brick_bag.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[BrickFileGroups · BrickFamily · BrickDeprecation · SimilarPeer · Brick · FeatureCallEdges · BrickBag · sideCmp · assembleBrickBag · assembleBrickBagWithCall · deriveFeatureCallEdges · featureIdOf · resolveSpecifier]</span><span class="chip m-clu">[CallPeer]</span></div>
+          <div class="m-reason">顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 4 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/brickify_cli.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[readArg · main · countBridges]</span><span class="chip m-clu">[has]</span></div>
+          <div class="m-reason">顶层 4 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/dogfood_stats.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[DogfoodUsage · logDir · logFile · recordDogfoodUsage · DogfoodActionStat · DogfoodToolStat · DogfoodSnapshot · emptyAction · snapshotDogfoodStats · renderDogfoodSnapshot · renderDogfoodSummary · runDogfoodCLI · isMain]</span><span class="chip m-clu">[MAX_ERR_LEN]</span></div>
+          <div class="m-reason">顶层 14 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/explore_code.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[EXPLORE_ACTIONS]</span><span class="chip m-clu">[requireStr · str · num · bool · toResult · exploreCode]</span></div>
+          <div class="m-reason">顶层 7 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 4 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/manage_feature.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[MANAGE_ACTIONS]</span><span class="chip m-clu">[ManageFeatureInput · ManageFeatureResult · manageFeature]</span></div>
+          <div class="m-reason">顶层 4 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 4 个功能被依赖切成 4 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/npm_mod.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[parseNpmDeps]</span><span class="chip m-clu">[resolveNpmThirdParty]</span><span class="chip m-clu">[isNonRegistrySpec]</span><span class="chip m-clu">[compareNpmVersion]</span></div>
+          <div class="m-reason">顶层 4 个功能被依赖切成 4 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 30 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/opl.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[OplApi · OplDeclFile · OplLiveFile · OplState · oplRoot · implRoot · stateFile · slugify · readState · writeState · oplAdd · oplLocate · langFromPath · oplDeclare · oplImplement · extractApis · sha1 · opSignatureCacheFile · fileApisWithCache · signaturesEqual · oplCheck · oplIntegrate · oplList · oplGet · parseLlmJson · llmDeclare · llmImplement · oplAuto · oplAutoImpl]</span><span class="chip m-clu">[SignatureCacheEntry]</span></div>
+          <div class="m-reason">顶层 30 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 11 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/refactor_langs.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[DeadImportsStepCfg · DeadStatementsStepCfg · RefactorStepsCfg]</span><span class="chip m-clu">[RunningChangePlan · RefactorStageComputeArgs · RefactorStageExecutor · LanguageRefactorExecutor · manifestPresent · DEFAULT_SKIP · dirHasSource · RefactorLangRegistry]</span></div>
+          <div class="m-reason">顶层 11 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 27 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/rename_symbol.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[N · TS_EXTS · TS_LANG_NAMES · ImportEdge · ModuleRef · ModuleAnalysis · FN_TYPES · CLASS_TYPES · VAR_TYPES · FOR_TYPES · isRefType · fieldText · nameInfo · isFakePatternName · stripQuotes · analyzeModuleSource · kindNodeTypes · walkProjectFiles · resolveRel · buildNoExt · Edit · applyEdits · RenameSymbolInput · RenameSymbolFileInfo · RenameSymbolResult · renameSymbol]</span><span class="chip m-clu">[TYPE_SYMBOL_TYPES]</span></div>
+          <div class="m-reason">顶层 27 个功能被依赖切成 2 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div><div class="m-file" title="顶层 28 个功能被依赖切成 3 个无耦合概念簇（疑似一文件多功能，解耦候选）">
+          <div class="m-path">tools/slim_brick.ts</div>
+          <div class="m-clusters"><span class="chip m-clu">[SlimBrickInput · SlimFileReport · SlimBrickResult · GoSlimFileSpec · GoSlimInput · GoSlimFileReport · GoSlimReport · runGoSlim · walkRelative · deriveGoModule · verifyBuild · isStdlibImport · goEmbedPatterns · embedPatternMatches · globSegMatches · makeInternalImportMatcher · slimBrick · TS_SRC_RE · TS_RESOLVE_EXTS · TsFileOutcome · unquote · TsImportBinding · tsImportBindings · resolveTsSpecifier · verifyTsBuild · slimTsBrickCore]</span><span class="chip m-clu">[tsImportSpecifiers]</span><span class="chip m-clu">[tsSideEffectSpecifiers]</span></div>
+          <div class="m-reason">顶层 28 个功能被依赖切成 3 个无耦合概念簇（疑似一文件多功能，解耦候选）</div>
+        </div>
+  </section>
+</main>
+<footer><ul><li>积木 = 源码根首层目录做种子，叠加依赖边校正；不自动搬目录（保守）</li><li>功能社区 = 积木间依赖边的无向连通分量 + 内聚度；启发式，需人确认边界</li><li>混合文件 = AST 顶层声明依赖聚类的&quot;信号级&quot;标记；不自动切分文件内部，解耦拆分需人/LLM 确认</li><li>依赖边仅工程内相对 import；裸包名跨文件不可解析故跳过</li></ul></footer>
+</body>
+</html>

@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildFeatureMap } from './feature_map.js';
 import { assembleBrickBagWithCall, type BrickBag, type Brick } from './brick_bag.js';
+import { buildBrickify, type BrickifyResult, type Community, type MixedFileSignal } from './brickify.js';
 
 const SIDE_LABEL: Record<string, string> = { frontend: '前端', backend: '后端', shared: '通用' };
 const SIDE_COLOR: Record<string, string> = { frontend: '#2563eb', backend: '#d97706', shared: '#6b7280' };
@@ -648,6 +649,140 @@ export function buildWorkbenchPreview(opts: { project_dir: string; source_root?:
   const html = renderWorkbenchHtml(bag);
   const srcRoot = path.resolve(opts.source_root ?? path.resolve(opts.project_dir));
   const out = path.resolve(opts.out_file ?? path.join(path.dirname(srcRoot), '..', 'docs', 'workbench_preview.html'));
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, html, 'utf-8');
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 依赖驱动的积木化 · 功能社区工作台（消费 BrickifyResult）
+// 社区 = 积木间依赖边的无向连通分量；每块积木=功能；混合文件 = 解耦候选信号。
+// 取代"按目录硬切 + 基名相似"启发式，作为思维导图式运算前的数据地基。
+// ─────────────────────────────────────────────────────────────
+
+/** 渲染依赖驱动的功能社区工作台：社区内聚 + 跨社区桥 + 混合文件诊断。自包含单 HTML。 */
+export function renderBrickifyWorkbenchHtml(r: BrickifyResult): string {
+  const m = r.meta;
+  const projectName = path.basename(m.project_dir);
+
+  // 社区卡片（按 size 降序，top 高亮内聚 100% 的自足社区）
+  const commCards = r.communities
+    .map(
+      (c: Community) => `<div class="c-card${c.cohesion >= 1 ? ' self' : ''}">
+        <div class="c-head">
+          <span class="c-id">${esc(c.id)}</span>
+          <span class="c-n">${c.bricks.length} 积木</span>
+          <span class="c-coh">内聚 ${Math.round(c.cohesion * 100)}%</span>
+        </div>
+        <div class="c-bar"><div class="c-fill" style="width:${Math.round(c.cohesion * 100)}%"></div></div>
+        <div class="c-edges">内部 ${c.internal_edges} · 边界 ${c.external_edges}</div>
+        <div class="c-bricks">${c.bricks.map((b) => `<span class="chip">${esc(b)}</span>`).join('')}</div>
+      </div>`,
+    )
+    .join('');
+
+  // 跨社区桥（两个不同社区之间的调用边 = 高耦合连接点）
+  const commOfBrick = new Map<string, string>();
+  for (const c of r.communities) for (const b of c.bricks) commOfBrick.set(b, c.id);
+  const bridges = r.call_edges.filter((e) => {
+    const a = commOfBrick.get(e.from), b = commOfBrick.get(e.to);
+    return a && b && a !== b;
+  });
+  const bridgeHtml =
+    bridges.length > 0
+      ? r.communities.length > 1
+        ? bridges.slice(0, 30).map((e) => `<div class="bridge"><span class="chip">${esc(e.from)}</span> → <span class="chip">${esc(e.to)}</span> <span class="bw">${e.count} 调用</span></div>`).join('')
+        : `<div class="empty">单社区工程，无跨社区桥。</div>`
+      : `<div class="empty">✅ 社区间无调用边——各社区完全解耦（内聚 100%）。</div>`;
+
+  // 混合文件诊断（一文件多功能 = 解耦候选信号）
+  const mixedHtml =
+    r.mixed_files.length > 0
+      ? r.mixed_files.map((mf: MixedFileSignal) => `<div class="m-file" title="${esc(mf.reason)}">
+          <div class="m-path">${esc(mf.file)}</div>
+          <div class="m-clusters">${mf.clusters.map((c) => `<span class="chip m-clu">[${c.map(esc).join(' · ')}]</span>`).join('')}</div>
+          <div class="m-reason">${esc(mf.reason)}</div>
+        </div>`).join('')
+      : `<div class="empty">🎉 未发现"一文件多概念簇"的混合文件——干净。</div>`;
+
+  const limHtml = r.limitations.map((l) => `<li>${esc(l)}</li>`).join('');
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>功能社区工作台 · ${esc(projectName)}</title>
+<style>
+:root{--bg:#fafafa;--card:#fff;--border:#e4e4e7;--text:#0a0a0a;--muted:#71717a;--brand:#7c3aed;--accent:#2563eb;--danger:#b91c1c;--ok:#16a34a}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Inter','Geist',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--text);background:var(--bg)}
+header{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:14px 20px;background:var(--card);border-bottom:1px solid var(--border)}
+header h1{font-size:16px;margin:0;font-weight:650}
+.meta{font-size:12px;color:var(--muted)}
+.megacount{margin-left:auto;display:flex;gap:18px;font-size:12px}
+.mc b{font-size:16px;display:block}
+main{padding:22px;max-width:1200px;margin:0 auto}
+section{margin-bottom:26px}
+h2{font-size:14px;font-weight:650;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+h2 .hint{font-size:11px;color:var(--muted);font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.c-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.c-card.self{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
+.c-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.c-id{font-weight:650;font-size:13px}
+.c-n{font-size:11px;color:var(--muted)}
+.c-coh{margin-left:auto;font-size:11px;color:var(--muted)}
+.c-bar{height:6px;background:#e4e4e7;border-radius:3px;overflow:hidden;margin-bottom:6px}
+.c-fill{height:100%;background:var(--brand)}
+.c-card.self .c-fill{background:var(--ok)}
+.c-edges{font-size:11px;color:var(--muted);margin-bottom:8px}
+.c-bricks{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-size:10.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--border);background:#fff;line-height:1}
+.bridges{display:flex;flex-wrap:wrap;gap:8px}
+.bridge{font-size:12px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px}
+.bridge .bw{color:var(--muted);font-size:11px}
+.m-file{background:var(--card);border:1px solid var(--danger);border-left:3px solid var(--danger);border-radius:0 8px 8px 0;padding:10px 12px;margin-bottom:10px}
+.m-path{font-size:13px;font-weight:600;color:var(--danger)}
+.m-clusters{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0}
+.m-clu{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+.m-reason{font-size:11px;color:var(--muted)}
+.empty{padding:16px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:12px}
+footer{padding:16px 22px;border-top:1px solid var(--border);background:var(--card)}
+footer ul{margin:0;color:var(--muted);font-size:11px;padding-left:18px;display:flex;flex-wrap:wrap;gap:4px 24px}
+</style>
+</head>
+<body>
+<header>
+  <h1>功能社区工作台 · ${esc(projectName)}</h1>
+  <span class="meta">${m.scanned_files} 文件 → ${r.bricks.length} 块积木 → ${r.communities.length} 个功能社区</span>
+  <div class="megacount"><span class="mc"><b>${r.communities.length}</b>社区</span><span class="mc"><b>${r.mixed_files.length}</b>混合文件</span><span class="mc"><b>${bridges.length}</b>跨社区桥</span></div>
+</header>
+<main>
+  <section>
+    <h2>功能社区（依赖边连通分量，取代"按目录硬切+基名相似"）<span class="hint">积木=功能；社区内聚度 = 内部边/总边</span></h2>
+    <div class="grid">${commCards}</div>
+  </section>
+  <section>
+    <h2>跨社区调用（桥 = 高耦合连接点，思维导图重点）<span class="hint">桥梁通常提示应提升为共享积木</span></h2>
+    <div class="bridges">${bridgeHtml}</div>
+  </section>
+  <section>
+    <h2>混合文件诊断（一文件多功能 = 解耦候选）</h2>
+    ${mixedHtml}
+  </section>
+</main>
+<footer><ul>${limHtml}</ul></footer>
+</body>
+</html>`;
+}
+
+/** 便捷入口：source → 依赖图 → 混合信号 → 社区 → 工作台 HTML → 写盘，返回 HTML 路径。 */
+export async function buildBrickifyPreview(opts: { project_dir: string; source_root?: string; out_file?: string }): Promise<string> {
+  const result = await buildBrickify({ project_dir: opts.project_dir, source_root: opts.source_root });
+  const html = renderBrickifyWorkbenchHtml(result);
+  const srcRoot = path.resolve(opts.source_root ?? path.resolve(opts.project_dir));
+  const out = path.resolve(opts.out_file ?? path.join(path.dirname(srcRoot), '..', 'docs', 'brickify_preview.html'));
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html, 'utf-8');
   return out;

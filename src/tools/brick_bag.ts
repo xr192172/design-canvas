@@ -241,7 +241,7 @@ function featureIdOf(rel: string): string {
 
 /** 解析 './x'/'../x' → 相对 source_root 的路径（补/换扩展名），失败返回 undefined。
  * 兼容 ESM-TS 风格：specifier 常以 '.js' 结尾（映射到 .ts 源）。 */
-function resolveSpecifier(sourceRoot: string, dir: string, spec: string): string | undefined {
+export function resolveSpecifier(sourceRoot: string, dir: string, spec: string): string | undefined {
   const rel = spec.startsWith('/') ? spec.slice(1) : path.posix.normalize(path.posix.join(dir, spec));
   const toAbs = (r: string): string => path.join(sourceRoot, ...r.split('/'));
   const srcExts = ['ts', 'tsx', 'js', 'jsx', 'cjs', 'mjs', 'cts', 'mts'];

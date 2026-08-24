@@ -44,7 +44,7 @@ import { assembleBricks } from './tools/assemble_bricks.js';
 import { narrateStep } from './tools/narrate_step.js';
 import type { NarrateStepInput } from './tools/narrate_step.js';
 import type { AssembleBricksInput } from './tools/assemble_bricks.js';
-import { buildWorkbenchPreview } from './tools/render_sandbox.js';
+import { buildBrickifyPreview } from './tools/render_sandbox.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { slimBrick } from './tools/slim_brick.js';
@@ -563,26 +563,27 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'render_sandbox',
-    title: 'Render the visual-collaboration workbench (sandbox) fed by BrickBag',
+    title: 'Render the dependency-driven community workbench (brickify)',
     description:
-      '可视化协作工作台外壳渲染（后端积木数据线路的交付出口）：扫描 project_dir → feature_map → BrickBag → ' +
-      '生成**自包含单 HTML 工作台**（取代静态 mock 的 DSL 协作工作台）。外壳含：' +
-      '左侧导航（沙盘视图/屎山重构/问题清单/版本历史/DSL源码/同步记录）、中央可拖拽积木沙盘（每块积木=一个功能，' +
-      'similar 虚线 / call 实线为拼接线）、右侧详情（选中积木的文件三侧/重复家族/相似积木/废弃证据）、底部版本栏。' +
-      '全部数据来自 BrickBag（feature_map 投影），无任何硬编码。返回 HTML 文件路径，浏览器可直接打开验收。',
+      '可视化协作平台的**依赖驱动积木化工作台**渲染（后端数据线路的交付出口）：' +
+      '扫描 project_dir → 文件级依赖图 → 目录种子积木 → 混合文件信号(AST 顶层概念簇) → ' +
+      '功能社区(依赖边连通分量+内聚度) → 生成**自包含单 HTML 社区工作台**。' +
+      '取代旧"按目录硬切+基名相似"启发式：每块积木=一个功能，社区=积木依赖簇，' +
+      '混合文件=一文件多功能(解耦候选信号，需人/LLM 确认拆分)。' +
+      '返回 HTML 文件路径，浏览器可直接打开验收。',
     inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（扫描 feature_map 的源）'),
-      source_root: z.string().optional().describe('源码根目录（默认 = project_dir；功能按此首层目录切分积木）'),
-      output_path: z.string().optional().describe('输出 HTML 路径（默认 <design-canvas>/docs/workbench_preview.html）'),
+      project_dir: z.string().describe('目标项目根目录（扫描依赖的源）'),
+      source_root: z.string().optional().describe('源码根目录（默认 = project_dir）'),
+      output_path: z.string().optional().describe('输出 HTML 路径（默认 <design-canvas>/docs/brickify_preview.html）'),
     },
     handler: wrapData(async (a) => {
-      const out = buildWorkbenchPreview({
+      const out = await buildBrickifyPreview({
         project_dir: a.project_dir as string,
         source_root: a.source_root as string | undefined,
         out_file: a.output_path as string | undefined,
       });
       const fileUrl = `file:///${out.replace(/\\/g, '/')}`;
-      return { message: `已生成可视化协作工作台：${out}\n（浏览器打开 ${fileUrl} 查看积木沙盘）` };
+      return { message: `已生成依赖驱动功能社区工作台：${out}\n（浏览器打开 ${fileUrl} 查看积木社区/混合文件诊断）` };
     }),
   },
   {
