@@ -80,6 +80,20 @@ export interface LanguageRefactorExecutor {
   detectVerifyCommands(cwd: string): VerifyCommand[];
   /** 该语言暴露的重构步骤（按声明顺序执行） */
   stages: RefactorStageExecutor[];
+  /**
+   * 该项目形态的 manifest 文件名（相对项目根，如 'package.json' / 'go.mod'）。
+   * 用于"manifest 定主导工具链"：验证命令只从主导语言取，不逐语言合并。
+   */
+  manifestFiles?: string[];
+  /** 多 manifest 并存时的主导优先级：数值越大越主导；缺省 0。 */
+  manifestPriority?: number;
+}
+
+/** 判定项目根是否存在某 manifest 文件之一。 */
+export function manifestPresent(cwd: string, files?: string[]): boolean {
+  if (!files || files.length === 0) return false;
+  const root = path.resolve(cwd);
+  return files.some((f) => fs.existsSync(path.join(root, f)));
 }
 
 // ─────────────────────────────────────────────

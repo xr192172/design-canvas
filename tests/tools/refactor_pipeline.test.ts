@@ -14,7 +14,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, afterAll } from 'vitest';
-import { runRefactorPipeline, collectSteps, mergeVerifyCommands, type PipelineResult } from '../../src/tools/refactor_pipeline';
+import {
+  runRefactorPipeline,
+  collectSteps,
+  mergeVerifyCommands,
+  dominantExecutor,
+  dominantVerifyCommands,
+  DEFAULT_LANGS,
+  type PipelineResult,
+} from '../../src/tools/refactor_pipeline';
 import { RefactorLangRegistry, type LanguageRefactorExecutor } from '../../src/tools/refactor_langs';
 import { type VerifyCommand } from '../../src/tools/verify_refactor';
 
@@ -313,5 +321,51 @@ describe('多语言可插拔执行器契约', () => {
     expect(fs.readFileSync(tsFile, 'utf-8')).not.toContain('lodash');
     expect(fs.readFileSync(goFile, 'utf-8')).not.toContain('fmt');
     expect(asSpy(s).calls.length).toBe(3); // 基线 + 2 次改后
+  });
+});
+
+describe('manifest 定主导工具链（多语言混合项目验证链归主导语言）', () => {
+  it('Python 工程内嵌 JS 脚本 → 验证链归 python（py 优先级 > node），而非 JS 主导', async () => {
+    const dir = tempRoot();
+    // 应用主体：python 工程；同时混入不少 JS 脚本（反向切片典型场景）
+    fs.writeFileSync(path.join(dir, 'requirements.txt'), 'requests==2.0\n', 'utf-8');
+    fs.writeFileSync(path.join(dir, 'app.py'), 'import requests\n', 'utf-8');
+    for (let i = 0; i < 20; i++) fs.writeFileSync(path.join(dir, `script${i}.js`), 'console.log(1)\n', 'utf-8');
+
+    // 用步骤"某语言只处理自己文件、且有自己的验证命令"，便于断言管线的验证链来源
+    const dom = dominantExecutor(DEFAULT_LANGS.forProject(dir), dir);
+    expect(dom?.lang).toBe('py'); // 即便 JS 文件多，主导仍是 python
+
+    const cmds = dominantVerifyCommands(DEFAULT_LANGS.forProject(dir), dir);
+    // python 验证链（compileall）被选为唯一验证命令组
+    expect(cmds.some((c) => c.cmd === 'python')).toBe(true);
+    expect(cmds.some((c) => c.cmd.indexOf('npx') >= 0)).toBe(false); // 不混入 node 工具链
+  });
+
+  it('多语言都无 manifest（纯源码）→ 主导不确定，验证命令组为空（可降级）', () => {
+    const dir = tempRoot();
+    fs.writeFileSync(path.join(dir, 'a.ts'), 'const x = 1;\n', 'utf-8');
+    fs.writeFileSync(path.join(dir, 'b.go'), 'package main\n', 'utf-8');
+    const dom = dominantExecutor(DEFAULT_LANGS.forProject(dir), dir);
+    expect(dom).toBeUndefined();
+    expect(dominantVerifyCommands(DEFAULT_LANGS.forProject(dir), dir)).toEqual([]);
+  });
+
+  it('manifestPriority 高者为主导（并发 command 也跟随主导）', () => {
+    const dir = tempRoot();
+    fs.writeFileSync(path.join(dir, 'go.mod'), 'module x\n', 'utf-8');
+
+    const mk = (lang: string, priority: number, cmd: string): LanguageRefactorExecutor => ({
+      lang,
+      isSourceFile: () => true,
+      manifestFiles: ['go.mod'],
+      manifestPriority: priority,
+      detectVerifyCommands: () => [{ label: cmd, cmd, args: [] }],
+      stages: [],
+    });
+    const low = mk('low', 10, 'lo');
+    const high = mk('high', 90, 'hi');
+    expect(dominantExecutor([low, high], dir)?.lang).toBe('high');
+    expect(dominantVerifyCommands([low, high], dir).map((c) => c.cmd)).toEqual(['hi']);
   });
 });

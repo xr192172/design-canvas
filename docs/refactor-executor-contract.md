@@ -33,10 +33,10 @@
 
 **已落地（2026-08）的可插拔骨架**：
 - `src/tools/refactor_langs.ts` —— 语言无关契约接口 + `RefactorLangRegistry` + 目录语言命中探测 `forProject` / `dirHasSource`。
-- `src/tools/refactor_pipeline.ts` —— `collectSteps`（聚合命中语言的 stages）+ `mergeVerifyCommands`（合并去重验证命令）+ `runRefactorPipeline` 按项目探测语言路由 + 注册入口 `registerRefactorLanguage`。
-- 默认注册了两个独立执行器 `ts` 与 `go`（一门语言一个），共享一组可复用内核，`DEFAULT_LANGS` 模块级单例。
+- `src/tools/refactor_pipeline.ts` —— `collectSteps`（聚合命中语言的 stages）+ `dominantVerifyCommands`（**manifest 定主导工具链**，见 §3 约定）+ `dominantExecutor` + `runRefactorPipeline` 按项目探测语言路由 + 注册入口 `registerRefactorLanguage`。
+- 默认注册了三个独立执行器 `ts`、`go` 与 `py`（一门语言一个），共享一组可复用内核，装配在模块级单例 `DEFAULT_LANGS`（`buildDefaultLangs` 内，`py` 由 `python_refactor/index.ts` 的 `pythonExecutor` 展开注册）。
 
-**新的默认架构已不再是"管线内硬编码两步"**，而是 `runRefactorPipeline` 里 `langs.forProject(cwd)` → 聚合执行器各自 `stages`。新增一门语言 = 注册一个执行器，管线自动拾取；混项目（如 TS+Go 并存）会**两个执行器都被拾取，各只动自己语言的文件**。
+**新的默认架构已不再是"管线内硬编码两步"**，而是 `runRefactorPipeline` 里 `langs.forProject(cwd)` → 聚合执行器各自 `stages`。新增一门语言 = 注册一个执行器，管线自动拾取；混项目（如 TS+Py 并存）会**多个执行器都被拾取，各只动自己语言的文件**。
 
 **仍需按语言实现的部分（每次新语言都要做，对应 §3 契约四段）**：
 
@@ -88,10 +88,12 @@ export interface RefactorStageExecutor {
 
 /** 一门语言的完整执行器（"新语言新路径"） */
 export interface LanguageRefactorExecutor {
-  lang: string;                                  // 如 'ts_go'/'py'/'java'（注册唯一 key）
+  lang: string;                                  // 如 'ts'/'go'/'py'（注册唯一 key）
   isSourceFile(rel: string): boolean;            // 目录语言命中探测用
   detectVerifyCommands(cwd: string): VerifyCommand[]; // 空数组 = 不可自动验证
   stages: RefactorStageExecutor[];               // 该语言暴露的重构步骤（保序执行）
+  manifestFiles?: string[];                      // 该项目形态的 manifest，如 ['go.mod'] / ['pyproject.toml']
+  manifestPriority?: number;                     // 多 manifest 并存时谁主导工具链；越大越主导
 }
 
 export class RefactorLangRegistry {
@@ -115,7 +117,12 @@ registerRefactorLanguage(ex: LanguageRefactorExecutor): void;   // 挂到模块�
 - `compute` 里**预读 originals**（= 上个绿点已应用的盘上内容），`apply` 交给管线写盘；
   改后验证失败，管线按 originals 还原，自然退到上一步绿点。
 - 分层责任：**检测（detect）与改写（remove/apply）都是纯计算**；验证、回滚、基线保护全在管线。
-- 验证命令：`verify:true` 时管线自动调 `mergeVerifyCommands(executors, cwd)` 聚合所有命中语言各自的 `detectVerifyCommands`（去重保序）；也可经 `verify.commands` 显式覆盖。
+- 验证命令：`verify:true` 时管线调 `dominantVerifyCommands(executors, cwd)` —— **manifest 定主导工具链**：
+  `dominantExecutor` 只在命中语言里挑"manifest 存在于项目根、且 `manifestPriority` 最大"的那一个，
+  验证命令**只取这一门的**（不逐语言合并）。这是为多语言混项目定的规则：**重构步骤各语言并行，
+  验证链归主导语言**（例如 Python 工程内嵌 JS 脚本：步骤照跑 JS 的死代码，但 `compileall`/`pytest`
+  这条验证链只归 Python，避免被无关 JS 工具链带偏）。都无 manifest（纯源码）→ 无主导 → 命令组为空
+  （可经 `verify.commands` 显式覆盖，或回退 `mergeVerifyCommands` 全量探测，该函数仍导出）。
 
 ---
 

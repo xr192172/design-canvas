@@ -28,6 +28,7 @@ import { removeImportsFromSource } from './remove_dead_imports.js';
 import { detectDeadImports } from './detect_dead_imports.js';
 import {
   RefactorLangRegistry,
+  manifestPresent,
   type RunningChangePlan,
   type LanguageRefactorExecutor,
   type RefactorStageExecutor,
@@ -36,6 +37,7 @@ import {
   type DeadImportsStepCfg,
   type DeadStatementsStepCfg,
 } from './refactor_langs.js';
+import { pythonExecutor } from './python_refactor/index.js';
 
 // re-export 契约类型（向后兼容：外部可从本模块取用）
 export type {
@@ -213,11 +215,13 @@ function computeDeadImportsPlan(
 function buildDefaultLangs(): RefactorLangRegistry {
   const reg = new RefactorLangRegistry();
 
-  // TS 家族（含 JS/JSX/MJS/CJS）
+  // TS 家族（含 JS/JSX/MJS/CJS）。manifest：package.json
   reg.register({
     lang: 'ts',
     isSourceFile: (rel) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel),
     detectVerifyCommands: (cwd) => defaultVerifyCommands(cwd),
+    manifestFiles: ['package.json'],
+    manifestPriority: 50,
     stages: [
       {
         kind: 'dead_imports',
@@ -239,11 +243,13 @@ function buildDefaultLangs(): RefactorLangRegistry {
     ],
   });
 
-  // Go
+  // Go。manifest：go.mod
   reg.register({
     lang: 'go',
     isSourceFile: (rel) => rel.endsWith('.go'),
     detectVerifyCommands: (cwd) => defaultVerifyCommands(cwd),
+    manifestFiles: ['go.mod'],
+    manifestPriority: 60,
     stages: [
       {
         kind: 'dead_imports',
@@ -263,6 +269,16 @@ function buildDefaultLangs(): RefactorLangRegistry {
         ],
       },
     ],
+  });
+
+  // Python。manifest：pyproject.toml / requirements.txt / setup.py|cfg
+  reg.register({
+    ...pythonExecutor,
+    manifestFiles: ['pyproject.toml', 'requirements.txt', 'setup.py', 'setup.cfg'],
+    // 主导判定：python 工程常兼具 JS 工具脚本，若按"文件数"会让 JS 误判成主导；
+    // 故 python 作为"应用主体"manifest 的优先级高于 node，验证链归 python，
+    // 但 JS 脚本的重构步骤仍各司其职并行执行。
+    manifestPriority: 70,
   });
 
   return reg;
@@ -318,7 +334,31 @@ export function collectSteps(
   return out;
 }
 
-/** 合并多语言执行器各自探测出的验证命令（按 cmd+args 去重，保序）。 */
+/** 在命中的语言执行器中挑出"主导"的那个（manifest 定主导工具链）：
+ *   - 优先取 manifest 存在于项目根的执行器；同候选则取 manifestPriority 最大者；
+ *   - 都无 manifest（纯源码，无 package.json/go.mod/pyproject 等）→ undefined，
+ *     由调用方降级（不验证 / 回退 mergeVerifyCommands 全量探测）。
+ */
+export function dominantExecutor(
+  executors: LanguageRefactorExecutor[],
+  cwd: string,
+): LanguageRefactorExecutor | undefined {
+  const withManifest = executors.filter((e) => manifestPresent(cwd, e.manifestFiles));
+  if (withManifest.length === 0) return undefined;
+  return [...withManifest].sort((a, b) => (b.manifestPriority ?? 0) - (a.manifestPriority ?? 0))[0];
+}
+
+/** 主导语言执行器的验证命令组；无主导 → 空数组。 */
+export function dominantVerifyCommands(
+  executors: LanguageRefactorExecutor[],
+  cwd: string,
+): VerifyCommand[] {
+  const dom = dominantExecutor(executors, cwd);
+  return dom ? dom.detectVerifyCommands(cwd) : [];
+}
+
+/** 合并多语言执行器各自探测出的验证命令（按 cmd+args 去重，保序）。
+ *  兼容旧行为/极端场景（无主导 manifest 时兜底全量探测）；通常管线用主导单源。 */
 export function mergeVerifyCommands(executors: LanguageRefactorExecutor[], cwd: string): VerifyCommand[] {
   const out: VerifyCommand[] = [];
   const seen = new Set<string>();
@@ -354,7 +394,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
   const commands: VerifyCommand[] =
     (typeof opts.verify === 'object' && opts.verify.commands) ||
-    (opts.verify === true ? mergeVerifyCommands(executors, cwd) : []);
+    (opts.verify === true ? dominantVerifyCommands(executors, cwd) : []);
 
   const baseline = verifyEnabled ? run({ cwd, commands }) : null;
 
