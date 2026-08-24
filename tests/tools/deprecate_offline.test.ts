@@ -151,6 +151,73 @@ describe('hasActiveReference（活跃消费确认，候选清单可信任的闸�
   });
 });
 
+describe('goConsumerSource (raw) · resolveConsumerSource【Go 包路径】', () => {
+  it('命中 go.mod module 前缀的包路径 → 解析到项目内 .go 文件（自研积木）', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'go.mod'), 'module github.com/demo/m\n\ngo 1.25\n', 'utf-8');
+    fs.mkdirSync(path.join(dir, 'pkg', 'greet'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'pkg', 'greet', 'a.go'), 'package greet\n', 'utf-8');
+    // 消费者 /main.go 所在目录不是 '.', source 是完整包路径（非相对）
+    const got = resolveConsumerSource(dir, 'main.go', 'github.com/demo/m/pkg/greet');
+    expect(got).toBe('pkg/greet/a.go');
+  });
+
+  it('三方 Go 包路径（不命中 module）→ null，非自研不参与下线', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'go.mod'), 'module github.com/demo/m\n\ngo 1.25\n', 'utf-8');
+    expect(resolveConsumerSource(dir, 'main.go', 'github.com/spf13/cobra')).toBeNull();
+  });
+});
+
+describe('Go 活跃消费判定（hasActiveReference · remainingImporters）', () => {
+  afterAll(() => {
+    // 环境无 go，仅静态判定，不跑 go 编译
+  });
+
+  it('Go 消费者活跃使用目标包（Q. 成员访问）→ hasActiveReference=true，不可下线', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'go.mod'), 'module github.com/demo/m\n\ngo 1.25\n', 'utf-8');
+    fs.mkdirSync(path.join(dir, 'pkg', 'greet'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'pkg', 'greet', 'a.go'), 'package greet\nfunc Hi() string { return "hi" }\n', 'utf-8');
+    // 同包内：import 自己包（同目录可省略），用跨文件成员；这里用另一目录 live 包 import 并调用
+    fs.mkdirSync(path.join(dir, 'cmd'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'cmd', 'main.go'),
+      'package main\nimport "github.com/demo/m/pkg/greet"\nvar x = greet.Hi()\n',
+      'utf-8',
+    );
+    const scanned = ['pkg/greet/a.go', 'cmd/main.go'];
+    expect(hasActiveReference(dir, 'pkg/greet/a.go', scanned)).toBe(true);
+    expect(remainingImporters(dir, 'pkg/greet/a.go', scanned)).toBe(1);
+  });
+
+  it('Go 仅死引用目标包（import 但无成员访问）→ hasActiveReference=false，真可下线', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'go.mod'), 'module github.com/demo/m\n\ngo 1.25\n', 'utf-8');
+    fs.mkdirSync(path.join(dir, 'pkg', 'greet'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'pkg', 'greet', 'a.go'), 'package greet\nfunc Hi() string { return "hi" }\n', 'utf-8');
+    fs.mkdirSync(path.join(dir, 'cmd'), { recursive: true });
+    // import 了但只用本地变量（未用 greet.Hi）—— Go 编译会否，但静态判定该 import 死
+    fs.writeFileSync(path.join(dir, 'cmd', 'main.go'), 'package main\nimport "github.com/demo/m/pkg/greet"\nvar x = 1\n', 'utf-8');
+    const scanned = ['pkg/greet/a.go', 'cmd/main.go'];
+    expect(hasActiveReference(dir, 'pkg/greet/a.go', scanned)).toBe(false);
+  });
+});
+
+describe('S→C 串扰：拆分器 re_export 产物', () => {
+  it('orig.ts 以 export { X } from "./new" re-export → 模块保守判活跃，绝不误下线', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'new.ts'), 'export function greeted() { return 1; }\n');
+    // re-export 转发（拆分器 re_export_extracted 产物，外部消费者的接口）
+    fs.writeFileSync(path.join(dir, 'orig.ts'), "export { greeted } from './new';\n");
+    // 死消费者 import 但未用
+    fs.writeFileSync(path.join(dir, 'dead.ts'), "import { greeted } from './new';\nexport const tag = 1;\n");
+    const scanned = ['new.ts', 'orig.ts', 'dead.ts'];
+    // re-export 是给外部转发的真接口 → hasActiveReference 必须先保守判活跃
+    expect(hasActiveReference(dir, 'new.ts', scanned)).toBe(true);
+  });
+});
+
 afterAll(() => {
   /* 临时目录由 OS 清理 */
 });

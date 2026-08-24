@@ -19,13 +19,22 @@
  *   - defaultVerifyCommands  ：项目形态探测（go/package.json）产出验收命令组
  *
  * 安全默认：dry_run=true 只出候选报告；--apply 落盘，`--remove-file` 是唯一物理删文件开关（需人拍板）。
+ *
+ * --files 作用域约定（重要）：
+ *   - `--files` 会同时收窄【候选判定】与【remainingImporters 物理删硬闸门】的扫描视野。
+ *     若 scope 漏掉"仍在活跃消费该模块"的文件，硬闸门可能计数为 0（视觉盲区）。
+ *   - 但**验证命令是整项目形态的**（tsc / go build），不受 --files 限制——scope 盲区一旦导致
+ *     物理删除后全项目编译回归，会被编译级重验兜底拦下并自动回滚（见回滚路径演示夹具
+ *     death-source-fixture-rollback）。
+ *   - 因此 --files 只建议用于"精确定位候选"的 dry-run 收敛；需要真物理下线时请**省略 --files**，
+ *     让硬闸门覆盖全库，避免盲区依赖兜底来擦屁股。
  */
 
 import path from 'node:path';
 import fs from 'node:fs';
 import { detectDeadImports, scanProjectSourceFiles } from './detect_dead_imports.js';
 import { removeDeadImportsWithVerify } from './remove_dead_imports.js';
-import { parseTsImportQualifiers, stripTsImportLines, qualifierLines, type DeadDepCandidate } from './dead_deps.js';
+import { parseTsImportQualifiers, parseGoImportQualifiers, stripTsImportLines, qualifierLines, type DeadDepCandidate } from './dead_deps.js';
 import { defaultVerifyCommands, runVerification } from './verify_refactor.js';
 
 const SOURCE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.go'];
@@ -89,9 +98,51 @@ export interface DeprecateOfflineResult {
 // 项目内源解析（source 相对"每个消费者文件"，非项目根）
 // ─────────────────────────────────────────────
 
-/** 把 import 说明符（相对某消费者文件）resolve 为项目内源文件；返回相对 project_dir 的 posix 路径，失败 null。 */
+/** 读 go.mod 的 module 名（首行 `module <path>`），无则 null。Go 包路径→项目内解析的唯一锚。 */
+export function goModulePrefix(project_dir: string): string | null {
+  try {
+    const goMod = fs.readFileSync(path.join(project_dir, 'go.mod'), 'utf-8');
+    const m = goMod.match(/^\s*module\s+(\S+)/m);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Go 包目录 `sub`（相对 project_dir、posix）→ 目录内首选 .go 文件（代表该包源码）；无返回 null。 */
+function resolveGoPackageFile(project_dir: string, sub: string): string | null {
+  const dir = sub ? path.join(project_dir, ...sub.split('/')) : project_dir;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const go = names.filter((n) => /\.go$/.test(n)).sort();
+  if (go.length === 0) return null;
+  return path.relative(project_dir, path.join(dir, go[0])).split(path.sep).join('/');
+}
+
+/** 目标模块文件（相对 project_dir）所属 Go 包路径（module 前缀 + 其目录）；非 Go 或读不到 go.mod 返回 null。 */
+export function goPackageOfFile(project_dir: string, moduleRel: string): string | null {
+  const mod = goModulePrefix(project_dir);
+  if (!mod) return null;
+  const dir = path.posix.dirname(moduleRel.replace(/\\/g, '/'));
+  return dir === '.' || dir === '' ? mod : `${mod}/${dir}`;
+}
+
+/** 把 import 说明符（相对某消费者文件）resolve 为项目内源文件；返回相对 project_dir 的 posix 路径，失败 null。
+ *  相对 source 按消费者目录解析；非相对 source 走 Go 包路径（命中 go.mod module 前缀才视为自研）。 */
 export function resolveConsumerSource(project_dir: string, consumerRel: string, source: string): string | null {
-  if (!source.startsWith('.')) return null; // 三方包 / node 内置
+  if (!source.startsWith('.')) {
+    // Go 包路径 / node 内置 / 三方包：仅当命中当前 module 前缀才是项目内自研包。
+    const mod = goModulePrefix(project_dir);
+    if (mod && (source === mod || source.startsWith(mod + '/'))) {
+      const sub = source === mod ? '' : source.slice(mod.length + 1);
+      return resolveGoPackageFile(project_dir, sub);
+    }
+    return null;
+  }
   const absConsumer = path.resolve(project_dir, consumerRel);
   const base = path.resolve(path.dirname(absConsumer), source.replace(/\\/g, '/'));
   const cands = [base, ...SOURCE_EXTS.map((e) => base + e), ...SOURCE_EXTS.map((e) => path.join(base, 'index' + e))];
@@ -153,7 +204,15 @@ export function remainingImporters(
     } catch {
       continue;
     }
-    if (/\.go$/.test(rel)) continue; // Go：保守跳过（不删）
+    // Go：按目标模块所属包路径匹配（Go 包级 import；命中即视为该 .go 文件仍引用目标包）。
+    if (/\.go$/.test(rel)) {
+      const tgt = goPackageOfFile(proj, mod);
+      if (tgt && parseGoImportQualifiers(src).has(tgt)) {
+        n++;
+        break;
+      }
+      continue;
+    }
     for (const source of enumerateDeriveSources(src).keys()) {
       if (!source.startsWith('.')) continue;
       if (resolveConsumerSource(proj, rel, source) === mod) {
@@ -192,11 +251,22 @@ export function hasActiveReference(project_dir: string, moduleRel: string, scann
     // 让本闸门退化为恒 false（活跃消费判不出 → 候选清单不可信）。须先归一化为相对 proj。
     const rel = path.isAbsolute(raw) ? path.relative(proj, raw) : raw;
     if (rel.replace(/\\/g, '/') === mod) continue; // 自身不算
-    if (/\.go$/.test(rel)) continue; // Go：保守跳过（不判可下线）
     let src: string;
     try {
       src = fs.readFileSync(path.join(proj, rel), 'utf-8');
     } catch {
+      continue;
+    }
+    // Go：按"目标模块所属包路径"匹配 .go 消费者的 import（Go 是包级 import，非相对文件路径）。
+    if (/\.go$/.test(rel)) {
+      const tgt = goPackageOfFile(proj, mod);
+      if (!tgt) continue;
+      for (const [source, quals] of parseGoImportQualifiers(src)) {
+        if (source !== tgt) continue;
+        // 空/点导入 = 副作用恒活；任一限定符有 `Q.` 成员访问 → 活跃引用
+        if (quals.some((q) => q === '_' || q === '.')) return true;
+        if (quals.some((q) => qualifierLines(src, q, 'go').length > 0)) return true;
+      }
       continue;
     }
     const scan = stripTsImportLines(src);
