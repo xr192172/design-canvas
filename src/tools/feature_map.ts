@@ -71,10 +71,41 @@ export interface RepeatedFamily {
   files: string[];
 }
 
+/**
+ * 文件级聚类明细（新画布绘制"前端文件/后端文件挂在同一功能下"的最小原子）。
+ * 数据契约见 docs/feature-map-viz-spec.md——本文件只产出数据，不掺展示逻辑。
+ */
+export interface FeatureMapEntry {
+  /** 相对 source_root 的源码路径（唯一 key） */
+  file: string;
+  /** 归属功能 id（= source_root 下首层目录段；根文件 'root'） */
+  feature_id: string;
+  /** 前端 / 后端 / 通用 */
+  side: FeatureSide;
+  /** 架构层 id（复用 layer_detect） */
+  layer: string;
+  /** 该文件内检测到的死 import 源（废弃证据，可空） */
+  dead_sources: string[];
+}
+
+/** 产物元信息 */
+export interface FeatureMapMeta {
+  project_dir: string;
+  source_root: string;
+  scanned_files: number;
+  features: number;
+  /** 各已注册执行器的语言清单（多语言混合项目可并行命中） */
+  langs: string[];
+}
+
 export interface FeatureMapResult {
+  /** 文件级聚类明细（扁平，唯一真相源） */
+  file_map: FeatureMapEntry[];
+  /** 功能级聚合 + 标注（相似/重复家族/废弃） */
   features: FeatureMapFeature[];
   /** 参与切分的源文件数 */
   scannedFiles: number;
+  meta: FeatureMapMeta;
   /** 规则说明（供报告 / 人审） */
   limitations: string[];
 }
@@ -178,6 +209,16 @@ export function buildFeatureMap(opts: FeatureMapOptions): FeatureMapResult {
   const pyDead = detectDeadPyImports({ project_dir: proj });
   collectDead(pyDead.dead.map((c) => ({ source: c.source, files: c.files })));
 
+  // 反查：文件 → 死 import 源清单（废弃证据落到文件级）
+  const fileDead = new Map<string, string[]>();
+  for (const [source, files] of deadBySource) {
+    for (const rel of files) {
+      const arr = fileDead.get(rel) ?? [];
+      arr.push(source);
+      fileDead.set(rel, arr);
+    }
+  }
+
   // 2) 按功能分组文件，标前端/后端/通用
   interface FeatAcc {
     id: string;
@@ -194,10 +235,20 @@ export function buildFeatureMap(opts: FeatureMapOptions): FeatureMapResult {
     }
     return f;
   };
+  const fileMap: FeatureMapEntry[] = [];
   for (const rel of rels) {
     const f = ensure(featureIdOf(rel));
     const side = sideOfLayer(matchLayer(rel));
     (side === 'frontend' ? f.frontend : side === 'backend' ? f.backend : f.shared).push(rel);
+
+    // 文件级明细：唯一真相源，供新画布直接消费
+    fileMap.push({
+      file: rel,
+      feature_id: featureIdOf(rel),
+      side,
+      layer: matchLayer(rel),
+      dead_sources: fileDead.get(rel) ?? [],
+    });
   }
 
   // 3) 相似功能：按文件基名重叠聚合
@@ -244,5 +295,28 @@ export function buildFeatureMap(opts: FeatureMapOptions): FeatureMapResult {
     '相似功能 = 文件基名重叠（>=0.2）的启发式，抓"重复实现"毒征兆；需人确认是否真合并',
     '废弃证据 = 文件级死 import 聚合（复用 TS/Go/py 检测的保守规则）；高死源 ≠ 必废弃',
   ];
-  return { features: features.sort((a, b) => a.id.localeCompare(b.id)), scannedFiles: rels.length, limitations };
+  return {
+    file_map: fileMap,
+    features: features.sort((a, b) => a.id.localeCompare(b.id)),
+    scannedFiles: rels.length,
+    meta: {
+      project_dir: proj,
+      source_root: sourceRoot,
+      scanned_files: rels.length,
+      features: features.length,
+      langs: detectLangs(rels), // 从实际扫到的文件扩展名推导（多语言混项目并行命中）
+    },
+    limitations,
+  };
+}
+
+/** 从文件清单推导命中语言（.ts/.tsx/.js… → ts；.go → go；.py → py）。 */
+function detectLangs(rels: string[]): string[] {
+  const set = new Set<string>();
+  for (const rel of rels) {
+    if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel)) set.add('ts');
+    else if (rel.endsWith('.go')) set.add('go');
+    else if (rel.endsWith('.py')) set.add('py');
+  }
+  return [...set].sort();
 }

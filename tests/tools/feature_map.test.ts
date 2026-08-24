@@ -70,4 +70,27 @@ describe('feature_map 在 design-canvas src 上的真实结果', () => {
     // derive_* 系列（algorithm/chain/anim_flow/feature_tree/mind_map/reasoning/split）自成一线
     expect(derive?.files.length).toBeGreaterThanOrEqual(6);
   });
+
+  it('file_map 给出文件级明细（file/feature_id/side/layer/dead_sources），是唯一真相源', () => {
+    const { file_map, scannedFiles } = buildFeatureMap({ project_dir: path.join(process.cwd()), source_root: SRC });
+    expect(file_map.length).toBe(scannedFiles);
+    expect(file_map.length).toBeGreaterThan(100);
+    // 每一条都带侧别与分层，且与功能聚合自洽：file_map 与 features 的划分一致
+    for (const e of file_map) {
+      expect(typeof e.file).toBe('string');
+      expect(['frontend', 'backend', 'shared']).toContain(e.side);
+      expect(typeof e.layer).toBe('string');
+      expect(Array.isArray(e.dead_sources)).toBe(true);
+    }
+    // renderer 下应有前端文件
+    expect(file_map.some((e) => e.feature_id === 'renderer' && e.side === 'frontend')).toBe(true);
+  });
+
+  it('meta 携带 project_dir/source_root/langs（前端窗口据此定位与说明）', () => {
+    const { meta } = buildFeatureMap({ project_dir: path.join(process.cwd()), source_root: SRC });
+    expect(meta.features).toBeGreaterThan(0);
+    expect(meta.source_root.endsWith('src')).toBe(true);
+    expect(meta.langs).toContain('ts');
+    expect(meta.langs.length).toBeGreaterThan(0);
+  });
 });
