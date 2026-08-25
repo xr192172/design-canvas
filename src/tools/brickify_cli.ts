@@ -57,6 +57,14 @@ async function main(): Promise<void> {
     for (const [id, n] of Object.entries(narratives.clusters)) {
       console.log(`  簇 ${id} → 「${n.title}」 ${n.desc.slice(0, 50)}${n.desc.length > 50 ? '…' : ''}`);
     }
+    // 第0层：项目总览（项目是什么 + 功能清单，与积木一一对应）
+    const ov = narratives.overview;
+    console.log(`\n[overview] 项目：${ov.title}${ov.mode === 'llm' ? '' : '（待解读）'}`);
+    console.log(`[overview] ${ov.desc}`);
+    for (const f of ov.features) {
+      console.log(`  功能 ${f.label}（${f.target}）：${f.desc}`);
+    }
+    console.log('');
   }
   // 摘要
   console.log(`[brickify] ${result.meta.scanned_files} 文件 → ${result.bricks.length} 块积木 → ${result.communities.length} 个社区`);

@@ -91,6 +91,23 @@ export function renderClusterWorkbenchHtml(
 ): string {
   const projectName = path.basename(r.meta.project_dir);
   const edges = clusterEdgesOf(r);
+  const ov = narratives?.overview;
+  const overviewCard = ov
+    ? `<section class="pcard">
+  <div class="pc-head">
+    <span class="pc-ic">📦</span>
+    <div>
+      <div class="pc-title">${esc(ov.title)}<span class="pc-dir">${esc(projectName)}</span></div>
+      <div class="pc-desc">${esc(ov.desc)}</div>
+    </div>
+    <span class="pc-mode ${ov.mode === 'llm' ? 'ok' : 'raw'}">${ov.mode === 'llm' ? 'LLM 已解读' : '待解读'}</span>
+  </div>
+  <div class="pc-chips">
+    ${ov.features.map((f) => `<button class="chip" data-brick-target="${esc(f.target)}" title="${esc(f.desc)}">${esc(f.label)}</button>`).join('')}
+  </div>
+  <div class="pc-stats">${r.meta.scanned_files} 文件 · ${r.bricks.length} 功能积木 · ${r.communities.length} 社区${ov.features.length ? ` · ${ov.features.length} 项功能` : ''}</div>
+</section>`
+    : '';
 
   // 社区分行：每社区一行，行内小簇横排（无社区归属的积木归"孤立"行）
   const brickById = new Map(r.bricks.map((b) => [b.id, b]));
@@ -163,6 +180,20 @@ header{display:flex;align-items:center;gap:14px;padding:12px 18px;background:var
 header h1{font-size:15px;margin:0;font-weight:650}
 .meta{font-size:12px;color:var(--muted)}
 main{padding:18px;max-width:1160px;margin:0 auto}
+.pcard{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.pc-head{display:flex;align-items:flex-start;gap:14px}
+.pc-ic{font-size:26px;line-height:1.2}
+.pc-title{font-size:17px;font-weight:700;letter-spacing:.2px}
+.pc-dir{font-size:11px;color:var(--muted);font-weight:500;margin-left:8px;font-family:ui-monospace,monospace}
+.pc-desc{font-size:13px;color:#3f3f46;line-height:1.65;margin-top:6px;max-width:860px}
+.pc-mode{margin-left:auto;flex-shrink:0;font-size:10.5px;padding:3px 10px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
+.pc-mode.ok{color:var(--ok);border-color:#bbf7d0;background:#f0fdf4}
+.pc-mode.raw{color:#b45309;border-color:#fde68a;background:#fffbeb}
+.pc-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chip{font-size:12px;padding:5px 13px;border-radius:16px;border:1px solid var(--border);background:#fff;cursor:pointer;transition:all .12s}
+.chip:hover{border-color:var(--brand);color:var(--brand);box-shadow:0 2px 8px #7c3aed22}
+.chip.flash{border-color:var(--brand);color:var(--brand);background:#faf5ff}
+.pc-stats{font-size:11.5px;color:var(--muted);margin-top:12px}
 .crow{margin-bottom:22px}
 .crow-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
 .crow-title{font-size:15px;font-weight:650}
@@ -210,6 +241,7 @@ footer{padding:14px 18px;border-top:1px solid var(--border);background:var(--car
   <span class="meta">${r.meta.scanned_files} 文件 · ${r.bricks.length} 积木 · ${r.communities.length} 社区 · ${narMeta}</span>
 </header>
 <main>
+  ${overviewCard}
   <div class="edgebar">
     ${edges.slice(0, 24).map((e) => `<span class="edge" data-e="${esc(e.from)}→${esc(e.to)}"><b>${esc(e.from)}</b> → <b>${esc(e.to)}</b> <span class="ec">${e.count} 次调用</span></span>`).join('') || '<span class="meta">簇间无调用边</span>'}
   </div>
@@ -251,6 +283,19 @@ document.querySelectorAll('.cnode').forEach(el => {
 document.getElementById('pclose').addEventListener('click', () => {
   document.getElementById('panel').classList.remove('open');
   document.querySelectorAll('.cnode').forEach(x => x.classList.remove('sel'));
+});
+// 项目总览功能 chip → 定位到对应积木的第一张簇卡（项目→功能→簇 的下钻闭环）
+document.querySelectorAll('.chip[data-brick-target]').forEach(el => {
+  el.addEventListener('click', () => {
+    const brick = el.dataset.brickTarget;
+    const card = document.querySelector('.cnode[data-brick="' + brick + '"]');
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('sel');
+    card.dispatchEvent(new Event('click'));
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1200);
+  });
 });
 </script>
 </body>

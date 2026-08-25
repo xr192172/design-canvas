@@ -34,13 +34,25 @@ export interface ClusterNarrative {
   mode: 'llm' | 'rule';
 }
 
-/** 三级人话：社区 / 积木 / 小簇（key = 对应 id） */
+/** 项目总览（第0层）：项目本身是什么 + 功能清单（与积木一一对应） */
+export interface ProjectOverview {
+  /** 项目是什么（≤16 字人话，如"可视化设计画布工具"） */
+  title: string;
+  /** 2-3 句：这个项目本身是什么、核心价值 */
+  desc: string;
+  /** 功能清单：每块积木一条（target=积木 id，与下钻结构一一对应） */
+  features: Array<{ target: string; label: string; desc: string }>;
+  mode: 'llm' | 'rule';
+}
+
+/** 三级人话：社区 / 积木 / 小簇（key = 对应 id）+ 项目总览 */
 export interface ClusterNarratives {
+  overview: ProjectOverview;
   communities: Record<string, ClusterNarrative>;
   bricks: Record<string, ClusterNarrative>;
   clusters: Record<string, ClusterNarrative>;
   meta: {
-    /** 真实走了 LLM 的条数 / 总条数 */
+    /** 真实走了 LLM 的条数 / 总条数（不含 overview） */
     llm_ok: number;
     total: number;
     degraded: boolean;
@@ -227,8 +239,11 @@ async function narrateOneBatch(
 }
 
 /**
- * 全量翻译：三级（社区/积木/小簇）→ 人话。LLM 缺席或部分失败时逐条降级为事实句。
- * 永不抛异常（翻译是增强层，不阻塞结构管线）。
+ * 全量翻译：第0层项目总览 + 三级（社区/积木/小簇）→ 人话。
+ * LLM 缺席或部分失败时逐条降级为事实句。永不抛异常（翻译是增强层，不阻塞结构管线）。
+ *
+ * 巨簇/漏翻补轮（两轮制）：第一轮按 batch 分批并发；LLM 没翻出来的单元（大簇
+ * JSON 截断/同批重名被拒）收集起来，第二轮小批量（≤3/批）重试一次，把覆盖率拉满。
  */
 export async function narrateClusters(
   r: BrickifyResult,
@@ -237,6 +252,7 @@ export async function narrateClusters(
 ): Promise<ClusterNarratives> {
   const units = collectNarrUnits(r, sourceRoot);
   const result: ClusterNarratives = {
+    overview: fallbackOverview(r),
     communities: {},
     bricks: {},
     clusters: {},
@@ -255,29 +271,171 @@ export async function narrateClusters(
 
   const batch = opts.batch ?? 6;
   const concurrency = opts.concurrency ?? 2;
-  const batches: NarrUnit[][] = [];
-  for (let i = 0; i < units.length; i += batch) batches.push(units.slice(i, i + batch));
 
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const idx = next++;
-      if (idx >= batches.length) return;
-      try {
-        const got = await narrateOneBatch(cfg, batches[idx]);
-        for (const [key, nar] of Object.entries(got)) {
-          const u = units.find((x) => x.key === key);
-          if (u) {
-            bucketOf(u)[u.rawId] = nar;
-            result.meta.llm_ok++;
+  const runBatches = async (group: NarrUnit[], size: number): Promise<void> => {
+    const batches: NarrUnit[][] = [];
+    for (let i = 0; i < group.length; i += size) batches.push(group.slice(i, i + size));
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const idx = next++;
+        if (idx >= batches.length) return;
+        try {
+          const got = await narrateOneBatch(cfg, batches[idx]);
+          for (const [key, nar] of Object.entries(got)) {
+            const u = units.find((x) => x.key === key);
+            if (u && bucketOf(u)[u.rawId].mode !== 'llm') {
+              bucketOf(u)[u.rawId] = nar;
+              result.meta.llm_ok++;
+            }
           }
+        } catch {
+          // 单批失败：该批保持降级事实句（第二轮再补）
         }
-      } catch {
-        // 单批失败：该批保持降级事实句
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, () => worker()));
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, () => worker()));
+
+  // 第一轮：全量
+  await runBatches(units, batch);
+  // 第二轮：只补漏（小批量重试）
+  const missing = units.filter((u) => bucketOf(u)[u.rawId].mode !== 'llm');
+  if (missing.length > 0) {
+    await runBatches(missing, Math.min(3, batch));
+  }
+
+  // 第0层：项目总览（用已翻好的积木人话做证据，保证"项目→功能"与下钻一一对应）
+  try {
+    const ov = await narrateOverview(cfg, r, r.meta.project_dir, result);
+    if (ov) result.overview = ov;
+  } catch {
+    // 总览失败：保持降级
+  }
+
   result.meta.degraded = result.meta.llm_ok === 0;
   return result;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 第0层：项目总览
+// ─────────────────────────────────────────────────────────────
+
+/** 读项目元证据：package.json name/description + README 头部（截断）。 */
+function readProjectEvidence(projectDir: string): { pkg?: string; readme?: string } {
+  const out: { pkg?: string; readme?: string } = {};
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf-8'));
+    out.pkg = [pkg.name ? `name=${pkg.name}` : '', pkg.description ? `description=${pkg.description}` : '']
+      .filter(Boolean)
+      .join('; ');
+  } catch {
+    // 无 package.json（Go 项目等）：跳过
+  }
+  for (const name of ['README.md', 'README-zh.md', 'readme.md']) {
+    try {
+      const txt = fs.readFileSync(path.join(projectDir, name), 'utf-8');
+      // 去掉 markdown 标记噪音，只留头 700 字
+      out.readme = txt.replace(/[#>*`|\[\]]/g, ' ').replace(/\s{2,}/g, ' ').slice(0, 700);
+      break;
+    } catch {
+      // 试下一个
+    }
+  }
+  return out;
+}
+
+/** 总览降级：项目名=目录名，desc=事实句，features=积木 id + 簇人话聚合（有 LLM 簇翻译时也够用）。 */
+function fallbackOverview(r: BrickifyResult): ProjectOverview {
+  const name = path.basename(r.meta.project_dir);
+  const features = r.bricks.map((b) => ({
+    target: b.id,
+    label: b.id,
+    desc: `${b.total} 个文件${b.community ? `（社区 ${b.community}）` : ''}`,
+  }));
+  return {
+    title: name,
+    desc: `本项目共 ${r.meta.scanned_files} 个源文件，聚成 ${r.bricks.length} 块积木（功能模块）、${r.communities.length} 个功能社区。项目一句话定位待 LLM 翻译（--narrate）。`,
+    features,
+    mode: 'rule',
+  };
+}
+
+/** LLM 总览：证据=package.json/README + 积木人话清单 → 项目定位 + 与积木一一对应的功能清单。 */
+async function narrateOverview(
+  cfg: { apiKey: string; model: string; baseURL: string },
+  r: BrickifyResult,
+  projectDir: string,
+  partial: ClusterNarratives,
+): Promise<ProjectOverview | null> {
+  const ev = readProjectEvidence(projectDir);
+  const brickList = r.bricks
+    .map((b) => {
+      const subs = b.sub_clusters
+        .map((s) => ({ id: s.id, title: partial.clusters[s.id]?.title }))
+        .filter((x) => !!x.title && x.title !== x.id)
+        .slice(0, 5)
+        .map((x) => x.title as string)
+        .join('、');
+      return `- ${b.id}（${b.total} 文件${subs ? `，内部功能：${subs}` : ''}）`;
+    })
+    .join('\n');
+
+  const system =
+    '你是项目解读官。给定项目元信息和它的"积木"（功能模块）清单，请产出项目总览：\n' +
+    '- title：这个项目本身是什么，≤16 个汉字（如"人机共享的可视化设计工具"），不要出现"项目"二字；\n' +
+    '- desc：2-3 句话讲清项目是什么、核心价值（给完全不懂代码的人听）；\n' +
+    '- features：功能清单，与给定积木**一一对应**（每块积木恰好一条：target=积木id，label=≤10字功能名，desc=一句话它给项目提供什么）；\n' +
+    '不得编造积木清单之外的功能；features 条数必须等于积木数。\n' +
+    '只输出 JSON：{"title":"...","desc":"...","features":[{"target":"...","label":"...","desc":"..."}]}';
+
+  const user =
+    `项目目录=${path.basename(r.meta.project_dir)}\n` +
+    (ev.pkg ? `package.json：${ev.pkg}\n` : '') +
+    (ev.readme ? `README 摘要：${ev.readme}\n` : '') +
+    `积木清单（${r.bricks.length} 块，功能与人话已初步译出）：\n${brickList}`;
+
+  const raw = await callChat(cfg, [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ]);
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fence ? fence[1] : raw;
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  const parsed = JSON.parse(candidate.slice(start, end + 1)) as {
+    title?: string;
+    desc?: string;
+    features?: Array<{ target?: string; label?: string; desc?: string }>;
+  };
+  if (!parsed.title) return null;
+  const known = new Set(r.bricks.map((b) => b.id));
+  const features = (parsed.features ?? [])
+    .filter((f) => f.target && known.has(f.target))
+    .map((f) => ({
+      target: f.target as string,
+      label: (f.label ?? f.target as string).trim().slice(0, 16),
+      desc: (f.desc ?? '').trim().slice(0, 120),
+    }));
+  // 一一对应兜底：LLM 漏的积木用积木级/簇级人话补齐
+  const covered = new Set(features.map((f) => f.target));
+  for (const b of r.bricks) {
+    if (covered.has(b.id)) continue;
+    features.push({
+      target: b.id,
+      label: partial.bricks[b.id]?.title?.slice(0, 16) ?? b.id,
+      desc: partial.bricks[b.id]?.desc?.slice(0, 120) ?? `${b.total} 个文件`,
+    });
+  }
+  return {
+    title: parsed.title.trim().slice(0, 20),
+    desc: (parsed.desc ?? '').trim().slice(0, 240),
+    features: features.sort((a, b) => {
+      const ia = r.bricks.findIndex((x) => x.id === a.target);
+      const ib = r.bricks.findIndex((x) => x.id === b.target);
+      return ia - ib;
+    }),
+    mode: 'llm',
+  };
 }

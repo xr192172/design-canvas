@@ -165,6 +165,18 @@ describe('narrateClusters 降级路径（无 LLM 环境）', () => {
     }
   });
 
+  it('无 LLM → 项目总览降级：title=目录名、features 与积木一一对应、不编造功能', async () => {
+    const r = miniResult();
+    const out = await narrateClusters(r, '/proj/src');
+    expect(out.overview.mode).toBe('rule');
+    expect(out.overview.title).toBe('proj'); // path.basename('/proj')
+    expect(out.overview.features.map((f) => f.target)).toEqual(['a', 'b']); // 一一对应
+    expect(out.overview.desc).toContain('3 个源文件');
+    expect(out.overview.desc).toContain('2 块积木');
+    // 降级不发明功能名
+    for (const f of out.overview.features) expect(f.desc).toMatch(/文件/);
+  });
+
   it('事实句只陈述确定性事实（文件数/内聚度/角色），不带编造功能名', async () => {
     const u = collectNarrUnits(miniResult(), '/proj/src').find((x) => x.key === 'cluster:a#1')!;
     const fb = fallbackNarrative(u);
@@ -196,8 +208,17 @@ describe('renderClusterWorkbenchHtml 沙盘渲染', () => {
     expect(html).toContain('const DETAIL');
   });
 
-  it('有人话：卡片标题/描述进 HTML，徽章区分 llm/rule', () => {
+  it('有人话：卡片标题/描述进 HTML，徽章区分 llm/rule；项目总览卡+功能chips', () => {
     const nar = {
+      overview: {
+        title: '可视化设计画布',
+        desc: '把想法变成图的工具，人和 AI 一起用。',
+        features: [
+          { target: 'a', label: '渲染引擎', desc: '画界面' },
+          { target: 'b', label: '胶水接线', desc: '接起来' },
+        ],
+        mode: 'llm' as const,
+      },
       communities: { a: { title: '渲染社区', desc: '负责画界面', mode: 'llm' as const } },
       bricks: { a: { title: '渲染积木', desc: '画界面核心', mode: 'llm' as const } },
       clusters: { 'a#1': { title: '界面渲染引擎', desc: '把数据变成图', mode: 'llm' as const } },
@@ -208,6 +229,11 @@ describe('renderClusterWorkbenchHtml 沙盘渲染', () => {
     expect(html).toContain('把数据变成图');
     // 社区行人话
     expect(html).toContain('渲染社区');
+    // 项目总览卡：标题/desc/功能chips（与积木一一对应）
+    expect(html).toContain('可视化设计画布');
+    expect(html).toContain('把想法变成图的工具');
+    expect(html).toContain('data-brick-target="a"');
+    expect(html).toContain('渲染引擎');
     // 仍有降级簇（b#1 无翻译）→ 待翻译徽章
     expect(html).toContain('待翻译');
     expect(html).toContain('LLM 翻译 3/5');
