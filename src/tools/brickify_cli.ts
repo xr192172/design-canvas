@@ -22,6 +22,8 @@ import { renderBrickifyMindMapHtml } from './render_mindmap.js';
 import { narrateClusters } from './cluster_narrator.js';
 import { renderClusterWorkbenchHtml } from './render_cluster_workbench.js';
 import { renderSandboxCanvasHtml } from './render_sandbox_canvas.js';
+import { classifyBricks } from './classify_bricks.js';
+import { renderAnatomyHtml } from './render_anatomy.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -32,7 +34,7 @@ const has = (name: string): boolean => process.argv.includes(name);
 async function main(): Promise<void> {
   const project = readArg('--project');
   if (!project) {
-    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--narrate]');
+    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--anatomy <lanes.html>] [--narrate]');
     process.exit(2);
   }
   const source = readArg('--source');
@@ -41,13 +43,14 @@ async function main(): Promise<void> {
   const mindmapOut = readArg('--mindmap');
   const workbenchOut = readArg('--workbench');
   const sandboxOut = readArg('--sandbox');
+  const anatomyOut = readArg('--anatomy');
   const doNarrate = has('--narrate');
 
   const result = await buildBrickify({ project_dir: project, source_root: source });
 
   // LLM 翻译层（可选）：社区/积木/小簇 → 人话。降级安全，永不阻塞。
   let narratives = undefined;
-  if (doNarrate || workbenchOut || sandboxOut) {
+  if (doNarrate || workbenchOut || sandboxOut || anatomyOut) {
     const srcRoot = result.meta.source_root;
     console.log('[narrate] LLM 翻译层启动（未配置则自动降级为事实句）…');
     narratives = await narrateClusters(result, srcRoot);
@@ -130,6 +133,27 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] 画布沙盘(mock样式真数据) HTML → ${abs}`);
+  }
+  if (anatomyOut) {
+    const anatomy = await classifyBricks(result, narratives);
+    console.log(
+      `[anatomy] ${anatomy.taxonomy.label}：LLM 归类 ${anatomy.meta.llm_ok}/${anatomy.meta.total} 簇` +
+        (anatomy.unclassified.length > 0 ? `，未归类 ${anatomy.unclassified.length}` : ''),
+    );
+    for (const lane of anatomy.slots) {
+      const items = lane.groups
+        .flatMap((g) => g.clusters.map((c) => `${c.title}(${c.id})`))
+        .join('、');
+      console.log(`  ${lane.slot.label}: ${items || '（空槽）'}`);
+    }
+    if (anatomy.unclassified.length > 0) {
+      console.log(`  未归类: ${anatomy.unclassified.join('、')}`);
+    }
+    const html = renderAnatomyHtml(result, anatomy);
+    const abs = path.resolve(anatomyOut);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, html, 'utf-8');
+    console.log(`[brickify] 解剖泳道视图 HTML → ${abs}`);
   }
 }
 
