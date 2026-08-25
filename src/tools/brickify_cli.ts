@@ -30,6 +30,7 @@ import { collectFunctions } from './collect_functions.js';
 import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
 import { renderWizardHtml } from './render_wizard.js';
+import { renderDslWorkbenchHtml } from './render_dsl_workbench.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
   const anatomyOut = readArg('--anatomy');
   const toolsMapOut = readArg('--tools-map');
   const wizardOut = readArg('--wizard');
+  const dslWorkbenchOut = readArg('--dsl-workbench');
   const registryFile = readArg('--registry');
   const doNarrate = has('--narrate');
 
@@ -59,7 +61,7 @@ async function main(): Promise<void> {
 
   // LLM 翻译层（可选）：社区/积木/小簇 → 人话。降级安全，永不阻塞。
   let narratives = undefined;
-  if (doNarrate || workbenchOut || sandboxOut || anatomyOut || toolsMapOut) {
+  if (doNarrate || workbenchOut || sandboxOut || anatomyOut || toolsMapOut || dslWorkbenchOut) {
     const srcRoot = result.meta.source_root;
     console.log('[narrate] LLM 翻译层启动（未配置则自动降级为事实句）…');
     narratives = await narrateClusters(result, srcRoot);
@@ -202,6 +204,26 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] 新功能向导 HTML → ${abs}`);
+  }
+  if (dslWorkbenchOut && narratives) {
+    // DSL 协作工作台：mock 壳 100% 保留（sidebar/toolbar/画布/审核面板/版本滑条），
+    // 数据全换真——七槽位=mock 七节点（同构），问题清单=混合文件信号+倒挂，人话=narrate
+    const anatomy = await classifyBricks(result, narratives);
+    const totalIssues = result.mixed_files.length + anatomy.limitations.length;
+    console.log(
+      `[dsl-workbench] 七槽位流水线（${anatomy.taxonomy.label}）：${anatomy.slots
+        .map((l) => `${l.slot.label} ${l.groups.reduce((a, g) => a + g.clusters.length, 0)}簇`)
+        .join(' · ')}`,
+    );
+    if (anatomy.slots.some((l) => l.groups.length === 0)) {
+      console.log(`[dsl-workbench] 空槽如实呈现: ${anatomy.slots.filter((l) => l.groups.length === 0).map((l) => l.slot.label).join('、')}`);
+    }
+    console.log(`[dsl-workbench] 问题清单（真实信号）: ${result.mixed_files.length} 混合文件 + ${anatomy.limitations.length} 倒挂 = ${totalIssues}`);
+    const html = renderDslWorkbenchHtml(result, anatomy, narratives, path.basename(path.resolve(project)));
+    const abs = path.resolve(dslWorkbenchOut);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, html, 'utf-8');
+    console.log(`[brickify] DSL 协作工作台 HTML → ${abs}`);
   }
 }
 
