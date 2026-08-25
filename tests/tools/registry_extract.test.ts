@@ -1,13 +1,16 @@
 /**
- * registry_extract（注册表提取器）+ classify_tools（工具标注官）+ render_tools_map 测试：
- *   - 提取器：name/title/description（多段引号串拼接）/import 映射/条目块符号扫描
- *   - 工具→实现簇映射是确定性的（模块路径精确匹配），匹配不上如实上报
- *   - 三维标注降级（rule）：关键词命中 domain/slot，tier 默认 P1
- *   - HTML：三维度分组 DOM 全渲染 + 切换脚本 + 悬窗下钻（工具→簇→文件）
+ * registry_extract（注册表提取）+ cli_extract（CLI 提取）+ collect_functions（统一
+ * 功能注册面）+ classify_tools（四维标注）+ render_tools_map 测试：
+ *   - MCP 提取：name/title/description/import 连线（命名 handler 扫定义体）
+ *   - CLI 提取：头注释人话描述 + usage 参数
+ *   - 合并：同名（CLI 去 _cli 后缀）→ 双入口 both；各自独占 → mcp_only/cli_only
+ *   - 四维标注降级（rule）+ 确定性簇映射 + unmatched 诚实上报
+ *   - HTML：四维分组 + 入口徽章 + 悬窗下钻
  * LLM 真调用不做单测；rule 路径即"标注层缺席"契约。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { extractRegistryTools } from '../../src/tools/registry_extract';
+import { collectFunctions, type FunctionEntry } from '../../src/tools/collect_functions';
 import { classifyTools, defaultDomains } from '../../src/tools/classify_tools';
 import { renderToolsMapHtml } from '../../src/tools/render_tools_map';
 import type { BrickifyResult } from '../../src/tools/brickify';
@@ -113,7 +116,7 @@ describe('extractRegistryTools（确定性提取）', () => {
   });
 });
 
-describe('classifyTools（三维标注 + 确定性簇映射）', () => {
+describe('classifyTools（四维标注 + 确定性簇映射）', () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) {
       saved[k] = process.env[k];
@@ -129,16 +132,18 @@ describe('classifyTools（三维标注 + 确定性簇映射）', () => {
 
   it('rule 降级标注 + 模块→簇精确映射 + 置信度低', async () => {
     const r = extractRegistryTools(FIXTURE_SRC);
-    const map = await classifyTools(r.tools, brickifyFixture());
+    const entries = collectFunctions(r.tools, []).entries;
+    const map = await classifyTools(entries, brickifyFixture());
     expect(map.meta.mode).toBe('rule');
     expect(map.tools).toHaveLength(2);
     // 实现簇连线（确定性）
     const get = map.tools.find((t) => t.name === 'get_dsl')!;
     expect(get.implClusters).toEqual([{ cluster: 'tools#1', brick: 'tools' }]);
     expect(get.unmatchedModules).toHaveLength(0);
-    // rule 标注
+    // rule 标注 + kind 透传（确定性维度）
     expect(['P0', 'P1', 'P2']).toContain(get.tier);
     expect(defaultDomains().some((d) => d.id === get.domain)).toBe(true);
+    expect(get.kind).toBe('mcp_only');
   });
 
   it('模块匹配不上簇时如实上报 unmatched（不硬塞）', async () => {
@@ -147,11 +152,45 @@ describe('classifyTools（三维标注 + 确定性簇映射）', () => {
       'const html = renderSandbox(a as never); ghost();',
     );
     const r = extractRegistryTools(src);
-    const map = await classifyTools(r.tools, brickifyFixture());
+    const entries = collectFunctions(r.tools, []).entries;
+    const map = await classifyTools(entries, brickifyFixture());
     const render = map.tools.find((t) => t.name === 'render_sandbox')!;
     expect(render.unmatchedModules).toContain('ghost');
-    // limitations 提及未匹配模块
     expect(map.limitations.some((l) => l.includes('未匹配'))).toBe(true);
+  });
+});
+
+describe('collectFunctions（统一功能注册面：MCP + CLI 合并）', () => {
+  it('同名合并为双入口（both）；各自独占分开；实现模块并集', () => {
+    const r = extractRegistryTools(FIXTURE_SRC);
+    const cli = [
+      {
+        name: 'render_sandbox',
+        file: 'render_sandbox_cli.ts',
+        desc: '渲染社区工作台的独立阶段 CLI',
+        usage: '--project <dir>',
+        implModules: ['tools/render_sandbox'],
+      },
+      {
+        name: 'signal_review',
+        file: 'signal_review_cli.ts',
+        desc: '混合文件解耦信号的 LLM 复核 CLI',
+        usage: '--project <dir>',
+        implModules: ['tools/signal_review'],
+      },
+    ];
+    const reg = collectFunctions(r.tools, cli);
+    // 三个功能：get_dsl(MCP) + render_sandbox(both) + signal_review(CLI)
+    expect(reg.entries).toHaveLength(3);
+    expect(reg.meta).toEqual({ mcp: 2, cli: 2, both: 1, mcp_only: 1, cli_only: 1 });
+    const both = reg.entries.find((e) => e.name === 'render_sandbox')!;
+    expect(both.kind).toBe('both');
+    expect(both.mcp?.title).toBe('Sandbox render');
+    expect(both.cli?.file).toBe('render_sandbox_cli.ts');
+    expect(both.desc).toBe('渲染社区工作台 HTML。'); // 双入口取 MCP 描述
+    const cliOnly = reg.entries.find((e) => e.name === 'signal_review')!;
+    expect(cliOnly.kind).toBe('cli_only');
+    expect(cliOnly.desc).toBe('混合文件解耦信号的 LLM 复核 CLI'); // CLI 独占用头注释
   });
 });
 
@@ -169,25 +208,35 @@ describe('renderToolsMapHtml（功能中心多维视图）', () => {
     }
   });
 
-  it('三维度分组 DOM 全渲染 + 切换脚本 + 悬窗下钻链', async () => {
+  it('四维度分组 DOM 全渲染 + 切换脚本 + 悬窗下钻链 + 入口徽章', async () => {
     const r = extractRegistryTools(FIXTURE_SRC);
-    const map = await classifyTools(r.tools, brickifyFixture());
+    const cli = [
+      { name: 'signal_review', file: 'signal_review_cli.ts', desc: '混合文件解耦信号的 LLM 复核 CLI', usage: '--project <dir>', implModules: ['tools/signal_review'] },
+    ];
+    const entries = collectFunctions(r.tools, cli).entries;
+    const map = await classifyTools(entries, brickifyFixture());
     const html = renderToolsMapHtml(brickifyFixture(), map);
-    // 三维度 section
+    // 四维度 section
     expect(html).toContain('data-dim="domain"');
     expect(html).toContain('data-dim="tier"');
     expect(html).toContain('data-dim="slot"');
+    expect(html).toContain('data-dim="kind"');
     // 维度切换 tabs
     expect(html).toContain('按能力域');
     expect(html).toContain('按分级');
+    expect(html).toContain('按入口形态');
     expect(html).toContain('按流水线槽位');
     expect(html).toContain('showDim');
+    // 入口形态分组标签 + 徽章
+    expect(html).toContain('双入口（MCP + CLI）');
+    expect(html).toContain('CLI 独占');
+    expect(html).toContain('tm-kind-both');
+    expect(html).toContain('tm-kind-cli');
     // 工具卡
     expect(html).toContain('data-tool="get_dsl"');
-    // 悬窗：三维徽章 + 实现簇 + 文件下钻
+    // 悬窗：四维徽章 + 实现簇 + 文件下钻
     expect(html).toContain('const DETAIL');
     expect(html).toContain('实现体');
-    expect(html).toContain('fileList'.replace('fileList', 'files')); // clusters[].files 在 DETAIL 里
     expect(html).toContain('内联实现');
   });
 });

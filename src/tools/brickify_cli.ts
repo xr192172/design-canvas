@@ -25,6 +25,8 @@ import { renderSandboxCanvasHtml } from './render_sandbox_canvas.js';
 import { classifyBricks } from './classify_bricks.js';
 import { renderAnatomyHtml } from './render_anatomy.js';
 import { extractRegistryToolsFromFile } from './registry_extract.js';
+import { extractCliCommands } from './cli_extract.js';
+import { collectFunctions } from './collect_functions.js';
 import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
 
@@ -161,21 +163,29 @@ async function main(): Promise<void> {
     console.log(`[brickify] 解剖泳道视图 HTML → ${abs}`);
   }
   if (toolsMapOut) {
-    // 功能中心：MCP 工具注册表（权威功能清单）→ 三维标注 + 实现簇连线
+    // 功能中心：统一功能注册面（MCP 工具 + CLI 命令）→ 四维标注 + 实现簇连线
     const reg = registryFile ?? path.join(result.meta.source_root, 'server_registry.ts');
     if (!fs.existsSync(reg)) {
       console.warn(`[tools-map] 未找到工具注册表 ${reg}，跳过（可用 --registry 指定）`);
     } else {
       const extracted = extractRegistryToolsFromFile(reg);
-      console.log(`[tools-map] 注册表提取：${extracted.tools.length} 个 MCP 工具，${extracted.importSymbols} 个 import 符号`);
-      const map = await classifyTools(extracted.tools, result);
-      console.log(`[tools-map] ${map.meta.mode === 'llm' ? `LLM 标注 ${map.meta.llm_ok}/${map.meta.total}` : '启发式标注'}；${map.tools.filter((t) => t.implClusters.length > 0).length}/${map.meta.total} 个工具已连实现簇`);
+      const cli = extractCliCommands(result.meta.source_root + '/tools');
+      const registry = collectFunctions(extracted.tools, cli.commands);
+      console.log(
+        `[tools-map] 功能注册面：${registry.entries.length} 个功能 = MCP ${extracted.tools.length} + CLI ${cli.commands.length}` +
+          `（双入口 ${registry.meta.both} · MCP 独占 ${registry.meta.mcp_only} · CLI 独占 ${registry.meta.cli_only}）`,
+      );
+      const map = await classifyTools(registry.entries, result);
+      console.log(`[tools-map] ${map.meta.mode === 'llm' ? `LLM 标注 ${map.meta.llm_ok}/${map.meta.total}` : '启发式标注'}；${map.tools.filter((t) => t.implClusters.length > 0).length}/${map.meta.total} 个功能已连实现簇`);
       const byDomain = new Map<string, number>();
       for (const t of map.tools) byDomain.set(t.domain, (byDomain.get(t.domain) ?? 0) + 1);
       console.log(`  能力域分布: ${[...byDomain.entries()].map(([d, n]) => `${map.domains.find((x) => x.id === d)?.label ?? d} ${n}`).join(' · ')}`);
       const byTier = new Map<string, number>();
       for (const t of map.tools) byTier.set(t.tier, (byTier.get(t.tier) ?? 0) + 1);
       console.log(`  分级分布: ${[...byTier.entries()].map(([k, n]) => `${k} ${n}`).join(' · ')}`);
+      if (registry.meta.cli_only > 0) {
+        console.log(`  CLI 独占（LLM 会话够不着，集成候选）: ${registry.entries.filter((e) => e.kind === 'cli_only').map((e) => e.name).join('、')}`);
+      }
       const html = renderToolsMapHtml(result, map);
       const abs = path.resolve(toolsMapOut);
       fs.mkdirSync(path.dirname(abs), { recursive: true });

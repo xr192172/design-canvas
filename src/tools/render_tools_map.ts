@@ -1,12 +1,14 @@
 /**
- * render_tools_map —— 功能中心视图（MCP 工具注册表的多维地图）
+ * render_tools_map —— 功能中心视图（统一功能注册面的多维地图）
  *
- * 用户定调：功能应该"分级放出来"，且有"很多种方向很多维度"去组织。
- * 本视图以 31 个 MCP 工具为卡片（工具=对外承诺的功能原子），支持三个维度切换：
+ * 用户定调：功能应该"分级放出来"，且有"很多种方向很多维度"去组织；
+ * 功能暴露形态（MCP 独占/CLI 独占/双入口）也是一维。本视图以统一功能条目
+ * （MCP 工具 + CLI 命令合并）为卡片，支持四个维度切换：
  *   - 能力域（设计编辑/查询理解/重构治理/观测质检/…8 域）
  *   - 分级（P0 日常高频 / P1 进阶 / P2 专家）
  *   - 解剖槽位（输入→…→人机闭环流水线位置）
- * 点击工具 → 悬窗下钻：三维标注 + 完整描述 + **实现簇清单**（确定性 import 连线）
+ *   - 入口形态（MCP 独占 / CLI 独占 / 双入口）
+ * 点击功能 → 悬窗下钻：四维标注 + 完整描述 + **实现簇清单**（确定性 import 连线）
  * → 点簇展开文件清单。功能（人话）→ 实现（代码）的桥就架在这里。
  */
 
@@ -25,6 +27,8 @@ function jsonForScript(o: unknown): string {
 
 const TIER_BADGE: Record<string, string> = { P0: 'tm-tier-p0', P1: 'tm-tier-p1', P2: 'tm-tier-p2' };
 const TIER_TXT: Record<string, string> = { P0: 'P0 日常', P1: 'P1 进阶', P2: 'P2 专家' };
+const KIND_BADGE: Record<string, string> = { mcp_only: 'tm-kind-mcp', cli_only: 'tm-kind-cli', both: 'tm-kind-both' };
+const KIND_TXT: Record<string, string> = { mcp_only: 'MCP', cli_only: 'CLI', both: 'MCP+CLI' };
 
 interface GroupDef {
   id: string;
@@ -32,13 +36,19 @@ interface GroupDef {
   desc: string;
 }
 
-function groupsOf(map: ToolsMapResult, dim: 'domain' | 'tier' | 'slot'): GroupDef[] {
+function groupsOf(map: ToolsMapResult, dim: 'domain' | 'tier' | 'slot' | 'kind'): GroupDef[] {
   if (dim === 'domain') return map.domains.map((d) => ({ id: d.id, label: d.label, desc: d.desc }));
   if (dim === 'tier')
     return [
       { id: 'P0', label: 'P0 日常高频', desc: '核心工作流每天都碰的能力' },
       { id: 'P1', label: 'P1 进阶', desc: '特定场景才用的能力' },
       { id: 'P2', label: 'P2 专家', desc: '低频专家操作' },
+    ];
+  if (dim === 'kind')
+    return [
+      { id: 'both', label: '双入口（MCP + CLI）', desc: 'LLM 会话和终端脚本都能用——主力功能应长这样' },
+      { id: 'mcp_only', label: 'MCP 独占', desc: '只在 LLM 会话里暴露，终端不可直达' },
+      { id: 'cli_only', label: 'CLI 独占', desc: '只有独立阶段脚本，LLM 会话够不着——集成候选' },
     ];
   // slot：从 taxonomy 取（render 不知道 taxonomy 对象，用 classify 的 slot id 借 label 表）
   const SLOT_LABEL: Record<string, string> = {
@@ -50,23 +60,27 @@ function groupsOf(map: ToolsMapResult, dim: 'domain' | 'tier' | 'slot'): GroupDe
 
 function toolCard(t: MappedTool): string {
   const bricks = [...new Set(t.implClusters.map((c) => c.brick))].slice(0, 3);
-  return `<div class="tm-card" data-tool="${esc(t.name)}" data-domain="${esc(t.domain)}" data-tier="${t.tier}" data-slot="${esc(t.slot)}">
+  return `<div class="tm-card" data-tool="${esc(t.name)}" data-domain="${esc(t.domain)}" data-tier="${t.tier}" data-slot="${esc(t.slot)}" data-kind="${t.kind}">
   <div class="tm-card-head">
     <span class="tm-summary">${esc(t.summary)}</span>
     <span class="tm-tier ${TIER_BADGE[t.tier]}">${TIER_TXT[t.tier]}</span>
   </div>
   <div class="tm-name">${esc(t.name)}</div>
-  <div class="tm-impl">${bricks.length > 0 ? bricks.map((b) => `<span class="tm-brick">${esc(b)}</span>`).join('') : '<span class="tm-brick none">内联实现</span>'}</div>
+  <div class="tm-card-foot">
+    <span class="tm-kind ${KIND_BADGE[t.kind]}">${KIND_TXT[t.kind]}</span>
+    <span class="tm-impl">${bricks.length > 0 ? bricks.map((b) => `<span class="tm-brick">${esc(b)}</span>`).join('') : '<span class="tm-brick none">内联</span>'}</span>
+  </div>
 </div>`;
 }
 
 export function renderToolsMapHtml(r: BrickifyResult, map: ToolsMapResult): string {
   const projectName = path.basename(r.meta.project_dir);
 
-  // 三维分组的静态 DOM 都渲染，切维度只切显隐（无重排闪烁）
-  const dims: Array<{ key: 'domain' | 'tier' | 'slot'; label: string }> = [
+  // 四维分组的静态 DOM 都渲染，切维度只切显隐（无重排闪烁）
+  const dims: Array<{ key: 'domain' | 'tier' | 'slot' | 'kind'; label: string }> = [
     { key: 'domain', label: '按能力域' },
     { key: 'tier', label: '按分级' },
+    { key: 'kind', label: '按入口形态' },
     { key: 'slot', label: '按流水线槽位' },
   ];
   const sections = dims
@@ -74,7 +88,9 @@ export function renderToolsMapHtml(r: BrickifyResult, map: ToolsMapResult): stri
       const groups = groupsOf(map, key);
       const blocks = groups
         .map((g) => {
-          const tools = map.tools.filter((t) => (key === 'domain' ? t.domain : key === 'tier' ? t.tier : t.slot) === g.id);
+          const tools = map.tools.filter((t) =>
+            (key === 'domain' ? t.domain : key === 'tier' ? t.tier : key === 'kind' ? t.kind : t.slot) === g.id,
+          );
           if (tools.length === 0 && key !== 'domain')
             return `<div class="tm-group" data-dim="${key}" data-g="${esc(g.id)}" style="display:none">
   <div class="tm-group-head"><span class="tm-group-label">${esc(g.label)}</span><span class="tm-count">0</span></div>
@@ -108,6 +124,7 @@ export function renderToolsMapHtml(r: BrickifyResult, map: ToolsMapResult): stri
     domain: map.domains.find((d) => d.id === t.domain)?.label ?? t.domain,
     tier: TIER_TXT[t.tier],
     slot: { intake: '输入摄取', parse: '解析转换', compute: '核心运算', store: '状态存储', render: '呈现输出', observe: '观测质检', review: '人机闭环' }[t.slot] ?? t.slot,
+    kind: KIND_TXT[t.kind],
     confidence: t.confidence,
     mode: t.mode,
     clusters: t.implClusters.map((c) => ({
@@ -121,6 +138,10 @@ export function renderToolsMapHtml(r: BrickifyResult, map: ToolsMapResult): stri
   const limHtml = map.limitations.map((l) => `- ${esc(l)}`).join('\n');
   const modeTxt = map.meta.mode === 'llm' ? `LLM 标注 ${map.meta.llm_ok}/${map.meta.total}` : '启发式标注（LLM 未启用）';
   const linked = map.tools.filter((t) => t.implClusters.length > 0).length;
+  const nBoth = map.tools.filter((t) => t.kind === 'both').length;
+  const nMcp = map.tools.filter((t) => t.kind === 'mcp_only').length;
+  const nCli = map.tools.filter((t) => t.kind === 'cli_only').length;
+  const metaTxt = `${map.meta.total} 个功能（双入口 ${nBoth} · MCP 独占 ${nMcp} · CLI 独占 ${nCli}）· ${linked} 个已连实现 · ${modeTxt}`;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
@@ -171,6 +192,12 @@ main{padding:18px;max-width:1160px;margin:0 auto}
 .tm-dim-badge.domain{background:#f5f3ff;color:#6d28d9}
 .tm-dim-badge.tier{background:#eff6ff;color:#1d4ed8}
 .tm-dim-badge.slot{background:#f0fdf4;color:#15803d}
+.tm-dim-badge.kindb{background:#fff7ed;color:#c2410c}
+.tm-card-foot{display:flex;align-items:center;gap:5px;margin-top:6px;flex-wrap:wrap}
+.tm-kind{font-size:9.5px;padding:2px 7px;border-radius:9px;font-weight:600;flex-shrink:0}
+.tm-kind-mcp{background:#eff6ff;color:#1d4ed8}
+.tm-kind-cli{background:#fef2f2;color:#b91c1c}
+.tm-kind-both{background:#f5f3ff;color:#6d28d9}
 .panel-desc{font-size:12px;color:#3f3f46;margin-top:10px;line-height:1.65;max-height:180px;overflow-y:auto}
 .panel-conf{font-size:10.5px;color:var(--muted);margin-top:8px}
 .panel-body{flex:1;overflow-y:auto;padding:12px 18px}
@@ -199,10 +226,11 @@ footer{padding:14px 18px;border-top:1px solid var(--border);background:var(--car
 <body>
 <header>
   <h1>功能地图 · ${esc(projectName)}</h1>
-  <span class="meta">${map.meta.total} 个 MCP 工具 · ${linked} 个已连实现 · ${modeTxt}</span>
+  <span class="meta">${metaTxt}</span>
   <div class="tabs">
     <button class="tab" data-dim="domain">按能力域</button>
     <button class="tab" data-dim="tier">按分级</button>
+    <button class="tab" data-dim="kind">按入口形态</button>
     <button class="tab" data-dim="slot">按流水线槽位</button>
   </div>
 </header>
@@ -240,7 +268,8 @@ document.querySelectorAll('.tm-card').forEach(el => {
     document.getElementById('pdimrow').innerHTML =
       '<span class="tm-dim-badge domain">' + d.domain + '</span>' +
       '<span class="tm-dim-badge tier">' + d.tier + '</span>' +
-      '<span class="tm-dim-badge slot">' + d.slot + '</span>';
+      '<span class="tm-dim-badge slot">' + d.slot + '</span>' +
+      '<span class="tm-dim-badge kindb">' + d.kind + '</span>';
     document.getElementById('pdesc').textContent = d.desc || '（无注册描述）';
     document.getElementById('pconf').textContent = (d.mode === 'llm' ? 'LLM 标注 · 置信 ' + Math.round(d.confidence * 100) + '%' : '启发式标注');
     const body = document.getElementById('pbody');

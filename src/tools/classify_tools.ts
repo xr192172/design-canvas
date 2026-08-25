@@ -1,17 +1,19 @@
 /**
- * classify_tools —— 工具标注官：给 MCP 工具打三维标签（多维度组织的落点）
+ * classify_tools —— 工具标注官：给功能条目打四维标签（多维度组织的落点）
  *
- * 用户定调（2026-08-25）：功能（MCP 工具）应该"分级放出来"，且有"很多种方向
- * 很多维度"去组织。本模块给每个工具三个正交维度的标注，视图层按维度切换分组：
+ * 用户定调（2026-08-25）：功能（MCP 工具+CLI 命令）应该"分级放出来"，且有
+ * "很多种方向很多维度"去组织；不同功能的暴露形态（MCP 独占/CLI 独占/双入口）
+ * 也是一维。本模块给每个功能条目打标：
  *   - domain 能力域（8 域封闭集合）：做什么类型的事
  *   - tier 分级：P0 日常高频 / P1 进阶 / P2 专家低频
  *   - slot 解剖槽位：复用 pipeline-v1 taxonomy（工具在流水线的位置）
- *   - summary：≤16 字人话功能名（注册描述已经很人话，LLM 只做精炼不发明）
+ *   - kind 暴露形态：确定性（MCP/CLI/双入口），不走 LLM
+ *   - summary：≤16 字人话功能名（从描述精炼，不发明）
  *
  * LLM 缺席/失败 → 关键词启发式降级；命中不了 → 诚实进 unclassified。
  */
 
-import type { RegistryTool } from './registry_extract.js';
+import type { FunctionEntry } from './collect_functions.js';
 import type { BrickifyResult } from './brickify.js';
 import { loadLlmConfig, callChat } from './llm_focus.js';
 import { loadExplainConfig } from './explain_gen.js';
@@ -54,6 +56,8 @@ export interface MappedTool {
   domain: string;
   tier: 'P0' | 'P1' | 'P2';
   slot: string;
+  /** 暴露形态（确定性，不走 LLM） */
+  kind: 'mcp_only' | 'cli_only' | 'both';
   confidence: number;
   mode: 'llm' | 'rule';
   /** 触达的实现簇（含积木 id）——确定性连线（import 分析） */
@@ -73,8 +77,8 @@ function toLlmCfg(c: ReturnType<typeof loadExplainConfig>) {
   return c ? { apiKey: c.apiKey, model: c.model, baseURL: c.baseURL } : null;
 }
 
-/** 规则降级：工具名/描述关键词 → domain/slot/tier。 */
-function annotateByRule(tools: RegistryTool[], taxonomy: Taxonomy): Record<string, ToolAnnotation> {
+/** 规则降级：名称/描述关键词 → domain/slot/tier。 */
+function annotateByRule(tools: FunctionEntry[], taxonomy: Taxonomy): Record<string, ToolAnnotation> {
   const out: Record<string, ToolAnnotation> = {};
   const KW: Array<[string, string[]]> = [
     ['design', ['dsl', 'feature', 'scaffold', 'render', 'simulation']],
@@ -120,7 +124,7 @@ function annotateByRule(tools: RegistryTool[], taxonomy: Taxonomy): Record<strin
 /** LLM 标注官：三维标签一次出（分批防 payload 爆）。 */
 async function annotateByLlm(
   cfg: { apiKey: string; model: string; baseURL: string },
-  tools: RegistryTool[],
+  tools: FunctionEntry[],
   domains: ToolDomain[],
   taxonomy: Taxonomy,
 ): Promise<Record<string, ToolAnnotation> | null> {
@@ -134,7 +138,7 @@ async function annotateByLlm(
     const toolsText = group
       .map(
         (t) =>
-          `### ${t.name}\ntitle: ${t.title}\n描述首句: ${t.summarySource}\n触达模块: ${t.implModules.slice(0, 6).join(', ') || '（内联实现）'}`,
+          `### ${t.name}（${t.kind === 'both' ? 'MCP+CLI 双入口' : t.kind === 'cli_only' ? 'CLI 独占' : 'MCP 独占'}）\n描述: ${t.desc.slice(0, 200) || t.summarySource}\n触达模块: ${t.implModules.slice(0, 6).join(', ') || '（内联实现）'}`,
       )
       .join('\n\n');
 
@@ -182,11 +186,11 @@ async function annotateByLlm(
 }
 
 /**
- * 主入口：注册表工具 → 三维标注 + 映射到积木实现簇。
+ * 主入口：统一功能条目（MCP+CLI）→ 四维标注 + 映射到积木实现簇。
  * implModules → 簇映射是确定性的（brickify 文件集精确匹配），匹配不上如实上报。
  */
 export async function classifyTools(
-  tools: RegistryTool[],
+  tools: FunctionEntry[],
   r: BrickifyResult,
   opts: { taxonomy?: Taxonomy; domains?: ToolDomain[] } = {},
 ): Promise<ToolsMapResult> {
@@ -235,12 +239,13 @@ export async function classifyTools(
     }
     return {
       name: t.name,
-      title: t.title,
-      description: t.description,
+      title: t.mcp?.title ?? t.name,
+      description: t.desc,
       summary: a?.summary || t.summarySource.slice(0, 16),
       domain: a?.domain ?? 'query',
       tier: a?.tier ?? 'P1',
       slot: a?.slot ?? 'compute',
+      kind: t.kind,
       confidence: a?.confidence ?? 0.3,
       mode: a?.mode ?? 'rule',
       implClusters,
