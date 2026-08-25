@@ -31,6 +31,7 @@ import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
 import { renderWizardHtml } from './render_wizard.js';
 import { renderDslWorkbenchHtml } from './render_dsl_workbench.js';
+import { buildWorkbenchData, writeWorkbenchDataJson } from './workbench_data.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
   const toolsMapOut = readArg('--tools-map');
   const wizardOut = readArg('--wizard');
   const dslWorkbenchOut = readArg('--dsl-workbench');
+  const workbenchDataOut = readArg('--workbench-data');
   const registryFile = readArg('--registry');
   const doNarrate = has('--narrate');
 
@@ -61,7 +63,7 @@ async function main(): Promise<void> {
 
   // LLM 翻译层（可选）：社区/积木/小簇 → 人话。降级安全，永不阻塞。
   let narratives = undefined;
-  if (doNarrate || workbenchOut || sandboxOut || anatomyOut || toolsMapOut || dslWorkbenchOut) {
+  if (doNarrate || workbenchOut || sandboxOut || anatomyOut || toolsMapOut || dslWorkbenchOut || workbenchDataOut) {
     const srcRoot = result.meta.source_root;
     console.log('[narrate] LLM 翻译层启动（未配置则自动降级为事实句）…');
     narratives = await narrateClusters(result, srcRoot);
@@ -224,6 +226,16 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] DSL 协作工作台 HTML → ${abs}`);
+  }
+  if (workbenchDataOut && narratives) {
+    // 工作台数据契约（v1 冻结）：前端窗口B 的对接物——先 mock 跑通交互，
+    // 最后 fetch 此 JSON「重新长数据路线」。结构见 workbench_data.ts。
+    const anatomy = await classifyBricks(result, narratives);
+    const data = buildWorkbenchData(result, anatomy, narratives, path.basename(path.resolve(project)));
+    const abs = writeWorkbenchDataJson(data, workbenchDataOut);
+    console.log(
+      `[workbench-data] 契约 v${data.version} → ${abs}（${data.slots.length} 槽位 · ${data.paths.length} 连线 · ${data.meta.totalIssues} 问题信号）`,
+    );
   }
 }
 
