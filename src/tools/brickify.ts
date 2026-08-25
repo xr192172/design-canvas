@@ -70,6 +70,10 @@ export interface BrickifyBrick {
   files: { frontend: string[]; backend: string[]; shared: string[] };
   total: number;
   dominant: FeatureSide;
+  /** 三类角色文件归组（积木/契约/胶水）——用户三层组织模型 */
+  roles: Record<BrickRole, string[]>;
+  /** 主导角色（块内文件最多的角色；同数按 积木>契约>胶水，功能优先） */
+  role: BrickRole;
   /** 所属功能社区 id（null = 孤立积木，无任何依赖边） */
   community: string | null;
   /** 落在本积木下的混合文件（解耦候选雷达） */
@@ -83,11 +87,46 @@ export interface BrickifyResult {
   mixed_files: MixedFileSignal[];
   /** 积木级有向调用边（社区画线的依据） */
   call_edges: Array<{ from: string; to: string; count: number }>;
-  meta: { project_dir: string; source_root: string; scanned_files: number; langs: string[] };
+  meta: {
+    project_dir: string;
+    source_root: string;
+    scanned_files: number;
+    langs: string[];
+    /** 三层角色文件总数（积木/契约/胶水），用户组织模型 */
+    role_totals: Record<BrickRole, number>;
+  };
   limitations: string[];
 }
 
 const TS_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/;
+
+// ─────────────────────────────────────────────────────────────
+// 三层角色（用户"积木/契约/胶水"组织模型，2026-08-25）
+// 角色正交于 前端/后端：胶水也可能是前端入口(index.tsx)、契约也可能是后端 DTO。
+// ─────────────────────────────────────────────────────────────
+
+export type BrickRole = 'brick' | 'contract' | 'glue';
+
+export const ROLE_LABEL: Record<BrickRole, string> = {
+  brick: '积木(功能)',
+  contract: '契约',
+  glue: '胶水',
+};
+
+/** 架构层 → 三类角色：
+ *   - brick（积木层=功能层）：业务逻辑/数据/界面/通用——可独立成块的"功能核心"
+ *   - contract（契约层）：类型/接口/契约/DTO——积木暴露给外界的"插头"
+ *   - glue（胶水层）：入口/路由/中间件/配置——把积木经契约接起来的"布线" */
+export function roleOfLayer(layer: string): BrickRole {
+  if (layer === 'types') return 'contract';
+  if (layer === 'entry' || layer === 'middleware' || layer === 'config' || layer === 'api') return 'glue';
+  return 'brick'; // service/data/ui/utility/core/test
+}
+
+/** 文件相对路径 → 角色（复用 layer_detect 的分层判定） */
+export function roleOfFile(rel: string): BrickRole {
+  return roleOfLayer(matchLayer(rel));
+}
 
 /** 读文件相对 source_root 的源码；失败返回空串（尽力而为） */
 function readRel(sourceRoot: string, rel: string): string {
@@ -441,11 +480,16 @@ export async function buildBrickify(opts: BrickifyOptions): Promise<BrickifyResu
 
   // 积木默认字段。
   const seedFiles: Record<string, { frontend: string[]; backend: string[]; shared: string[] }> = {};
+  const seedRoles: Record<string, Record<BrickRole, string[]>> = {};
   for (const rel of rels) {
     const id = featureIdOf(rel);
     const bucket = seedFiles[id] ?? (seedFiles[id] = { frontend: [], backend: [], shared: [] });
     const side = sideOfLayer(matchLayer(rel));
     (side === 'frontend' ? bucket.frontend : side === 'backend' ? bucket.backend : bucket.shared).push(rel);
+    // 三层角色归组
+    const role = roleOfFile(rel);
+    const rb = seedRoles[id] ?? (seedRoles[id] = { brick: [], contract: [], glue: [] });
+    rb[role].push(rel);
   }
   // 积木 → 其下混合文件
   const mixedByBrick = new Map<string, string[]>();
@@ -466,11 +510,21 @@ export async function buildBrickify(opts: BrickifyOptions): Promise<BrickifyResu
         : files.backend.length > files.frontend.length && files.backend.length >= files.shared.length
           ? 'backend'
           : 'shared';
+    // 主导角色：文件最多者；同数按 积木>契约>胶水（功能优先）
+    const roles = seedRoles[id] ?? { brick: [], contract: [], glue: [] };
+    const roleCount = (r: BrickRole): number => roles[r].length;
+    const role: BrickRole = roleCount('brick') >= roleCount('contract') && roleCount('brick') >= roleCount('glue')
+      ? 'brick'
+      : roleCount('contract') >= roleCount('glue')
+        ? 'contract'
+        : 'glue';
     return {
       id,
       files,
       total,
       dominant,
+      roles,
+      role,
       community: brickComm.get(id) ?? null,
       mixed_files: mixedByBrick.get(id) ?? [],
     };
@@ -502,12 +556,25 @@ export async function buildBrickify(opts: BrickifyOptions): Promise<BrickifyResu
       source_root: sourceRoot,
       scanned_files: rels.length,
       langs: [...langs].sort(),
+      // 三层角色文件总数（积木/契约/胶水）——用户组织模型
+      role_totals: summarizeRoles(bricks),
     },
     limitations: [
       '积木 = 源码根首层目录做种子，叠加依赖边校正；不自动搬目录（保守）',
       '功能社区 = 积木间依赖边的无向连通分量 + 内聚度；启发式，需人确认边界',
+      '三类角色（积木/契约/胶水）= 复用 layer_detect 层的模式启发式映射，非运行时确证；' +
+        'type→契约(interface/dto/types)，entry/middleware/config/api→胶水，service/data/ui/utility/core→积木(功能)',
       '混合文件 = AST 顶层声明依赖聚类的"信号级"标记；不自动切分文件内部，解耦拆分需人/LLM 确认',
       '依赖边仅工程内相对 import；裸包名跨文件不可解析故跳过',
     ],
   };
+}
+
+type RoleTotals = Record<BrickRole, number>;
+
+/** 汇总各积木角色文件数，得到全项目三层角色分布。 */
+function summarizeRoles(bricks: BrickifyBrick[]): RoleTotals {
+  const t: RoleTotals = { brick: 0, contract: 0, glue: 0 };
+  for (const b of bricks) for (const role of Object.keys(b.roles) as BrickRole[]) t[role] += b.roles[role].length;
+  return t;
 }

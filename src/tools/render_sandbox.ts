@@ -707,6 +707,22 @@ export function renderBrickifyWorkbenchHtml(r: BrickifyResult): string {
 
   const limHtml = r.limitations.map((l) => `<li>${esc(l)}</li>`).join('');
 
+  // 三层角色（积木/契约/胶水）——用户组织模型
+  const rt = m.role_totals;
+  const roleBadge = (role: 'brick' | 'contract' | 'glue'): string => {
+    const cls = { brick: 'rb-brick', contract: 'rb-contract', glue: 'rb-glue' }[role];
+    const label = { brick: '积木(功能)', contract: '契约', glue: '胶水' }[role];
+    return `<span class="role-b ${cls}">${esc(label)}</span>`;
+  };
+  const roleRows = r.bricks
+    .map((b) => `<tr>
+        <td><b>${esc(b.id)}</b></td>
+        <td>${roleBadge(b.role)}</td>
+        <td class="role-cnt">功能 ${b.roles.brick.length} · 契约 ${b.roles.contract.length} · 胶水 ${b.roles.glue.length}</td>
+        <td class="role-cnt">${b.community ? esc(b.community) : '-'}</td>
+      </tr>`)
+    .join('');
+
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -748,6 +764,17 @@ h2 .hint{font-size:11px;color:var(--muted);font-weight:400}
 .m-clu{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
 .m-reason{font-size:11px;color:var(--muted)}
 .empty{padding:16px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:12px}
+.role-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.role-table td,.role-table th{font-size:12px;padding:8px 12px;text-align:left;border-bottom:1px solid var(--border)}
+.role-table th{background:#f4f4f5;font-weight:600;color:var(--muted)}
+.role-table tr:last-child td{border-bottom:none}
+.role-b{display:inline-block;padding:2px 9px;border-radius:10px;font-size:10.5px;line-height:1;font-weight:600}
+.rb-brick{background:#ecfdf5;color:#15803d;border:1px solid #bbf7d0}
+.rb-contract{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+.rb-glue{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}
+.legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.lg{font-size:11px;display:flex;align-items:center;gap:6px;color:var(--muted)}
+.role-cnt{color:var(--muted);font-size:11px}
 footer{padding:16px 22px;border-top:1px solid var(--border);background:var(--card)}
 footer ul{margin:0;color:var(--muted);font-size:11px;padding-left:18px;display:flex;flex-wrap:wrap;gap:4px 24px}
 </style>
@@ -756,12 +783,24 @@ footer ul{margin:0;color:var(--muted);font-size:11px;padding-left:18px;display:f
 <header>
   <h1>功能社区工作台 · ${esc(projectName)}</h1>
   <span class="meta">${m.scanned_files} 文件 → ${r.bricks.length} 块积木 → ${r.communities.length} 个功能社区</span>
-  <div class="megacount"><span class="mc"><b>${r.communities.length}</b>社区</span><span class="mc"><b>${r.mixed_files.length}</b>混合文件</span><span class="mc"><b>${bridges.length}</b>跨社区桥</span></div>
+  <div class="megacount"><span class="mc"><b>${r.communities.length}</b>社区</span><span class="mc"><b>${r.mixed_files.length}</b>混合文件</span><span class="mc"><b>${bridges.length}</b>跨社区桥</span><span class="mc"><b>${rt.brick}/${rt.contract}/${rt.glue}</b>积木/契约/胶水</span></div>
 </header>
 <main>
   <section>
     <h2>功能社区（依赖边连通分量，取代"按目录硬切+基名相似"）<span class="hint">积木=功能；社区内聚度 = 内部边/总边</span></h2>
     <div class="grid">${commCards}</div>
+  </section>
+  <section>
+    <h2>三层角色（积木/契约/胶水——用户组织模型）<span class="hint">积木=功能核心 · 契约=类型/接口插头 · 胶水=入口/路由/中间件接线</span></h2>
+    <div class="legend">
+      <span class="lg">${roleBadge('brick')}业务逻辑/数据/界面——可独立成块</span>
+      <span class="lg">${roleBadge('contract')}type/interface/dto/契约——积木外露的插头</span>
+      <span class="lg">${roleBadge('glue')}entry/middleware/config/api——把积木接起来的布线</span>
+    </div>
+    <table class="role-table">
+      <tr><th>积木</th><th>主导角色</th><th>角色分布</th><th>所属社区</th></tr>
+      ${roleRows}
+    </table>
   </section>
   <section>
     <h2>跨社区调用（桥 = 高耦合连接点，思维导图重点）<span class="hint">桥梁通常提示应提升为共享积木</span></h2>

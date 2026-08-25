@@ -55,6 +55,8 @@ import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsV
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
+import { runRefactorJudge } from './tools/refactor_judge.js';
+import type { JudgeIssue, JudgeDecision } from './tools/refactor_judge.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
@@ -1417,6 +1419,58 @@ const TOOL_DEFS: ToolDef[] = [
           `可直接改名的项 ${items.length} 条，已附在 data.items 供 rename_many 使用。`,
         data: { ...result, items },
       };
+    }),
+  },
+  {
+    name: 'refactor_judge',
+    title: 'LLM review gate: collect issues, decide adopt/reject, escalate the unsure to human (via context/inbox)',
+    description:
+      'LLM 审闭环的裁决门：接受候选问题清单，逐条裁【采纳/驳回/不确定(+置信度+理由)】，' +
+      '把"拿不定主意"的（uncertain）上抛回控制台/上下文（经 alert_inbox 入箱，下一次工具响应自动附带），' +
+      '其余进 decided（adopt/reject）。' +
+      '这是"用工具收集问题 → 问题回吐给 LLM → 再给人审"的最小闭环，无需交互审核 UI。' +
+      '用法：给我 issues（type/file/desc/severity/evidence 数组）；不传 decide → 全部判"不确定"全部上抛（等 LLM/人拍板），' +
+      '或传 decide 裁决器自动路由（adopt→做/继续，reject→忽略，unsure→上抛）。' +
+      '返回 result：{ decided:{adopt,reject}, escalated, decisions, meta, review_prompt }，' +
+      '其中 review_prompt 可直接贴给人看。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根目录（用于入箱定位；可省略）'),
+      issues: z
+        .array(
+          z.object({
+            type: z.string().describe('问题类型：dead_code/dead_import/mixed_signals/package_migration…'),
+            file: z.string().optional().describe('关联文件'),
+            desc: z.string().describe('人话描述'),
+            severity: z.enum(['low', 'medium', 'high']).optional().describe('严重度，默认 medium'),
+            evidence: z.string().optional().describe('支撑证据'),
+            confidence: z.number().min(0).max(1).optional().describe('预备置信度'),
+          }),
+        )
+        .describe('候选问题清单'),
+      verdicts: z
+        .array(
+          z.object({
+            issue_id: z.string().describe('对应 issue 的 id；缺省自动补 type#序号'),
+            verdict: z.enum(['adopt', 'reject', 'unsure']).describe('采纳/驳回/拿不定主意'),
+            reason: z.string().describe('一句话理由'),
+            confidence: z.number().min(0).max(1).optional().describe('置信度 0..1'),
+          }),
+        )
+        .optional()
+        .describe('裁决结果；不传则全部判"不确定"上抛（最小形态）'),
+      escalate_to_inbox: z.boolean().optional().default(true).describe('uncertain 是否入收件箱回上下文'),
+    },
+    handler: wrap(async (a) => {
+      const issues = (a.issues as JudgeIssue[]) ?? [];
+      const verdicts = a.verdicts as JudgeDecision[] | undefined;
+      const result = await runRefactorJudge({
+        project_dir: a.project_dir ? String(a.project_dir) : undefined,
+        issues,
+        // 传了 verdicts 就用它当裁决器，否则缺省（全部上抛）
+        decide: verdicts ? () => verdicts : undefined,
+        escalate_to_inbox: a.escalate_to_inbox !== false,
+      });
+      return { message: result.review_prompt, data: result };
     }),
   },
 ];

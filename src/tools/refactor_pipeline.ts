@@ -41,6 +41,7 @@ import {
   type PackageMigrationSpec,
 } from './refactor_langs.js';
 import { pythonExecutor } from './python_refactor/index.js';
+import type { JudgeIssue } from './refactor_judge.js';
 
 // re-export 契约类型（向后兼容：外部可从本模块取用）
 export type {
@@ -99,6 +100,9 @@ export interface PipelineOptions {
   };
   /** true = 自动探测验证命令；{commands} = 自定义命令组；false/缺省 = 不验证仅落盘 */
   verify?: boolean | { commands?: VerifyCommand[] };
+  /** LLM 审闭环钩子：管线跑完且确有改动时，把"改动的文件+类型"合成候选问题喂给外接裁决/人审
+   *  （典型接 refactor_judge：LLM 看到清单后给人审拿不定主意的项）。可选。 */
+  onReviewIssues?: (issues: JudgeIssue[]) => void;
   /** 单测注入的验证执行器（默认跑真命令） */
   verifyImpl?: (o: { cwd: string; commands: VerifyCommand[] }) => VerificationOutcome;
   /** 多语言执行器注册表；缺省用内置 DEFAULT_LANGS（TS/Go）。新语言调用
@@ -447,10 +451,24 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     planned_steps: planned,
   };
 
+  // LLM 审闭环：记录实际改动的文件，跑完喂给 onReviewIssues（若设置）
+  const changedFiles = new Set<string>();
+  const relTo = (abs: string): string => (path.relative(cwd, abs) || abs).split(path.sep).join('/');
+
   for (const [i, s] of stepList.entries()) {
     await runStage(i + 1, s.stage.kind, s.stage.label, s.enabled, () =>
       s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead, migrate: s.migrate }),
     );
+  }
+
+  if (opts.onReviewIssues && changedFiles.size > 0) {
+    const issues: JudgeIssue[] = [...changedFiles].map((abs) => ({
+      type: 'refactor_change',
+      file: relTo(abs),
+      desc: `重构管线改动过的文件，建议纳入人工复核`,
+      severity: 'medium',
+    }));
+    opts.onReviewIssues(issues);
   }
 
   return r;
@@ -496,6 +514,11 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
     r.total_files_changed += Math.max(plan.absToNew.size, moves.length);
     r.total_units_removed += units;
+    for (const abs of plan.absToNew.keys()) changedFiles.add(abs);
+    for (const m of moves) {
+      changedFiles.add(m.from);
+      changedFiles.add(m.to);
+    }
 
     // 不可验证：仍已落盘，但如实标注
     if (!verifyEnabled) {

@@ -13,7 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildBrickify } from './brickify.js';
+import { buildBrickify, ROLE_LABEL } from './brickify.js';
 import { renderBrickifyWorkbenchHtml } from './render_sandbox.js';
 
 function readArg(name: string): string | undefined {
@@ -36,6 +36,17 @@ async function main(): Promise<void> {
   // 摘要
   console.log(`[brickify] ${result.meta.scanned_files} 文件 → ${result.bricks.length} 块积木 → ${result.communities.length} 个社区`);
   console.log(`[brickify] 混合文件信号 ${result.mixed_files.length} 个；跨社区桥 ${countBridges(result)} 条`);
+  const rt = result.meta.role_totals;
+  console.log(
+    `[brickify] 三层角色 积木(功能)${rt.brick} / 契约${rt.contract} / 胶水${rt.glue}`,
+  );
+  for (const b of result.bricks) {
+    const tr = b.roles;
+    if (tr.brick.length + tr.contract.length + tr.glue.length === 0) continue;
+    console.log(
+      `  积木 ${b.id}(${b.total}) [${ROLE_LABEL[b.role]}]: 功能${tr.brick.length}/契约${tr.contract.length}/胶水${tr.glue.length} 社区=${b.community ?? '-'}`,
+    );
+  }
   for (const c of result.communities) {
     console.log(`  社区 ${c.id}(${c.bricks.length}): 内聚 ${Math.round(c.cohesion * 100)}% 内部${c.internal_edges}/边界${c.external_edges}`);
   }

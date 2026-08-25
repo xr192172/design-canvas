@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { buildFileDeps, computeCommunities, detectMixedFiles, buildBrickify } from '../../src/tools/brickify';
+import { buildFileDeps, computeCommunities, detectMixedFiles, buildBrickify, roleOfFile, roleOfLayer, type BrickRole } from '../../src/tools/brickify';
 
 function makeTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'brickify-'));
@@ -107,6 +107,42 @@ export function beta() { return helperA(); }
     );
     const signals = await detectMixedFiles(root, ['single.ts']);
     expect(signals).toHaveLength(0);
+  });
+});
+
+describe('三层角色（积木/契约/胶水）', () => {
+  it('roleOfLayer 决定性映射：types→契约，entry/middleware/config/api→胶水，其余→积木(功能)', () => {
+    expect(roleOfLayer('types')).toBe('contract');
+    expect(roleOfLayer('entry')).toBe('glue');
+    expect(roleOfLayer('middleware')).toBe('glue');
+    expect(roleOfLayer('config')).toBe('glue');
+    expect(roleOfLayer('api')).toBe('glue');
+    for (const l of ['service', 'data', 'ui', 'utility', 'core', 'test']) {
+      expect(roleOfLayer(l)).toBe('brick');
+    }
+  });
+
+  it('roleOfFile 按路径分层复用（types 目录 → 契约；main.ts → 胶水；service 目录 → 积木）', () => {
+    expect(roleOfFile('billing/types.ts')).toBe('contract');
+    expect(roleOfFile('billing/main.ts')).toBe('glue');
+    expect(roleOfFile('billing/routes/order.ts')).toBe('glue');
+    expect(roleOfFile('billing/service/pay.ts')).toBe('brick');
+    expect(roleOfFile('root.ts')).toBe('brick');
+  });
+
+  it('buildBrickify 聚合每块积木的三层角色归组与主导角色', async () => {
+    const r = await buildBrickify({ project_dir: path.join(process.cwd()), source_root: SRC });
+    const rt = r.meta.role_totals;
+    const sum = rt.brick + rt.contract + rt.glue;
+    expect(sum).toBe(r.meta.scanned_files);
+    expect(r.bricks.every((b) => b.role === 'brick' || b.role === 'contract' || b.role === 'glue')).toBe(true);
+    for (const b of r.bricks) {
+      const n = b.roles.brick.length + b.roles.contract.length + b.roles.glue.length;
+      expect(n).toBe(b.total); // 角色归组不漏不重
+      const roles: BrickRole[] = ['brick', 'contract', 'glue'];
+      const max = Math.max(b.roles.brick.length, b.roles.contract.length, b.roles.glue.length);
+      expect(b.roles[b.role].length).toBe(max); // 主导角色 = 文件最多者
+    }
   });
 });
 
