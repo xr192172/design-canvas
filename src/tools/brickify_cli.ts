@@ -29,6 +29,7 @@ import { extractCliCommands } from './cli_extract.js';
 import { collectFunctions } from './collect_functions.js';
 import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
+import { renderWizardHtml } from './render_wizard.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -39,7 +40,7 @@ const has = (name: string): boolean => process.argv.includes(name);
 async function main(): Promise<void> {
   const project = readArg('--project');
   if (!project) {
-    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--anatomy <lanes.html>] [--tools-map <tools.html>] [--registry <server_registry.ts>] [--narrate]');
+    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--anatomy <lanes.html>] [--tools-map <tools.html>] [--wizard <wizard.html>] [--registry <server_registry.ts>] [--narrate]');
     process.exit(2);
   }
   const source = readArg('--source');
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
   const sandboxOut = readArg('--sandbox');
   const anatomyOut = readArg('--anatomy');
   const toolsMapOut = readArg('--tools-map');
+  const wizardOut = readArg('--wizard');
   const registryFile = readArg('--registry');
   const doNarrate = has('--narrate');
 
@@ -192,6 +194,14 @@ async function main(): Promise<void> {
       fs.writeFileSync(abs, html, 'utf-8');
       console.log(`[brickify] 功能中心视图 HTML → ${abs}`);
     }
+  }
+  if (wizardOut) {
+    // 新功能向导：七步闭环（积木→契约→胶水→采集→登记→验证），独立页面，不动 tools_map
+    const html = renderWizardHtml(path.basename(result.meta.source_root));
+    const abs = path.resolve(wizardOut);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, html, 'utf-8');
+    console.log(`[brickify] 新功能向导 HTML → ${abs}`);
   }
 }
 
