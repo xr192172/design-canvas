@@ -10,6 +10,8 @@
  *   - --json：完整数据报告（file_deps / communities / mixed_files / call_edges）
  *   - --out ：功能社区工作台自包含 HTML（可浏览器直接打开验收）
  *   - --mindmap：项目→社区→积木→积木内小簇→文件 分层导图自包含 HTML（可展开/折叠下钻）
+ *   - --workbench：簇级协作工作台 HTML（DSL 工作台样式：人话节点卡+簇间调用边+点击下钻详情悬窗）
+ *   - --narrate：启用 LLM 翻译层（社区/积木/小簇 → 人话标题+描述；未配置 LLM 自动降级为事实句）
  */
 
 import fs from 'node:fs';
@@ -17,6 +19,8 @@ import path from 'node:path';
 import { buildBrickify, ROLE_LABEL } from './brickify.js';
 import { renderBrickifyWorkbenchHtml } from './render_sandbox.js';
 import { renderBrickifyMindMapHtml } from './render_mindmap.js';
+import { narrateClusters } from './cluster_narrator.js';
+import { renderClusterWorkbenchHtml } from './render_cluster_workbench.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -27,15 +31,33 @@ const has = (name: string): boolean => process.argv.includes(name);
 async function main(): Promise<void> {
   const project = readArg('--project');
   if (!project) {
-    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>]');
+    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--narrate]');
     process.exit(2);
   }
   const source = readArg('--source');
   const jsonOut = readArg('--json');
   const htmlOut = readArg('--out');
   const mindmapOut = readArg('--mindmap');
+  const workbenchOut = readArg('--workbench');
+  const doNarrate = has('--narrate');
 
   const result = await buildBrickify({ project_dir: project, source_root: source });
+
+  // LLM 翻译层（可选）：社区/积木/小簇 → 人话。降级安全，永不阻塞。
+  let narratives = undefined;
+  if (doNarrate || workbenchOut) {
+    const srcRoot = result.meta.source_root;
+    console.log('[narrate] LLM 翻译层启动（未配置则自动降级为事实句）…');
+    narratives = await narrateClusters(result, srcRoot);
+    console.log(
+      `[narrate] 翻译完成：LLM ${narratives.meta.llm_ok}/${narratives.meta.total}` +
+        (narratives.meta.degraded ? '（全部降级）' : ''),
+    );
+    // 翻译摘要：人话标题直接上控制台（这本身就是"看懂"的第一现场）
+    for (const [id, n] of Object.entries(narratives.clusters)) {
+      console.log(`  簇 ${id} → 「${n.title}」 ${n.desc.slice(0, 50)}${n.desc.length > 50 ? '…' : ''}`);
+    }
+  }
   // 摘要
   console.log(`[brickify] ${result.meta.scanned_files} 文件 → ${result.bricks.length} 块积木 → ${result.communities.length} 个社区`);
   console.log(`[brickify] 混合文件信号 ${result.mixed_files.length} 个；跨社区桥 ${countBridges(result)} 条`);
@@ -84,6 +106,13 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] 分层导图(下钻) HTML → ${abs}`);
+  }
+  if (workbenchOut) {
+    const html = renderClusterWorkbenchHtml(result, narratives);
+    const abs = path.resolve(workbenchOut);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, html, 'utf-8');
+    console.log(`[brickify] 簇级协作工作台 HTML → ${abs}`);
   }
 }
 
