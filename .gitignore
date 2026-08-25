@@ -8,6 +8,9 @@ build/
 # 渲染产物（HTML 文件，含嵌套目录）
 output/
 
+# 狗食验收产物（brickify / refactor_judge 等工具跑出的 HTML/JSON 报告，不入库）
+.artifacts/
+
 # 布局腐坏备份 / 诊断脚本等临时产物
 .backup/
 
