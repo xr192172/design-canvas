@@ -305,12 +305,17 @@ export async function narrateClusters(
     await runBatches(missing, Math.min(3, batch));
   }
 
-  // 第0层：项目总览（用已翻好的积木人话做证据，保证"项目→功能"与下钻一一对应）
-  try {
-    const ov = await narrateOverview(cfg, r, r.meta.project_dir, result);
-    if (ov) result.overview = ov;
-  } catch {
-    // 总览失败：保持降级
+  // 第0层：项目总览（用已翻好的积木人话做证据，保证"项目→功能"与下钻一一对应；失败重试一次）
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const ov = await narrateOverview(cfg, r, r.meta.project_dir, result);
+      if (ov) {
+        result.overview = ov;
+        break;
+      }
+    } catch {
+      // 重试一次；再失败保持降级
+    }
   }
 
   result.meta.degraded = result.meta.llm_ok === 0;
