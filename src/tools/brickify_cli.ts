@@ -24,6 +24,9 @@ import { renderClusterWorkbenchHtml } from './render_cluster_workbench.js';
 import { renderSandboxCanvasHtml } from './render_sandbox_canvas.js';
 import { classifyBricks } from './classify_bricks.js';
 import { renderAnatomyHtml } from './render_anatomy.js';
+import { extractRegistryToolsFromFile } from './registry_extract.js';
+import { classifyTools } from './classify_tools.js';
+import { renderToolsMapHtml } from './render_tools_map.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -34,7 +37,7 @@ const has = (name: string): boolean => process.argv.includes(name);
 async function main(): Promise<void> {
   const project = readArg('--project');
   if (!project) {
-    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--anatomy <lanes.html>] [--narrate]');
+    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>] [--workbench <wb.html>] [--sandbox <canvas.html>] [--anatomy <lanes.html>] [--tools-map <tools.html>] [--registry <server_registry.ts>] [--narrate]');
     process.exit(2);
   }
   const source = readArg('--source');
@@ -44,13 +47,15 @@ async function main(): Promise<void> {
   const workbenchOut = readArg('--workbench');
   const sandboxOut = readArg('--sandbox');
   const anatomyOut = readArg('--anatomy');
+  const toolsMapOut = readArg('--tools-map');
+  const registryFile = readArg('--registry');
   const doNarrate = has('--narrate');
 
   const result = await buildBrickify({ project_dir: project, source_root: source });
 
   // LLM 翻译层（可选）：社区/积木/小簇 → 人话。降级安全，永不阻塞。
   let narratives = undefined;
-  if (doNarrate || workbenchOut || sandboxOut || anatomyOut) {
+  if (doNarrate || workbenchOut || sandboxOut || anatomyOut || toolsMapOut) {
     const srcRoot = result.meta.source_root;
     console.log('[narrate] LLM 翻译层启动（未配置则自动降级为事实句）…');
     narratives = await narrateClusters(result, srcRoot);
@@ -154,6 +159,29 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] 解剖泳道视图 HTML → ${abs}`);
+  }
+  if (toolsMapOut) {
+    // 功能中心：MCP 工具注册表（权威功能清单）→ 三维标注 + 实现簇连线
+    const reg = registryFile ?? path.join(result.meta.source_root, 'server_registry.ts');
+    if (!fs.existsSync(reg)) {
+      console.warn(`[tools-map] 未找到工具注册表 ${reg}，跳过（可用 --registry 指定）`);
+    } else {
+      const extracted = extractRegistryToolsFromFile(reg);
+      console.log(`[tools-map] 注册表提取：${extracted.tools.length} 个 MCP 工具，${extracted.importSymbols} 个 import 符号`);
+      const map = await classifyTools(extracted.tools, result);
+      console.log(`[tools-map] ${map.meta.mode === 'llm' ? `LLM 标注 ${map.meta.llm_ok}/${map.meta.total}` : '启发式标注'}；${map.tools.filter((t) => t.implClusters.length > 0).length}/${map.meta.total} 个工具已连实现簇`);
+      const byDomain = new Map<string, number>();
+      for (const t of map.tools) byDomain.set(t.domain, (byDomain.get(t.domain) ?? 0) + 1);
+      console.log(`  能力域分布: ${[...byDomain.entries()].map(([d, n]) => `${map.domains.find((x) => x.id === d)?.label ?? d} ${n}`).join(' · ')}`);
+      const byTier = new Map<string, number>();
+      for (const t of map.tools) byTier.set(t.tier, (byTier.get(t.tier) ?? 0) + 1);
+      console.log(`  分级分布: ${[...byTier.entries()].map(([k, n]) => `${k} ${n}`).join(' · ')}`);
+      const html = renderToolsMapHtml(result, map);
+      const abs = path.resolve(toolsMapOut);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, html, 'utf-8');
+      console.log(`[brickify] 功能中心视图 HTML → ${abs}`);
+    }
   }
 }
 
