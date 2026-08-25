@@ -9,12 +9,14 @@
  *   - 控制台：积木/社区/混合文件/跨社区桥 摘要
  *   - --json：完整数据报告（file_deps / communities / mixed_files / call_edges）
  *   - --out ：功能社区工作台自包含 HTML（可浏览器直接打开验收）
+ *   - --mindmap：项目→社区→积木→积木内小簇→文件 分层导图自包含 HTML（可展开/折叠下钻）
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildBrickify, ROLE_LABEL } from './brickify.js';
 import { renderBrickifyWorkbenchHtml } from './render_sandbox.js';
+import { renderBrickifyMindMapHtml } from './render_mindmap.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -25,12 +27,13 @@ const has = (name: string): boolean => process.argv.includes(name);
 async function main(): Promise<void> {
   const project = readArg('--project');
   if (!project) {
-    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>]');
+    console.error('usage: brickify_cli --project <dir> [--source <subdir>] [--json <report.json>] [--out <community.html>] [--mindmap <mindmap.html>]');
     process.exit(2);
   }
   const source = readArg('--source');
   const jsonOut = readArg('--json');
   const htmlOut = readArg('--out');
+  const mindmapOut = readArg('--mindmap');
 
   const result = await buildBrickify({ project_dir: project, source_root: source });
   // 摘要
@@ -43,8 +46,17 @@ async function main(): Promise<void> {
   for (const b of result.bricks) {
     const tr = b.roles;
     if (tr.brick.length + tr.contract.length + tr.glue.length === 0) continue;
+    // 第2层下钻摘要：积木内小簇数 + 退化（整层耦合）提示
+    const subs = b.sub_clusters;
+    const nonDegenerate = subs.filter((s) => !s.degenerate).length;
+    const subInfo =
+      nonDegenerate > 0
+        ? ` 下钻${subs.length}簇`
+        : subs.length === 1
+          ? ` 下钻1簇(退化为整层耦合)`
+          : ` 下钻${subs.length}簇`;
     console.log(
-      `  积木 ${b.id}(${b.total}) [${ROLE_LABEL[b.role]}]: 功能${tr.brick.length}/契约${tr.contract.length}/胶水${tr.glue.length} 社区=${b.community ?? '-'}`,
+      `  积木 ${b.id}(${b.total}) [${ROLE_LABEL[b.role]}]: 功能${tr.brick.length}/契约${tr.contract.length}/胶水${tr.glue.length} 社区=${b.community ?? '-'}${subInfo}`,
     );
   }
   for (const c of result.communities) {
@@ -65,6 +77,13 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] 社区工作台 HTML → ${abs}`);
+  }
+  if (mindmapOut) {
+    const html = renderBrickifyMindMapHtml(result);
+    const abs = path.resolve(mindmapOut);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, html, 'utf-8');
+    console.log(`[brickify] 分层导图(下钻) HTML → ${abs}`);
   }
 }
 

@@ -64,12 +64,40 @@ export interface Community {
   cohesion: number;
 }
 
+/**
+ * 第2层小簇：积木（目录种子）内按"文件级依赖连通分量"再聚出的更小功能簇。
+ * 下钻语义（对齐用户"沙盘节点可下钻"的心智模型）：点开一个积木 → 看到它内部
+ * 若干个内聚的功能簇 → 每簇再下钻到具体文件。
+ */
+export interface BrickSubCluster {
+  /** 簇 id：`${积木id}#${序号}`（同一积木内确定） */
+  id: string;
+  /** 簇内文件（相对 source_root，已排序） */
+  files: string[];
+  total: number;
+  dominant: FeatureSide;
+  /** 主导角色（功能>契约>胶水） */
+  role: BrickRole;
+  /** 簇内三层角色归组（下钻第二维度：功能/契约/胶水 分拨） */
+  roles: Record<BrickRole, string[]>;
+  /** 簇内依赖边权重（会议数） */
+  internal_edges: number;
+  /** 出境边：连到本积木其他簇/文件，或其他积木 */
+  external_edges: number;
+  /** 簇内聚度 = internal/(internal+external)；1=完全自足 */
+  cohesion: number;
+  /** true = 整个积木退化为单簇（目录内高度耦合，无更小功能边界可切） */
+  degenerate: boolean;
+}
+
 /** 升级版积木（目录种子 + 依赖社区标签 + 混合文件雷达） */
 export interface BrickifyBrick {
   id: string;
   files: { frontend: string[]; backend: string[]; shared: string[] };
   total: number;
   dominant: FeatureSide;
+  /** 第2层垂直细化：积木内按文件级依赖再聚的更小功能簇（下钻用） */
+  sub_clusters: BrickSubCluster[];
   /** 三类角色文件归组（积木/契约/胶水）——用户三层组织模型 */
   roles: Record<BrickRole, string[]>;
   /** 主导角色（块内文件最多的角色；同数按 积木>契约>胶水，功能优先） */
@@ -453,6 +481,92 @@ export function computeCommunities(rels: string[], fileDeps: FileDep[]): Communi
 }
 
 // ─────────────────────────────────────────────────────────────
+// ④ 第2层：积木内小簇（文件级依赖连通分量，垂直细化下钻）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 第2层聚类：给定一个积木（目录种子）的全体文件，用"仅本积木内部的文件级依赖边"
+ * 做无向连通分量 → 得到该积木内部若干个更小功能簇。
+ *
+ * 诚实边界：
+ *   - 连通分量是确定性的（不引入随机社区算法）；目录若高度耦合，会退化为单簇，
+ *     degenerate=true 如实标注（"无更小功能边界可切"——向内钻到底即整层耦合）。
+ *   - 内聚度按簇：簇内边权重 / (簇内+簇出境边权重)。
+ *   - 每簇附带三层角色归组，作为下钻的第二个维度：即便连通度退化为单簇，
+ *     渲染端仍能按 功能/契约/胶水 三拨来展示簇内组织。
+ */
+export function computeBrickSubClusters(
+  brickId: string,
+  files: string[],
+  fileDeps: FileDep[],
+): BrickSubCluster[] {
+  // 仅本积木内部的文件级依赖边
+  const intra: Array<{ from: string; to: string; count: number }> = [];
+  for (const d of fileDeps) {
+    if (featureIdOf(d.from) !== brickId || featureIdOf(d.to) !== brickId) continue;
+    intra.push({ from: d.from, to: d.to, count: d.count });
+  }
+  const sorted = [...files].sort();
+  const idx = new Map(sorted.map((f, i) => [f, i]));
+  const uf = new UnionFind(sorted.length);
+  for (const e of intra) {
+    const a = idx.get(e.from), b = idx.get(e.to);
+    if (a !== undefined && b !== undefined && a !== b) uf.union(a, b);
+  }
+  const comp = new Map<number, string[]>();
+  for (let i = 0; i < sorted.length; i++) {
+    const r = uf.find(i);
+    const arr = comp.get(r) ?? [];
+    arr.push(sorted[i]);
+    comp.set(r, arr);
+  }
+  const clusters = [...comp.values()].sort(
+    (x, y) => y.length - x.length || (x[0] < y[0] ? -1 : 1),
+  );
+  const degenerate = clusters.length <= 1;
+  return clusters.map((filesInCluster, ci) => {
+    const cSet = new Set(filesInCluster);
+    let internal = 0;
+    let external = 0;
+    for (const e of intra) {
+      const aIn = cSet.has(e.from), bIn = cSet.has(e.to);
+      if (aIn && bIn) internal += e.count;
+      else if (aIn || bIn) external += e.count;
+    }
+    const roles: Record<BrickRole, string[]> = { brick: [], contract: [], glue: [] };
+    for (const f of filesInCluster) roles[roleOfFile(f)].push(f);
+    const role: BrickRole =
+      roles.brick.length >= roles.contract.length && roles.brick.length >= roles.glue.length
+        ? 'brick'
+        : roles.contract.length >= roles.glue.length
+          ? 'contract'
+          : 'glue';
+    let fe = 0, be = 0, sh = 0;
+    for (const f of filesInCluster) {
+      const s = sideOfLayer(matchLayer(f));
+      if (s === 'frontend') fe++;
+      else if (s === 'backend') be++;
+      else sh++;
+    }
+    const dominant: FeatureSide =
+      fe > be && fe >= sh ? 'frontend' : be > fe && be >= sh ? 'backend' : 'shared';
+    const total = internal + external;
+    return {
+      id: `${brickId}#${ci + 1}`,
+      files: filesInCluster,
+      total: filesInCluster.length,
+      dominant,
+      role,
+      roles,
+      internal_edges: internal,
+      external_edges: external,
+      cohesion: total > 0 ? Number((internal / total).toFixed(3)) : 1,
+      degenerate,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // 汇总：全链路一次打通
 // ─────────────────────────────────────────────────────────────
 
@@ -523,6 +637,12 @@ export async function buildBrickify(opts: BrickifyOptions): Promise<BrickifyResu
       files,
       total,
       dominant,
+      // 第2层：积木内按文件级依赖再聚的更小功能簇（下钻）
+      sub_clusters: computeBrickSubClusters(
+        id,
+        [...files.frontend, ...files.backend, ...files.shared],
+        fileDeps,
+      ),
       roles,
       role,
       community: brickComm.get(id) ?? null,
@@ -562,6 +682,7 @@ export async function buildBrickify(opts: BrickifyOptions): Promise<BrickifyResu
     limitations: [
       '积木 = 源码根首层目录做种子，叠加依赖边校正；不自动搬目录（保守）',
       '功能社区 = 积木间依赖边的无向连通分量 + 内聚度；启发式，需人确认边界',
+      '第2层小簇 = 积木内按文件级依赖连通分量再聚；目录高度耦合时退化为单簇（degenerate 如实标注，无更小功能边界可切）',
       '三类角色（积木/契约/胶水）= 复用 layer_detect 层的模式启发式映射，非运行时确证；' +
         'type→契约(interface/dto/types)，entry/middleware/config/api→胶水，service/data/ui/utility/core→积木(功能)',
       '混合文件 = AST 顶层声明依赖聚类的"信号级"标记；不自动切分文件内部，解耦拆分需人/LLM 确认',

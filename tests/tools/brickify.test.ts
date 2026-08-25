@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { buildFileDeps, computeCommunities, detectMixedFiles, buildBrickify, roleOfFile, roleOfLayer, type BrickRole } from '../../src/tools/brickify';
+import { buildFileDeps, computeCommunities, computeBrickSubClusters, detectMixedFiles, buildBrickify, roleOfFile, roleOfLayer, type BrickRole } from '../../src/tools/brickify';
 
 function makeTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'brickify-'));
@@ -146,11 +146,73 @@ describe('三层角色（积木/契约/胶水）', () => {
   });
 });
 
+describe('computeBrickSubClusters 第2层（积木内小簇）', () => {
+  it('按积木内文件级依赖连通分量，切成更小功能簇（多余孤立文件成独立单簇）', () => {
+    const root = makeTmp();
+    // 积木 'a'：a1→a2→a3 联成一条链簇；b1 无依赖成单簇
+    write(root, 'a/a1.ts', "import './a2';\n");
+    write(root, 'a/a2.ts', "import './a3';\n");
+    write(root, 'a/a3.ts', "\n");
+    write(root, 'a/b1.ts', "export const b=1;\n");
+    const rels = ['a/a1.ts', 'a/a2.ts', 'a/a3.ts', 'a/b1.ts'];
+    const deps = buildFileDeps(root, rels);
+    const clusters = computeBrickSubClusters('a', rels, deps);
+    expect(clusters).toHaveLength(2); // {a1,a2,a3} 与 {b1}
+    // 链簇包含 a1/a2/a3，且簇间不泄漏依赖
+    const chain = clusters.find((c) => c.files.includes('a/a1.ts'))!;
+    expect(chain.files.sort()).toEqual(['a/a1.ts', 'a/a2.ts', 'a/a3.ts']);
+    expect(chain.internal_edges).toBeGreaterThan(0);
+    expect(chain.cohesion).toBe(1);
+    // b1 自成单簇，无任何依赖边 → 内聚 1
+    const lone = clusters.find((c) => c.files.includes('a/b1.ts'))!;
+    expect(lone.files).toHaveLength(1);
+    expect(lone.cohesion).toBe(1);
+    // 全部文件不重不漏
+    const flat = clusters.flatMap((c) => c.files).sort();
+    expect(flat).toEqual(rels.sort());
+  });
+
+  it('目录高度耦合（全员连通）→ 退化为单簇，degenerate=true 如实标注', () => {
+    const root = makeTmp();
+    write(root, 'a/a1.ts', "import './a2';\n");
+    write(root, 'a/a2.ts', "import './a3';\n");
+    write(root, 'a/a3.ts', "import './a1';\n");
+    const rels = ['a/a1.ts', 'a/a2.ts', 'a/a3.ts'];
+    const deps = buildFileDeps(root, rels);
+    const clusters = computeBrickSubClusters('a', rels, deps);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].degenerate).toBe(true);
+    expect(clusters[0].files).toHaveLength(3);
+  });
+
+  it('第2层不跨积木：边一旦连出积木外即忽略（隔离性）', () => {
+    const root = makeTmp();
+    write(root, 'a/a.ts', "import '../b/b';\n");
+    write(root, 'b/b.ts', "\n");
+    const rels = ['a/a.ts', 'b/b.ts'];
+    const deps = buildFileDeps(root, rels);
+    const clusters = computeBrickSubClusters('a', ['a/a.ts'], deps);
+    expect(clusters).toHaveLength(1); // 只有 a/a.ts，内部无依赖边 → 单簇
+    expect(clusters[0].files).toEqual(['a/a.ts']);
+    expect(clusters[0].degenerate).toBe(true);
+  });
+});
+
 describe('buildBrickify 全链路（design-canvas 狗食）', () => {
   it('扫描 src → 积木 → 社区 → 混合文件，链路自洽可渲染', async () => {
     const r = await buildBrickify({ project_dir: path.join(process.cwd()), source_root: SRC });
     expect(r.meta.scanned_files).toBeGreaterThan(100);
     expect(r.bricks.length).toBeGreaterThan(0);
+    // 第2层：每个积木的 sub_clusters 文件不重不漏地覆盖其全部文件
+    for (const b of r.bricks) {
+      const subFiles = b.sub_clusters.flatMap((s) => s.files);
+      const allFiles = [...b.files.frontend, ...b.files.backend, ...b.files.shared];
+      expect(subFiles.sort()).toEqual([...allFiles].sort());
+      for (const s of b.sub_clusters) {
+        expect(s.cohesion).toBeGreaterThanOrEqual(0);
+        expect(s.cohesion).toBeLessThanOrEqual(1);
+      }
+    }
     // 每个积木都归属社区（可空仅当真正孤立）
     expect(r.communities.length).toBeGreaterThan(0);
     expect(Array.isArray(r.file_deps)).toBe(true);
