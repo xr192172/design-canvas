@@ -68,6 +68,8 @@ import { queryCameraLog } from './camera/log_query.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './camera/contract.js';
 import { rebuildChains } from './camera/chain.js';
+import { chainRecon } from './tools/chain_recon.js';
+import type { ChainReconInput } from './tools/chain_recon.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -384,6 +386,27 @@ const cameraJudgeHandler = wrap(async (a) => {
     ? renderJudgeReport(report) + (diff ? `\n\n${renderTSDiffReport(diff)}${chainsNote}` : '')
     : JSON.stringify(merged);
   return { message: text, data: merged };
+});
+
+/**
+ * chain_recon：中观档——按「文件/宿主节点」一条命令的真跑 + 查数据 + 对账。
+ * 后工具自动前置：宿主下无 detail 链时自动调用 deriveDetailChain（缓存判断——已有链即跳过），
+ * 再自动发现事件文件、按链文件过滤真跑事件、逐事件判定、重建实测链、链路契约匹配。
+ */
+const chainReconHandler = wrapData(async (a) => {
+  const input = a as unknown as ChainReconInput;
+  if (!input.feature || !input.node_id) {
+    throw new Error('chain_recon 需要 feature + node_id：指定宿主文件节点（detail 链挂在它下面）做中观档对账。');
+  }
+  const r = await chainRecon({
+    feature: String(input.feature),
+    node_id: String(input.node_id),
+    project_dir: String(input.project_dir ?? process.cwd()),
+    events_files: Array.isArray(input.events_files) ? (input.events_files as string[]) : undefined,
+    force: input.force === true,
+    max_steps: typeof input.max_steps === 'number' ? input.max_steps : undefined,
+  });
+  return { message: r.message, data: r };
 });
 
 /** camera_instrument：对目标项目全自动插桩 / 还原（复用 instrumentProject/restoreInstrumented） */
@@ -989,6 +1012,28 @@ const TOOL_DEFS: ToolDef[] = [
       use_llm: z.boolean().optional().describe('true=对可疑事件做 LLM 行为级复核（默认 false 纯规则秒判）'),
     },
     handler: cameraJudgeHandler,
+  },
+  {
+    name: 'chain_recon',
+    title: 'Reconcile a host chain with its real-run camera events (meso tier)',
+    description:
+      '中观档对账（工具可用性复盘缺口 C）：按「文件/宿主节点」一条命令的真跑 + 查数据 + 对账，' +
+      '填补宏观（整项目对账）与微观（trace-exec 纯函数子集）之间的空档。' +
+      '后工具自动前置 + 缓存跳过：宿主下无 detail 链时自动调用 deriveDetailChain 建链' +
+      '（已有链则命中缓存跳过派生），自动发现被观测项目事件文件（.agent/camera + .design-canvas/camera），' +
+      '按链涉及文件过滤出这条链的真跑事件 → judgeEvent 逐事件判定偏差 → rebuildChains 重建实测调用链' +
+      '→ 链路契约匹配（声明链须是某条实测链的子序列，mode=bare-name 近似）。' +
+      '该链无任何事件时 not_run=true 并明示「先跑一遍再对账」，绝不伪造事件降级冒充成品。' +
+      '用途：重构前基线 + 重构后验收对照。',
+    inputSchema: {
+      feature: z.string().describe('DSL feature 名'),
+      node_id: z.string().describe('宿主文件节点 id（detail 链挂在它下面，作为对账的链根）'),
+      project_dir: z.string().describe('被观测项目根目录（其下 .agent/camera/events-*.jsonl 是事件源）'),
+      events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
+      force: z.boolean().optional().describe('true=忽略缓存强制重新派生链（默认 false，已有链则跳过派生）'),
+      max_steps: z.number().optional().describe('派生入链函数上限（默认 12，仅需派生时生效）'),
+    },
+    handler: chainReconHandler,
   },
   {
     name: 'camera_instrument',

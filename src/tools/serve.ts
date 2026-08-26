@@ -51,6 +51,7 @@ import type { MindMap } from '../dsl/mindmap.js';
 import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { deriveDetailChain } from './derive_chain.js';
+import { chainRecon } from './chain_recon.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
   loadExplainConfig,
@@ -654,6 +655,29 @@ async function handleApiTraceExec(req: http.IncomingMessage, res: http.ServerRes
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/chain-recon：中观档对账——一条命令真跑 + 查数据 + 对账（后工具自动前置 + 缓存跳过） */
+async function handleApiChainRecon(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const { feature, node_id, project_dir, events_files, force, max_steps } = JSON.parse(body.toString('utf-8'));
+    if (!feature || !node_id) {
+      sendError(res, 400, '缺少参数：feature / node_id（指定宿主文件节点做中观档对账）');
+      return;
+    }
+    const r = await chainRecon({
+      feature: String(feature),
+      node_id: String(node_id),
+      project_dir: String(project_dir ?? getServeProjectRoot()),
+      events_files: Array.isArray(events_files) ? events_files : undefined,
+      force: force === true || force === 'true' || force === '1',
+      max_steps: typeof max_steps === 'number' ? max_steps : undefined,
+    });
+    sendJson(res, 200, { success: true, ...r });
+  } catch (e) {
+    sendError(res, 400, (e as Error).message);
   }
 }
 
@@ -2424,6 +2448,11 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/trace-exec') && method === 'POST') {
       handleApiTraceExec(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/chain-recon') && method === 'POST') {
+      handleApiChainRecon(req, res);
       return;
     }
 
