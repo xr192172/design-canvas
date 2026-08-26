@@ -51,6 +51,7 @@ import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
+import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
@@ -1102,6 +1103,38 @@ const TOOL_DEFS: ToolDef[] = [
       } else {
         parts.push('\t无其它文件引用该符号');
       }
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'rename_file',
+    title: 'File-level rename with import reference rewrite (防文件悬空)',
+    description:
+      '文件级智能重命名：把改一个文件的名字/路径做成全仓一致的安全操作。' +
+      '过程=算影响面(干跑只报告) → 迁移文件 → 自动改写全项目解析到该文件的 import/require 源字面量 + 重索引。' +
+      '安全：只改相对导入且确实解析到被移动文件的引用，注释/字符串/无关引用不碰；目标已存在或源缺失 → 原子阻断不落盘。' +
+      'dry_run=true 时只返回将被改写的引用清单，不迁移、不改写、不重索引。' +
+      '文件若是目录桶(index.ts)，会提示语义变化风险需复核。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（用于解析 from/to 为绝对路径）'),
+      from: z.string().describe('源文件（相对 project_dir 或绝对路径）'),
+      to: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
+      dry_run: z.boolean().optional().describe('true = 只算影响面（不迁移/不改写/不重索引）'),
+    },
+    handler: wrap(async (a) => {
+      const { project_dir, from, to, dry_run } = a;
+      const r = await renameFile({ project_dir: String(project_dir), from: String(from), to: String(to), dry_run: !!dry_run });
+      if (!r.ok) {
+        return { message: `文件重命名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
+      }
+      const parts = [r.dryRun ? `[干跑] 计划把 ${r.fromRel} → ${r.toRel}` : `文件重命名完成：${r.fromRel} → ${r.toRel}`];
+      if (r.moved) parts.push(`\t已 fs 迁移 + 重索引`);
+      if (r.editCount === 0) parts.push('\t无其它文件引用该文件路径');
+      else {
+        parts.push(`\t改写 ${r.editCount} 处 import/require 引用：`);
+        for (const f of r.references) parts.push(`\t  - ${f.file}  ${f.fromSource} → ${f.toSource}`);
+      }
+      if (r.pending && r.pending.length > 0) for (const p of r.pending) parts.push(`\t⚠ ${p}`);
       return { message: parts.join('\n'), data: r };
     }),
   },
