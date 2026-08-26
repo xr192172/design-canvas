@@ -132,9 +132,36 @@ export function computeMigrationPlan(opts: MigrationPlanOptions): RunningChangeP
   const exts = new Set(spec.sourceExts ?? [...DEFAULT_EXTS]);
   const skipDirs = new Set(spec.skipDirs ?? [...DEFAULT_SKIP]);
 
-  const moduleBase = spec.moduleBase.endsWith('/') ? spec.moduleBase.slice(0, -1) : spec.moduleBase;
+  const moduleBaseRaw = (spec.moduleBase ?? '').trim();
+  // 把连续的尾随斜杠全部剥掉（moduleBase 纯斜杠形式 '///' 是最容易触发"静默数据破坏"的配置，必须拦截）。
+  const moduleBase = moduleBaseRaw.endsWith('/') ? moduleBaseRaw.replace(/\/+$/, '') : moduleBaseRaw;
+
+  // prefix / to 必须是相对 project_dir 的路径；若用户误传绝对路径（如 '/tmp/hub'、'D:\\hub'），
+  // path.join(proj, ...) 会退化成直接使用绝对路径，命中非预期目录甚至盘外，属于路径穿越类隐患。
+  // 注意：必须在剥前导斜杠之前判定，否则 '/tmp/pkg' 会被误剥成 'tmp/pkg' 伪装成相对路径。
+  const invalidSegment = (s: string): boolean =>
+    s.length > 0 && (path.isAbsolute(s) || /^[a-zA-Z]:/.test(s) || s.startsWith('\\') || s.startsWith('/'));
+  if (invalidSegment(spec.prefix) || invalidSegment(spec.to)) {
+    throw new Error(
+      `package_migration.prefix/to 必须是相对 project_dir 的正斜杠路径，prefix=${JSON.stringify(
+        spec.prefix,
+      )}、to=${JSON.stringify(spec.to)} 已在计划期拦截。`,
+    );
+  }
+
   const prefix = spec.prefix.replace(/^\/+|\/+$/g, '');
   const to = spec.to.replace(/^\/+|\/+$/g, '');
+
+  // 输入护栏：moduleBase 是 import 前缀重写的锚。若被剥成空串，
+  // rewriteImportPaths 会退化成"把所有 /prefix/ 替换成 /to/"——
+  // 在任意文件里吞掉所有以 / 开头的路径片段，属于静默数据破坏，必须在计划期就拦截。
+  if (!moduleBase) {
+    throw new Error(
+      `package_migration.moduleBase 解析为空（原始值 ${JSON.stringify(spec.moduleBase)}），` +
+        '重写会退化成无锚点的全局替换，已在计划期拦截，请检查配置。',
+    );
+  }
+
   const importOldAbs = `${moduleBase}/${prefix}`;
   const importNewAbs = `${moduleBase}/${to}`;
 

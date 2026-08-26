@@ -46,9 +46,9 @@
 
 ## 四、落地顺序
 
-- **P1 文件级智能重命名 `rename_file`** —— 最硬缺口 + 首选：算影响面(引用它的所有 import/require) → 迁移文件 → 自动改全项目引用 → 重索引 → 报无关引用清单。状态：待开工
-- **P2 `edit_code` 加 `op:'range'`** —— 符号为主 + 显式行区间可选，带 diff 预览 + 语法门兜底。状态：待开工
-- **P3 接可视化界面** —— 把 P1/P2/现有底层接到壳上，人看 diff + 点审批（呼应 dsl-workbench/design-canvas 可视化闭环）。状态：待开工
+- **P1 文件级智能重命名 `rename_file`** —— 最硬缺口 + 首选：算影响面(引用它的所有 import/require) → 迁移文件 → 自动改全项目引用 → 重索引 → 报无关引用清单。状态：✅ 已落地（含 `dry_run` 影响面预览）
+- **P2 `edit_code` 加 `op:'range'`** —— 符号为主 + 显式行区间可选，带 diff 预览 + 语法门兜底。状态：✅ 已落地（含 `dry_run`）
+- **P3 接可视化界面** —— 把 P1/P2/现有底层接到壳上，人看 diff + 点审批（呼应 dsl-workbench/design-canvas 可视化闭环）。状态：✅ 已落地（`/code-workbench` 工作台 + `/api/code/propose|workbench|approve|reject`，闭环"改→看 diff→点审批→执行"）
 - **P4 自主回舱闭环** —— 独立 `verify` 工具 + 改后 auto-verify/auto-rollback + 接线开源 `monolith`/`split_stage` + judge 改为"自检吸收后只上报真问题"。状态：待开工
 
 ## 五、实施铁律（沿用工作区约定）

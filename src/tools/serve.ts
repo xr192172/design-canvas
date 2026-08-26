@@ -39,8 +39,8 @@ import { buildDictionaryView, getGlobalDictFile, getProjectDictFile, loadGlobalD
 import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { renderDsl } from './render_dsl.js';
-import { renderHomePage, renderProjectPage } from './hub_page.js';
-import { renderMindmapPage } from './mindmap_page.js';
+import { renderWorkbenchPage } from './workbench_page.js';
+import { proposeChange, listChanges, approveChange, rejectChange } from './code_workbench.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { deriveMindMap } from './derive_mind_map.js';
@@ -50,6 +50,7 @@ import { getMindMapFile } from './derive_mind_map.js';
 import type { MindMap } from '../dsl/mindmap.js';
 import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
+import { deriveDetailChain } from './derive_chain.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
   loadExplainConfig,
@@ -541,7 +542,12 @@ function collectChainInfo(
 ): { steps: TraceStepSpec[]; infos: ChainNodeInfo[] } {
   const rel = dsl.semantic?.files?.find((f) => f.id === nodeId)?.path;
   if (!rel) return { steps: [], infos: [] };
-  const hostFile = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
+  // host 源文件定位：相对路径优先 projectRoot，取不到再回退 projectRoot/src（semantic.files 的 path 是相对 src/ 的）
+  let hostFile = path.isAbsolute(rel) ? rel : path.join(projectRoot, rel);
+  if (!path.isAbsolute(rel) && !fs.existsSync(hostFile)) {
+    const underSrc = path.join(projectRoot, 'src', rel);
+    if (fs.existsSync(underSrc)) hostFile = underSrc;
+  }
   const nodes = dsl.geometry.nodes
     .filter((n) => n.host === nodeId && n.layer === 'detail' && !n.id.includes('__alg_'))
     .sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
@@ -589,25 +595,59 @@ function collectChainInfo(
   return { steps, infos };
 }
 
+/** 定位宿主源文件绝对路径（project_root 先，回退 project_root/src），与 collectChainInfo 对齐 */
+function locateHostSource(
+  dsl: { semantic?: { files?: Array<{ id: string; path: string }> } },
+  nodeId: string,
+  projectRoot: string,
+): string | null {
+  const rel = dsl.semantic?.files?.find((f) => f.id === nodeId)?.path;
+  if (!rel) return null;
+  if (path.isAbsolute(rel)) return fs.existsSync(rel) ? rel : null;
+  const atRoot = path.join(projectRoot, rel);
+  if (fs.existsSync(atRoot)) return atRoot;
+  const underSrc = path.join(projectRoot, 'src', rel);
+  return fs.existsSync(underSrc) ? underSrc : null;
+}
+
 /** POST /api/trace-exec：数据流真实执行——从宿主节点构造链路步骤，喂用户输入真实运行链上函数 */
 async function handleApiTraceExec(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
     const { feature, node_id, input_value } = JSON.parse(body.toString('utf-8'));
-    const dsl = getDSL(feature);
-    if (!dsl) {
+    const dsl0 = getDSL(feature);
+    if (!dsl0) {
       sendError(res, 404, `feature "${feature}" 不存在`);
       return;
     }
-    if (!dsl.geometry.nodes.some((n) => n.id === node_id)) {
+    if (!dsl0.geometry.nodes.some((n) => n.id === node_id)) {
       sendError(res, 404, `节点 "${node_id}" 不存在于 feature "${feature}"`);
       return;
     }
     const projectRoot = getServeProjectRoot();
-    const { steps, infos } = collectChainInfo(dsl, node_id, projectRoot);
+
+    // 宿主无 detail 链时按需自动派生（TreeSitter 从源文件推导变形链），再重试真实执行；
+    // 派生失败仅记录，走下方诚实降级——绝不伪造轨迹。
+    let dsl = dsl0;
+    let { steps, infos } = collectChainInfo(dsl, node_id, projectRoot);
     if (infos.length === 0) {
-      sendError(res, 400, '宿主节点下无 detail 链节点可真实执行（先 derive_detail_chain）');
-      return;
+      const hostFile = locateHostSource(dsl, node_id, projectRoot);
+      if (hostFile) {
+        try {
+          await deriveDetailChain({ feature, node_id, project_root: projectRoot, source_path: hostFile });
+          const reload = getDSL(feature);
+          if (reload) {
+            dsl = reload;
+            ({ steps, infos } = collectChainInfo(dsl, node_id, projectRoot));
+          }
+        } catch (e) {
+          console.warn(`[trace-exec] 按需派生 detail 链失败 ${node_id}: ${(e as Error).message}`);
+        }
+      }
+      if (infos.length === 0) {
+        sendError(res, 400, '宿主节点下无 detail 链节点可真实执行（自动派生后仍无可推导的函数调用链，或源文件不可解析）');
+        return;
+      }
     }
 
     const result = await traceExecChain({ steps, input_value });
@@ -1024,6 +1064,127 @@ async function handleApiDiffViews(req: http.IncomingMessage, res: http.ServerRes
     }
     const result = diffViews({ feature, live_dir: params.live_dir });
     sendJson(res, 200, { success: true, ...result });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/feature-meta：单出口工作台所需的 feature 元数据（source_root → 代码审批定位；workbench 产物 → iframe 画布） */
+async function handleApiFeatureMeta(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const url = new URL(req.url!, 'http://localhost');
+    const feature = url.searchParams.get('feature') || '';
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    let workbenchArtifact = '';
+    try {
+      const artifacts = readRegistry();
+      const hit = artifacts
+        .filter((a) => a.feature === feature && String(a.type ?? '').includes('feature') && a.path.endsWith('.html'))
+        .sort((x, y) => String(y.updated_at ?? '').localeCompare(String(x.updated_at ?? '')))[0];
+      if (hit) workbenchArtifact = '/' + hit.path.replace(/^\/+/, '');
+    } catch {
+      /* registry 不可读时忽略，画布降级为空 */
+    }
+    sendJson(res, 200, {
+      success: true,
+      feature,
+      title: dsl.title || feature,
+      source_root: dsl.source_root || '',
+      workbench_artifact: workbenchArtifact,
+    });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/feature-dsl?feature=<name>：返回某 feature 的完整 DSL（前端 normalize → IR 的实时数据源） */
+function handleApiFeatureDsl(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url!, 'http://localhost');
+    const feature = url.searchParams.get('feature') || '';
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    sendJson(res, 200, dsl);
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/code/workbench：列出某项目的代码变更（P3 工作台） */
+async function handleApiCodeWorkbench(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const url = new URL(req.url!, 'http://localhost');
+    const project_dir = url.searchParams.get('project_dir') || '';
+    if (!project_dir) {
+      sendError(res, 400, '缺少 project_dir');
+      return;
+    }
+    const changes = listChanges(project_dir);
+    sendJson(res, 200, { success: true, changes, project_dir });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/code/propose：提交变更提案（干跑预览 + 落为 pending） */
+async function handleApiCodePropose(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    if (!params.project_dir) {
+      sendError(res, 400, '缺少 project_dir');
+      return;
+    }
+    const r = await proposeChange({
+      kind: params.kind,
+      project_dir: params.project_dir,
+      op: params.op || {},
+      submitter: params.submitter,
+    });
+    if (!r.ok) {
+      sendError(res, 409, r.error || '预览失败');
+      return;
+    }
+    sendJson(res, 200, { success: true, change: r.change });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/code/approve：通过并真正写盘 */
+async function handleApiCodeApprove(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const r = await approveChange(params.project_dir || '', params.id || '');
+    sendJson(res, 200, { success: r.ok, status: r.status, result: r.result, error: r.error });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/code/reject：驳回丢弃（不写盘） */
+async function handleApiCodeReject(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const r = rejectChange(params.project_dir || '', params.id || '');
+    sendJson(res, 200, { success: r.ok, status: r.status, result: r.result, error: r.error });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1950,7 +2111,9 @@ export async function startServer(port?: number): Promise<void> {
       (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
         url.startsWith('/api/registry') || url.startsWith('/api/import') ||
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
-        url.startsWith('/api/mind-map'));
+        url.startsWith('/api/mind-map') ||
+        url.startsWith('/api/code/approve') || url.startsWith('/api/code/reject') ||
+        url.startsWith('/api/code/propose'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
@@ -2198,44 +2361,64 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
-    if (url === '/explain.html' || url.startsWith('/explain.html?')) {
-      handleExplainPage(res);
+    if (url.startsWith('/api/feature-dsl') && method === 'GET') {
+      handleApiFeatureDsl(req, res);
       return;
     }
 
-    if ((url === '/tour.html' || url.startsWith('/tour.html?')) && method === 'GET') {
-      handleTourPage(res);
+    if (url.startsWith('/api/feature-meta') && method === 'GET') {
+      void handleApiFeatureMeta(req, res);
       return;
     }
 
+    if (url.startsWith('/api/code/workbench') && method === 'GET') {
+      handleApiCodeWorkbench(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/code/propose') && method === 'POST') {
+      void handleApiCodePropose(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/code/approve') && method === 'POST') {
+      void handleApiCodeApprove(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/code/reject') && method === 'POST') {
+      handleApiCodeReject(req, res);
+      return;
+    }
+
+    if (url.startsWith('/workbench') && method === 'GET') {
+      // 唯一前端出口：协作画布 + 沙盘反馈 + 右侧代码审批（废弃 Hub/思维导图/独立审批台/teach）
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderWorkbenchPage());
+      return;
+    }
+
+    // 已废弃出口 → 归一到唯一出口 /workbench（302 保留旧书签可达，不新增页面代码）
+    const routeToWorkbenchHash = (prefix: string): string | '' => {
+      if (url.startsWith(prefix)) {
+        const feature = decodeURIComponent(url.slice(prefix.length).split('?')[0]).replace(/[/\\]/g, '');
+        return feature ? '/workbench#' + feature : '/workbench';
+      }
+      return '';
+    };
     if (url === '/' || url.startsWith('/?')) {
-      // Hub 主页：项目选择器（动态渲染，无预生成文件）
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderHomePage());
+      res.writeHead(302, { Location: '/workbench' });
+      res.end();
       return;
     }
-
-    if (url.startsWith('/project/') && method === 'GET') {
-      // 项目专属页：主视图 + 递进分组入口
-      const feature = decodeURIComponent(url.slice('/project/'.length).split('?')[0]).replace(/[/\\]/g, '');
-      if (!feature) {
-        sendError(res, 400, '缺少项目名');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderProjectPage(feature));
-      return;
-    }
-
-    if (url.startsWith('/mindmap/') && method === 'GET') {
-      // 思维导图画布页：放射导图 + 人工批注（人机共笔主视图）
-      const feature = decodeURIComponent(url.slice('/mindmap/'.length).split('?')[0]).replace(/[/\\]/g, '');
-      if (!feature) {
-        sendError(res, 400, '缺少项目名');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderMindmapPage(feature));
+    const redirectTarget =
+      routeToWorkbenchHash('/project/') ||
+      routeToWorkbenchHash('/mindmap/') ||
+      (/^\/code-workbench/.test(url) ? '/workbench' : '') ||
+      (/^\/(tour\.html|explain\.html)/.test(url) ? '/workbench' : '');
+    if (redirectTarget) {
+      res.writeHead(302, { Location: redirectTarget });
+      res.end();
       return;
     }
 
@@ -2261,6 +2444,9 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 布局 API: POST /api/layout/dag, POST /api/layout/force, POST /api/layout/grid`);
       console.log(`  - 代码生成 API: POST /api/scaffold`);
       console.log(`  - 一致性检查 API: POST /api/consistency`);
+      console.log(`  - 唯一前端出口（协作画布 + 沙盘反馈 + 代码审批）: GET /workbench`);
+      console.log(`    - 代码审批 API: 列出 /api/code/workbench ｜ 提案 /api/code/propose ｜ 通过 /api/code/approve ｜ 驳回 /api/code/reject`);
+      console.log(`    - feature 元数据 API: GET /api/feature-meta`);
       console.log(`  - 变更影响分析 API: POST /api/diff-impact`);
       console.log(`  - 巨石体检/拆分任务单 API: POST /api/monolith, POST /api/split_plan`);
       console.log(`  - 架构分层分析 API: POST /api/arch-layer`);
@@ -2270,7 +2456,7 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 产物注册表 API: GET/POST /api/registry`);
       console.log(`  - 项目导入 API: POST /api/import（浏览器目录上传）`);
       console.log(`  - SSE 实时推送: GET /api/events`);
-      console.log(`  - 访问 http://localhost:${listenPort} 打开 Hub（项目选择器 → 项目专属页）`);
+      console.log(`  - 访问 http://localhost:${listenPort}/workbench 打开唯一前端出口`);
 
       // 常驻 watch（最后一英里实时推送）：DC_AUTO_WATCH=1 + DC_WATCH_FEATURE=X 时，
       // 监听 cwd 代码变更 → 重建实际 DSL（live/）→ SSE 推送 dsl-changed(source=watch)，

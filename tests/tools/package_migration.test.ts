@@ -104,4 +104,66 @@ describe('computeMigrationPlan', () => {
     // 都在自己的原位改写（key===原路径，originals 有对应）→ 不抛错，正常产出
     expect(plan.absToNew.size).toBeGreaterThanOrEqual(1);
   });
+
+  it('moduleBase 被剥空 → 计划期抛错，禁止静默全局替换', () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module x\n');
+    write(root, 'pkg/a.go', 'package a\n');
+    // 空串 / 纯斜杠 / 纯空白 moduleBase 都会被剥成空 → 计划期拦截
+    for (const bad of ['', '/', '///', '   /   ']) {
+      try {
+        computeMigrationPlan({
+          project_dir: root,
+          migrate: { moduleBase: bad, prefix: 'pkg/a', to: 'pkg/b' },
+        });
+        throw new Error(`未抛出异常: moduleBase=${JSON.stringify(bad)}`);
+      } catch (e: any) {
+        if (!/moduleBase 解析为空/.test(e.message)) {
+          throw new Error(`错误消息不匹配: ${e.message}`);
+        }
+      }
+    }
+    // 正常 moduleBase 仍能正常产出
+    const ok = computeMigrationPlan({
+      project_dir: root,
+      migrate: { moduleBase: 'acme/x', prefix: 'pkg/a', to: 'pkg/b' },
+    });
+    expect(ok.absToNew.size).toBeGreaterThanOrEqual(0);
+  });
+
+  it('prefix/to 误传绝对路径 → 计划期抛错，禁止路径穿越', () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module x\n');
+    write(root, 'pkg/a.go', 'package a\n');
+    // Unix 绝对形式
+    try {
+      computeMigrationPlan({
+        project_dir: root,
+        migrate: { moduleBase: 'm', prefix: '/tmp/pkg', to: 'pkg/b' },
+      });
+      throw new Error('未抛出异常: Unix 绝对路径');
+    } catch (e: any) {
+      if (!/prefix\/to.*相对 project_dir/.test(e.message)) {
+        throw new Error(`Unix: 错误消息不匹配: ${e.message}`);
+      }
+    }
+    // Windows 盘符绝对形式
+    try {
+      computeMigrationPlan({
+        project_dir: root,
+        migrate: { moduleBase: 'm', prefix: 'pkg/a', to: 'D:\\outside\\pkg' },
+      });
+      throw new Error('未抛出异常: Windows 盘符');
+    } catch (e: any) {
+      if (!/prefix\/to.*相对 project_dir/.test(e.message)) {
+        throw new Error(`Windows: 错误消息不匹配: ${e.message}`);
+      }
+    }
+    // 正斜杠相对路径仍可用
+    const ok = computeMigrationPlan({
+      project_dir: root,
+      migrate: { moduleBase: 'm', prefix: 'pkg/a', to: 'pkg/b' },
+    });
+    expect(ok.absToNew.size).toBeGreaterThanOrEqual(0);
+  });
 });

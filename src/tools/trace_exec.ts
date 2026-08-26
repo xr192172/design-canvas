@@ -51,6 +51,8 @@ export interface TraceExecInput {
 
 export interface TraceExecResult {
   steps: TraceExecStep[];
+  /** 宿主链第一步函数的参数名（供前端按名提示多参/无参） */
+  entryParams: string[];
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -268,6 +270,7 @@ async function execGo(codeText: string, entryName: string, args: unknown[]): Pro
 
 export async function traceExecChain(input: TraceExecInput): Promise<TraceExecResult> {
   const steps: TraceExecStep[] = [];
+  let entryParams: string[] = [];
   let carry = input.input_value;
   let broken = false;
 
@@ -345,6 +348,8 @@ export async function traceExecChain(input: TraceExecInput): Promise<TraceExecRe
       broken = true;
       continue;
     }
+    // 回流宿主链第一步函数的参数名，供前端按名提示多参/无参
+    if (i === 0) entryParams = resolved.fn.names;
 
     // 3. 真实执行
     try {
@@ -361,7 +366,7 @@ export async function traceExecChain(input: TraceExecInput): Promise<TraceExecRe
     steps.push(step);
   }
 
-  return { steps };
+  return { steps, entryParams };
 }
 
 async function execByLang(lang: Lang, fn: ResolvedFn, args: unknown[]): Promise<unknown> {

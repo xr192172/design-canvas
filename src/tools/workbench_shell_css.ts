@@ -214,8 +214,6 @@ export const WORKBENCH_SHELL_CSS = `
       .text-sidebar-accent-foreground { color: var(--dslw-sidebar-accent-foreground); }
       .border-sidebar-accent-foreground { border-color: var(--dslw-sidebar-accent-foreground); }
       .ring-sidebar-accent-foreground { --tw-ring-color: var(--dslw-sidebar-accent-foreground); }
-    </style>
-    <style>
       .no-scrollbar::-webkit-scrollbar { display: none; }
       .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
       [data-icon] {
@@ -230,8 +228,6 @@ export const WORKBENCH_SHELL_CSS = `
         mask-position: center;
         background-color: currentColor;
       }
-    </style>
-</head>
   /* ===== Critical App Shell Layout ===== */
   *, *::before, *::after { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; min-width: 1200px; }
