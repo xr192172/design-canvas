@@ -23,6 +23,7 @@ import path from 'node:path';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi, Symbol } from '../dsl/types.js';
 import type { BrickManifest } from '../dsl/contract.js';
 import { saveDSL, saveLiveFeature } from '../storage.js';
+import { mergeDesignLayer } from '../storage_overlay.js';
 import { detectArchLayers } from './layer_detect.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
 import type { ParsedImport } from './ts_kernel/index.js';
@@ -1289,6 +1290,22 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     const layered = detectArchLayers(dsl);
 
     let roleNote: string | null = null;
+    let overlayNote: string | null = null;
+    // 设计层 overlay 增量保留：真相刷新只替换 base，设计意图（决策/标注/user_node/分镜）按稳定锚点保留/迁移/孤儿/标过期
+    if (input.live_only) {
+      saveLiveFeature(layered, input.live_dir);
+    } else {
+      const { dsl: designDsl, message: ovMsg } = mergeDesignLayer(layered);
+      overlayNote = ovMsg;
+      saveDSL(designDsl);
+      // 同时写入 live 代码快照：功能树聚类（derive_feature_tree）以 live 视图的
+      // semantic.files 为语义基准做命中率闸门。手动导入的项目若只有设计 DSL 而无
+      // live 快照，换项目后聚类会因语义基准为空被判"db 不相关"而拒生成 → 导图平铺。
+      // 导入即落一份 live，保证换项目后功能树可稳定聚类。（live_dir 缺省 = 默认 dataHome，
+      // 与 getLiveFeature 默认读取路径一致。）
+      saveLiveFeature(layered, input.live_dir);
+    }
+
     if (input.gen_roles) {
       const roleFiles = input.design_mode || input.functional_mode
         ? semanticFiles
@@ -1359,6 +1376,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
         : null,
       skipped.length > 0 ? `跳过/截断:\n  - ${skipped.join('\n  - ')}` : null,
       roleNote ? `职责标题: ${roleNote}` : null,
+      overlayNote ? `设计层 overlay: ${overlayNote}` : null,
       `下一步: render_dsl 渲染预览，或 get_dsl 查看/修改。`,
     ].filter(Boolean).join('\n');
 
