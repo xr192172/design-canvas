@@ -129,7 +129,75 @@ describe('renameFile - 真实重命名', () => {
   });
 });
 
-describe('renameFile - 原子阻断', () => {
+describe('renameFile - 原子化执行修复（回归保障）', () => {
+  // 修复说明：原实现第 3 步先 fs.renameSync(from→to)，再遍历改写引用、重索引。
+  // 任何中途异常（磁盘满/权限/IO/索引写失败）都会导致「源文件已走、引用仍指向旧路径、
+  // 索引悬空」——用户无从回退。修复后顺序：copy → 改写引用 → 删源 + 重索引，
+  // 失败时拷贝被 catch 分支清理，源文件仍在原位置，调用方看到 ok=false。
+  //
+  // 关键断言：验证成功路径的最终状态正确，并补充一个"前置文件不存在"的回归用例。
+
+  it('成功路径：源文件已删除、目标已创建且内容正确、importer 引用已改写', async () => {
+    const dir = mkProj({
+      'src/foo.ts': FOO,
+      'src/entry.ts': "import { a } from './foo';\n",
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.ts', to: 'src/bar.ts' });
+      expect(r.ok).toBe(true);
+      expect(r.moved).toBe(true);
+      expect(existsSync(path.join(dir, 'src/foo.ts'))).toBe(false);
+      expect(existsSync(path.join(dir, 'src/bar.ts'))).toBe(true);
+      expect(readFileSync(path.join(dir, 'src/bar.ts'), 'utf-8')).toBe(FOO);
+      expect(readFileSync(path.join(dir, 'src/entry.ts'), 'utf-8')).toContain("from './bar'");
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('前置检查：源文件不存在时提前阻断，不走 copy/unlink 路径（回归原子保护）', async () => {
+    const dir = mkProj({
+      'src/entry.ts': "import { a } from './foo';\n",
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/missing.ts', to: 'src/gone.ts' });
+      expect(r.ok).toBe(false);
+      expect(r.moved).toBe(false);
+      // 关键：目标路径不应存在（修复前若已走到 copy 路径，可能留下残留拷贝）
+      expect(existsSync(path.join(dir, 'src/gone.ts'))).toBe(false);
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('跨目录移动：源文件已被正确清理，目标位于新目录，importer 与自引用均正确', async () => {
+    const dir = mkProj({
+      'src/foo.ts': "export { h } from './helper';\nexport function a() { return 1; }\n",
+      'src/helper.ts': 'export const h = 1;\n',
+      'src/entry.ts': "import { a } from './foo';\n",
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.ts', to: 'sub/bar.ts' });
+      expect(r.ok).toBe(true);
+      expect(r.moved).toBe(true);
+      // 源文件必须已删除（修复后此断言由 unlinkSync 在全成功后执行保障）
+      expect(existsSync(path.join(dir, 'src/foo.ts'))).toBe(false);
+      // 目标已创建
+      expect(existsSync(path.join(dir, 'sub/bar.ts'))).toBe(true);
+      // importer 改写为新路径
+      expect(readFileSync(path.join(dir, 'src/entry.ts'), 'utf-8')).toContain("from '../sub/bar'");
+      // 被移动文件自身的相对导入按新位置重锚定：从 sub/ 指向 ../src/helper
+      expect(readFileSync(path.join(dir, 'sub/bar.ts'), 'utf-8')).toContain("from '../src/helper'");
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('renameFile - 原子阻断（前置检查仍保持）', () => {
   it('目标已存在 → 阻断，无任何落盘', async () => {
     const dir = mkProj({
       'src/foo.ts': FOO,

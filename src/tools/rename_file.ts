@@ -233,45 +233,59 @@ export async function renameFile(input: RenameFileInput): Promise<RenameFileResu
     return { ok: true, dryRun, fromRel, toRel, moved: false, references, editCount, pending };
   }
 
-  // 3) 迁移文件（先确保目标父目录存在）。
-  //    用原生 path.dirname（非 posix）：toAbs 是 OS 原生路径（Windows 用反斜杠），
-  //    posix.dirname 只按 '/' 切分会把整条路径当作父目录，mkdir 误建出同名目录导致 renameSync 失败。
+  // 3) 原子化执行——先复制，再改写引用，最后删除原文件。
+  //    原实现是先 renameSync 再改引用，中途任何一步（文件改写/索引写入）失败
+  //    都会导致「文件已走、引用仍指向旧路径、索引悬空」的半完成状态，用户无从回退。
+  //    新顺序：复制 → 改引用（原文件仍在，失败零损失）→ 删原文件 + 重索引。
   const toDir = path.dirname(toAbs);
   fs.mkdirSync(toDir, { recursive: true });
+  fs.copyFileSync(fromAbs, toAbs);
   const db = getProjectCacheDb(projectRoot);
+  let copySucceeded = true;
 
   try {
-    fs.renameSync(fromAbs, toAbs);
+    // 4) 改写各引用文件（字节级，逆序防偏移互相影响）
+    for (const importer of byImporter.values()) {
+      const items = importer.items;
+      const content = fs.readFileSync(importer.importerAbs, 'utf-8');
+      const sorted = [...items].sort((a, b) => b.pos - a.pos);
+      let out = content;
+      for (const it of sorted) out = out.slice(0, it.pos) + it.quote + it.toSource + it.quote + out.slice(it.pos + it.len);
+      fs.writeFileSync(importer.importerAbs, out, 'utf8');
+      await syncFile(db, projectRoot, importer.importerAbs);
+    }
+
+    // 5) 被移动文件自身的相对导入按新位置重锚定（对拷贝体做改写）
+    if (ownEdits.length > 0) {
+      const content = fs.readFileSync(toAbs, 'utf-8');
+      const sorted = [...ownEdits].sort((a, b) => b.pos - a.pos);
+      let out = content;
+      for (const it of sorted) out = out.slice(0, it.pos) + it.quote + it.toSource + it.quote + out.slice(it.pos + it.len);
+      fs.writeFileSync(toAbs, out, 'utf8');
+    }
+
+    // 6) 全部改写成功后才删除原文件 + 重索引
+    fs.unlinkSync(fromAbs);
+    removeFile(db, projectRoot, fromAbs);
+    await syncFile(db, projectRoot, toAbs);
   } catch (e) {
+    // 中途失败回滚：删除第 3 步留下的拷贝，让调用方看到「没挪动」
+    try {
+      if (fs.existsSync(toAbs)) fs.unlinkSync(toAbs);
+    } catch {
+      /* 清理失败不影响主错误返回 */
+    }
+    copySucceeded = false;
     return {
       ok: false, dryRun, fromRel, toRel, moved: false, references, editCount, pending,
-      blocked: [`文件迁移失败：${(e as Error).message}`],
+      blocked: [`rename_file 中途失败（已回滚拷贝）：${(e as Error).message}`],
     };
+  } finally {
+    // 保险：如果失败回滚路径上有任何遗留，务必清掉 toAbs
+    if (!copySucceeded && fs.existsSync(toAbs)) {
+      try { fs.unlinkSync(toAbs); } catch { /* noop */ }
+    }
   }
-
-  // 4) 改写各引用文件（字节级，逆序防偏移互相影响）
-  for (const importer of byImporter.values()) {
-    const items = importer.items;
-    const content = fs.readFileSync(importer.importerAbs, 'utf-8');
-    const sorted = [...items].sort((a, b) => b.pos - a.pos);
-    let out = content;
-    for (const it of sorted) out = out.slice(0, it.pos) + it.quote + it.toSource + it.quote + out.slice(it.pos + it.len);
-    fs.writeFileSync(importer.importerAbs, out, 'utf8');
-    await syncFile(db, projectRoot, importer.importerAbs);
-  }
-
-  // 5) 被移动文件自身的相对导入按新位置重锚定（先读被移动后的内容，逆序改写再写回）
-  if (ownEdits.length > 0) {
-    const content = fs.readFileSync(toAbs, 'utf-8');
-    const sorted = [...ownEdits].sort((a, b) => b.pos - a.pos);
-    let out = content;
-    for (const it of sorted) out = out.slice(0, it.pos) + it.quote + it.toSource + it.quote + out.slice(it.pos + it.len);
-    fs.writeFileSync(toAbs, out, 'utf8');
-  }
-
-  // 6) 重索引被移动文件：删旧索引 + 建新索引
-  removeFile(db, projectRoot, fromAbs);
-  await syncFile(db, projectRoot, toAbs);
 
   return { ok: true, dryRun, fromRel, toRel, moved: true, references, editCount, pending };
 }
