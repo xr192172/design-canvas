@@ -20,7 +20,7 @@ import { parseFileFull, parseAstRoot, type ParsedSymbol } from './ts_kernel/inde
 import { syncFile } from '../db/symbols.js';
 import { getProjectCacheDb } from '../db/db.js';
 
-export type EditCodeOp = 'replace' | 'insert' | 'delete';
+export type EditCodeOp = 'replace' | 'insert' | 'delete' | 'range';
 
 export interface EditCodeArgs {
   /** 项目根目录（索引归属，编辑后重建该文件的 cache.db 索引） */
@@ -36,8 +36,14 @@ export interface EditCodeArgs {
   symbol?: string;
   /** 符号父级（类名 / Go receiver 类型名），同名消歧用 */
   parent?: string;
-  /** replace/insert 的新代码（完整符号定义；delete 不需要） */
+  /** replace/insert 的新代码（完整符号定义；delete 不需要；range=区间新内容，传空串删除区间） */
   code?: string;
+  /** op='range' 专用：1-based 含端点的起始行（行号随时漂移前由调用方先读文件确认） */
+  start?: number;
+  /** op='range' 专用：1-based 含端点的结束行 */
+  end?: number;
+  /** op='range' 专用：true=只出 diff 预览 + 语法门结果，不写盘、不改索引 */
+  dry_run?: boolean;
 }
 
 interface LineOp {
@@ -109,6 +115,37 @@ function squeezeBlankRuns(lines: string[]): string[] {
   return out;
 }
 
+/** 生成 range 编辑的 diff 预览（− 移除 / + 新增 / 区间穿透符号提示），预览行数设上限防爆 */
+function buildRangePreview(
+  start: number,
+  end: number,
+  total: number,
+  removed: string[],
+  added: string[],
+  overlapped: ParsedSymbol[],
+): string {
+  const cap = 400;
+  const trunc = removed.length > cap || added.length > cap;
+  const body = [
+    ...removed.slice(0, cap).map((l) => '- ' + l.replace(/\r?\n$/, '')),
+    ...added.slice(0, cap).map((l) => '+ ' + l.replace(/\r?\n$/, '')),
+  ].join('\n');
+  const symNote =
+    overlapped.length > 0
+      ? `\n⚠ 区间穿透 ${overlapped.length} 个符号: ` +
+        overlapped.map((s) => describeSymbol(s)).join('；') +
+        '（显式行区间，默认信任 caller，请复核）'
+      : '';
+  return (
+    `diff L${start}-L${end}/${total}（${removed.length} 行 → ${added.length} 行）` +
+    (trunc ? '，预览已截断' : '') +
+    symNote +
+    '\n```diff\n' +
+    body +
+    '\n```'
+  );
+}
+
 export async function editCode(args: EditCodeArgs): Promise<{ message: string }> {
   const { op } = args;
   const projectRoot = path.resolve(args.project_dir);
@@ -153,6 +190,63 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   const parsed = await parseFileFull(absPath, original);
   if (parsed.error) throw new Error(`目标文件当前就解析失败（先修文件再编辑）: ${parsed.error}`);
   const baselineHasError = await hasSyntaxError(absPath, original);
+
+  // ── op='range'：显式行区间编辑（符号为主路径的可选偏好；行号由调用方先读文件确认）──
+  if (op === 'range') {
+    if (args.start == null || args.end == null) {
+      throw new Error('range 需要 start/end（1-based 含端点行号）');
+    }
+    if (args.code == null) throw new Error('range 需要 code（新内容；传空串表示删除该区间）');
+    const start = args.start;
+    const end = args.end;
+    const total = lines.length;
+    if (start < 1) throw new Error(`start 必须 ≥1，收到 ${start}`);
+    if (end < start) throw new Error(`end(${end}) < start(${start})`);
+    if (end > total) throw new Error(`end(${end}) 超出文件总行数(${total})`);
+
+    const startIdx = start - 1;
+    const count = end - start + 1;
+    const codeLines = normalizeCode(args.code, eol);
+    const newLines = [...lines];
+    newLines.splice(startIdx, count, ...codeLines);
+    const newContent = newLines.join('');
+
+    // 语法门（同 replace：解析失败 / 新引入语法错误 → 拒绝不写盘）
+    const reparsed = await parseFileFull(absPath, newContent);
+    if (reparsed.error) {
+      throw new Error(`编辑后文件解析失败，已放弃（未写盘）: ${reparsed.error}`);
+    }
+    const afterHasError = await hasSyntaxError(absPath, newContent);
+    const syntaxRepaired = baselineHasError && !afterHasError;
+    if (!baselineHasError && afterHasError) {
+      throw new Error('编辑引入了语法错误（hasError false→true），已放弃（未写盘）。请检查 code 的括号/引号/缩进。');
+    }
+
+    // 区间穿透的符号（提示影响面，不禁止——行区间是显式请求，默认信任 caller）
+    const overlapped = parsed.symbols.filter((s) => s.start_line <= end && s.end_line >= start);
+    const preview = buildRangePreview(start, end, total, lines.slice(startIdx, startIdx + count), codeLines, overlapped);
+
+    if (args.dry_run) {
+      return {
+        message:
+          `[干跑] range ${relPath} L${start}-L${end}（${count} 行 → ${codeLines.length} 行）` +
+          (syntaxRepaired ? '（此编辑会顺手修复原文件语法错误）' : '') +
+          `，${afterHasError ? '⚠ 文件原有语法错误仍在（未恶化也未修复）' : '语法门通过'}，未写盘:\n${preview}`,
+      };
+    }
+
+    fs.writeFileSync(absPath, newContent, 'utf8');
+    const sync = await syncFile(getProjectCacheDb(projectRoot), projectRoot, absPath);
+    const diffNote = sync.symbol_diff
+      ? `（符号 diff: +${sync.symbol_diff.added} -${sync.symbol_diff.removed} ~${sync.symbol_diff.changed}）`
+      : '';
+    const repairNote = syntaxRepaired ? '（顺手修复了原文件的语法错误 ✓）' : '';
+    return {
+      message:
+        `✓ range 编辑 ${relPath} L${start}-L${end}（${count} 行 → ${codeLines.length} 行），` +
+        `索引已重建（${sync.status}）${diffNote}${repairNote}\n${preview}`,
+    };
+  }
 
   let lineOp: LineOp;
 

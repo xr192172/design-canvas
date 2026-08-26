@@ -337,3 +337,109 @@ describe('索引闭环（编辑即索引更新）', () => {
     expect(hits[0].name).toBe('branded');
   });
 });
+
+describe('range（显式行区间编辑）', () => {
+  it('替换指定行区间，其他行不动', async () => {
+    write('src/math.ts', TS_SAMPLE);
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/math.ts',
+      op: 'range',
+      start: 2,
+      end: 2,
+      code: '  return a + b + 100;\n',
+    });
+    expect(r.message).toContain('range');
+    const after = fs.readFileSync(path.join(dir, 'src/math.ts'), 'utf8');
+    expect(after).toContain('return a + b + 100;');
+    expect(after).toContain("return 'x';"); // helper 不动
+    // add 函数体被替换后仍是合法 TS
+    const parsed = await parseFileFull('x.ts', after);
+    expect(parsed.symbols.map((s) => s.name)).toContain('add');
+  });
+
+  it('dry_run 出 diff 预览但不写盘', async () => {
+    const p = write('src/dry.ts', TS_SAMPLE);
+    const before = fs.readFileSync(p, 'utf8');
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/dry.ts',
+      op: 'range',
+      start: 2,
+      end: 2,
+      code: '  return a + b + 100;\n',
+      dry_run: true,
+    });
+    expect(r.message).toContain('[干跑]');
+    expect(r.message).toContain('语法门通过');
+    expect(r.message).toContain('- ' + '  return a + b;');
+    expect(r.message).toContain('+ ' + '  return a + b + 100;');
+    // 未写盘
+    expect(fs.readFileSync(p, 'utf8')).toBe(before);
+  });
+
+  it('区间穿透符号 → 提示影响面', async () => {
+    write('src/oc.ts', TS_SAMPLE);
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/oc.ts',
+      op: 'range',
+      start: 6,
+      end: 6,
+      code: '  total = 42;\n',
+    });
+    // L6 落在 class Calc(L5-L16) 内部 → 提示穿透 Calc
+    expect(r.message).toContain('⚠ 区间穿透');
+    expect(r.message).toContain('Calc');
+    const after = fs.readFileSync(path.join(dir, 'src/oc.ts'), 'utf8');
+    expect(after).toContain('total = 42;');
+  });
+
+  it('传空串 code = 删除区间', async () => {
+    write('src/delr.ts', TS_SAMPLE);
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/delr.ts',
+      op: 'range',
+      start: 12,
+      end: 15,
+      code: '',
+    });
+    expect(r.message).toContain('range');
+    const after = fs.readFileSync(path.join(dir, 'src/delr.ts'), 'utf8');
+    expect(after).not.toContain('add(n: number)');
+    expect(after).toContain('class Calc'); // 类其余部分保留
+    const parsed = await parseFileFull('x.ts', after);
+    expect(parsed.symbols.some((s) => s.qualified_name === 'Calc.add')).toBe(false); // 类方法没了
+    expect(parsed.symbols.map((s) => s.name)).toContain('add'); // 顶层 export function add 仍在
+  });
+
+  it('区间引入语法错误 / 越界 → 拒绝不写盘', async () => {
+    // 语法错误
+    const p = write('src/badr.ts', TS_SAMPLE);
+    const before = fs.readFileSync(p, 'utf8');
+    await expect(
+      editCode({
+        project_dir: dir,
+        file: 'src/badr.ts',
+        op: 'range',
+        start: 2,
+        end: 2,
+        code: '  return "unterminated',
+      }),
+    ).rejects.toThrow(/语法错误|放弃/);
+    expect(fs.readFileSync(p, 'utf8')).toBe(before);
+    // 越界 end
+    await expect(
+      editCode({ project_dir: dir, file: 'src/badr.ts', op: 'range', start: 1, end: 9999, code: '' }),
+    ).rejects.toThrow(/超出文件总行数/);
+    // start < 1
+    await expect(
+      editCode({ project_dir: dir, file: 'src/badr.ts', op: 'range', start: 0, end: 2, code: 'x' }),
+    ).rejects.toThrow(/start 必须 ≥1|start 必须 ≥ 1/);
+    // end < start
+    await expect(
+      editCode({ project_dir: dir, file: 'src/badr.ts', op: 'range', start: 5, end: 2, code: 'x' }),
+    ).rejects.toThrow(/end\(2\) < start\(5\)/);
+  });
+});
