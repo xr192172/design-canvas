@@ -25,6 +25,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PackageMigrationSpec, RunningChangePlan } from './refactor_langs.js';
+import { parseAstRoot } from './ts_kernel/index.js';
+import type { SyntaxNodeLike } from './ts_kernel/index.js';
 
 const DEFAULT_SKIP = new Set([
   '.git', 'node_modules', '.design-canvas', 'dist', 'build', 'target', '.venv', 'venv', '__pycache__', '.next', 'out',
@@ -77,8 +79,131 @@ function rewriteImportPaths(src: string, oldAbs: string, newAbs: string): string
   return s;
 }
 
-/** 清洗单条 import 别名：声明改名 + 标识符用法重写。 */
-function cleanAlias(src: string, exactPath: string, from: string, to: string): string {
+/** 一条基于 AST 字节偏移的编辑点。start/end 为 JS 字符串索引（与当前封装对齐）。 */
+interface AliasEdit {
+  start: number;
+  end: number;
+  replacement: string;
+}
+
+/** 去掉字符串字面量的引号（如 `"path"` → `path`）。 */
+function stripQuotes(s: string): string {
+  if (s.length >= 2) {
+    const c0 = s[0];
+    if ((c0 === '"' || c0 === "'") && s[s.length - 1] === c0) return s.slice(1, -1);
+  }
+  return s;
+}
+
+/** 收集 `from` 在该文件中作为 `exactPath` 的 import 别名声明点。 */
+function collectGoImportAliasEdits(
+  node: SyntaxNodeLike,
+  exactPath: string,
+  from: string,
+  to: string,
+): { edits: AliasEdit[]; confirmed: boolean } {
+  let confirmed = false;
+  const edits: AliasEdit[] = [];
+  const walk = (n: SyntaxNodeLike): void => {
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (!c) continue;
+      if (c.type === 'import_spec') {
+        const pathNode = c.childForFieldName('path');
+        const p = pathNode ? stripQuotes(pathNode.text) : '';
+        if (pathNode && p === exactPath) {
+          const aliasNode = c.childForFieldName('name'); // import_spec 的"别名"字段
+          if (aliasNode && aliasNode.text === from) {
+            confirmed = true;
+            if (!to) {
+              // 去掉别名：删 `alias "path"` 中 alias+空白，保留 path
+              const specStart = c.startIndex ?? 0;
+              const pathStart = pathNode.startIndex ?? specStart;
+              if (pathStart > specStart) edits.push({ start: specStart, end: pathStart, replacement: '' });
+            } else if (to !== from) {
+              const tS = aliasNode.startIndex ?? 0;
+              const tE = aliasNode.endIndex ?? tS + aliasNode.text.length;
+              edits.push({ start: tS, end: tE, replacement: to });
+            }
+          }
+        }
+        continue; // import_spec 内部不再深挖
+      }
+      walk(c);
+    }
+  };
+  walk(node);
+  return { edits, confirmed };
+}
+
+/** 收集 Go `selector_expression` 左操作数 `from` 的用法点（包别名调用 `from.X`）→ `to`。 */
+function collectGoSelectorEdits(node: SyntaxNodeLike, from: string, to: string): AliasEdit[] {
+  const edits: AliasEdit[] = [];
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'import_declaration' || n.type === 'import_spec_list') return; // 跳过 import 区
+    if (n.type === 'selector_expression') {
+      const x = n.child(0);
+      if (x && x.type === 'identifier' && x.text === from) {
+        const tS = x.startIndex ?? 0;
+        const tE = x.endIndex ?? tS + x.text.length;
+        edits.push({ start: tS, end: tE, replacement: to });
+      }
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(node);
+  return edits;
+}
+
+/**
+ * Go AST 作用域守卫 + 精确替换（root cause 拦截）：
+ * 仅在「本文件确有 `from` 作为 `exactPath` 的 import 别名」时才生成编辑点；
+ * 否则（守卫命中）返回空编辑，调用方按原样跳过——修复「from 是局部变量
+ * （如 v2.Get）却被正则无差别地 `\bfrom\.` 改掉」的根因。
+ * 返回 { ok:false } 表示解析失败（语言包缺失/退化环境），调用方据此回退正则。
+ */
+async function goAliasEdits(
+  src: string,
+  exactPath: string,
+  from: string,
+  to: string,
+  fileAbs: string,
+): Promise<{ ok: boolean; edits: AliasEdit[] }> {
+  const r = await parseAstRoot(fileAbs, src);
+  if (!r || r.langName !== 'go') return { ok: false, edits: [] };
+  const { root } = r;
+
+  const imp = collectGoImportAliasEdits(root, exactPath, from, to);
+  if (!imp.confirmed) return { ok: true, edits: [] }; // 守卫命中：from 非该 importPath 别名 → 跳过
+
+  const edits = [...imp.edits];
+  if (to && to !== from) edits.push(...collectGoSelectorEdits(root, from, to));
+  return { ok: true, edits };
+}
+
+/** 按 offset 降序应用编辑点；每个替换点先做一致性校验（防/兜多字节偏移错位）。 */
+function applyAliasEdits(src: string, edits: AliasEdit[], from: string): string {
+  if (edits.length === 0) return src;
+  const sorted = [...edits].sort((a, b) => b.start - a.start);
+  let s = src;
+  for (const e of sorted) {
+    if (e.start < 0 || e.end > s.length || e.start > e.end) continue;
+    if (e.replacement === '') {
+      // 删除别名段（to 空）——边界来自 import_spec/path 内部，直接删除
+      s = s.slice(0, e.start) + s.slice(e.end);
+    } else {
+      if (s.slice(e.start, e.end) !== from) continue; // 一致性校验：替换点必须恰好是 from token
+      s = s.slice(0, e.start) + e.replacement + s.slice(e.end);
+    }
+  }
+  return s;
+}
+
+/** 非 Go（TS/Python…）沿用原正则清洗。 */
+function cleanAliasRegex(src: string, exactPath: string, from: string, to: string): string {
   let s = src;
   const quoted = escapeRe(exactPath);
   // 1) 别名声明：`alias "path"` → `to "path"`；to 为空则去掉别名（仅留 `"path"`）
@@ -94,6 +219,24 @@ function cleanAlias(src: string, exactPath: string, from: string, to: string): s
     s = s.replace(new RegExp(`\\b${escapeRe(from)}\\.`, 'g'), `${to}.`);
   }
   return s;
+}
+
+/**
+ * 清洗单条 import 别名：声明改名 + 标识符用法重写。
+ * Go 走 AST 作用域守卫（先）精确替换；其余语言回退正则。
+ */
+async function cleanAlias(src: string, exactPath: string, from: string, to: string, fileAbs: string): Promise<string> {
+  const ext = '.' + (fileAbs.split('.').pop() || '');
+  if (ext === '.go') {
+    const res = await goAliasEdits(src, exactPath, from, to, fileAbs);
+    if (!res.ok) {
+      // Go 语言包缺失 / 解析失败（退化环境）→ 回退正则，保证迁移功能不静默失效
+      return cleanAliasRegex(src, exactPath, from, to);
+    }
+    // 守卫命中（空编辑→原样）或精确替换
+    return applyAliasEdits(src, res.edits, from);
+  }
+  return cleanAliasRegex(src, exactPath, from, to);
 }
 
 /** 顶层 package 声明改名（from_test → to_test 优先）。 */
@@ -125,8 +268,9 @@ export interface MigrationPlanOptions {
 
 /**
  * 纯计算：产出提级计划。不改盘。会做真实文件系统读取与存在性判断。
+ * （Go 别名清洗走 AST 作用域守卫，为异步。）
  */
-export function computeMigrationPlan(opts: MigrationPlanOptions): RunningChangePlan {
+export async function computeMigrationPlan(opts: MigrationPlanOptions): Promise<RunningChangePlan> {
   const proj = path.resolve(opts.project_dir);
   const spec = opts.migrate;
   const exts = new Set(spec.sourceExts ?? [...DEFAULT_EXTS]);
@@ -223,9 +367,9 @@ export function computeMigrationPlan(opts: MigrationPlanOptions): RunningChangeP
     // (a) import 引用面重写（全量文件）
     s = rewriteImportPaths(s, importOldAbs, importNewAbs);
 
-    // (b) 别名清洗（逐条）
+    // (b) 别名清洗（逐条；Go 走 AST 作用域守卫）
     for (const al of spec.aliases ?? []) {
-      s = cleanAlias(s, al.importPath, al.from, al.to);
+      s = await cleanAlias(s, al.importPath, al.from, al.to, fileAbs);
     }
 
     // (c) package 文件改名：仅作用于 packageRenameDir 树内；topLevelOnly 时只改直接位

@@ -38,7 +38,7 @@ function write(dir: string, rel: string, content: string): void {
 }
 
 describe('computeMigrationPlan', () => {
-  it('已物理到位：只改内容——package 改名 + import 引用面重写 + 别名清洗（hubv2→hub）', () => {
+  it('已物理到位：只改内容——package 改名 + import 引用面重写 + 别名清洗（hubv2→hub）', async () => {
     const root = tempRoot();
     // 代码已物理在 internal/hub（package 仍是 v2）；消费者仍指向 internal/hub/v2（目录不存在 → 编译不过的中间态）
     write(root, 'go.mod', 'module github.com/acme/shell\n');
@@ -51,7 +51,7 @@ describe('computeMigrationPlan', () => {
       'package main\n\nimport (\n\thubv2 "github.com/acme/shell/internal/hub/v2"\n)\n\nfunc main() { _ = hubv2.Hub() }\n',
     );
 
-    const plan = computeMigrationPlan({
+    const plan = await computeMigrationPlan({
       project_dir: root,
       migrate: {
         moduleBase: 'github.com/acme/shell',
@@ -86,13 +86,61 @@ describe('computeMigrationPlan', () => {
     expect(plan.absToNew.has(path.join(root, 'internal/hubclient', 'client.go'))).toBe(false);
   });
 
-  it('撞名检测：内容写入目标已是现存文件 → 抛错', () => {
+  it('作用域守卫：from 是局部变量（v2.Get）→ 不被误扫', async () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module github.com/acme/shell\n');
+    write(root, 'internal/hub/hub.go', 'package hub\n\nfunc Hub() string { return "hub" }\n');
+    // vault_test 样本：v2 是局部变量（`var v2 = &agent.Agent{}`），不是 `.../internal/hub` 的 import 别名
+    write(
+      root,
+      'internal/vault/vault_test.go',
+      [
+        'package vault_test',
+        '',
+        'import (',
+        '\t"testing"',
+        '',
+        '\t"github.com/acme/shell/internal/agent"',
+        ')',
+        '',
+        'func TestVault(t *testing.T) {',
+        '\tvar v2 = &agent.Agent{}',
+        '\tv2.Get("key")',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    const plan = await computeMigrationPlan({
+      project_dir: root,
+      migrate: {
+        moduleBase: 'github.com/acme/shell',
+        prefix: 'internal/hub',
+        to: 'internal/hub',
+        aliases: [
+          // 清洗目标 from='v2'，但本文件 v2 是局部变量 → AST 守卫应命中，跳过
+          { importPath: 'github.com/acme/shell/internal/hub', from: 'v2', to: 'agentv2' },
+        ],
+      },
+    });
+
+    // 守卫命中：v2 是局部变量、非该 importPath 的别名 → 文件零改动，不进重写计划
+    // （旧正则实现会把 `v2.Get` 误改成 `agentv2.Get` 并进入 absToNew）
+    expect(plan.absToNew.has(path.join(root, 'internal/vault', 'vault_test.go'))).toBe(false);
+    // 磁盘原样仍在（未被改写）
+    const onDisk = fs.readFileSync(path.join(root, 'internal/vault', 'vault_test.go'), 'utf-8');
+    expect(onDisk).toContain('var v2 = &agent.Agent{}');
+    expect(onDisk).toContain('v2.Get("key")');
+    expect(onDisk).not.toContain('agentv2');
+  });
+
+  it('撞名检测：内容写入目标已是现存文件 → 抛错', async () => {
     const root = tempRoot();
     write(root, 'go.mod', 'module github.com/acme/shell\n');
     write(root, 'internal/hub/hub.go', 'package v2\n');
     // 消费者文件自身也物理在目标位置但需要重写 → 自身参与改写不算撞名（originals 有之）
     write(root, 'internal/hub/main.go', 'package v2\n');
-    const plan = computeMigrationPlan({
+    const plan = await computeMigrationPlan({
       project_dir: root,
       migrate: {
         moduleBase: 'github.com/acme/shell',
@@ -105,14 +153,14 @@ describe('computeMigrationPlan', () => {
     expect(plan.absToNew.size).toBeGreaterThanOrEqual(1);
   });
 
-  it('moduleBase 被剥空 → 计划期抛错，禁止静默全局替换', () => {
+  it('moduleBase 被剥空 → 计划期抛错，禁止静默全局替换', async () => {
     const root = tempRoot();
     write(root, 'go.mod', 'module x\n');
     write(root, 'pkg/a.go', 'package a\n');
     // 空串 / 纯斜杠 / 纯空白 moduleBase 都会被剥成空 → 计划期拦截
     for (const bad of ['', '/', '///', '   /   ']) {
       try {
-        computeMigrationPlan({
+        await computeMigrationPlan({
           project_dir: root,
           migrate: { moduleBase: bad, prefix: 'pkg/a', to: 'pkg/b' },
         });
@@ -124,20 +172,20 @@ describe('computeMigrationPlan', () => {
       }
     }
     // 正常 moduleBase 仍能正常产出
-    const ok = computeMigrationPlan({
+    const ok = await computeMigrationPlan({
       project_dir: root,
       migrate: { moduleBase: 'acme/x', prefix: 'pkg/a', to: 'pkg/b' },
     });
     expect(ok.absToNew.size).toBeGreaterThanOrEqual(0);
   });
 
-  it('prefix/to 误传绝对路径 → 计划期抛错，禁止路径穿越', () => {
+  it('prefix/to 误传绝对路径 → 计划期抛错，禁止路径穿越', async () => {
     const root = tempRoot();
     write(root, 'go.mod', 'module x\n');
     write(root, 'pkg/a.go', 'package a\n');
     // Unix 绝对形式
     try {
-      computeMigrationPlan({
+      await computeMigrationPlan({
         project_dir: root,
         migrate: { moduleBase: 'm', prefix: '/tmp/pkg', to: 'pkg/b' },
       });
@@ -149,7 +197,7 @@ describe('computeMigrationPlan', () => {
     }
     // Windows 盘符绝对形式
     try {
-      computeMigrationPlan({
+      await computeMigrationPlan({
         project_dir: root,
         migrate: { moduleBase: 'm', prefix: 'pkg/a', to: 'D:\\outside\\pkg' },
       });
@@ -160,7 +208,7 @@ describe('computeMigrationPlan', () => {
       }
     }
     // 正斜杠相对路径仍可用
-    const ok = computeMigrationPlan({
+    const ok = await computeMigrationPlan({
       project_dir: root,
       migrate: { moduleBase: 'm', prefix: 'pkg/a', to: 'pkg/b' },
     });
