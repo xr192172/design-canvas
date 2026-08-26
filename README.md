@@ -1,44 +1,29 @@
 # design-canvas
 
-> 人机共享的可视化协议层。LLM 输出结构化 DSL → 渲染成自包含 HTML 网页 → 人看图改 JSON → LLM 读 JSON 理解。
+> 人机共享的可视化协议层。LLM 输出结构化 DSL → 渲染成自包含 HTML → 人看图改 JSON → LLM 读 JSON 理解。
 >
-> 作为 MCP 服务对外开放，兼容所有支持 MCP 的 client（Claude Desktop / Cursor / agent-shell 等）。
+> 标准 MCP server，兼容所有支持 MCP 的 client（Claude Desktop / Cursor / VS Code / agent-shell 等）。
 
 ---
 
 ## 这是什么
 
-一个 **MCP server**，提供工具让 LLM 把"脑子里的图"画出来给人类看。
+Agent 与人类协作开发时最大的痛点是**需求对不齐**：LLM 输出文字描述（“传送带有 L0 / SummaryZone / SectionQueue…”），人类在脑子里渲染成图，对齐成本极高。
 
-人类和 LLM 协作开发时最大的问题是 **需求对不齐**：LLM 输出文字描述（"传送带有 L0 / SummaryZone / SectionQueue..."），人类在脑子里渲染成图，对齐成本极高。这个工具让 LLM 直接输出结构化 DSL JSON，渲染成可交互的 HTML 网页，人在网页上看图、改 JSON、再让 LLM 读改后的 JSON 继续迭代。
+design-canvas 让 LLM 直接输出**结构化 DSL JSON** → 渲染成**可交互的自包含 HTML 网页**（零依赖，内联 CSS+JS）。人看图上手、改 JSON，LLM 再读改后的 JSON 继续迭代。它是一层**共享的可视化协议层**，把 Agent 的“脑子里的图”画给人类看。
 
-**产品形式**：MCP server 接收 DSL → 渲染成自包含 HTML 文件（内联 CSS+JS，零依赖）→ 用户浏览器打开 `file:///...output/xxx.html` 看图。
+**产品形式**：MCP server 接收 DSL → 渲染成单个 HTML 文件 → 浏览器打开 `file:///.../xxx.html` 看图与交互。
 
-## 核心特性
+## 核心能力线
 
-- **双层 DSL**：几何层（位置/样式，人编辑）+ 语义层（文件/API/依赖，LLM 编辑），id 锚定避免冲突
-- **MCP 协议**：标准 MCP server，任何 MCP client 都能接入
-- **自包含 HTML**：渲染产物是单个 HTML 文件，内联所有 CSS/JS，可邮件/IM 分发
-- **内置 TreeSitterKernel**：AST 解析能力内置（Go/TypeScript/Python/JavaScript），支持代码回填与一致性检查，无需外部 AST 服务
-- **闭环工作流**：scaffold 生成骨架 → LLM 填充实现 → backfill_scaffold 解析实际 API 回填 DSL → check_status 推断状态 → render_dsl 颜色反馈
-- **双向编辑**：浏览器端拖拽/属性编辑/撤销重做/右键菜单，改动回写 DSL 并持久化
-- **人端筛选**：筛选条按状态（待实现/实现中/已完成）/ 孤岛（无连线节点）一键过滤 + 聚焦模式（只看选中节点 ±1 跳上下游）——把 LLM 端的查询过滤能力还给人类用户
-- **数据流追踪**：选中 detail 层函数节点 → 注入数据（JSON）→ 光点沿 AST 级调用链流动，每步浮层显示"进/出值" + CFG 判定（if/loop 条件原文与走向）——不执行代码的静态推演（L5a）
-- **人审流程**：人类在浏览器双击节点添加标注，LLM 读取标注迭代，支持审批链
-- **HTTP API**：`serve.ts` 提供 /api/save /api/load /api/features 及布局/生成/检查端点，浏览器端可直接调用
-
-## 插桩/摄像头工具链（camera）
-
-双语言插桩工具链**唯一归属本仓库**（2026-08-14 自 ai-base 迁移，原目录不再更新）：
-
-| 组件 | 路径 | 说明 |
+| 能力线 | 说明 | 代表工具 |
 |---|---|---|
-| TS 插桩器 | `src/camera/instrument.ts` | tree-sitter AST 源码级全量插桩（函数出入口/catch/IO），幂等，git 兜底 |
-| Go 插桩器 + 探针 | `go-camera/` | go/ast 改写插桩 + probe 契约判定 + camera-dsl CLI（仅标准库，自包含） |
-| 编译期 trace | `go-trace/` | TraceEntry/TraceExit 函数级仿真采集核心 |
-| 迁移留档 | `go-camera/MIGRATED_FROM_AI_BASE.md` | 自 ai-base 迁移的说明与解耦记录 |
-
-被插桩目标（狗食现场）：`ai-base/agent-shell` —— 其仓库已提交全量插桩基线快照，重跑 hub 即产出 `.agent/camera/events-*.jsonl`，由 camera-dsl CLI 消费判定。
+| **画图 / 出图** | 从结构数据生成设计图、思维导图、架构图，可交互双向编辑 | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` |
+| **代码理解** | 工程导入、语义搜索、影响分析、架构分层、微服务拆分、算法流推导、数据流追踪 | `explore_code`（`import/semantic_search/diff_impact/arch_layer/derive_split/…`） |
+| **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架；解析实现回填 actual_apis；对比期望契约输出一致性报告 | `scaffold` / `backfill_scaffold` / `consistency_check` |
+| **重构防线** | 重构前基线验证、重构后契约对账、提交层产物完整性自检、失败回滚的闭环 | `verify_refactor` / `refactor_pipeline` / `contract_gate` / `submit_gate` / `release tools` |
+| **插桩 / 摄像头** | 对被测代码动态插桩，采集真实行为与契约比对，识别行为偏差（TS + Go 双语言链） | `src/camera/`（TS 插桩）+ `go-camera/`（Go 插桩 + probe） |
+| **多语言 AST 根基** | 内置 TreeSitterKernel（Go/TypeScript/Python/JavaScript），符号/import/调用边/类型引用统一产出，支撑改造能力（提升别名清洗等） | `ts_kernel` / `package_migration` |
 
 ## 快速开始
 
@@ -63,40 +48,35 @@ npm start
 # }
 ```
 
-或一键分发到各主流 MCP client（Claude/Cursor/VS Code/Codex/Copilot/Gemini/Windsurf/Cline）：
+或一键分发到各主流 MCP client（Claude / Cursor / VS Code / Codex / Copilot / Gemini / Windsurf / Cline）：
 
 ```bash
-node scripts/install_mcp.mjs          # 写入全部已安装 client 的配置（自动合并+备份）
-node scripts/install_mcp.mjs --list   # 查看各平台配置路径与写入状态
-node scripts/install_mcp.mjs --dry-run# 预览将写入的内容（不落盘）
+node scripts/install_mcp.mjs            # 写入全部已安装 client 的配置（自动合并 + 备份）
+node scripts/install_mcp.mjs --list     # 查看各平台配置路径与写入状态
+node scripts/install_mcp.mjs --dry-run  # 预览将写入的内容（不落盘）
 node scripts/install_mcp.mjs --target claude  # 只写指定平台
 ```
 
 ## MCP 工具一览（8 主工具 + 别名）
 
-> 为降低 LLM 的工具选择成本，工具已从 37 个收敛为 **8 个主工具**（参数化分发）。旧工具名**全部保留为别名**，指向对应主工具，存量会话/脚本/文档零破坏。
-> 完整工具演化与偏离记录见 [docs/evolution.md](./docs/evolution.md)。
+> 工具从历史版本收敛为 **8 个主工具**（参数化分发），旧工具名**全部保留为别名**指向主工具，存量会话/脚本零破坏。新会话请直接使用主工具。
 
-### 主工具 ★
-
-| 工具 | 用途 |
+| 主工具 | 用途 |
 |------|------|
-| `get_dsl` | **统一只读入口**：`query`(dsl/features/annotations/approvals/approval_history/snapshots/templates/simulation_state/diff) + `view`(design/live) + 各过滤参数 |
-| `edit_dsl` | **统一写入口**：`operations[]` 批量执行节点/边/文件/API 增删改、平移(move)、语义绑定(binding)、状态更新，以及标注/审批/快照/自动布局/仿真重置。按序执行，任一失败全部回滚（原子性）。`view=live` 拒绝写入（代码快照只读） |
+| `get_dsl` | **统一只读入口**：`query`(dsl/features/annotations/approvals/snapshots/templates/simulation_state/diff) + `view`(design/live) + 过滤参数 |
+| `edit_dsl` | **统一写入口**：`operations[]` 批量增删改/平移/语义绑定/状态更新/标注/审批/快照/自动布局，按序执行、任一失败全量回滚（原子）。`view=live` 拒绝写入 |
 | `manage_feature` | **生命周期入口**：`action`(create/clone/template/list/delete) |
 | `render_dsl` | **渲染入口**：`format`(html 默认/svg/markdown) + `view`(design/live) + `output_path` |
-| `scaffold` | 从 DSL semantic 层生成代码骨架（go/ts/py/js/vue/tsx + INVARIANTS.md）+ 状态推断 |
-| `backfill_scaffold` | 解析实现代码的 API 签名回填 DSL actual_apis，输出差异报告 |
+| `scaffold` | 从 DSL 语义层生成代码骨架 + 状态推断 |
+| `backfill_scaffold` | 解析实现代码 API 签名回填 actual_apis，输出差异报告 |
 | `consistency_check` | 对比 expected_apis vs 实际代码，输出一致性报告 + 跨文件不变式（只读） |
 | `explore_code` | **代码理解入口**：`action`(import/semantic_search/diff_impact/arch_layer/guided_tour/check_monolith/analyze_monolith/derive_split/derive_detail_chain/derive_anim_flow/derive_algorithm/inject_replay/run_simulation/reset_simulation/watch) + `args` |
 
 ### `view` 参数（design | live，默认 design）
 
-三个可能落数据的工具（`get_dsl` / `edit_dsl` / `render_dsl`）统一显式声明视图，杜绝"改到哪一层"的歧义：
-
-- **design**（默认）= 设计视图：活态 DSL（`design-canvas.json`）+ feature 存档，LLM 刻意设计的主战场。对应浏览器「🎭 设计」。
-- **live** = 实际视图：代码快照（`live/<f>.dsl.json`），只读，只能由 `explore_code action=import/watch` 重建。对应浏览器「⚡ 实际」。
-- **判别口诀**：要改的那一版 = `design`；要看的代码现状 = `live`；listen 自动更新 = `watch`（explore_code）。
+- **design**（默认）= 设计视图：活态 DSL + feature 存档，LLM 刻意设计的主战场。对应浏览器「🎭 设计」。
+- **live** = 实际视图：代码快照（只读），只能由 `explore_code action=import/watch` 重建。对应浏览器「⚡ 实际」。
+- **判别口诀**：要改的那一版 = `design`；要看的代码现状 = `live`。
 
 ### 别名（旧工具名 → 主工具）
 
@@ -108,59 +88,50 @@ node scripts/install_mcp.mjs --target claude  # 只写指定平台
 | `export_svg` / `export_markdown` | → `render_dsl` |
 | `check_status` | → `scaffold` |
 | `import_project` / `semantic_search` / `diff_impact` / `arch_layer` / `guided_tour` / `check_monolith` / `analyze_monolith` / `derive_split` / `derive_detail_chain` / `derive_anim_flow` / `derive_algorithm` / `inject_replay` / `run_simulation` / `reset_simulation` / `watch_project` | → `explore_code` |
-| `add_annotation` / `resolve_annotation` / `dag_layout` / `force_layout` / `grid_align` / `submit_approval` / `review_annotation` / `save_snapshot` / `rollback_snapshot` / `delete_snapshot` | → `edit_dsl`（写动作） |
+| `add_annotation` / `resolve_annotation` / `dag_layout` / `force_layout` / `grid_align` / `submit_approval` / `review_annotation` / `save_snapshot` / `rollback_snapshot` / `delete_snapshot` | → `edit_dsl` |
 
-> 新会话建议直接用 8 主工具；旧工具名仍可用以兼容历史调用。
+## 能力矩阵 & 多语言支持
 
-## HTTP API（serve.ts）
+工具基于 **168+ 语言 AST 解析器**（tree-sitter）按需拉取。核心通用根基 `ts_kernel` 对已安装语言全部全量支持（符号/import/调用边/类型引用）；部分改造类功能按语言分级落地：
 
-除 MCP 工具外，`npm run serve` 启动 HTTP server，浏览器端可直接调用：
+- **full_ast**：Go / TypeScript / JS 家族全量；Python 视功能而定
+- **regex_fallback**：少数功能对个别语言回退到正则
+- **unimplemented**：未落地的「功能 × 语言」对——**可见、可排期**，而非隐藏窟窿
 
-- `POST /api/save` / `GET /api/load` — DSL 读写
-- `GET /api/features` — 列出 feature
-- `/api/layout` / `/api/scaffold` / `/api/consistency` — 布局/生成/检查能力
-- `POST /api/trace-exec` — 数据流真实执行：喂用户输入，链上纯函数子集真实运行（TS/Py/Go 三语言），不支持/出错如实标注
-- `POST /api/focus` — LLM 关键节点选点（`.design-canvas/config.json` 配置 apiKey/model/baseURL；未配置降级启发式）
-- 静态文件服务（output/ 目录）
+体检时自动扫描缺口：
 
-## 开发路线（实际进度）
+```bash
+npm run doctor        # 环境就绪检查 + 能力矩阵缺口自检
+npm run capability    # 单独输出能力缺口（JSON / 人类可读）
+```
 
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| 1 | DSL Schema + 类型 + 校验器 | ✅ 完成 |
-| 2 | MCP server + render_dsl | ✅ 完成 |
-| 3 | HTML 渲染器 | ✅ 完成 |
-| 4 | 传送带示例 + e2e 测试 | ✅ 完成 |
-| 5 | 一致性检查 + 代码回填（内置 TreeSitterKernel） | ✅ 完成 |
-| 6 | 双向编辑（拖拽回写 + 撤销/重做 + 属性面板） | ✅ 完成 |
-| 7 | 代码骨架生成（scaffold 多语言） | ✅ 完成 |
-| 8 | 仿真器 + 动画系统 | ✅ 通用动画引擎 L0-L4.5（粒子流/分层/条件分支/函数绑定/异常语义/effect 注册，conveyor 已迁移）；⏳ L5 反向提取（代码→动画 DSL） |
-| 9 | 分层披露（main/error/detail 三层 + 宿主角标钻入） | ✅ 完成 |
-| 10 | 工程导入（import_project/check_monolith/derive_detail_chain/derive_algorithm/inject_replay） | ✅ 完成 |
-| 11 | SQLite 符号缓存（schema v2 + 增量解析 + 删除侦测） | ✅ 完成 |
-| 12 | MCP 工具收敛（写→update_feature，读→query_feature） | ✅ 完成 |
-| 13 | 人端筛选（筛选条 + 聚焦模式） | ✅ 完成 |
-| 14 | 调用边接入渲染 + 数据流追踪（AST 级调用图 → detail 层虚线跳边/分支节点 → 注入数据静态推演 + CFG 判定展示） | ✅ 完成（L5a 静态推演，判定展示条件原文与走向） |
-| 15 | 数据流真实执行 + LLM 关键节点聚焦（trace_exec 三语言真实执行，用户输入空间，不支持如实标注；/api/focus LLM 选点，前端聚焦高亮 + 非关键压缩） | ✅ 完成（验证产物 output/trace_demo.html、output/xf_trace.html） |
-| 16 | 全量借鉴路线图（Diff Impact / 语义搜索 / 文件监听 / 多平台分发） | ⏳ 见 [docs/evolution.md](./docs/evolution.md) §6 |
+## 测试 / 验证
 
-> 设计文档原意与实际实现的偏离追溯见 [docs/evolution.md](./docs/evolution.md)。
+```bash
+npm test              # vitest 全量
+npm run doctor        # 环境体检 + 能力缺口
+```
 
 ## 示例
 
-传送带模型示例见 [examples/conveyor.json](./examples/conveyor.json)，对应 agent-shell v2 上下文引擎的可视化。渲染产物 [output/conveyor.html](./output/conveyor.html) 可直接浏览器打开。
+传送带模型示例见 [examples/conveyor.json](./examples/conveyor.json)（对应 agent-shell 上下文引擎可视化），构建后可用 `render_dsl`/`serve` 渲染为 HTML 浏览器查看。
 
 ## 技术栈
 
 - **MCP server**：TypeScript + [@modelcontextprotocol/sdk](https://www.npmjs.com/package/@modelcontextprotocol/sdk)
-- **AST 解析**：tree-sitter（Go/TypeScript/Python/JavaScript），动态检测语言包
-- **渲染器**：HTML 字符串拼接（不用 React/Vite，MVP 阶段保持零构建链）
+- **AST 解析**：tree-sitter（Go / TypeScript / Python / JavaScript），动态检测语言包
+- **渲染器**：HTML 字符串拼接（零构建链，产物单文件自包含）
 - **Schema 校验**：ajv + ajv-formats
 - **测试**：vitest
 
-## 项目背景
+## 心智 / 渐进披露
 
-源自 agent-shell 项目主脑与左脑的讨论。LLM 协作开发时需求对不齐成本高，需要"共享可视化协议层"。独立项目化以便对外开放。完整背景与设计决策见 [docs/design.md](./docs/design.md)，变更追溯见 [docs/evolution.md](./docs/evolution.md)。
+仓库内置面向 Agent 的两个 skill（`.trae/skills/`）：
+
+- **design-canvas-router**：渐进披露路由，「遇到什么问题 → 调哪个工具」分层定位，先查再用、不为小愿望造工具。
+- **design-canvas-mind**：心智外衣，注入能力地图、愿望→即席编排、后工具自动前置 + 缓存跳过、诚实交付纪律。
+
+用这条工具链前请先穿戴它们，避免“为最小愿望手写一套新工具”。
 
 ## License
 

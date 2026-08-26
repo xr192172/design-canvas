@@ -90,3 +90,36 @@ test_*.mjs
 test_*.ts
 test_*.txt
 
+# ───── 发布划界（内部实验/诊断/目标项目专属，不入发布仓库） ─────
+# 内部 Go 插桩实验与探针（区分于 svc 的 go-slim/go-camera 运行时依赖）
+go-trace/
+camera-conformance/
+scaffold/
+# 内部文档（dev 过程稿：plans/progress/验收纪要/报告/preview html）
+docs/
+# 内部交接/狗食试产产物
+HANDOVER_DOGFOOD.md
+.tmp_test.mjs
+.brickify_agentshell_report.json
+*.report.json
+# 一次性/诊断/目标项目专属脚本（产品链 scripts 保留：gen_anim_core_bundle / install_mcp / install_global_skill / promote_design_canvas_mcp / setup / hub / rebuild_feature / gen_teach / rebuild_teach / scan_projects / batch_import / audit_env / reorg_env）
+scripts/*_aibase.mjs
+scripts/annotate_aibase.mjs
+scripts/bughunt_self.mjs
+scripts/*_smoke.mjs
+scripts/*_verify.mjs
+scripts/*_real.mjs
+scripts/check_*.mjs
+scripts/dogfood_audit.mjs
+scripts/e2e_*.mjs
+scripts/regen_*.mjs
+scripts/regenerate_design.mjs
+scripts/relayout_*.mjs
+scripts/rerender_output.mjs
+scripts/derive_real_aibase.mjs
+scripts/derive_algorithm_real.mjs
+scripts/dump_geom.mjs
+scripts/reorg_env.cjs
+# 狗食落盘 runner（直接对外部真实项目写盘，clone 后不可运行，不入发布套件）
+tests/tools/z_dg_*.test.ts
+
