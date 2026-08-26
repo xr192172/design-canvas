@@ -134,6 +134,102 @@ describe('computeMigrationPlan', () => {
     expect(onDisk).not.toContain('agentv2');
   });
 
+  it('TS AST：from 是该 source 的 import 命名空间别名 → 精确替换（命中），非该 source 局部变量 → 跳过（守卫）', async () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module github.com/acme/shell\n');
+    // 命中用例：`import * as v2 from "acme/pkg/client"` + v2.Get() → 别名声明改名 + 用法点改写
+    write(
+      root,
+      'src/consumer.ts',
+      [
+        'import * as v2 from "acme/pkg/client";',
+        'export const r = v2.Get("k");',
+        '',
+      ].join('\n'),
+    );
+    // 守卫用例：v2 是局部变量（非从 acme/pkg/client 导入）→ AST 守卫命中，跳过
+    write(
+      root,
+      'src/local.ts',
+      [
+        'const v2 = maker();',
+        'v2.Get("k");',
+        '',
+      ].join('\n'),
+    );
+
+    const plan = await computeMigrationPlan({
+      project_dir: root,
+      migrate: {
+        moduleBase: 'acme',
+        prefix: 'other/x',
+        to: 'other/y',
+        aliases: [{ importPath: 'acme/pkg/client', from: 'v2', to: 'acmepkg' }],
+      },
+    });
+
+    // 命中：consumer.ts 进计划，import 标注 + 用法点都改名
+    const consumer = plan.absToNew.get(path.join(root, 'src', 'consumer.ts'));
+    expect(consumer).toBeDefined();
+    expect(consumer).toContain('import * as acmepkg from "acme/pkg/client"');
+    expect(consumer).toContain('acmepkg.Get("k")');
+    expect(consumer).not.toContain('v2');
+
+    // 守卫：local.ts 不进计划，磁盘原样
+    expect(plan.absToNew.has(path.join(root, 'src', 'local.ts'))).toBe(false);
+    const localDisk = fs.readFileSync(path.join(root, 'src', 'local.ts'), 'utf-8');
+    expect(localDisk).toContain('const v2 = maker();');
+    expect(localDisk).toContain('v2.Get("k");');
+    expect(localDisk).not.toContain('acmepkg');
+  });
+
+  it('Python AST：from 是该 source 的别名 import → 精确替换（命中），非该 source 局部变量 → 跳过（守卫）', async () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module github.com/acme/shell\n');
+    // 命中用例：`import pkg_client as v2` + v2.on() → 别名声明改名 + 用法点改写
+    write(
+      root,
+      'src/hit.py',
+      [
+        'import pkg_client as v2',
+        'result = v2.on("k")',
+        '',
+      ].join('\n'),
+    );
+    // 守卫用例：v2 是普通赋值局部变量（没从 pkg_client 导入）→ AST 守卫命中，跳过
+    write(
+      root,
+      'src/miss.py',
+      [
+        'v2 = factory()',
+        'result = v2.getd("k")',
+        '',
+      ].join('\n'),
+    );
+
+    const plan = await computeMigrationPlan({
+      project_dir: root,
+      migrate: {
+        moduleBase: 'acme',
+        prefix: 'other/x',
+        to: 'other/y',
+        aliases: [{ importPath: 'pkg_client', from: 'v2', to: 'pc' }],
+      },
+    });
+
+    const hit = plan.absToNew.get(path.join(root, 'src', 'hit.py'));
+    expect(hit).toBeDefined();
+    expect(hit).toContain('import pkg_client as pc');
+    expect(hit).toContain('result = pc.on("k")');
+    expect(hit).not.toContain('v2');
+
+    expect(plan.absToNew.has(path.join(root, 'src', 'miss.py'))).toBe(false);
+    const missDisk = fs.readFileSync(path.join(root, 'src', 'miss.py'), 'utf-8');
+    expect(missDisk).toContain('v2 = factory()');
+    expect(missDisk).toContain('v2.getd("k")');
+    expect(missDisk).not.toContain('pc');
+  });
+
   it('撞名检测：内容写入目标已是现存文件 → 抛错', async () => {
     const root = tempRoot();
     write(root, 'go.mod', 'module github.com/acme/shell\n');

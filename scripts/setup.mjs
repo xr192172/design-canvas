@@ -34,6 +34,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_SRC = path.join(ROOT, '.trae', 'skills');
 const INSTALL_MCP = path.join(ROOT, 'scripts', 'install_mcp.mjs');
 const INSTRUMENT_CLI = path.join(ROOT, 'dist', 'src', 'camera', 'instrument_cli.js');
+const CAPABILITY_CLI = path.join(ROOT, 'dist', 'src', 'tools', 'capability_cli.js');
 const DEFAULT_AGENT_SKILLS = path.join(ROOT, '..', 'ai-config', 'skills'); // 本地 agent 的 skills 目录
 const EVENT_DIRS_TPL = ['.design-canvas/camera', '.agent/camera'];
 
@@ -166,6 +167,35 @@ function runDoctor() {
     const hasLLM = process.env.DESIGN_CANVAS_LLM || process.env.LLM_API_KEY;
     if (hasLLM) { pass++; console.log(ok(`LLM/Router：已配置 (${hasLLM ? 'env 可见' : ''})`)); }
     else { console.log(warn(`LLM/Router：未检测到 env（DESIGN_CANVAS_LLM/LLM_API_KEY）。分镜/语义命名会停在「需配置 LLM」，这是诚实标注，不是缺失功能`)); }
+  }
+
+  // 6) 能力矩阵缺口（工具自身的「功能×语言」支持度）。纯计算，不依赖目标项目；
+  //    搭载 doctor 后，复语言能力缺口随体检一并可见——补哪个功能、补哪门语言有据可依。
+  {
+    const aside = path.join(os.tmpdir(), `dc-cap-${process.pid}.json`);
+    const r = runNode(CAPABILITY_CLI, ['--installed', '--json', aside]);
+    if (r && r.status === 0 && fs.existsSync(aside)) {
+      let data = null;
+      try { data = JSON.parse(fs.readFileSync(aside, 'utf-8')); } catch { data = null; }
+      fs.rmSync(aside, { force: true });
+      const totalNeed = data?.totalNeed ?? 0;
+      if (totalNeed === 0) {
+        pass++;
+        console.log(ok(`能力矩阵：已装语言全部功能 AST 全量（无缺口）`));
+      } else {
+        // 缺口存在不算 fail（新语言/新功能待补是正常状态，属「待办建议」而非环境故障），给一条汇总即可
+        console.log(warn(`能力矩阵：已装语言下 ${totalNeed} 个「功能×语言」缺口`));
+        const lines = (data?.capabilities || []).map((c) => c.id).join(', ');
+        console.log(dim(`   功能名单：${lines}`));
+        for (const [id, langs] of Object.entries(data?.gaps ?? {})) {
+          console.log(dim(`   - ${id}: ${langs.join(', ')}`));
+        }
+      }
+    } else {
+      fail++;
+      console.log(no(`能力矩阵：capability_cli 无法运行（capability CLI 报错，缺口无法自检）`));
+      console.log(dim(`   → dist/src/tools/capability_cli.js 是否已构建？跑 npm run build`));
+    }
   }
 
   console.log(`\n${fail === 0 ? '全部就绪' : `${fail} 项未就绪`}：${pass} 项通过 / ${fail} 项待办。`);

@@ -104,7 +104,8 @@ const GO_RESERVED = new Set([
 
 function langOfFile(rel: string): Lang | null {
   if (rel.endsWith('.go')) return 'go';
-  if (/\.(ts|tsx)$/.test(rel)) return 'ts';
+  // JS 家族：语法是 TS 子集，走同一套 ts 分支（collectSymbols/collectReferences 的 TS 逻辑对纯 JS 兼容）
+  if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel)) return 'ts';
   return null;
 }
 

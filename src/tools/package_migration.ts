@@ -32,7 +32,7 @@ const DEFAULT_SKIP = new Set([
   '.git', 'node_modules', '.design-canvas', 'dist', 'build', 'target', '.venv', 'venv', '__pycache__', '.next', 'out',
 ]);
 
-const DEFAULT_EXTS = new Set(['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+const DEFAULT_EXTS = new Set(['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py']);
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -184,6 +184,223 @@ async function goAliasEdits(
   return { ok: true, edits };
 }
 
+// ─────────────────────────────────────────────
+// TS 家族（.ts/.tsx/.js/.jsx/.mjs/.cjs）
+// ─────────────────────────────────────────────
+
+/** 收集 TS 中「目标 source 的 import」引入的绑定名 identifier 节点（default/namespace/named）。 */
+function collectTsBinds(
+  node: SyntaxNodeLike,
+  exactPath: string,
+  from: string,
+): { hasFrom: boolean; fromBinds: SyntaxNodeLike[] } {
+  const fromBinds: SyntaxNodeLike[] = [];
+  let hasFrom = false;
+  const check = (id: SyntaxNodeLike | null): void => {
+    if (id && id.type === 'identifier' && id.text === from) {
+      hasFrom = true;
+      fromBinds.push(id);
+    }
+  };
+  const collect = (stmt: SyntaxNodeLike): void => {
+    for (let i = 0; i < stmt.childCount; i++) {
+      const c = stmt.child(i);
+      if (!c || c.type !== 'import_clause') continue;
+      for (let j = 0; j < c.childCount; j++) {
+        const cc = c.child(j);
+        if (!cc) continue;
+        if (cc.type === 'identifier') {
+          // default import：`import from "p"`
+          check(cc);
+        } else if (cc.type === 'namespace_import') {
+          // `import * as from "p"`
+          for (let k = 0; k < cc.childCount; k++) {
+            const x = cc.child(k);
+            if (x && x.type === 'identifier') check(x);
+          }
+        } else if (cc.type === 'named_imports') {
+          for (let k = 0; k < cc.childCount; k++) {
+            const sp = cc.child(k);
+            if (!sp || sp.type !== 'import_specifier') continue;
+            const alias = sp.childForFieldName('alias');
+            check(alias ?? sp.childForFieldName('name'));
+          }
+        }
+      }
+    }
+  };
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'import_statement') {
+      const s = n.childForFieldName('source');
+      if (s && stripQuotes(s.text) === exactPath) collect(n);
+      return;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(node);
+  return { hasFrom, fromBinds };
+}
+
+/** TS 用法点：`member_expression` 的 object 标识符 === from → to（`from.X`）。 */
+function collectTsUsage(node: SyntaxNodeLike, from: string, to: string): AliasEdit[] {
+  const edits: AliasEdit[] = [];
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'member_expression') {
+      const obj = n.childForFieldName('object');
+      if (obj && obj.type === 'identifier' && obj.text === from) {
+        const tS = obj.startIndex ?? 0;
+        const tE = obj.endIndex ?? tS + obj.text.length;
+        edits.push({ start: tS, end: tE, replacement: to });
+      }
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(node);
+  return edits;
+}
+
+/** TS 家族 AST 守卫 + 精确替换（对齐 Go 语义）。 */
+async function tsAliasEdits(
+  src: string,
+  exactPath: string,
+  from: string,
+  to: string,
+  fileAbs: string,
+): Promise<{ ok: boolean; edits: AliasEdit[] }> {
+  const r = await parseAstRoot(fileAbs, src);
+  if (!r) return { ok: false, edits: [] };
+  const b = collectTsBinds(r.root, exactPath, from);
+  if (!b.hasFrom) return { ok: true, edits: [] }; // 守卫命中：from 非该 source 的绑定 → 跳过
+  const edits: AliasEdit[] = [];
+  for (const id of b.fromBinds) {
+    const tS = id.startIndex ?? 0;
+    const tE = id.endIndex ?? tS + id.text.length;
+    edits.push({ start: tS, end: tE, replacement: to });
+  }
+  if (to && to !== from) edits.push(...collectTsUsage(r.root, from, to));
+  return { ok: true, edits };
+}
+
+// ─────────────────────────────────────────────
+// Python（.py）
+// ─────────────────────────────────────────────
+
+/** `from <module> import …` 的模块路径（点分）。 */
+function pyFromModule(stmt: SyntaxNodeLike): string | null {
+  const m = stmt.text.match(/^\s*from\s+([.\w]+)\s+import/);
+  return m ? m[1] : null;
+}
+
+/** 一条 Python import 的来源路径（import_statement 取首个项；import_from 取模块）。 */
+function pyImportSource(stmt: SyntaxNodeLike): string | null {
+  if (stmt.type === 'import_statement') {
+    for (let i = 0; i < stmt.childCount; i++) {
+      const c = stmt.child(i);
+      if (!c) continue;
+      if (c.type === 'aliased_import') {
+        const n = c.childForFieldName('name');
+        if (n) return n.text;
+      }
+      if (c.type === 'dotted_name') return c.text;
+    }
+    return null;
+  }
+  if (stmt.type === 'import_from_statement') return pyFromModule(stmt);
+  return null;
+}
+
+/** 收集 Python 「目标 source 的 import」引入的绑定名 identifier（aliased 别名 / 直导入的首段）。 */
+function collectPyBinds(
+  node: SyntaxNodeLike,
+  exactPath: string,
+  from: string,
+): { hasFrom: boolean; fromBinds: SyntaxNodeLike[] } {
+  const fromBinds: SyntaxNodeLike[] = [];
+  let hasFrom = false;
+  const check = (id: SyntaxNodeLike | null): void => {
+    if (id && id.type === 'identifier' && id.text === from) {
+      hasFrom = true;
+      fromBinds.push(id);
+    }
+  };
+  const collect = (stmt: SyntaxNodeLike): void => {
+    const isFrom = stmt.type === 'import_from_statement';
+    const fromModule = isFrom ? pyFromModule(stmt) : null;
+    for (let i = 0; i < stmt.childCount; i++) {
+      const c = stmt.child(i);
+      if (!c) continue;
+      if (c.type === 'aliased_import') {
+        check(c.childForFieldName('alias')); // `import p as from` / `from p import X as from`
+      } else if (c.type === 'dotted_name') {
+        if (isFrom && c.text === fromModule) continue; // 模块本身非绑定
+        const first = c.child(0);
+        if (first && first.type === 'identifier') check(first);
+      }
+    }
+  };
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'import_statement' || n.type === 'import_from_statement') {
+      if (pyImportSource(n) === exactPath) collect(n);
+      return;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(node);
+  return { hasFrom, fromBinds };
+}
+
+/** Python 用法点：`attribute` 的 object 标识符 === from → to（`from.X`）。 */
+function collectPyUsage(node: SyntaxNodeLike, from: string, to: string): AliasEdit[] {
+  const edits: AliasEdit[] = [];
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'attribute') {
+      const obj = n.childForFieldName('object');
+      if (obj && obj.type === 'identifier' && obj.text === from) {
+        const tS = obj.startIndex ?? 0;
+        const tE = obj.endIndex ?? tS + obj.text.length;
+        edits.push({ start: tS, end: tE, replacement: to });
+      }
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(node);
+  return edits;
+}
+
+/** Python AST 守卫 + 精确替换（对齐 Go 语义）。 */
+async function pyAliasEdits(
+  src: string,
+  exactPath: string,
+  from: string,
+  to: string,
+  fileAbs: string,
+): Promise<{ ok: boolean; edits: AliasEdit[] }> {
+  const r = await parseAstRoot(fileAbs, src);
+  if (!r) return { ok: false, edits: [] };
+  const b = collectPyBinds(r.root, exactPath, from);
+  if (!b.hasFrom) return { ok: true, edits: [] }; // 守卫命中：from 非该 source 的绑定 → 跳过
+  const edits: AliasEdit[] = [];
+  for (const id of b.fromBinds) {
+    const tS = id.startIndex ?? 0;
+    const tE = id.endIndex ?? tS + id.text.length;
+    edits.push({ start: tS, end: tE, replacement: to });
+  }
+  if (to && to !== from) edits.push(...collectPyUsage(r.root, from, to));
+  return { ok: true, edits };
+}
+
 /** 按 offset 降序应用编辑点；每个替换点先做一致性校验（防/兜多字节偏移错位）。 */
 function applyAliasEdits(src: string, edits: AliasEdit[], from: string): string {
   if (edits.length === 0) return src;
@@ -223,20 +440,26 @@ function cleanAliasRegex(src: string, exactPath: string, from: string, to: strin
 
 /**
  * 清洗单条 import 别名：声明改名 + 标识符用法重写。
- * Go 走 AST 作用域守卫（先）精确替换；其余语言回退正则。
+ * Go/TS 家族/Python 均走 AST 作用域守卫（先）精确替换；语言包缺失或解析失败回退正则。
  */
 async function cleanAlias(src: string, exactPath: string, from: string, to: string, fileAbs: string): Promise<string> {
   const ext = '.' + (fileAbs.split('.').pop() || '');
+  let res: { ok: boolean; edits: AliasEdit[] };
   if (ext === '.go') {
-    const res = await goAliasEdits(src, exactPath, from, to, fileAbs);
-    if (!res.ok) {
-      // Go 语言包缺失 / 解析失败（退化环境）→ 回退正则，保证迁移功能不静默失效
-      return cleanAliasRegex(src, exactPath, from, to);
-    }
-    // 守卫命中（空编辑→原样）或精确替换
-    return applyAliasEdits(src, res.edits, from);
+    res = await goAliasEdits(src, exactPath, from, to, fileAbs);
+  } else if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
+    res = await tsAliasEdits(src, exactPath, from, to, fileAbs);
+  } else if (ext === '.py') {
+    res = await pyAliasEdits(src, exactPath, from, to, fileAbs);
+  } else {
+    return cleanAliasRegex(src, exactPath, from, to);
   }
-  return cleanAliasRegex(src, exactPath, from, to);
+  if (!res.ok) {
+    // 语言包缺失 / 解析失败（退化环境）→ 回退正则，保证迁移功能不静默失效
+    return cleanAliasRegex(src, exactPath, from, to);
+  }
+  // 守卫命中（空编辑→原样）或精确替换
+  return applyAliasEdits(src, res.edits, from);
 }
 
 /** 顶层 package 声明改名（from_test → to_test 优先）。 */
