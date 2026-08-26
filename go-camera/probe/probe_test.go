@@ -68,7 +68,7 @@ func TestSinkEmitAndJudge(t *testing.T) {
 	t.Logf("Report:\n%s", report)
 }
 
-// ── 以下 4 条回迁自 agent-shell 分叉期（2026-08-16 防写爆重构）测试 ──
+// ── 以下 4 条回迁自历史分叉期（2026-08-16 防写爆重构）测试 ──
 
 // TestSinkRotationExtractsDeviations 验证降级保全：环形缓冲轮转覆盖旧槽位前，
 // 快车道规则判定的 deviation 事件被抽到独立 deviations.jsonl 保留，其余噪音清空。

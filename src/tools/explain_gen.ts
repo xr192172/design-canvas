@@ -2,7 +2,7 @@
  * explain_gen：科普式讲解导览的角色化文案生成（Persona-Adaptive UI 的 LLM 后端）
  *
  * 手写 EXPLAIN_SCRIPT 只作为兜底；本模块用文本 LLM（OpenAI 兼容
- * /chat/completions，接入方式从 ai-base 项目抽取）为每个讲解模块实时生成
+ * /chat/completions，接入方式复用本仓库既有抽取约定）为每个讲解模块实时生成
  * 三档角色文案：newbie（口语）/ pm（业务价值）/ senior（技术实现）。
  * 生成失败 / 未配置时回退手写文案，不阻塞讲解播放。
  *

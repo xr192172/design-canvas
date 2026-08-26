@@ -1,9 +1,9 @@
 {
-  "id": "agent_shell_context_engine_conveyor",
+  "id": "context_pipeline_conveyor",
   "type": "feature_diagram",
   "feature": "conveyor",
   "version": "1.0.0",
-  "title": "agent-shell v2 上下文引擎传送带模型",
+  "title": "分层上下文流水线传送带模型",
   "status": "done",
 
   "geometry": {

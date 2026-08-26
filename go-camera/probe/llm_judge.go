@@ -18,7 +18,7 @@ import (
 )
 
 // LLMMessage 是喂给 LLM 的一条消息。自包含最小形态（role/content），
-// 由装配层把本模块的发送器适配到真实 LLM client（如 ai-base 的 Router）。
+// 由装配层把本模块的发送器适配到真实 LLM client（如宿主的 Router）。
 type LLMMessage struct {
 	Role    string // system | user | assistant
 	Content string

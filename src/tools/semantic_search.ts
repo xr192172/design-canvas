@@ -74,7 +74,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig | null {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Embedding（OpenAI 兼容 /embeddings，协议与 ai-base RemoteEmbedder 一致）
+// Embedding（OpenAI 兼容 /embeddings，协议与远端 RemoteEmbedder 一致）
 // ─────────────────────────────────────────────────────────────
 
 /** 进程内向量缓存：model:sha256(text) → vector。符号侧文本不变即命中，复用免重算。 */

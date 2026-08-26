@@ -1,7 +1,7 @@
 package probe
 
 // llm_sink_test.go — Sink 轮转抽离的 LLM 慢车道复核测试。
-// 回迁自 agent-shell 分叉期（2026-08-16 防写爆重构）；mockSender/sampleEvent
+// 回迁自历史分叉期（2026-08-16 防写爆重构）；mockSender/sampleEvent
 // 复用 llm_judge_test.go 的定义（同包）。
 
 import (

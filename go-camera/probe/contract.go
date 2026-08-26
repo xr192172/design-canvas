@@ -52,7 +52,7 @@ func (j *Judge) JudgeEvent(ev Event) Verdict {
 // JudgeLog reads events from a JSONL reader and produces a verdict for each.
 func (j *Judge) JudgeLog(r io.Reader) ([]Verdict, error) {
 	var verdicts []Verdict
-	// 2026-08-16 超长行修复（回迁自 agent-shell）：ReadBytes 逐行读取，
+	// 2026-08-16 超长行修复（回迁自历史迁移）：ReadBytes 逐行读取，
 	// Scanner 1MB 行上限会在超长事件行（探针捕获整段流式消息可达 10MB+）
 	// 处 ErrTooLong 中止整个判定。
 	br := bufio.NewReaderSize(r, 64*1024)

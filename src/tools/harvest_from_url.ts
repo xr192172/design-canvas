@@ -168,7 +168,7 @@ export function aggregateContracts(contracts: BrickContract[]): BrickManifest['a
 
 /**
  * 判断相对路径是否落在 vendored 第三方项目克隆内（如 research/amazon-extensions/nodriver，
- * 或 gitignore 的 go-lab/agent-shell 实验克隆——嵌套 go.mod = 独立 module）。
+ * 或 gitignore 的实验性克隆——嵌套 go.mod = 独立 module）。
  * 信号：某个祖先目录（非项目根）携带独立项目全套标记——
  *   Go 嵌套 module（go.mod）、Python 打包件（pyproject.toml/setup.py/setup.cfg）、
  *   或 LICENSE+README 并存（完整镜像特征；单 package.json 不算——monorepo 子包是一方代码）。

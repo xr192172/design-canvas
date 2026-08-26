@@ -14,9 +14,9 @@
  *   import { parseFile, listSupportedLanguages } from './ts_kernel';
  *   const symbols = await parseFile('src/app.go', goSource);
  *
- * 共享给其他项目（如 ai-base）：
+ * 共享给其他项目：
  *   - 抽出为 @design-canvas/ts-kernel 包
- *   - 两边项目 npm install 后都能用
+ *   - 各项目 npm install 后都能用
  *   - 用户只需装一次 tree-sitter-* 包
  */
 

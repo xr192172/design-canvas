@@ -14,7 +14,7 @@ $ledger = @'
 Set-Content -Path (Join-Path $proj '.design-canvas\impact\ledger.json') -Value $ledger -Encoding UTF8
 Set-Content -Path (Join-Path $proj 'events.jsonl') -Value '{"probe":"p1","time":"2026-08-17T00:00:00Z","source":"s","fields":{"x":1}}' -Encoding UTF8
 
-Set-Location d:\project_develop\design-canvas\go-camera
+Set-Location $here
 go build -o (Join-Path $env:TEMP 'camera-dsl.exe') ./cmd/camera-dsl
 Write-Host '=== seed ==='
 & (Join-Path $env:TEMP 'camera-dsl.exe') --project-root $proj seed

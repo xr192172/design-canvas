@@ -1310,7 +1310,7 @@ const TOOL_DEFS: ToolDef[] = [
           package_migration: z
             .object({
               enabled: z.boolean().optional().default(false).describe('是否启用包改名/提级步骤'),
-              moduleBase: z.string().describe('模块根，如 github.com/ai-base/agent-shell'),
+              moduleBase: z.string().describe('模块根，如 github.com/acme/widget/server'),
               prefix: z.string().describe('被改写的旧 import 前缀（相对 project_dir），如 internal/hub/v2'),
               to: z.string().describe('新 import 前缀（相对 project_dir），如 internal/hub'),
               packageRename: z

@@ -56,7 +56,7 @@ export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_mi
  *  全项目源文件里所有 `"<moduleBase>/<prefix>…"` import 路径重写为 `"<moduleBase>/<to>…"`，
  *  并按 aliases 清洗 import 别名（碰撞敏感，逐个文件守卫）。 */
 export interface PackageMigrationSpec {
-  /** 模块根，如 'github.com/ai-base/agent-shell'（配合 prefix 拼出被改写的 import 前缀） */
+  /** 模块根，如 'github.com/acme/widget/server'（配合 prefix 拼出被改写的 import 前缀） */
   moduleBase: string;
   /** 相对 project_dir 的被迁移目录（正斜杠），如 'internal/hub/v2' */
   prefix: string;

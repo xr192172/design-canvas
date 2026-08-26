@@ -1,6 +1,6 @@
 // promote_design_canvas_mcp.mjs — 把 design-canvas 注册为 TRAE 用户级（全局）MCP。
 // 核心修复：用户级配置里的 ${workspaceFolder} 会解析成「当前打开的工作区」，
-// 导致在非 design-canvas 窗口（如 ai-base）加载不到。改为绝对路径后真正全局可用。
+// 导致在非 design-canvas 工作区加载不到。改为绝对路径后真正全局可用。
 //
 // 用法：node scripts/promote_design_canvas_mcp.mjs
 // 写前自动备份到同目录 mcp.json.design-canvas.bak

@@ -1,7 +1,7 @@
 /**
  * contract_gate —— 契约对账闸门（重构吸后预拦 "符号失配"）
  *
- * 背景（agent-shell vault 事故归纳）："v2 提级重构"把 vault_test.go 里正确的
+ * 背景（一次重构事故归纳）："v2 提级重构"把 vault_test.go 里正确的
  * `v2.Get`（v2 = 测试局部变量）机械替换成 `agent.Get`（vault 包内不存在的符号）。
  * 该错误只藏在 *_test.go → `go build` 不编测试 → 默认构建放行 → 静默掉线。
  *

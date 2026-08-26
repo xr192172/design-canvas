@@ -1,8 +1,8 @@
 # design-canvas
 
-> 人机共享的可视化协议层。LLM 输出结构化 DSL → 渲染成自包含 HTML → 人看图改 JSON → LLM 读 JSON 理解。
+> 人机共享的可视化协议层：LLM 输出结构化 DSL JSON → 面向人类的协作前端把它渲染成可交互图 → 人看图改 JSON → LLM 读 JSON 继续迭代。
 >
-> 标准 MCP server，兼容所有支持 MCP 的 client（Claude Desktop / Cursor / VS Code / agent-shell 等）。
+> 标准 MCP server，兼容所有支持 MCP 的 client（Claude Desktop / Cursor / VS Code / Cline 等）。前端采用前后端分离，可视化协作由独立配套项目承载（见下）。
 
 ---
 
@@ -10,15 +10,19 @@
 
 Agent 与人类协作开发时最大的痛点是**需求对不齐**：LLM 输出文字描述（“传送带有 L0 / SummaryZone / SectionQueue…”），人类在脑子里渲染成图，对齐成本极高。
 
-design-canvas 让 LLM 直接输出**结构化 DSL JSON** → 渲染成**可交互的自包含 HTML 网页**（零依赖，内联 CSS+JS）。人看图上手、改 JSON，LLM 再读改后的 JSON 继续迭代。它是一层**共享的可视化协议层**，把 Agent 的“脑子里的图”画给人类看。
+design-canvas 让 LLM 直接输出**结构化 DSL JSON**（双层：几何 + 语义，取消歧义），作为**共享的可视化协议层**，把 Agent 的“脑子里的图”用数据表达出来。可视化与交互由**分工明确的前端**接手：人替换 JSON、改 JSON，LLM 再读回继续迭代。它是一层可复用的**数据/协议提供方**，不绑定任何特定前端。
 
-**产品形式**：MCP server 接收 DSL → 渲染成单个 HTML 文件 → 浏览器打开 `file:///.../xxx.html` 看图与交互。
+### 前端分工（前后端分离）
+
+- 本仓库（MCP server）是**数据/协议层**：负责 DSL 的存取、代码理解、生成/回填/一致性、重构防线、插桩对账，统一以 JSON 与 MCP 工具对外——
+- 可视化协作工作台是**独立的配套前端项目**，订阅本仓库产出的 DSL JSON 并渲染成交互图。
+- 内置一个**精简自包含 HTML 渲染器**（`render_dsl`）作快速预览兜底：无前端环境时也能 `npm run serve` 把单张 DSL 渲染成单文件 HTML 检查。
 
 ## 核心能力线
 
 | 能力线 | 说明 | 代表工具 |
 |---|---|---|
-| **画图 / 出图** | 从结构数据生成设计图、思维导图、架构图，可交互双向编辑 | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` |
+| **可视化 DSL** | DSL 写读与编辑（JSON），渲染交给配套前端；内置 `render_dsl` 作快速预览兜底 | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` |
 | **代码理解** | 工程导入、语义搜索、影响分析、架构分层、微服务拆分、算法流推导、数据流追踪 | `explore_code`（`import/semantic_search/diff_impact/arch_layer/derive_split/…`） |
 | **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架；解析实现回填 actual_apis；对比期望契约输出一致性报告 | `scaffold` / `backfill_scaffold` / `consistency_check` |
 | **重构防线** | 重构前基线验证、重构后契约对账、提交层产物完整性自检、失败回滚的闭环 | `verify_refactor` / `refactor_pipeline` / `contract_gate` / `submit_gate` / `release tools` |
@@ -114,7 +118,7 @@ npm run doctor        # 环境体检 + 能力缺口
 
 ## 示例
 
-传送带模型示例见 [examples/conveyor.json](./examples/conveyor.json)（对应 agent-shell 上下文引擎可视化），构建后可用 `render_dsl`/`serve` 渲染为 HTML 浏览器查看。
+一个「分层上下文流水线传送带」DSL 示例：[examples/conveyor.json](./examples/conveyor.json)（含 33 节点 / 33 边、分层、标注，也用作渲染器回归测试的中坚 fixture）。构建后可用 `render_dsl`/`serve` 渲染为 HTML 浏览器预览。
 
 ## 技术栈
 

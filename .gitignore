@@ -120,6 +120,11 @@ scripts/derive_real_aibase.mjs
 scripts/derive_algorithm_real.mjs
 scripts/dump_geom.mjs
 scripts/reorg_env.cjs
+scripts/audit_env.cjs
+scripts/batch_import.cjs
+scripts/scan_projects.cjs
+# go-camera 迁移交接文档（本地保留，含个人工程路径，不入发布仓库）
+go-camera/MIGRATED_FROM_AI_BASE.md
 # 狗食落盘 runner（直接对外部真实项目写盘，clone 后不可运行，不入发布套件）
 tests/tools/z_dg_*.test.ts
 

@@ -1,7 +1,7 @@
 /**
  * submit_gate —— 提交层完整性自检（go:embed / 产物提交）
  *
- * 背景（agent-shell 默认构建断点归纳）：`//go:embed web/dist/*` 依赖前端构建产物，
+ * 背景（一类默认构建断点归纳）：`//go:embed web/dist/*` 依赖前端构建产物，
  * 但 web/dist 曾因 .gitignore 未纳入版本控制 → 新克隆项目 `go build` 直接失败。
  * `go build` 是重构验证的常见闸门，但它只测"当前磁盘"，测不出"新克隆能否构建"。
  *
