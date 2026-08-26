@@ -42,6 +42,8 @@ import {
 } from './refactor_langs.js';
 import { pythonExecutor } from './python_refactor/index.js';
 import type { JudgeIssue } from './refactor_judge.js';
+import { scanContracts, diffContracts, type ContractSnapshot, type ScanContractsOptions, type UndefinedRef } from './contract_gate.js';
+import { checkEmbedSubmissions, type SubmitCheckResult } from './submit_gate.js';
 
 // re-export 契约类型（向后兼容：外部可从本模块取用）
 export type {
@@ -77,6 +79,8 @@ export interface StageResult {
   detail?: string;
   baseline?: VerificationOutcome | null;
   after?: VerificationOutcome | null;
+  /** 契约对账闸门结果（contractGate 开启且该步确有落盘时才记录） */
+  contract?: { status: 'ok' | 'danger'; newIssues: UndefinedRef[] } | null;
 }
 
 export interface PipelineOptions {
@@ -103,6 +107,13 @@ export interface PipelineOptions {
   /** LLM 审闭环钩子：管线跑完且确有改动时，把"改动的文件+类型"合成候选问题喂给外接裁决/人审
    *  （典型接 refactor_judge：LLM 看到清单后给人审拿不定主意的项）。可选。 */
   onReviewIssues?: (issues: JudgeIssue[]) => void;
+  /** 契约对账闸门：重构落盘后扫描 `X.` 形式引用是否有定义来源，识别"改名/提级/move"
+   *  打断的跨引用失配（如 vault 事故：把局部变量 v2 误当包引用替换成 agent）。
+   *  开启后每步落盘对比 before/after 快照，新增失配 = danger，写进该步 contract + 汇总。
+   *  自检器是"飞刀"（非权威编译器），只预拦不改动决策——权威兜底仍走 go test/tsc。 */
+  contractGate?: { enabled?: boolean; dirs?: string[] };
+  /** 收尾提交层自检（go:embed 产物存在 + 已进 git），结果挂 PipelineResult.submit_check */
+  submitCheck?: boolean;
   /** 单测注入的验证执行器（默认跑真命令） */
   verifyImpl?: (o: { cwd: string; commands: VerifyCommand[] }) => VerificationOutcome;
   /** 多语言执行器注册表；缺省用内置 DEFAULT_LANGS（TS/Go）。新语言调用
@@ -118,6 +129,8 @@ export interface PipelineResult {
   baseline: VerificationOutcome | null;
   /** 初始开启的步骤数（含后续 skipped） */
   planned_steps: number;
+  /** 提交层自检结果（submitCheck 开启时）；null = 未开启 */
+  submit_check?: SubmitCheckResult | null;
 }
 
 // ─────────────────────────────────────────────
@@ -439,6 +452,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
       total_units_removed: 0,
       baseline,
       planned_steps: planned,
+      submit_check: opts.submitCheck ? checkEmbedSubmissions(cwd) : null,
     };
   }
 
@@ -449,6 +463,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     total_units_removed: 0,
     baseline,
     planned_steps: planned,
+    submit_check: opts.submitCheck ? checkEmbedSubmissions(cwd) : null,
   };
 
   // LLM 审闭环：记录实际改动的文件，跑完喂给 onReviewIssues（若设置）
