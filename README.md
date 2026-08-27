@@ -113,6 +113,7 @@ node scripts/install_mcp.mjs --target claude  # 只写指定平台
 | `suggest_renames` | 改造 | 为短名/无意义变量建议语义化名字 |
 | `find_similar_names` | 改造 | 检测易混淆相似名并消歧 |
 | `refactor_judge` | 审闭环 | LLM 审裁决门：采纳/驳回/上抛不确定项给人类 |
+| `diagnose` | 诊断 | 症状→根因六步流水线：症状解析→候选定位（符号缓存）→调用链追溯→影响面→根因聚合（规则+可选 LLM，未配置自动降级）→验证建议（只建议不执行） |
 
 ## 能力矩阵 & 多语言支持
 
