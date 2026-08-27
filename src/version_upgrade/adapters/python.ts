@@ -121,7 +121,12 @@ function runProbe(file: SourceFile): DynamicGateItem {
   );
   fs.writeFileSync(tmp, file.content, 'utf-8');
   try {
-    const r = spawnSync(PY, [tmp], { encoding: 'utf-8', timeout: 15_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    const r = spawnSync(PY, [tmp], { encoding: 'utf-8', timeout: 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    // 超时被终止时 Node 会同时置 error=ETIMEDOUT 与 signal=SIGTERM —— 必须先判 signal：
+    // 超时是"死循环/环境卡顿"的硬信号，归 fail；若先判 error 会把超时误报成"python 不可用"(skipped)
+    if (r.signal) {
+      return { file: file.path, status: 'fail', detail: `运行超时被终止（${r.signal}），疑似死循环` };
+    }
     if (r.error) {
       return { file: file.path, status: 'skipped', detail: `python 不可用/执行异常: ${r.error.message}` };
     }
@@ -129,9 +134,6 @@ function runProbe(file: SourceFile): DynamicGateItem {
     const err = `${r.stderr || ''}`.trim().split(/\r?\n/).filter(Boolean).slice(-4).join('\n');
     if (/ModuleNotFoundError|ImportError/.test(err)) {
       return { file: file.path, status: 'skipped', detail: '依赖无法单文件隔离，改由项目级验证' };
-    }
-    if (r.signal) {
-      return { file: file.path, status: 'fail', detail: `运行超时被终止（${r.signal}），疑似死循环` };
     }
     return { file: file.path, status: 'fail', detail: err.slice(0, 400) || '运行时抛异常' };
   } finally {
