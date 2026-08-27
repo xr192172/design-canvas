@@ -16,7 +16,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseFileFull } from './ts_kernel/index.js';
 import type { ParsedSymbol } from './ts_kernel/kernel.js';
 import type { DesignDSL } from '../dsl/types.js';
@@ -135,8 +134,12 @@ async function loadAndWrap(
   chain: ParsedSymbol[],
   tracer: Tracer,
 ): Promise<{ mod: Record<string, unknown>; freeFns: Map<string, (...a: unknown[]) => unknown> }> {
-  const url = pathToFileURL(absFile).href;
-  const mod = (await import(url)) as Record<string, unknown>;
+  // vitest 的模块加载器无法解析 file:// 形式带 %20 编码的 URL（路径含空格时
+  // pathToFileURL().href 会产生 %20）；而纯 C:/ 形式又被生产 Node ESM loader
+  // 拒绝（只认 file/data/node scheme）。/C:/ 前置斜杠 POSIX 形式两者皆兼容。
+  const posix = absFile.replace(/\\/g, '/');
+  const spec = /^[A-Za-z]:\//.test(posix) ? '/' + posix : posix;
+  const mod = (await import(spec)) as Record<string, unknown>;
   // ESM 模块命名空间冻结只读，不能给 mod[name] 重新赋值；
   // 方法原型可变（instance.method() 走原型，可拦截内部 this 调用），自由函数在此仅登记、调用点包装。
   const freeFns = new Map<string, (...a: unknown[]) => unknown>();

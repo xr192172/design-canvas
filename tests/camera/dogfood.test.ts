@@ -15,7 +15,6 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { instrumentFile } from '../../src/camera/instrument.js';
 import {
   TSProbeCapture,
@@ -63,7 +62,9 @@ describe('Camera 狗食插桩 · 零侵入', () => {
 describe('Camera 狗食插桩 · 跨模块实例共享 sink（回归）', () => {
   it('不同 specifier 加载的 probe 实例共享同一份全局 sink', async () => {
     const modA = await import('../../dist/src/camera/probe.js');
-    const modB = await import(pathToFileURL(path.resolve('dist/src/camera/probe.js')).href);
+    // 用 /C:/ 前置斜杠形式加载同一 dist 模块（file:// + %20 在 vitest 加载器会失败）
+    const probePosix = path.resolve('dist/src/camera/probe.js').replace(/\\/g, '/');
+    const modB = await import(/^[A-Za-z]:\//.test(probePosix) ? '/' + probePosix : probePosix);
 
     const eventsPath = path.join(getDataHome(), 'camera-shared');
     const sink = new TSProbeCapture(TSProbeCapture.pathFor(eventsPath));
