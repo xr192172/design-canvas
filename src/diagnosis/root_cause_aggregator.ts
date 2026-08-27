@@ -351,7 +351,9 @@ async function aggregateWithLlm(cfg: LlmConfig, input: AggregateInput, rule: Agg
       source_snippet: snippet,
     };
     const suggestions: FixSuggestion[] = (j.fix_suggestions ?? [])
-      .filter((s) => s.target_file && s.description)
+      // 建议的 target_file 必须是项目内真实存在的文件：LLM 只出建议，不许编造
+      // 不存在的文件/路径（幻觉文件），证据与事实边界以磁盘为准
+      .filter((s) => s.target_file && s.description && fs.existsSync(path.resolve(input.project_dir, s.target_file)))
       .slice(0, 3)
       .map((s) => ({
         target_file: s.target_file as string,

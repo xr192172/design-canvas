@@ -5,7 +5,8 @@
  * - 规则引擎：无位置 → 推断 kind
  * - 规则引擎：无候选 → 提示性修复建议
  * - captureSnippet：行号 + 限长截断 + 文件缺失
- * LLM 引擎路径不做单测（需网络/配置），在冒烟测试里验证降级。
+ * LLM 引擎路径的确定性单测见 root_cause_aggregator.llm.test.ts
+ * （mock fetch 注入假 LLM 响应，验证证据不编造边界 + 降级路径）。
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
