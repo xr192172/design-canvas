@@ -24,6 +24,8 @@
     "capability": "node dist/src/tools/capability_cli.js",
     "diagnose": "node dist/src/tools/diagnose_cli.js",
     "diagnose-loop": "node dist/src/tools/diagnose_loop_cli.js",
+    "upgrade-scan": "node dist/src/tools/upgrade_cli.js",
+    "upgrade-rewrite": "node dist/src/tools/upgrade_rewrite_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "hub": "node scripts/hub.mjs"
