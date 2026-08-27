@@ -111,4 +111,29 @@ describe('symptom_parser 关键词', () => {
     const kws = extractKeywords('x y z x a b foo foo');
     expect(kws).toEqual(['foo']);
   });
+
+  it('回归：绝对路径只留文件名，目录组成词不污染关键词（含空格路径）', () => {
+    const kws = extractKeywords(
+      'Failed to load url /C:/Users/Admin/Downloads/Browsers/Microsoft Edge/design-canvas-main/design-canvas/tests/fixtures/agent_demo.mjs. Does the file exist?',
+    );
+    // 路径里的 Microsoft / Edge / design / canvas 等目录组成词不应进入关键词
+    for (const bad of ['microsoft', 'edge', 'design', 'canvas', 'admin', 'downloads', 'browsers']) {
+      expect(kws).not.toContain(bad);
+    }
+    // 文件名是最强线索，必须保留；真实信息词也保留
+    expect(kws).toContain('agent_demo');
+    expect(kws).toContain('load');
+    expect(kws).toContain('exist');
+  });
+
+  it('回归：file:// 与 http(s):// URL 剥目录、留文件名', () => {
+    const kws = extractKeywords('Cannot find module "file:///C:/Users/a b/cache.db" after GET https://api.example.com/v1/chat');
+    // cache.db 的文件名 cache 保留，但扩展名 db 与目录/域名噪声剥离
+    expect(kws).toContain('cache');
+    expect(kws).toContain('chat');
+    expect(kws).not.toContain('db');
+    expect(kws).not.toContain('users');
+    expect(kws).not.toContain('example');
+    expect(kws).not.toContain('api');
+  });
 });

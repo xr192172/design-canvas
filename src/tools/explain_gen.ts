@@ -16,7 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { configFilePath } from './llm_focus.js';
+import { configFileReadPath } from './llm_focus.js';
 import { getStorageRoot } from '../storage.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ export function loadExplainConfig(): ExplainConfig | null {
   if (process.env.AGNES_MODEL) agnesEnv.model = process.env.AGNES_MODEL;
 
   let fileCfg: Partial<ExplainConfig> = {};
-  const cfgPath = configFilePath();
+  const cfgPath = configFileReadPath();
   if (fs.existsSync(cfgPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));

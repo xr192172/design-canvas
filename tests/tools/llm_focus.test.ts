@@ -11,7 +11,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pickKeyNodes, loadLlmConfig, configFilePath } from '../../src/tools/llm_focus';
+import { pickKeyNodes, loadLlmConfig, configFilePath, configFileReadPath, getConfigHome } from '../../src/tools/llm_focus';
+import * as storage from '../../src/storage.js';
 
 const CHAIN = [
   { node_id: 'n1', label: '① sanitize', func_name: 'sanitize', description: 'sanitize(s)', is_judgement: false, is_cross: false },
@@ -37,6 +38,10 @@ afterEach(() => {
   delete process.env.DESIGN_CANVAS_HOME;
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
+  // stubGlobal 的 fetch mock 不会随 restoreAllMocks 卸载（只清实现不清注册），
+  // singleFork 共享进程下会把"已清空实现的坏 fetch"泄漏给后续文件（曾致
+  // daemon 健康探测 res=undefined）。须显式卸载全局 stub。
+  vi.unstubAllGlobals();
 });
 
 describe('llm_focus', () => {
@@ -57,6 +62,45 @@ describe('llm_focus', () => {
     expect(cfg!.apiKey).toBe('sk-test');
     expect(cfg!.model).toBe('deepseek-chat');
     expect(cfg!.baseURL).toBe('https://api.deepseek.com/v1');
+  });
+
+  it('配置路径默认落在用户主目录（DESIGN_CANVAS_HOME 覆盖生效）', () => {
+    expect(configFilePath()).toBe(path.join(tmpHome, '.design-canvas', 'config.json'));
+    expect(getConfigHome()).toBe(tmpHome);
+  });
+
+  it('回退旧位置：主目录无 config 时读项目根 .design-canvas/config.json（迁移兼容）', () => {
+    const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_legacy_'));
+    const spy = vi.spyOn(storage, 'getDataHome').mockReturnValue(legacyRoot);
+    try {
+      const legacyCfg = path.join(legacyRoot, '.design-canvas', 'config.json');
+      fs.mkdirSync(path.dirname(legacyCfg), { recursive: true });
+      fs.writeFileSync(legacyCfg, JSON.stringify({ llm: { apiKey: 'sk-legacy', model: 'm-legacy', baseURL: 'https://legacy/v1' } }));
+      // 主目录（tmpHome）无 config
+      expect(fs.existsSync(configFilePath())).toBe(false);
+      expect(configFileReadPath()).toBe(legacyCfg);
+      expect(loadLlmConfig()?.apiKey).toBe('sk-legacy');
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('主目录优先：两处都有 config 时读主目录', () => {
+    const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dc_legacy_'));
+    const spy = vi.spyOn(storage, 'getDataHome').mockReturnValue(legacyRoot);
+    try {
+      const legacyCfg = path.join(legacyRoot, '.design-canvas', 'config.json');
+      fs.mkdirSync(path.dirname(legacyCfg), { recursive: true });
+      fs.writeFileSync(legacyCfg, JSON.stringify({ llm: { apiKey: 'sk-legacy', model: 'm-legacy', baseURL: 'https://legacy/v1' } }));
+      fs.mkdirSync(path.dirname(configFilePath()), { recursive: true });
+      fs.writeFileSync(configFilePath(), JSON.stringify({ llm: { apiKey: 'sk-home', model: 'm-home', baseURL: 'https://home/v1' } }));
+      expect(configFileReadPath()).toBe(configFilePath());
+      expect(loadLlmConfig()?.apiKey).toBe('sk-home');
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(legacyRoot, { recursive: true, force: true });
+    }
   });
 
   it('mock LLM 返回 → 解析 JSON 选点，llm=true', async () => {
