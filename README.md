@@ -61,7 +61,7 @@ node scripts/install_mcp.mjs --dry-run  # 预览将写入的内容（不落盘�
 node scripts/install_mcp.mjs --target claude  # 只写指定平台
 ```
 
-## MCP 工具一览（33 个注册工具）
+## MCP 工具一览（34 个注册工具）
 
 > 工具已收敛为「主工具 + 专项工具」两级：8 个主工具承担 DSL 读写 / 生命周期 / 渲染 / 代码理解的统一入口，其余为单一职责的专项工具。**旧工具名别名已于 2026-08-17 移除**，不再保留兼容别名，存量脚本请改用下方主工具名。
 
@@ -84,7 +84,7 @@ node scripts/install_mcp.mjs --target claude  # 只写指定平台
 - **live** = 实际视图：代码快照（只读），只能由 `import_project` / `explore_code action=watch` 重建。对应浏览器「⚡ 实际」。
 - **判别口诀**：要改的那一版 = `design`；要看的代码现状 = `live`。
 
-### 其余专项工具（25 个，独立注册）
+### 其余专项工具（26 个，独立注册）
 
 | 工具 | 能力线 | 用途 |
 |------|------|------|
@@ -113,6 +113,7 @@ node scripts/install_mcp.mjs --target claude  # 只写指定平台
 | `suggest_renames` | 改造 | 为短名/无意义变量建议语义化名字 |
 | `find_similar_names` | 改造 | 检测易混淆相似名并消歧 |
 | `refactor_judge` | 审闭环 | LLM 审裁决门：采纳/驳回/上抛不确定项给人类 |
+| `diagnose` | 诊断 | 症状→根因六步流水线：症状解析→候选定位（符号缓存）→调用链追溯→影响面→根因聚合（规则+可选 LLM，未配置自动降级）→验证建议（只建议不执行） |
 
 ## 能力矩阵 & 多语言支持
 
