@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── TS 主工程：测试 + 类型检查（跨平台矩阵） ───
+  node-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: 单元测试（vitest）
+        run: npm test
+      - name: 类型检查 + 构建（tsc + gen bundle）
+        run: npm run build
+
+  # ─── Go 插桩组件：go-camera / go-slim ───
+  go-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [go-camera, go-slim]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: 编译
+        run: go build ./...
+        working-directory: ${{ matrix.module }}
+      - name: Go 测试
+        run: go test ./...
+        working-directory: ${{ matrix.module }}
