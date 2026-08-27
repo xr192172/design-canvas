@@ -61,6 +61,8 @@ import type { JudgeIssue, JudgeDecision } from './tools/refactor_judge.js';
 import { validateReason } from './tools/reason_validator.js';
 import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
+import { runDiagnosis, formatDiagnoseText } from './diagnosis/diagnose.js';
+import type { DiagnoseInput } from './diagnosis/contract.js';
 import { getDSLByView, getLiveDir } from './storage.js';
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
@@ -1554,6 +1556,30 @@ const TOOL_DEFS: ToolDef[] = [
         escalate_to_inbox: a.escalate_to_inbox !== false,
       });
       return { message: result.review_prompt, data: result };
+    }),
+  },
+  {
+    name: 'diagnose',
+    title: 'Diagnose a symptom to root cause + evidence chain + impact + fix suggestions',
+    description:
+      '症状诊断：输入"症状"（报错信息 / stack trace / 测试失败输出 / 行为异常描述），' +
+      '输出"根因 + 证据链 + 影响面 + 修改建议 + 验证方式"。' +
+      '六步流水线：症状解析（正则提取 错误类型/文件:行/符号）→ 候选定位（查 .design-canvas/cache.db 符号缓存，' +
+      'exact/file/FTS/anchor 四路）→ 调用链追溯（沿 call/type_ref/import 三类边双向 BFS）→ 影响面分析（复用 diff_impact）→ ' +
+      '根因聚合（规则引擎先跑，LLM 可选把证据翻成人话根因，未配置自动降级）→ 验证建议（按项目类型给命令，只建议不执行）。' +
+      '前置：目标项目需先运行 import_project 建立符号缓存，否则只能给文件级线索。' +
+      'anchor 可选：用户已知的线索（文件路径或函数名）帮助聚焦。',
+    inputSchema: {
+      project_dir: z.string().describe('被诊断项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      symptom: z.string().describe('症状：报错信息 / stack trace / 测试失败输出 / 行为异常描述'),
+      symptom_type: z.enum(['error', 'test_failure', 'behavior']).optional().describe('症状类型，缺省 auto 自动识别'),
+      anchor: z.string().optional().describe('可选线索：文件路径或函数名，帮助聚焦定位'),
+      max_depth: z.number().optional().describe('调用链追溯深度（默认 3）'),
+    },
+    handler: wrapData(async (a) => {
+      const input = a as unknown as DiagnoseInput;
+      const out = await runDiagnosis(input);
+      return { message: formatDiagnoseText(out), data: out };
     }),
   },
 ];
