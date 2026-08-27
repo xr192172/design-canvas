@@ -172,8 +172,16 @@ declareCapability({
   label: '影响面分析（改前风险闭包报告）',
   desc: '从变更点（文件+符号）沿调用边/类型引用做反向可达闭包传播，输出直接/间接受影响文件与风险排序；复用 ast_parse_skeleton 的调用边；跨项目版支撑杂交验证',
   default: 'unimplemented',
+  overrides: {
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
+    go: 'full_ast',
+    python: 'full_ast',
+  },
   notes: {
-    typescript: '立项：T9 首个落地项，单项目版起步、跨项目预留接口',
+    typescript: 'T9 已落地：依赖图三路证据(import/call/type_ref) + 符号级变更点 + 热区盘点',
     javascript: '经 TS 家族同一解析路径',
   },
 });
@@ -184,8 +192,17 @@ declareCapability({
   label: '跨项目符号索引（两仓顶层导出交集）',
   desc: '为 rename_symbol / package_migration / impact_analysis 提供跨项目符号集合：顶层导出求交=冲突清单、求差=迁移范围；单仓索引已有，跨项目是自然扩展',
   default: 'unimplemented',
+  overrides: {
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
+    go: 'full_ast',
+    python: 'full_ast',
+  },
   notes: {
-    typescript: '立项：T9 第二阶段，把现有单仓符号索引提到工作区级',
+    typescript: 'T9 已落地：两仓顶层符号求交(冲突/双胞胎)+求差(迁移范围)，复用 impact 依赖图索引',
+    javascript: '经 TS 家族同一解析路径',
   },
 });
 

@@ -74,6 +74,7 @@ import { chainRecon } from './tools/chain_recon.js';
 import type { ChainReconInput } from './tools/chain_recon.js';
 import { analyzeImpact, analyzeHubs } from './impact/index.js';
 import type { ImpactChangePoint } from './impact/index.js';
+import { compareProjects } from './cross_repo/index.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -1203,6 +1204,43 @@ const TOOL_DEFS: ToolDef[] = [
         lines.push(`${f.risk === 'high' ? '⚠' : f.risk === 'medium' ? '·' : ' '} [${f.risk}] ${f.file}  (depth=${f.depth}, 被${f.dep_count}个文件依赖)`);
         for (const s of f.sites) lines.push(`      ${s.kind.padEnd(9)} L${s.line}  ${s.detail}`);
       }
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'cross_repo_symbol_index',
+    title: 'Cross-repo symbol index - two-project conflict & migration scope',
+    description:
+      '跨项目符号索引（杂交前"会不会撞名"）：对两个项目根各建顶层符号集合，再求交/求差。' +
+      '①冲突清单（同名不同签 = 真冲突，杂交前需改名/错位，附两侧定义文件与签名）；' +
+      '②双胞胎（同名同签 = 语义重复，可去重一个）；' +
+      '③迁移范围 aOnly/bOnly（只在一方的顶层符号 = 搬到对侧不撞名的安全候选）。' +
+      '是 rename_symbol / package_migration / impact_analysis 跨项目版与 hybrid_precheck 的符号层地基。' +
+      '顶层符号 = 所有模块级符号（未显式 export 的也计入，保守超集）。',
+    inputSchema: {
+      project_dir_a: z.string().describe('项目 A 根目录（绝对路径）'),
+      project_dir_b: z.string().describe('项目 B 根目录（绝对路径）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await compareProjects(String(a.project_dir_a), String(a.project_dir_b));
+      const fmtSym = (defs: Array<{ file: string; signature: string }>) => defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
+      const lines = [
+        `跨项目符号索引 · ${r.aRoot} ↔ ${r.bRoot}`,
+        `A：${r.aFiles} 文件 / ${r.aSymbols} 顶层符号     B：${r.bFiles} 文件 / ${r.bSymbols} 顶层符号`,
+        '',
+        `■ 冲突 ${r.conflicts.length}（同名不同签，杂交前需改名/错位）`,
+      ];
+      for (const c of r.conflicts) {
+        lines.push(`  ! ${c.name}`, `      A: ${fmtSym(c.a)}`, `      B: ${fmtSym(c.b)}`);
+      }
+      if (r.conflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 双胞胎 ${r.duplicates.length}（同名同签，可去重一个）`);
+      for (const c of r.duplicates) lines.push(`  = ${c.name}   A: ${c.a[0].file} ↔ B: ${c.b[0].file}`);
+      if (r.duplicates.length === 0) lines.push('  （无）');
+      lines.push('', `■ 迁移范围：A→B 候选 ${r.aOnly.length} 个`);
+      if (r.aOnly.length > 0) lines.push(`  ${r.aOnly.join(', ')}`);
+      lines.push('', `■ 迁移范围：B→A 候选 ${r.bOnly.length} 个`);
+      if (r.bOnly.length > 0) lines.push(`  ${r.bOnly.join(', ')}`);
       return { message: lines.join('\n'), data: r };
     }),
   },

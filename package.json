@@ -26,6 +26,7 @@
     "diagnose-loop": "node dist/src/tools/diagnose_loop_cli.js",
     "upgrade-scan": "node dist/src/tools/upgrade_cli.js",
     "impact": "node dist/src/tools/impact_cli.js",
+    "cross-repo": "node dist/src/tools/cross_repo_cli.js",
     "upgrade-rewrite": "node dist/src/tools/upgrade_rewrite_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
