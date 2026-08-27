@@ -224,7 +224,8 @@ export function getDSLByView(feature: string, view: DSLView = 'design'): DesignD
 export function listFeatures(): DesignDSL[] {
   const dir = getFeaturesDir();
   if (!fs.existsSync(dir)) return [];
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  // 排除 overlay 覆盖文件（<feature>.overlay.json 非完整 DSL，无 id/status，混入会被当成幽灵 feature）
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && !f.endsWith('.overlay.json'));
   const dsls: DesignDSL[] = [];
   for (const f of files) {
     try {
@@ -252,6 +253,10 @@ export function deleteDSL(feature: string): void {
 export function deleteFeature(feature: string): void {
   const file = getFeatureFile(feature);
   if (fs.existsSync(file)) fs.unlinkSync(file);
+
+  // 连带删除该 feature 的 overlay 覆盖文件，避免删除后残留陈旧 overlay
+  const overlayFile = path.join(getFeaturesDir(), `${feature}.overlay.json`);
+  if (fs.existsSync(overlayFile)) fs.unlinkSync(overlayFile);
 
   const liveFile = getLiveFeatureFile(feature);
   if (fs.existsSync(liveFile)) fs.unlinkSync(liveFile);

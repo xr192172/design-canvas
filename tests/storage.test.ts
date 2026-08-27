@@ -9,11 +9,13 @@
  */
 import fs from 'node:fs';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { saveDSL, getDSL, clearAllFeatures, getLiveDslFile } from '../src/storage';
+import { saveDSL, getDSL, clearAllFeatures, getLiveDslFile, listFeatures, deleteFeature } from '../src/storage';
+import { saveOverlay } from '../src/storage_overlay';
 import type { DesignDSL } from '../src/dsl/types';
 
 function mkDsl(rev?: number): DesignDSL {
   return {
+    id: 'opt_lock',
     feature: 'opt_lock',
     version: '1.0',
     title: '乐观锁',
@@ -63,5 +65,27 @@ describe('DSL 乐观锁（saveDSL base_dsl_rev）', () => {
     saveDSL({ ...mkDsl(), title: 'rebase 后' }, 'browser', latest._dsl_rev);
     expect(getDSL('opt_lock')!.title).toBe('rebase 后');
     expect(getDSL('opt_lock')!._dsl_rev).toBe(2);
+  });
+});
+
+describe('listFeatures 忽略 overlay 覆盖文件（Bug 2 回归）', () => {
+  beforeEach(() => clearAllFeatures());
+  afterEach(() => clearAllFeatures());
+
+  it('overlay 文件不被当作 feature 列出（无幽灵 draft 条目）', () => {
+    saveDSL(mkDsl()); // feature: opt_lock
+    // 模拟 import 后 mergeDesignLayer 无条件落盘的空锚点 overlay
+    saveOverlay({ version: 1, feature: 'opt_lock', anchors: {} });
+    const features = listFeatures();
+    expect(features.length).toBe(1);
+    expect(features[0].feature).toBe('opt_lock');
+    expect(features[0].id).toBeDefined();
+  });
+
+  it('deleteFeature 连带删除 overlay 文件', () => {
+    saveDSL(mkDsl());
+    saveOverlay({ version: 1, feature: 'opt_lock', anchors: {} });
+    deleteFeature('opt_lock');
+    expect(listFeatures()).toEqual([]);
   });
 });
