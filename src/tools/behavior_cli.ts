@@ -50,8 +50,8 @@ function main(): void {
   if (!action || !projectDir || !file || !func) {
     console.error(
       '用法:\n' +
-        '  behavior capture <projectDir> --file <rel.py> --func <name> --cases "<json>" [--baseline <out>]\n' +
-        '  behavior verify  <projectDir> --file <rel.py> --func <name> [--baseline <in>]',
+        '  behavior capture <projectDir> --file <rel.<py|ts|js>> --func <name> --cases "<json>" [--baseline <out>]\n' +
+        '  behavior verify  <projectDir> --file <rel.<py|ts|js>> --func <name> [--baseline <in>]',
     );
     process.exit(1);
   }

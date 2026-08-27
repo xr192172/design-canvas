@@ -161,7 +161,7 @@ describe('capability_matrix', () => {
     // 缺口 = 未全量的语言：go/js 家族（unimplemented）+ java（partial）
     expect(dg.gaps.map((g) => g.lang).sort()).toEqual(['go', 'java', 'javascript', 'tsx', 'typescript']);
     // 影响面/项目杂交线（T9）：impact_analysis / cross_repo_symbol_index / hybrid_precheck 已落地（TS 家族 + go/python full_ast）；
-    // behavior_baseline：python 已落地（金丝雀 harness 真跑），其余语言仍立项未实现；
+    // behavior_baseline：python + Node 家族已落地（金丝雀 harness 真跑），go 仍立项未实现；
     // code_health 仍为全景立项未实现
     for (const id of ['impact_analysis', 'cross_repo_symbol_index', 'hybrid_precheck']) {
       const row = rows.find((r) => r.decl.id === id)!;
@@ -174,8 +174,11 @@ describe('capability_matrix', () => {
     }
     const bb = rows.find((r) => r.decl.id === 'behavior_baseline')!;
     expect(bb.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
-    expect(bb.cells.find((c) => c.lang === 'typescript')!.level).toBe('unimplemented');
-    expect(bb.gaps.some((g) => g.lang === 'typescript')).toBe(true);
+    expect(bb.cells.find((c) => c.lang === 'typescript')!.level).toBe('full_ast');
+    expect(bb.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
+    expect(bb.cells.find((c) => c.lang === 'go')!.level).toBe('unimplemented');
+    expect(bb.gaps.some((g) => g.lang === 'typescript')).toBe(false);
+    expect(bb.gaps.some((g) => g.lang === 'go')).toBe(true);
     // code_health（T9 第五阶段）：TS 家族 + go/python 已落地（复用 impact 解析路径），java 仍 default 缺口
     const ch = rows.find((r) => r.decl.id === 'code_health')!;
     for (const lang of ['typescript', 'javascript', 'go', 'python']) {

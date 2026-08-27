@@ -232,13 +232,18 @@ declareCapability({
 declareCapability({
   id: 'behavior_baseline',
   label: '行为基线（契约→金丝雀测试对比）',
-  desc: '从 extract_contracts 的签名骨架生成金丝雀/属性测试，改动前后各跑一次对比行为差异；与动态闸（只验不炸）互补，是"行为级验证"闭环',
+  desc: '从 extract_contracts 的签名骨架生成金丝雀/属性测试，改动前后各跑一次对比行为差异；与动态闸（只验不炸）互补，是"行为级验证"闭环；python 顶层 exec 整文件，node 家族 transpileModule 转 CJS 整文件 require',
   default: 'unimplemented',
   overrides: {
     python: 'full_ast',
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
   },
   notes: {
-    typescript: 'T9 第四阶段已落地（Python 金丝雀 harness）：capture 记录行为快照 → 改代码 → verify 逐 case 对比 → same/diff',
+    typescript: 'T9 已落地（Node 家族 harness）：transpileModule→CJS + node 子进程 require 整文件，规范化 repr（Set/Map 排序化）+ stdout 痕迹 + 源码快照；kwargs 以尾部 options 对象传入',
+    javascript: '经 TS 家族同一路径（.ts/.tsx/.js/.jsx/.mjs/.cjs 共 6 扩展名）',
     python: 'T9 已落地：harness 顶层 exec 目标文件 + 规范化 repr 返回值 + stdout 痕迹 + 源码快照，真跑解释器对比',
   },
 });

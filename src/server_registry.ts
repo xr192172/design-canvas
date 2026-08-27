@@ -1302,7 +1302,7 @@ const TOOL_DEFS: ToolDef[] = [
     inputSchema: {
       action: z.enum(['capture', 'verify']).describe('capture=记录行为基线；verify=对比当前行为与基线'),
       project_dir: z.string().describe('目标项目根目录（绝对路径）'),
-      file: z.string().describe('相对 project_dir 的目标 .py 文件'),
+      file: z.string().describe('相对 project_dir 的目标文件（.py / .ts / .tsx / .js / .jsx / .mjs / .cjs）'),
       function: z.string().describe('目标顶层函数名'),
       cases: z
         .array(z.object({ name: z.string(), args: z.array(z.unknown()).optional(), kwargs: z.record(z.string(), z.unknown()).optional() }))
