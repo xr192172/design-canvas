@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, it, expect, afterAll } from 'vitest';
-import { runStaticGates } from '../../src/version_upgrade/gate';
+import { runStaticGates, runDynamicGates } from '../../src/version_upgrade/gate';
 import { pythonAdapter } from '../../src/version_upgrade/adapters/python';
 import { javaAdapter } from '../../src/version_upgrade/adapters/java';
 import type { SourceFile } from '../../src/version_upgrade/adapters/types';
@@ -139,6 +139,71 @@ describe('runStaticGates 编排', () => {
     write(root, 'main.go', 'package main\n');
     const decls = [{ projectDir: '.', tool: 'go' as const, source: 'go.mod', declaredVersion: '1.21', raw: 'go 1.21' }];
     const gates = runStaticGates(root, decls);
+    expect(gates[0].available).toBe(false);
+    expect(gates[0].items).toHaveLength(0);
+  });
+});
+
+describe('pythonAdapter.dynamicGate（本机 python 可用时真跑）', () => {
+  const files: SourceFile[] = [
+    { path: 'ok.py', content: 'def a(x):\n    return x + 1\n' },
+    { path: 'runtime_error.py', content: 'def f():\n    return 1 / 0\n\nprint(f())\n' },
+    { path: 'dep.py', content: 'import nonexistent_mod_xyz\n' },
+  ];
+
+  it.skipIf(!pyAvailable)('干净运行 ok / 运行时异常 fail / 依赖无法隔离 skipped', async () => {
+    const items = await pythonAdapter.dynamicGate!('', 9, files);
+    const byFile = new Map(items.map((i) => [i.file, i]));
+    expect(byFile.get('ok.py')?.status).toBe('ok');
+    expect(byFile.get('runtime_error.py')?.status).toBe('fail');
+    expect(byFile.get('runtime_error.py')?.detail ?? '').toContain('ZeroDivisionError');
+    expect(byFile.get('dep.py')?.status).toBe('skipped');
+  });
+});
+
+describe('javaAdapter.dynamicGate（javac+java 可用时真跑）', () => {
+  it('无 javac 时整体 skipped（容错）', async () => {
+    const items = await javaAdapter.dynamicGate!('', 11, [
+      { path: 'A.java', content: 'public class A {}\n' },
+    ]);
+    expect(items.every((i) => i.status === 'skipped')).toBe(true);
+  });
+
+  it.skipIf(!javacAvailable)('main 运行 ok / main 抛异常 fail / 无 main skipped', async () => {
+    const items = await javaAdapter.dynamicGate!('', 11, [
+      { path: 'Ok.java', content: 'public class Ok { public static void main(String[] a) { System.out.println("hi"); } }\n' },
+      { path: 'Crash.java', content: 'public class Crash { public static void main(String[] a) { throw new RuntimeException("boom"); } }\n' },
+      { path: 'Plain.java', content: 'public class Plain { public void m() {} }\n' },
+    ]);
+    const byFile = new Map(items.map((i) => [i.file, i]));
+    expect(byFile.get('Ok.java')?.status).toBe('ok');
+    expect(byFile.get('Crash.java')?.status).toBe('fail');
+    expect(byFile.get('Crash.java')?.detail ?? '').toContain('boom');
+    expect(byFile.get('Plain.java')?.status).toBe('skipped');
+  });
+});
+
+describe('runDynamicGates 编排', () => {
+  it.skipIf(!pyAvailable)('按 pyproject 声明跑动态闸：运行异常文件报 fail', async () => {
+    const root = tempRoot();
+    write(root, 'app/pyproject.toml', '[project]\nrequires-python = ">=3.8"\n');
+    write(root, 'app/main.py', 'x = 1 / 0\n');
+    const decls = [
+      { projectDir: 'app', tool: 'python' as const, source: 'pyproject.toml', declaredVersion: '3.8', raw: 'requires-python = ">=3.8"' },
+    ];
+    const gates = await runDynamicGates(root, decls);
+    expect(gates).toHaveLength(1);
+    expect(gates[0].available).toBe(true);
+    expect(gates[0].boundary).toBe(8);
+    expect(gates[0].items.some((i) => i.status === 'fail')).toBe(true);
+  });
+
+  it('无动态闸能力的语言（go）→ unavailable，items 为空', async () => {
+    const root = tempRoot();
+    write(root, 'go.mod', 'module x\n\ngo 1.21\n');
+    write(root, 'main.go', 'package main\n');
+    const decls = [{ projectDir: '.', tool: 'go' as const, source: 'go.mod', declaredVersion: '1.21', raw: 'go 1.21' }];
+    const gates = await runDynamicGates(root, decls);
     expect(gates[0].available).toBe(false);
     expect(gates[0].items).toHaveLength(0);
   });

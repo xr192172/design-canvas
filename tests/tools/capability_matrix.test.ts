@@ -100,7 +100,16 @@ describe('capability_matrix', () => {
     _resetRegistry();
     await import('../../src/tools/register_capabilities');
     const ids = allCapabilities().map((c) => c.id);
-    for (const expectId of ['ast_parse_skeleton', 'package_migration', 'rename_symbol', 'contract_gate', 'extract_contracts']) {
+    for (const expectId of [
+      'ast_parse_skeleton',
+      'package_migration',
+      'rename_symbol',
+      'contract_gate',
+      'extract_contracts',
+      'version_upgrade_detection',
+      'static_gate',
+      'dynamic_gate',
+    ]) {
       expect(ids).toContain(expectId);
     }
     const rows = diagnoseCapabilities(['go', 'python', 'java', 'typescript', 'javascript', 'tsx']);
@@ -116,6 +125,27 @@ describe('capability_matrix', () => {
     expect(cg.gaps.some((g) => g.lang === 'python')).toBe(true);
     const ec = rows.find((r) => r.decl.id === 'extract_contracts')!;
     expect(ec.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
+    // version_upgrade 线：检测四语言齐备；静态/动态闸暴露缺口
+    const det = rows.find((r) => r.decl.id === 'version_upgrade_detection')!;
+    expect(det.cells.find((c) => c.lang === 'java')!.level).toBe('full_ast');
+    expect(det.cells.find((c) => c.lang === 'go')!.level).toBe('full_ast');
+    expect(det.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(det.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast'); // node 适配器
+    expect(det.gaps).toHaveLength(0);
+    const sg = rows.find((r) => r.decl.id === 'static_gate')!;
+    expect(sg.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(sg.cells.find((c) => c.lang === 'java')!.level).toBe('full_ast');
+    expect(sg.cells.find((c) => c.lang === 'go')!.level).toBe('partial_ast');
+    expect(sg.cells.find((c) => c.lang === 'javascript')!.level).toBe('partial_ast');
+    expect(sg.gaps.some((g) => g.lang === 'go')).toBe(true);
+    const dg = rows.find((r) => r.decl.id === 'dynamic_gate')!;
+    expect(dg.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(dg.cells.find((c) => c.lang === 'java')!.level).toBe('partial_ast');
+    expect(dg.cells.find((c) => c.lang === 'go')!.level).toBe('unimplemented');
+    expect(dg.cells.find((c) => c.lang === 'javascript')!.level).toBe('unimplemented');
+    expect(dg.cells.find((c) => c.lang === 'typescript')!.level).toBe('unimplemented');
+    // 缺口 = 未全量的语言：go/js 家族（unimplemented）+ java（partial）
+    expect(dg.gaps.map((g) => g.lang).sort()).toEqual(['go', 'java', 'javascript', 'tsx', 'typescript']);
     _resetRegistry();
   });
 

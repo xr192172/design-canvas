@@ -10,7 +10,9 @@
  *   3. 源码扩展名 + 特性/废弃 API 规则表（正则）
  *   4. 本机版本探测命令     （java -version / node -v / go version / python3 --version）
  *   5. 静态闸：按声明版本单文件编译级校验（Python: ast.parse(feature_version)；Java: javac --release）
- *   6. 项目级验证命令组     （go build/test、tsc、compileall、mvn…）
+ *   6. 动态闸：运行时探针 —— 真跑代码采集运行层行为（Python: python 执行捕获异常；
+ *      Java: javac + java 运行自包含 main 类）
+ *   7. 项目级验证命令组     （go build/test、tsc、compileall、mvn…）
  *
  * 通用内核只认这个接口，不认识具体语言；新增语言 = 新增一个适配器 + 注册进 registry。
  */
@@ -69,6 +71,13 @@ export interface StaticGateItem {
   detail?: string; // fail/skipped 时的说明（编译错误摘要 / 无法隔离校验的原因）
 }
 
+/** 动态闸单文件结果（运行时探针：真跑代码，采集运行层行为） */
+export interface DynamicGateItem {
+  file: string; // 相对该子项目
+  status: 'ok' | 'fail' | 'skipped';
+  detail?: string; // fail/skipped 时的说明（运行时异常摘要 / 无法隔离运行的原因）
+}
+
 /** 本机版本探测：命令 + 输出解析 */
 export interface ProbeSpec {
   cmd: string;
@@ -111,6 +120,8 @@ export interface LanguageAdapter {
 
   /** 静态闸：按声明版本对源码做单文件编译级校验（可选；不实现则无静态闸） */
   staticGate?(dir: string, boundary: number, files: SourceFile[]): StaticGateItem[];
+  /** 动态闸：运行时探针 —— 真跑源码采集运行层行为，暴露"编译能过但一跑就炸"的契约差（可选） */
+  dynamicGate?(dir: string, boundary: number, files: SourceFile[]): Promise<DynamicGateItem[]>;
   /** 项目级验证命令组（可选；返回空数组 = 该语言无项目级验证） */
   verifyCommands?(dir: string): VerifyCommand[];
 }

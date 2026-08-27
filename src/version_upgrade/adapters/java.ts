@@ -20,6 +20,7 @@ import type {
   VersionInfo,
   SourceFile,
   StaticGateItem,
+  DynamicGateItem,
   FeatureRule,
   RemovedRule,
 } from './types.js';
@@ -139,6 +140,64 @@ function javacSingleFile(file: SourceFile, boundary: number): StaticGateItem {
   }
 }
 
+// ── 动态闸：javac + java 运行时探针 ───────────────────────────────
+
+/** 是否含 main 入口（public static void main(String[] args) 或 varargs） */
+function hasMainEntry(content: string): boolean {
+  return /\bstatic\s+void\s+main\s*\(\s*(?:String\s*\[\s*\]\s+\w+|String\.\.\.\s+\w+|String\s+\w+\s*\[\s*\])\s*\)/.test(content);
+}
+
+/**
+ * 对自包含文件做"编译 + 真跑"运行级探测：
+ *   - 编译不过 → fail（静态闸同源问题）
+ *   - 无 main 入口 → skipped（非可运行入口，无法单文件运行）
+ *   - 有 main 且运行干净 → ok；运行时抛异常/非零退出 → fail（附异常摘要）
+ */
+async function javaRunProbe(file: SourceFile, boundary: number): Promise<DynamicGateItem> {
+  if (!isSelfContained(file.content)) {
+    return { file: file.path, status: 'skipped', detail: '含外部依赖，无法单文件隔离运行' };
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-java-'));
+  const abs = path.join(tmp, path.basename(file.path));
+  try {
+    fs.writeFileSync(abs, file.content, 'utf-8');
+    const c = spawnSync('javac', ['-encoding', 'UTF-8', '--release', String(boundary), abs], {
+      encoding: 'buffer',
+      timeout: 120_000,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (c.status !== 0) {
+      const raw = decodeJavacOutput(Buffer.concat([c.stdout || Buffer.alloc(0), c.stderr || Buffer.alloc(0)]));
+      const tail = raw.split(/\r?\n/).filter(Boolean).slice(-3).join(' | ').replaceAll(path.dirname(abs) + path.sep, '').slice(0, 400);
+      return { file: file.path, status: 'fail', detail: `编译失败，无法进入运行探测: ${tail}` };
+    }
+    if (!hasMainEntry(file.content)) {
+      return { file: file.path, status: 'skipped', detail: '无 main 入口，非可运行单元，运行探测跳过' };
+    }
+    const className = path.basename(file.path, '.java');
+    const r = spawnSync('java', ['-cp', tmp, className], {
+      encoding: 'buffer',
+      timeout: 15_000,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (r.status === 0) return { file: file.path, status: 'ok' };
+    if (r.signal) return { file: file.path, status: 'fail', detail: `运行超时被终止（${r.signal}），疑似死循环` };
+    const raw = decodeJavacOutput(Buffer.concat([r.stdout || Buffer.alloc(0), r.stderr || Buffer.alloc(0)]));
+    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-4).join(' | ').slice(0, 400);
+    return { file: file.path, status: 'fail', detail: lines || `运行时异常（exit ${r.status}）` };
+  } catch (e) {
+    return { file: file.path, status: 'skipped', detail: `执行异常: ${(e as Error).message}` };
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // Windows 上留给 OS 清理
+    }
+  }
+}
+
 // ── 适配器对象 ────────────────────────────────────────────────────
 
 export const javaAdapter: LanguageAdapter = {
@@ -214,5 +273,19 @@ export const javaAdapter: LanguageAdapter = {
       return files.map((f) => ({ file: f.path, status: 'skipped', detail: `本机 javac 为 ${jv}，低于声明边界 ${boundary}，无法按目标版本编译，改由项目级构建验证` }));
     }
     return files.map((f) => javacSingleFile(f, boundary));
+  },
+
+  async dynamicGate(_dir: string, boundary: number, files: SourceFile[]): Promise<DynamicGateItem[]> {
+    const jv = localJavacMajor();
+    if (jv == null) {
+      return files.map((f) => ({ file: f.path, status: 'skipped', detail: '本机未安装 javac/java，无法运行探测' }));
+    }
+    if (jv < 9) {
+      return files.map((f) => ({ file: f.path, status: 'skipped', detail: 'javac --release 需 JDK9+，本机 javac 过旧' }));
+    }
+    if (boundary > jv) {
+      return files.map((f) => ({ file: f.path, status: 'skipped', detail: `本机 javac 为 ${jv}，低于声明边界 ${boundary}，无法按目标版本编译运行` }));
+    }
+    return Promise.all(files.map((f) => javaRunProbe(f, boundary)));
   },
 };

@@ -13,6 +13,8 @@
  *           JAXB/JAX-WS/JAF 等），附替代方案，属另一类硬性/软性契约差。
  *   阶段 D（--gate）：静态闸 —— 按声明版本对源码做编译级校验（Python: ast.parse
  *           feature_version；Java: javac --release），直接暴露"编译会失败"的硬契约差。
+ *   阶段 E（--dynamic）：动态闸 —— 运行时探针真跑源码（Python: python 执行；
+ *           Java: javac + java 运行自包含 main），暴露"编译能过但一跑就炸"的运行层契约差。
  *
  * 只做报告，不做改写——改写由 upgrade_rewrite_cli 的 git 验证回退闭环承载。
  * --json 输出结构化结果（供 LLM/闭环消费）。
@@ -20,7 +22,7 @@
 
 import path from 'node:path';
 import { runContractScan, type ContractScanResult } from '../version_upgrade/detect.js';
-import { runStaticGates, type StaticGateResult } from '../version_upgrade/gate.js';
+import { runStaticGates, runDynamicGates, type StaticGateResult, type DynamicGateResult } from '../version_upgrade/gate.js';
 import type { FeatureHit } from '../version_upgrade/features.js';
 import type { RemovedHit } from '../version_upgrade/removed.js';
 
@@ -132,6 +134,34 @@ function renderGates(gates: StaticGateResult[]): string[] {
   return lines;
 }
 
+function renderDynamicGates(gates: DynamicGateResult[]): string[] {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('【5. 动态闸（运行级契约差）】--dynamic');
+  if (gates.length === 0) {
+    lines.push('  （无工具链声明）');
+    return lines;
+  }
+  for (const g of gates) {
+    const label = TOOL_LABEL[g.tool] ?? g.label;
+    if (!g.available) {
+      lines.push(`  ▶ ${g.projectDir === '.' ? '<root>' : g.projectDir}（${label} ${g.declaredVersion}）：本语言暂无动态闸，运行层契约差暂不可检`);
+      continue;
+    }
+    const fails = g.items.filter((i) => i.status === 'fail');
+    const oks = g.items.filter((i) => i.status === 'ok');
+    const skips = g.items.filter((i) => i.status === 'skipped');
+    lines.push(
+      `  ▶ ${g.projectDir === '.' ? '<root>' : g.projectDir}（${label} ${g.declaredVersion}，边界 ${label} ${g.boundary}）：运行通过 ${oks.length} · 运行异常 ${fails.length} · 跳过 ${skips.length}`
+    );
+    for (const f of fails) {
+      lines.push(`      ✗ ${f.file}: ${f.detail ?? '运行时异常'}`);
+    }
+    if (fails.length === 0 && skips.length === 0) lines.push('      ✓ 全部运行通过（无运行级契约差）');
+  }
+  return lines;
+}
+
 function renderSummary(res: ContractScanResult): string[] {
   const featureCount = res.features.reduce((n, g) => n + g.hits.length, 0);
   const removedCount = res.removed.reduce((n, g) => n + g.hits.length, 0);
@@ -142,7 +172,7 @@ function renderSummary(res: ContractScanResult): string[] {
   ];
 }
 
-function toJson(res: ContractScanResult, gates: StaticGateResult[] = []): string {
+function toJson(res: ContractScanResult, gates: StaticGateResult[] = [], dynamicGates: DynamicGateResult[] = []): string {
   return JSON.stringify(
     {
       root: res.root,
@@ -174,22 +204,32 @@ function toJson(res: ContractScanResult, gates: StaticGateResult[] = []): string
         available: g.available,
         items: g.items,
       })),
+      dynamicGates: dynamicGates.map((g) => ({
+        projectDir: g.projectDir,
+        tool: g.tool,
+        declaredVersion: g.declaredVersion,
+        boundary: g.boundary,
+        available: g.available,
+        items: g.items,
+      })),
     },
     null,
     2
   );
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const root = path.resolve(args[0] ?? process.cwd());
   const json = args.includes('--json');
   const gate = args.includes('--gate');
+  const dynamic = args.includes('--dynamic');
   const res = runContractScan(root);
   const gates = gate ? runStaticGates(root, res.scan.declarations) : [];
+  const dynamicGates = dynamic ? await runDynamicGates(root, res.scan.declarations) : [];
   if (json) {
     // eslint-disable-next-line no-console
-    console.log(toJson(res, gates));
+    console.log(toJson(res, gates, dynamicGates));
     return;
   }
   const out = [`版本升级契约差检测：${root}`];
@@ -197,9 +237,10 @@ function main(): void {
   out.push(...renderFeatures(res));
   out.push(...renderRemoved(res));
   if (gate) out.push(...renderGates(gates));
+  if (dynamic) out.push(...renderDynamicGates(dynamicGates));
   out.push(...renderSummary(res));
   // eslint-disable-next-line no-console
   console.log(out.join('\n'));
 }
 
-main();
+void main();
