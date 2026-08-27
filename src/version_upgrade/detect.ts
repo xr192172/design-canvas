@@ -1,7 +1,7 @@
 /**
- * detect：版本升级契约差 · 共享检测编排（供 upgrade_cli / upgrade_rewrite_cli 复用）
+ * detect：版本升级契约差 · 共享检测编排（供 upgrade_cli / upgrade_rewrite_cli 复用）—— 通用内核
  *
- * 把"按子项目扫描"的编排逻辑从 CLI 抽出来：
+ * 把"按子项目扫描"的编排逻辑从 CLI 抽出来，语言差异全部委托给适配器注册表：
  *   1. 工具链声明（阶段 A）→ 每个子项目声明什么运行时版本
  *   2. 语言特性契约差（阶段 B）→ 用了超过声明版本的语言特性
  *   3. 废弃/移除 API（阶段 C）→ 用了目标版本已移除/废弃的 API
@@ -15,26 +15,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   scanToolchains,
-  parseToolchainVersion,
   type ToolchainDeclaration,
   type ToolchainScan,
   type ToolName,
 } from './toolchain.js';
+import { adapterForLang } from './adapters/registry.js';
 import { scanFeatureHits, type FeatureHit } from './features.js';
 import { scanRemovedApis, type RemovedHit } from './removed.js';
 
-export const FEATURE_EXTS: Record<ToolName, string[]> = {
-  java: ['.java'],
-  go: ['.go'],
-  node: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
-};
+/** 语言 → 源码扩展名（来自适配器；保持导出以兼容既有调用方） */
+export const FEATURE_EXTS: Record<ToolName, string[]> = Object.fromEntries(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (['java', 'go', 'node', 'python'] as ToolName[]).map((t) => [t, adapterForLang(t)?.sourceExts ?? []])
+) as Record<ToolName, string[]>;
 
-/** 声明版本 → 检测的目标边界（JDK 主版本 / go minor / node major） */
+/** 声明版本 → 检测的目标边界（各语言边界语义见适配器 featureBoundary） */
 export function declaredToFeatureVersion(tool: ToolName, declaredVersion: string): number | null {
-  const info = parseToolchainVersion(tool, declaredVersion);
-  if (!info) return null;
-  if (tool === 'go') return info.minor ?? info.major;
-  return info.major;
+  const adapter = adapterForLang(tool);
+  if (!adapter) return null;
+  const info = adapter.parseVersion(declaredVersion);
+  return info ? adapter.featureBoundary(info) : null;
 }
 
 /** 各子项目根目录（相对 root；"." = 根目录本身） */
@@ -63,7 +63,7 @@ export function collectSourceFiles(
   excludeRelDirs?: Set<string>
 ): Array<{ rel: string; content: string }> {
   const out: Array<{ rel: string; content: string }> = [];
-  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'target', 'out', 'bin', 'vendor', '.gradle']);
+  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'target', 'out', 'bin', 'vendor', '.gradle', '__pycache__', '.venv', 'venv']);
   const stack: Array<{ abs: string; rel: string }> = [{ abs: dir, rel: '' }];
   while (stack.length > 0) {
     const { abs, rel } = stack.pop()!;
@@ -107,7 +107,10 @@ export function filesForDeclarations(root: string, declarations: ToolchainDeclar
     const boundary = declaredToFeatureVersion(d.tool, d.declaredVersion);
     const dir = path.join(root, d.projectDir === '.' ? '' : d.projectDir);
     const excluded = nestedProjectDirs(d.projectDir, allDirs);
-    const files = collectSourceFiles(dir, FEATURE_EXTS[d.tool], excluded).map((f) => ({ path: f.rel, content: f.content }));
+    const files = collectSourceFiles(dir, adapterForLang(d.tool)?.sourceExts ?? [], excluded).map((f) => ({
+      path: f.rel,
+      content: f.content,
+    }));
     return { declaration: d, boundary, files };
   });
 }

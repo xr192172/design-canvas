@@ -19,9 +19,8 @@
  *     有 package.json → tsc --noEmit + npm test（若配了 test script）。
  *   - 探测不出的项目形态返回空命令组 → 视为"不可验证"，由调用方决定降级。
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { adapters } from '../version_upgrade/adapters/registry.js';
 
 // ── 命令与结果类型 ─────────────────────────────────────────
 
@@ -68,31 +67,12 @@ export function runVerification(opts: { cwd: string; commands: VerifyCommand[] }
   return { status: 'pass', at, detail: runs.join('\n') || undefined };
 }
 
-/** 按项目形态给缺省验证命令组（可被调用方 commands 覆盖）。 */
+/** 按项目形态给缺省验证命令组（可被调用方 commands 覆盖）。委托语言适配器。 */
 export function defaultVerifyCommands(cwd: string): VerifyCommand[] {
-  const hasGo = fs.existsSync(path.join(cwd, 'go.mod'));
-  const hasPackageJson = fs.existsSync(path.join(cwd, 'package.json'));
-  if (hasGo && !hasPackageJson) {
-    return [
-      { label: 'go build', cmd: 'go', args: ['build', './...'] },
-      { label: 'go test', cmd: 'go', args: ['test', './...'], timeoutMs: 600_000 },
-    ];
-  }
-  if (hasPackageJson) {
-    const cmds: VerifyCommand[] = [{ label: 'tsc noEmit', cmd: 'npx', args: ['tsc', '--noEmit'] }];
-    let scripts: Record<string, string> | undefined;
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf-8')) as {
-        scripts?: Record<string, string>;
-      };
-      scripts = pkg.scripts;
-    } catch {
-      scripts = undefined;
-    }
-    if (scripts && typeof scripts.test === 'string') {
-      cmds.push({ label: 'npm test', cmd: 'npm', args: ['test', '--', '--run'], timeoutMs: 600_000 });
-    }
-    return cmds;
+  for (const a of adapters) {
+    if (!a.verifyCommands) continue;
+    const cmds = a.verifyCommands(cwd);
+    if (cmds.length > 0) return cmds;
   }
   return [];
 }

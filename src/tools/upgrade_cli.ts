@@ -11,6 +11,8 @@
  *           报告"用了超过声明版本的语言特性"（= 编译会失败、契约对不上的部分），附行号与重写建议。
  *   阶段 C：废弃/移除 API 检测 —— 报告目标版本已移除/废弃的 API（如 JDK 11 起移除的
  *           JAXB/JAX-WS/JAF 等），附替代方案，属另一类硬性/软性契约差。
+ *   阶段 D（--gate）：静态闸 —— 按声明版本对源码做编译级校验（Python: ast.parse
+ *           feature_version；Java: javac --release），直接暴露"编译会失败"的硬契约差。
  *
  * 只做报告，不做改写——改写由 upgrade_rewrite_cli 的 git 验证回退闭环承载。
  * --json 输出结构化结果（供 LLM/闭环消费）。
@@ -18,10 +20,11 @@
 
 import path from 'node:path';
 import { runContractScan, type ContractScanResult } from '../version_upgrade/detect.js';
+import { runStaticGates, type StaticGateResult } from '../version_upgrade/gate.js';
 import type { FeatureHit } from '../version_upgrade/features.js';
 import type { RemovedHit } from '../version_upgrade/removed.js';
 
-const TOOL_LABEL: Record<string, string> = { java: 'JDK', node: 'Node', go: 'Go' };
+const TOOL_LABEL: Record<string, string> = { java: 'JDK', node: 'Node', go: 'Go', python: 'Python' };
 
 function statusBadge(status: string): string {
   switch (status) {
@@ -101,6 +104,34 @@ function renderRemoved(res: ContractScanResult): string[] {
   return lines;
 }
 
+function renderGates(gates: StaticGateResult[]): string[] {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('【4. 静态闸（编译级契约差）】--gate');
+  if (gates.length === 0) {
+    lines.push('  （无工具链声明）');
+    return lines;
+  }
+  for (const g of gates) {
+    const label = TOOL_LABEL[g.tool] ?? g.label;
+    if (!g.available) {
+      lines.push(`  ▶ ${g.projectDir === '.' ? '<root>' : g.projectDir}（${label} ${g.declaredVersion}）：本语言无单文件静态闸，改由项目级构建验证`);
+      continue;
+    }
+    const fails = g.items.filter((i) => i.status === 'fail');
+    const oks = g.items.filter((i) => i.status === 'ok');
+    const skips = g.items.filter((i) => i.status === 'skipped');
+    lines.push(
+      `  ▶ ${g.projectDir === '.' ? '<root>' : g.projectDir}（${label} ${g.declaredVersion}，边界 ${label} ${g.boundary}）：编译 ${oks.length} · 超标 ${fails.length} · 跳过 ${skips.length}`
+    );
+    for (const f of fails) {
+      lines.push(`      ✗ ${f.file}: ${f.detail ?? '编译失败'}`);
+    }
+    if (fails.length === 0 && skips.length === 0) lines.push('      ✓ 全部通过（无编译级契约差）');
+  }
+  return lines;
+}
+
 function renderSummary(res: ContractScanResult): string[] {
   const featureCount = res.features.reduce((n, g) => n + g.hits.length, 0);
   const removedCount = res.removed.reduce((n, g) => n + g.hits.length, 0);
@@ -111,7 +142,7 @@ function renderSummary(res: ContractScanResult): string[] {
   ];
 }
 
-function toJson(res: ContractScanResult): string {
+function toJson(res: ContractScanResult, gates: StaticGateResult[] = []): string {
   return JSON.stringify(
     {
       root: res.root,
@@ -135,6 +166,14 @@ function toJson(res: ContractScanResult): string {
         declaredVersion: d.declaredVersion,
         hits: hits.map((h: RemovedHit) => ({ file: h.file, line: h.line, api: h.api, since: h.since, kind: h.kind, rewrite: h.rewrite, snippet: h.snippet })),
       })),
+      gates: gates.map((g) => ({
+        projectDir: g.projectDir,
+        tool: g.tool,
+        declaredVersion: g.declaredVersion,
+        boundary: g.boundary,
+        available: g.available,
+        items: g.items,
+      })),
     },
     null,
     2
@@ -145,16 +184,19 @@ function main(): void {
   const args = process.argv.slice(2);
   const root = path.resolve(args[0] ?? process.cwd());
   const json = args.includes('--json');
+  const gate = args.includes('--gate');
   const res = runContractScan(root);
+  const gates = gate ? runStaticGates(root, res.scan.declarations) : [];
   if (json) {
     // eslint-disable-next-line no-console
-    console.log(toJson(res));
+    console.log(toJson(res, gates));
     return;
   }
   const out = [`版本升级契约差检测：${root}`];
   out.push(...renderToolchain(res.scan));
   out.push(...renderFeatures(res));
   out.push(...renderRemoved(res));
+  if (gate) out.push(...renderGates(gates));
   out.push(...renderSummary(res));
   // eslint-disable-next-line no-console
   console.log(out.join('\n'));

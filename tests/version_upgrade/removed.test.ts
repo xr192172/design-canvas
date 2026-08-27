@@ -61,7 +61,7 @@ describe('removedRulesForExt', () => {
     expect(removedRulesForExt('.java').length).toBeGreaterThan(0);
     expect(removedRulesForExt('.go').length).toBeGreaterThan(0);
     expect(removedRulesForExt('.ts').length).toBeGreaterThan(0);
-    expect(removedRulesForExt('.py').length).toBe(0);
+    expect(removedRulesForExt('.py').length).toBeGreaterThan(0); // Python 适配器已注册
   });
 });
 

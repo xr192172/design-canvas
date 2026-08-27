@@ -60,7 +60,7 @@ describe('rulesForExt', () => {
     expect(rulesForExt('.java').length).toBeGreaterThan(0);
     expect(rulesForExt('.go').length).toBeGreaterThan(0);
     expect(rulesForExt('.ts').length).toBeGreaterThan(0);
-    expect(rulesForExt('.py').length).toBe(0);
+    expect(rulesForExt('.py').length).toBeGreaterThan(0); // Python 适配器已注册
   });
 });
 
