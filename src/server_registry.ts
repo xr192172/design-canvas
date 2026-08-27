@@ -76,6 +76,7 @@ import { analyzeImpact, analyzeHubs } from './impact/index.js';
 import type { ImpactChangePoint } from './impact/index.js';
 import { compareProjects } from './cross_repo/index.js';
 import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
+import { captureBaseline, verifyBaseline, baselinePathFor } from './behavior/index.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -1284,6 +1285,83 @@ const TOOL_DEFS: ToolDef[] = [
       if (r.deps.aOnly.length > 0) lines.push(`  仅A: ${r.deps.aOnly.map((d) => d.name).join(', ')}`);
       if (r.deps.bOnly.length > 0) lines.push(`  仅B: ${r.deps.bOnly.map((d) => d.name).join(', ')}`);
       return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'behavior_baseline',
+    title: 'Behavior baseline - canary test capture/verify diff',
+    description:
+      '行为基线（金丝雀测试对比）：对目标 Python 函数用样例输入跑一次记录行为快照（capture），' +
+      '改代码后再跑一次对比（verify）——回答"跑得对不对"（动态闸只答"跑得动不炸"，补不了行为级变化）。' +
+      'action=capture：生成 harness（顶层 exec 目标文件 + 规范化 repr 返回值 + stdout 痕迹 + 函数源码快照），' +
+      '存基线到 <project_dir>/.design-canvas/behavior/<file>__<func>.json（baseline 参数可覆盖路径）。' +
+      'action=verify：读基线 + 对当前磁盘再跑同一份 harness，逐 case 对齐对比 → verdict same/diff（进程级失败 → error）。' +
+      'v1 边界：仅 Python；目标函数须自包含（顶层 exec 整文件，模块级常量/其它函数可用；跨文件 import 与 import 副作用不支持）；' +
+      '返回值对比 = 规范化 repr（set 排序化）；样例输入由 cases 显式提供（capture 必需），不自动生成。',
+    inputSchema: {
+      action: z.enum(['capture', 'verify']).describe('capture=记录行为基线；verify=对比当前行为与基线'),
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      file: z.string().describe('相对 project_dir 的目标 .py 文件'),
+      function: z.string().describe('目标顶层函数名'),
+      cases: z
+        .array(z.object({ name: z.string(), args: z.array(z.unknown()).optional(), kwargs: z.record(z.string(), z.unknown()).optional() }))
+        .optional()
+        .describe('capture 必需：金丝雀样例输入（verify 忽略，复用基线里的 cases）'),
+      baseline: z.string().optional().describe('基线 JSON 路径覆盖（缺省 <project_dir>/.design-canvas/behavior/<file>__<func>.json）'),
+    },
+    handler: wrap(async (a) => {
+      const spec = {
+        project_dir: String(a.project_dir),
+        file: String(a.file),
+        function: String(a.function),
+        cases: Array.isArray(a.cases)
+          ? (a.cases as Array<Record<string, unknown>>).map((c) => ({
+              name: String(c.name),
+              args: Array.isArray(c.args) ? (c.args as unknown[]) : [],
+              kwargs: c.kwargs as Record<string, unknown> | undefined,
+            }))
+          : [],
+      };
+      const bp = a.baseline ? String(a.baseline) : baselinePathFor(String(a.project_dir), String(a.file), String(a.function));
+
+      if (a.action === 'capture') {
+        const b = captureBaseline(spec, bp);
+        const lines = [
+          `行为基线已记录 · ${b.spec.function} @ ${b.spec.file}`,
+          `基线：${b.baseline_path}（文件哈希 ${b.file_hash}）`,
+          `${b.results.length} 个 case：`,
+          ...b.results.map((r) => `  ${r.case} = ${r.ok ? r.ret : `✗ ${r.error}`}`),
+          '',
+          '函数源码快照：',
+          ...(b.source || '(unavailable)').split('\n').map((l) => `  ${l}`),
+        ];
+        return { message: lines.join('\n'), data: b };
+      }
+
+      const v = verifyBaseline(spec, bp);
+      const lines = [
+        `行为基线对比 · ${v.diff.verdict === 'same' ? '✔ 一致' : v.diff.verdict === 'diff' ? '✗ 有差异' : '⚠ 无法对比'}`,
+        v.diff.message,
+        `基线文件哈希 ${v.baseline.file_hash} → 当前 ${v.run.file_hash}`,
+        '',
+      ];
+      for (const d of v.diff.details) {
+        if (d.status === 'same') {
+          lines.push(`  = ${d.case}  same`);
+          continue;
+        }
+        lines.push(`  ! ${d.case}`);
+        if (d.case === '(stdout)') {
+          lines.push(`    改前 stdout: ${JSON.stringify(d.before)}`);
+          lines.push(`    改后 stdout: ${JSON.stringify(d.after)}`);
+        } else {
+          if (d.before !== undefined) lines.push(`    改前 ret: ${d.before}`);
+          if (d.after !== undefined) lines.push(`    改后 ret: ${d.after}`);
+          if (d.before_error !== undefined) lines.push(`    改前 error: ${d.before_error}`);
+          if (d.after_error !== undefined) lines.push(`    改后 error: ${d.after_error}`);
+        }
+      }
+      return { message: lines.join('\n'), data: v };
     }),
   },
   {

@@ -232,8 +232,12 @@ declareCapability({
   label: '行为基线（契约→金丝雀测试对比）',
   desc: '从 extract_contracts 的签名骨架生成金丝雀/属性测试，改动前后各跑一次对比行为差异；与动态闸（只验不炸）互补，是"行为级验证"闭环',
   default: 'unimplemented',
+  overrides: {
+    python: 'full_ast',
+  },
   notes: {
-    typescript: '立项：T9 第四阶段，复用契约提取 + 动态闸执行器',
+    typescript: 'T9 第四阶段已落地（Python 金丝雀 harness）：capture 记录行为快照 → 改代码 → verify 逐 case 对比 → same/diff',
+    python: 'T9 已落地：harness 顶层 exec 目标文件 + 规范化 repr 返回值 + stdout 痕迹 + 源码快照，真跑解释器对比',
   },
 });
 
