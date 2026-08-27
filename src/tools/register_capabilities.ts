@@ -247,7 +247,16 @@ declareCapability({
   label: '代码健康度（死代码/复杂度/分层违规）',
   desc: '死代码检测（复用调用边反查未使用导出）+ 圈复杂度 + 依赖方向违规（胶水层反向依赖积木层）；独立性强可并行；是项目杂交"选材体检"的评分依据',
   default: 'unimplemented',
+  overrides: {
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
+    go: 'full_ast',
+    python: 'full_ast',
+  },
   notes: {
-    typescript: '立项：T9 第五阶段，死代码零成本起步',
+    typescript: 'T9 第五阶段已落地：死代码(未使用导出/import/孤儿) + 圈复杂度启发式 + 分层违规，复用 impact 解析路径与依赖图',
+    javascript: '经 TS 家族同一解析路径',
   },
 });

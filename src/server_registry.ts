@@ -77,6 +77,7 @@ import type { ImpactChangePoint } from './impact/index.js';
 import { compareProjects } from './cross_repo/index.js';
 import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
 import { captureBaseline, verifyBaseline, baselinePathFor } from './behavior/index.js';
+import { analyzeHealth } from './health/index.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -1362,6 +1363,49 @@ const TOOL_DEFS: ToolDef[] = [
         }
       }
       return { message: lines.join('\n'), data: v };
+    }),
+  },
+  {
+    name: 'code_health',
+    title: 'Code health - dead code / complexity / layer violation',
+    description:
+      '代码健康度（选材体检）：对 project_dir 全项目做三层体检，输出健康分 + 问题清单。' +
+      '三维度：①死代码——未使用导出（复用调用边/类型引用边反查，外部消费者不可见一律标 info 不自动删）、' +
+      '未使用 import（TS/JS/Python/Java 命名导入）、孤儿文件（无任何项目内消费者的非胶水文件）；' +
+      '②复杂度——顶层函数/方法圈复杂度启发式（剥注释后数分支，默认阈值 10，超阈值标 warn）；' +
+      '③分层违规——依赖方向向上（契约→积木/胶水、积木→胶水）标 error。' +
+      '守护"积木/契约/胶水"三分层哲学，是项目杂交选材的评分依据。' +
+      '输出：score(0-100)/grade(A-D)/summary + issues 逐条(file/line/symbol/message/evidence) + complexity Top 清单。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      complexity_threshold: z.number().int().optional().describe('圈复杂度阈值（默认 10）'),
+      top: z.number().int().optional().describe('复杂度清单最多列多少个（默认 10）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await analyzeHealth(String(a.project_dir), {
+        complexityThreshold: a.complexity_threshold == null ? undefined : Number(a.complexity_threshold),
+        top: a.top == null ? undefined : Number(a.top),
+      });
+      const sevMark: Record<string, string> = { error: '✗', warn: '!', info: '·' };
+      const lines = [
+        `代码健康度 · ${r.root}`,
+        `${r.fileCount} 个文件 → 健康分 ${r.score}（${r.grade}）`,
+        `分层：胶水 ${r.layers.glue} / 积木 ${r.layers.brick} / 契约 ${r.layers.contract} / 违规 ${r.layers.violations}`,
+        r.summary,
+        '',
+        '—— 问题清单 ——',
+      ];
+      if (r.issues.length === 0) lines.push('（无问题）');
+      for (const i of r.issues) {
+        const loc = `${i.file}${i.line ? `:${i.line}` : ''}${i.symbol ? ` ${i.symbol}` : ''}`;
+        lines.push(`${sevMark[i.severity]} [${i.kind}] ${loc}`);
+        lines.push(`      ${i.message}`);
+      }
+      if (r.complexity.length > 0) {
+        lines.push('', `—— 最高复杂度 Top ${r.complexity.length} ——`);
+        for (const c of r.complexity) lines.push(`  ${c.complexity}  ${c.file}:${c.line}  ${c.symbol}`);
+      }
+      return { message: lines.join('\n'), data: r };
     }),
   },
   {

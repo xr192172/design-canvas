@@ -167,9 +167,13 @@ describe('capability_matrix', () => {
     expect(bb.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
     expect(bb.cells.find((c) => c.lang === 'typescript')!.level).toBe('unimplemented');
     expect(bb.gaps.some((g) => g.lang === 'typescript')).toBe(true);
+    // code_health（T9 第五阶段）：TS 家族 + go/python 已落地（复用 impact 解析路径），java 仍 default 缺口
     const ch = rows.find((r) => r.decl.id === 'code_health')!;
-    expect(ch.cells.every((c) => c.level === 'unimplemented')).toBe(true);
-    expect(ch.gaps.length).toBeGreaterThan(0);
+    for (const lang of ['typescript', 'javascript', 'go', 'python']) {
+      expect(ch.cells.find((c) => c.lang === lang)!.level).toBe('full_ast');
+    }
+    expect(ch.cells.find((c) => c.lang === 'java')!.level).toBe('unimplemented');
+    expect(ch.gaps.some((g) => g.lang === 'java')).toBe(true);
     _resetRegistry();
   });
 

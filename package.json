@@ -29,6 +29,7 @@
     "cross-repo": "node dist/src/tools/cross_repo_cli.js",
     "hybrid": "node dist/src/tools/hybrid_cli.js",
     "behavior": "node dist/src/tools/behavior_cli.js",
+    "health": "node dist/src/tools/health_cli.js",
     "upgrade-rewrite": "node dist/src/tools/upgrade_rewrite_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
