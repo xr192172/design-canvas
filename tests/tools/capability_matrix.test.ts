@@ -124,12 +124,21 @@ describe('capability_matrix', () => {
     expect(pm.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
     expect(pm.cells.find((c) => c.lang === 'java')!.level).toBe('regex_fallback'); // 未点名语言 → default
     expect(pm.gaps.some((g) => g.lang === 'java')).toBe(true);
-    // contract_gate / extract_contracts：js 家族已补齐（低垂果实），python 仍缺口
+    // rename_symbol：TS 家族 + python 已补齐（AST 分支）；go 仍走其他线（缺）
+    const rs = rows.find((r) => r.decl.id === 'rename_symbol')!;
+    expect(rs.cells.find((c) => c.lang === 'typescript')!.level).toBe('full_ast');
+    expect(rs.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(rs.gaps.some((g) => g.lang === 'python')).toBe(false);
+    expect(rs.gaps.some((g) => g.lang === 'go')).toBe(true);
+    // contract_gate / extract_contracts：js 家族 + python 均补齐（AST 分支）
     const cg = rows.find((r) => r.decl.id === 'contract_gate')!;
     expect(cg.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
-    expect(cg.gaps.some((g) => g.lang === 'python')).toBe(true);
+    expect(cg.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(cg.gaps.some((g) => g.lang === 'python')).toBe(false);
     const ec = rows.find((r) => r.decl.id === 'extract_contracts')!;
     expect(ec.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
+    expect(ec.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(ec.gaps.some((g) => g.lang === 'python')).toBe(false);
     // version_upgrade 线：检测四语言齐备；静态/动态闸暴露缺口
     const det = rows.find((r) => r.decl.id === 'version_upgrade_detection')!;
     expect(det.cells.find((c) => c.lang === 'java')!.level).toBe('full_ast');

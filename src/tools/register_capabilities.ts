@@ -47,29 +47,30 @@ declareCapability({
   },
 });
 
-/** 符号改名：仅实现 TS 家族（TS_EXTS 中文名解析 + import/reexport 边） */
+/** 符号改名：TS 家族 + Python（tree-sitter AST：def/class/import 别名/模块属性引用跨文件追踪） */
 declareCapability({
   id: 'rename_symbol',
   label: '符号改名（作用域解析 + 跨文件 import 边）',
-  desc: '当前只实现 TS 家族（typescript/tsx/javascript/jsx 及其扩展）；Go/Python 走别的路子',
+  desc: 'TS 家族（typescript/tsx/javascript/jsx 及其扩展）+ Python（tree-sitter AST：def/class/import 别名/模块属性引用跨文件追踪）；Go 走 refactor_pipeline/rename_file 等其他线',
   default: 'unimplemented',
   overrides: {
     typescript: 'full_ast',
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    python: 'full_ast',
   },
   notes: {
+    python: 'analyzePyModuleSource：def/class/顶层赋值 + from-import 别名 + 模块属性引用（util.format）',
     go: 'Go 改名走 refactor_pipeline / rename_file 等其他线',
-    python: 'Python 改名尚未接 rename_symbol',
   },
 });
 
-/** 契约对账闸门：go 分支 + JS/TS 家族（非 go 一律走 TS 逻辑，JS 是 TS 子集语法兼容） */
+/** 契约对账闸门：go 分支 + JS/TS 家族 + python 分支（后两者走 AST；go 走正则） */
 declareCapability({
   id: 'contract_gate',
   label: '契约对账闸门（重构后裸标识符定义源检查）',
-  desc: 'go 单独分支；ts/tsx/js/jsx/mjs/cjs 走同一套 TS 逻辑（语法兼容）；python/其他语言未纳入',
+  desc: 'go 单独分支；ts/tsx/js/jsx/mjs/cjs 走同一套 TS 逻辑（语法兼容）；python 走 tree-sitter AST（analyzePyTree，通配导入整文件跳过）',
   default: 'unimplemented',
   overrides: {
     go: 'full_ast',
@@ -77,14 +78,15 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    python: 'full_ast',
   },
 });
 
-/** 契约提取（签名/env 对账）：go 分支 + 非 go 一律走 TS 逻辑 */
+/** 契约提取（签名/env 对账）：go 分支 + 非 go 一律走 TS 逻辑；python 走 AST 分支 */
 declareCapability({
   id: 'extract_contracts',
   label: '契约提取（签名 + 环境符号）',
-  desc: 'go 单独分支；非 go（含 js 家族）走同一套 TS 提取逻辑；python 语法差异大未专门适配',
+  desc: 'go 单独分支；非 go（含 js 家族）走同一套 TS 提取逻辑；python 走 tree-sitter AST（analyzePyFile：class 字段 shapes + os.environ.get/os.getenv reads_config + open/Path().write_text/os.remove 文件写删 + Thread/Popen/emit 占用与事件）',
   default: 'partial_ast',
   overrides: {
     go: 'full_ast',
@@ -92,7 +94,7 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
-    python: 'unimplemented',
+    python: 'full_ast',
   },
 });
 

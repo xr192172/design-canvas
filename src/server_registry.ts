@@ -782,7 +782,7 @@ const TOOL_DEFS: ToolDef[] = [
       write_dsl: z.boolean().optional().describe('false=只读预演不写回，默认 true'),
     },
     handler: wrapData(async (a) => {
-      const r = extractContracts(a as unknown as ExtractContractsInput);
+      const r = await extractContracts(a as unknown as ExtractContractsInput);
       return { message: r.message, data: r };
     }),
   },

@@ -222,7 +222,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
     } finally {
       db.close();
     }
-    const ec = extractContracts({ project_dir: root, return_contracts: true });
+    const ec = await extractContracts({ project_dir: root, return_contracts: true });
     const contractsByPath = ec.contracts ?? {};
     const reportByPath = new Map<string, FileContractReport>(ec.files.map((f) => [f.path, f]));
 

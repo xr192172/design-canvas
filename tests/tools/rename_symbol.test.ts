@@ -224,3 +224,92 @@ describe('renameSymbol - 原子阻断（全部不落盘）', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('Python 模块级作用域解析（analyzeModuleSource .py 分支）', () => {
+  it('收集 def/class/顶层赋值声明 + import 绑定', async () => {
+    const src = [
+      'import os',
+      'from .util import helper',
+      'from . import def_mod',
+      'CONFIG = {}',
+      'def compute(a):',
+      '    return helper(a)',
+      'class Point:',
+      '    def area(self):',
+      '        return 0',
+    ].join('\n');
+    const m = await analyzeModuleSource(src, 'def.py');
+    expect(m).not.toBeNull();
+    expect(m!.rootKinds.get('compute')).toBe('function');
+    expect(m!.rootKinds.get('Point')).toBe('class');
+    expect(m!.rootKinds.get('CONFIG')).toBe('const');
+    expect(m!.rootKinds.get('os')).toBe('import');
+    expect(m!.rootKinds.get('helper')).toBe('import');
+    expect(m!.rootKinds.get('def_mod')).toBe('import');
+  });
+
+  it('模块属性引用记录到 moduleAttrs', async () => {
+    const src = ['import util', 'util.format(x)'].join('\n');
+    const m = await analyzeModuleSource(src, 'main.py');
+    expect(m!.moduleAttrs.some((a) => a.attrName === 'format' && a.objectName === 'util')).toBe(true);
+  });
+});
+
+describe('renameSymbol - Python 跨文件改名落盘', () => {
+  it('from .def import compute 无别名：import+直接引用一起改', async () => {
+    const dir = mkProj({
+      'src/def.py': ['def compute(a):', '    return a * 2', 'def internal():', '    return compute(1)'].join('\n'),
+      'src/a.py': ['from .def import compute', 'def run():', '    return compute(3)'].join('\n'),
+      'src/b.py': ['from .def import compute as calc', 'def run2():', '    return calc(5)'].join('\n'),
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    const def = readFileSync(path.join(dir, 'src/def.py'), 'utf-8');
+    expect(def).toContain('def tally(a):');
+    expect(def).toContain('return tally(1)');
+    const a = readFileSync(path.join(dir, 'src/a.py'), 'utf-8');
+    expect(a).toContain('from .def import tally');
+    expect(a).toContain('return tally(3)');
+    const b = readFileSync(path.join(dir, 'src/b.py'), 'utf-8');
+    expect(b).toContain('from .def import tally as calc');
+    expect(b).toContain('return calc(5)'); // 别名使用点不动
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('from . import def_mod + def_mod.compute(...) 模块属性引用也改', async () => {
+    const dir = mkProj({
+      'src/def_mod.py': 'def compute(x):\n    return x + 1\n',
+      'src/main.py': ['from . import def_mod', 'def run():', '    return def_mod.compute(3)'].join('\n'),
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def_mod.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    const main = readFileSync(path.join(dir, 'src/main.py'), 'utf-8');
+    expect(main).toContain('return def_mod.tally(3)');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('import util 绝对模块路径 + util.compute(...) 属性引用也改', async () => {
+    const dir = mkProj({
+      'src/util.py': 'def compute(x):\n    return x * 2\n',
+      'src/main.py': ['import util', 'def run():', '    return util.compute(4)'].join('\n'),
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/util.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    const main = readFileSync(path.join(dir, 'src/main.py'), 'utf-8');
+    expect(main).toContain('return util.tally(4)');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('同文件局部遮蔽：参数/局部同名不改', async () => {
+    const dir = mkProj({
+      'src/def.py': ['def compute(a):', '    return a', 'def outer(compute):', '    return compute'].join('\n'),
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    const def = readFileSync(path.join(dir, 'src/def.py'), 'utf-8');
+    expect(def).toContain('def tally(a):');
+    expect(def).toContain('def outer(compute):'); // 遮蔽侧不改
+    expect(def).toContain('    return compute'); // 遮蔽侧不改
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

@@ -21,12 +21,15 @@
  *   - 声明/局部名使用文件级并集（非精确作用域）——牺牲一丝精度换取近零误报，
  *     对 vault 完美命中，且不会把闭包捕获误判。
  *   - 每种语言各接一个"定义来源"适配器，快照/diff/报告编排全复用。
+ *   - Python 走 tree-sitter AST 适配器（analyzePyTree）：定义源与 `X.` 引用都从语法树取，
+ *     遇 `from x import *` 通配导入（定义源不可枚举）整文件跳过，低误报优先。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseAstRoot, type SyntaxNodeLike } from './ts_kernel/kernel.js';
 
-export type Lang = 'go' | 'ts';
+export type Lang = 'go' | 'ts' | 'py';
 
 export interface UndefinedRef {
   /** 相对 cwd 的路径（POSIX 分隔符） */
@@ -70,7 +73,7 @@ export interface ScanContractsOptions {
 
 // ── 常量 ─────────────────────────────────────────────
 
-const SRC_EXT = ['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+const SRC_EXT = ['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py'];
 
 const EXCLUDE_DIRS = new Set(['node_modules', '.git', 'vendor', 'dist', 'build', '.output', '.next', '.cache']);
 
@@ -100,12 +103,42 @@ const GO_RESERVED = new Set([
   'default', 'case', 'chan', 'struct', 'interface', 'map', 'nil', 'true', 'false',
 ]);
 
+/** Python 内建对象/异常/魔法名白名单——避免把 str/list/Exception/self 等误判成未定义。
+ *  注意：模块（os/json 等）不在其中——它们必须有 import 定义源，缺失才算失配。 */
+const PY_GLOBALS = new Set([
+  // 内建类型/对象（可作 `X.` 的接收者）
+  'str', 'int', 'float', 'complex', 'bool', 'bytes', 'bytearray', 'list', 'dict',
+  'set', 'frozenset', 'tuple', 'range', 'slice', 'object', 'type', 'super',
+  'property', 'staticmethod', 'classmethod', 'enumerate', 'zip', 'map', 'filter',
+  'sorted', 'sum', 'min', 'max', 'abs', 'len', 'print', 'repr', 'hash', 'id',
+  'iter', 'next', 'open', 'input', 'round', 'divmod', 'pow', 'format', 'bin',
+  'oct', 'hex', 'chr', 'ord', 'any', 'all', 'callable', 'getattr', 'hasattr',
+  'setattr', 'delattr', 'vars', 'dir', 'globals', 'locals', 'memoryview',
+  'isinstance', 'issubclass', 'ascii', 'buffer',
+  // 异常体系
+  'BaseException', 'Exception', 'ArithmeticError', 'AssertionError', 'AttributeError',
+  'BufferError', 'EOFError', 'ImportError', 'ModuleNotFoundError', 'LookupError',
+  'IndexError', 'KeyError', 'MemoryError', 'NameError', 'NotImplementedError',
+  'OSError', 'IOError', 'FileNotFoundError', 'PermissionError', 'TimeoutError',
+  'ReferenceError', 'RuntimeError', 'StopIteration', 'StopAsyncIteration',
+  'SyntaxError', 'IndentationError', 'TabError', 'SystemError', 'TypeError',
+  'ValueError', 'UnicodeError', 'UnicodeDecodeError', 'UnicodeEncodeError',
+  'UnicodeTranslateError', 'Warning', 'UserWarning', 'DeprecationWarning',
+  'PendingDeprecationWarning', 'RuntimeWarning', 'SyntaxWarning', 'FutureWarning',
+  'ImportWarning', 'UnicodeWarning', 'BytesWarning', 'ResourceWarning',
+  'GeneratorExit', 'KeyboardInterrupt', 'SystemExit', 'RecursionError',
+  // 实例/类上下文与模块级魔法名
+  'self', 'cls', '__name__', '__file__', '__path__', '__doc__', '__package__',
+  '__spec__', '__all__', '__dict__', '__class__', '__slots__', '__init__',
+]);
+
 // ── 语言判定 ─────────────────────────────────────────
 
 function langOfFile(rel: string): Lang | null {
   if (rel.endsWith('.go')) return 'go';
   // JS 家族：语法是 TS 子集，走同一套 ts 分支（collectSymbols/collectReferences 的 TS 逻辑对纯 JS 兼容）
   if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel)) return 'ts';
+  if (rel.endsWith('.py')) return 'py';
   return null;
 }
 
@@ -306,9 +339,163 @@ function collectReferences(text: string, lang: Lang): Array<{ line: number; iden
   return out;
 }
 
+// ── Python 分支（AST 级） ─────────────────────────────
+// 与 go/ts 的正则"清洗文本 + 文件级并集"不同，Python 直接走 tree-sitter AST：
+//   定义源（def/class/import/赋值/参数/with-as/except-as/for）与 `X.` 引用（attribute
+//   节点 object 为裸标识符）都从语法树取——正则分不清 `self.x`、注释/字符串里的同名文本，
+//   也无法正确处理 `import os.path` 绑定 os、`from .m import a as b` 绑定 b 这类结构。
+
+/** 取某字段的全部子节点（tree-sitter 多值字段，如 `import a, b` 的 name） */
+function pyFieldChildren(n: SyntaxNodeLike, field: string): SyntaxNodeLike[] {
+  const anyN = n as unknown as { childrenForFieldName?: (f: string) => SyntaxNodeLike[] | null };
+  if (typeof anyN.childrenForFieldName === 'function') {
+    try {
+      const list = anyN.childrenForFieldName(field);
+      if (list && list.length > 0) return list;
+    } catch {
+      // fallthrough
+    }
+  }
+  const one = n.childForFieldName(field);
+  return one ? [one] : [];
+}
+
+/** 赋值/for 左侧的绑定目标（identifier / 解构 pattern；`self.x` 属性目标跳过） */
+function collectBindTargets(left: SyntaxNodeLike, locals: Set<string>): void {
+  const t = left.type;
+  if (t === 'identifier') {
+    locals.add(left.text);
+  } else if (t === 'pattern_list' || t === 'tuple_pattern' || t === 'list_pattern' || t === 'expression_list' || t === 'typed_pattern') {
+    if (t === 'typed_pattern') {
+      const nm = left.childForFieldName('name');
+      if (nm) collectBindTargets(nm, locals);
+      return;
+    }
+    for (let i = 0; i < left.childCount; i++) {
+      const c = left.child(i);
+      if (c) collectBindTargets(c, locals);
+    }
+  }
+  // attribute（self.x）/ subscript / star_pattern → 不产生本地绑定，跳过
+}
+
+/** 收集形参名（def 的 parameters / lambda 的 lambda_parameters） */
+function collectParamNames(params: SyntaxNodeLike, locals: Set<string>): void {
+  for (let i = 0; i < params.childCount; i++) {
+    const c = params.child(i);
+    if (!c) continue;
+    const t = c.type;
+    if (t === 'identifier') {
+      locals.add(c.text);
+    } else if (t === 'typed_parameter' || t === 'default_parameter' || t === 'typed_default_parameter') {
+      const nm = c.childForFieldName('name');
+      if (nm && nm.type === 'identifier') locals.add(nm.text);
+    } else if (t === 'list_splat_pattern' || t === 'dictionary_splat_pattern') {
+      const nm = c.childForFieldName('name');
+      if (nm) locals.add(nm.text);
+    }
+    // keyword_separator(*) / positional_separator(/) 无绑定
+  }
+}
+
+/** 一次 AST 遍历同时产出：定义源（declared/aliases/locals）+ `X.` 引用 + 通配导入标记 */
+function analyzePyTree(root: SyntaxNodeLike): {
+  symbols: FileSymbols;
+  refs: Array<{ line: number; ident: string }>;
+  wildcard: boolean;
+} {
+  const declared = new Set<string>();
+  const aliases = new Set<string>();
+  const locals = new Set<string>();
+  const refs: Array<{ line: number; ident: string }> = [];
+  let wildcard = false;
+
+  const walk = (node: SyntaxNodeLike, depth: number): void => {
+    if (depth > 300) return;
+    const t = node.type;
+    switch (t) {
+      case 'function_definition':
+      case 'class_definition': {
+        const name = node.childForFieldName('name');
+        if (name && name.type === 'identifier') declared.add(name.text);
+        break;
+      }
+      case 'parameters':
+      case 'lambda_parameters': {
+        collectParamNames(node, locals);
+        break;
+      }
+      case 'import_statement': {
+        // import os.path / import json as j / import a, b —— 绑定名取别名或点分首段
+        for (const nm of pyFieldChildren(node, 'name')) {
+          if (nm.type === 'aliased_import') {
+            const alias = nm.childForFieldName('alias');
+            if (alias) aliases.add(alias.text);
+          } else if (nm.type === 'dotted_name') {
+            const first = nm.text.split('.')[0];
+            if (first) aliases.add(first);
+          }
+        }
+        break;
+      }
+      case 'import_from_statement': {
+        // from .mod import a as b / from x import * —— 只取 import 子句的 name 字段（module_name 内嵌的点分名除外）
+        for (const nm of pyFieldChildren(node, 'name')) {
+          if (nm.type === 'aliased_import') {
+            const alias = nm.childForFieldName('alias');
+            if (alias) aliases.add(alias.text);
+          } else if (nm.type === 'dotted_name') {
+            const first = nm.text.split('.')[0];
+            if (first) aliases.add(first);
+          }
+        }
+        break;
+      }
+      case 'wildcard_import': {
+        // from x import *（0.21 语法里不带 name 字段，按节点类型识别）
+        wildcard = true;
+        break;
+      }
+      case 'assignment':
+      case 'augmented_assignment': {
+        const left = node.childForFieldName('left');
+        if (left) collectBindTargets(left, locals);
+        break;
+      }
+      case 'for_statement': {
+        const left = node.childForFieldName('left');
+        if (left) collectBindTargets(left, locals);
+        break;
+      }
+      case 'as_pattern_target': {
+        // with ... as x / except E as e
+        locals.add(node.text);
+        break;
+      }
+      case 'attribute': {
+        // `X.attr`：object 为裸标识符才算"包/接收者引用"；`a.b.c` 只记最左 a（b 是属性名）
+        const obj = node.childForFieldName('object');
+        if (obj && obj.type === 'identifier') {
+          refs.push({ line: obj.startPosition.row + 1, ident: obj.text });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) walk(c, depth + 1);
+    }
+  };
+
+  walk(root, 0);
+  return { symbols: { declared, aliases, locals }, refs, wildcard };
+}
+
 // ── 扫描快照 ─────────────────────────────────────────
 
-function scanOne(cwd: string, abs: string, lang: Lang): FileScan {
+async function scanOne(cwd: string, abs: string, lang: Lang): Promise<FileScan> {
   const file = path.relative(cwd, abs).split(path.sep).join('/') || abs;
   let src = '';
   try {
@@ -316,6 +503,26 @@ function scanOne(cwd: string, abs: string, lang: Lang): FileScan {
   } catch {
     return { file, lang, undefinedRefs: [] };
   }
+
+  // Python：AST 级（tree-sitter），一次解析同时拿定义源与 `X.` 引用
+  if (lang === 'py') {
+    const parsed = await parseAstRoot(abs, src);
+    // 解析器不可用 / 非 python → 空扫描（不误报）
+    if (!parsed || parsed.langName !== 'python') return { file, lang, undefinedRefs: [] };
+    const { symbols, refs, wildcard } = analyzePyTree(parsed.root);
+    // 通配导入（from x import *）→ 定义源不可枚举；低误报优先，整文件跳过判定
+    if (wildcard) return { file, lang, undefinedRefs: [] };
+    const combined = new Set<string>([...symbols.declared, ...symbols.aliases, ...symbols.locals, ...PY_GLOBALS]);
+    const undefinedRefs: UndefinedRef[] = [];
+    for (const r of refs) {
+      if (!combined.has(r.ident)) {
+        undefinedRefs.push({ file, line: r.line, ident: r.ident, hint: `${file}:${r.line} ${r.ident}.` });
+      }
+    }
+    return { file, lang, undefinedRefs };
+  }
+
+  // Go/TS 家族：正则清洗文本 + 文件级并集
   const cleaned = cleanSource(src, lang);
   const { declared, aliases, locals } = collectSymbols(cleaned.text, lang);
   const combined = new Set<string>([...declared, ...aliases, ...locals]);
@@ -332,7 +539,7 @@ function scanOne(cwd: string, abs: string, lang: Lang): FileScan {
   return { file, lang, undefinedRefs };
 }
 
-export function scanContracts(opts: ScanContractsOptions): ContractSnapshot {
+export async function scanContracts(opts: ScanContractsOptions): Promise<ContractSnapshot> {
   const cwd = path.resolve(opts.cwd);
   const files: string[] = opts.files && opts.files.length > 0
     ? opts.files.map((f) => (path.isAbsolute(f) ? f : path.resolve(cwd, f)))
@@ -346,7 +553,7 @@ export function scanContracts(opts: ScanContractsOptions): ContractSnapshot {
     seen.add(rel);
     const l = opts.lang === 'auto' || !opts.lang ? langOfFile(rel) : opts.lang;
     if (!l) continue;
-    dirList.push(scanOne(cwd, abs, l));
+    dirList.push(await scanOne(cwd, abs, l));
   }
 
   // 聚合去重失配
@@ -382,8 +589,8 @@ export interface ContractGateResult {
 }
 
 /** 单点扫描：直接对给定 cwd/files 扫一遍并报告失配（不上 diff）。 */
-export function contractGate(opts: ScanContractsOptions): ContractGateResult {
-  const scan = scanContracts(opts);
+export async function contractGate(opts: ScanContractsOptions): Promise<ContractGateResult> {
+  const scan = await scanContracts(opts);
   if (scan.undefinedRefs.length === 0) return { scan, ok: true };
   return {
     scan,

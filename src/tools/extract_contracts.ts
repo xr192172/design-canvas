@@ -28,6 +28,7 @@ import path from 'node:path';
 import { getDSL, saveDSL } from '../storage.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
 import { buildImportGraph, type ImportGraph } from './import_graph.js';
+import { parseAstRoot, type SyntaxNodeLike } from './ts_kernel/kernel.js';
 import type {
   BrickContract,
   BrickRole,
@@ -95,8 +96,8 @@ export interface ExtractContractsResult {
 // ── role 判定：种子模式（入口/装配层启发）──────────────────────────
 const BUSINESS_SEED_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /(^|\/)cmd\//, reason: 'cmd 入口目录' },
-  { re: /(^|\/)main\.(go|ts|js|mjs)$/, reason: 'main 入口文件' },
-  { re: /(^|\/)(server|app|bootstrap)\.(go|ts|js)$/, reason: '服务装配入口' },
+  { re: /(^|\/)main\.(go|ts|js|mjs|py)$/, reason: 'main 入口文件' },
+  { re: /(^|\/)(server|app|bootstrap|manage)\.(go|ts|js|py)$/, reason: '服务装配入口' },
   { re: /(^|\/)cli\//, reason: 'cli 装配目录' },
   { re: /(^|\/)handlers?\//, reason: 'handler 胶水目录' },
 ];
@@ -427,6 +428,324 @@ interface EffectCandidates {
   emits: string[];
 }
 
+// ── Python 分支（AST 级，tree-sitter）────────────────────────────
+// Go/TS 家族的效果/形状扫描是"清洗文本 + 正则"，对 Python 语法差异大
+// （缩进块、self.x、os.environ.get、annotation、from x import * 等）不适配，
+// 故 Python 直接走 tree-sitter AST，一次解析产出三类契约信息：
+//   ① shapes：class 定义体 → 类属性（带 annotation，如 `name: str = "hub"`）
+//      + __init__ 里的 self.x 实例属性（`self.token = token`）
+//   ② reads_config：os.environ.get('K') / os.getenv('K') / os.environ['K']
+//   ③ effects：模块级赋值（写状态候选）+ open(path, mode) 写/读句柄 +
+//      Path().write_text / os.remove 文件写删 + Thread/Timer/Popen 占用 +
+//      emit/publish 事件发送 + uvicorn.run / app.run 监听占用。
+//      全部只标候选（origin='ast'），camera 观测后转正——与 go/ts 语义一致。
+
+interface PyStatics {
+  readsConfig: string[];
+  effects: EffectCandidates;
+  shapes: ShapeSchema[];
+}
+
+/** 去字符串引号（单/双/三引号） */
+function pyStripQuotes(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2) {
+    const q = t[0];
+    if (q === '"' || q === "'") {
+      const end = t.endsWith(q) ? t.length - 1 : t.length;
+      return t.slice(1, end);
+    }
+  }
+  return t;
+}
+
+/** subscript 的索引字段 → 键串（os.environ['K'] 的 'K'）。
+ *  tree-sitter-python 0.21 用 'subscript' 字段名（'index' 为旧版兜底）；
+ *  字符串去引号，表达式记原文 */
+function pySubscriptIndex(node: SyntaxNodeLike): string | undefined {
+  const idx = node.childForFieldName('subscript') ?? node.childForFieldName('index');
+  if (!idx) return undefined;
+  if (idx.type === 'string' || idx.type === 'concatenated_string') return pyStripQuotes(idx.text);
+  return idx.text.replace(/\s+/g, ' ').trim();
+}
+
+/** 直子节点里找第一个指定类型 */
+function pyFindChild(node: SyntaxNodeLike, type: string): SyntaxNodeLike | null {
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i);
+    if (c && c.type === type) return c;
+  }
+  return null;
+}
+
+/** argument_list 的位置参数（跳过逗号与 keyword_argument，如 target=self.run） */
+function pyPositionalArgs(args: SyntaxNodeLike): SyntaxNodeLike[] {
+  const out: SyntaxNodeLike[] = [];
+  for (let i = 0; i < args.childCount; i++) {
+    const c = args.child(i);
+    if (!c) continue;
+    const t = c.type;
+    if (t === ',' || t === '(' || t === ')') continue;
+    if (t === 'keyword_argument') continue;
+    out.push(c);
+  }
+  return out;
+}
+
+/** 取第 idx 个位置参数的目标串：字符串字面量去引号，表达式记原文（截断防爆） */
+function pyArgTarget(pos: SyntaxNodeLike[], idx: number): string | undefined {
+  const a = pos[idx];
+  if (!a) return undefined;
+  if (a.type === 'string' || a.type === 'concatenated_string') return pyStripQuotes(a.text);
+  const t = a.text.replace(/\s+/g, ' ').trim();
+  return t.length > 60 ? t.slice(0, 60) + '…' : t;
+}
+
+/** RHS 节点 → 形状字段的类型串（有 annotation 用 annotation，否则按值节点推断） */
+function pyInferType(v: SyntaxNodeLike | null): string {
+  if (!v) return '';
+  switch (v.type) {
+    case 'string':
+    case 'concatenated_string':
+      return 'str';
+    case 'integer':
+      return 'int';
+    case 'float':
+      return 'float';
+    case 'true':
+    case 'false':
+      return 'bool';
+    case 'none':
+      return 'None';
+    case 'list':
+    case 'list_comprehension':
+      return 'list';
+    case 'dictionary':
+    case 'dictionary_comprehension':
+      return 'dict';
+    case 'tuple':
+      return 'tuple';
+    case 'set':
+      return 'set';
+    case 'identifier':
+      return v.text;
+    case 'call': {
+      const f = v.childForFieldName('function');
+      return f ? f.text : 'call';
+    }
+    default:
+      return '';
+  }
+}
+
+/** 解析一个 class_definition：类属性（直子 assignment）+ __init__ 的 self.x 实例属性 */
+function parsePyClassShape(classNode: SyntaxNodeLike): ShapeSchema {
+  const nameNode = classNode.childForFieldName('name');
+  const name = nameNode ? nameNode.text : 'unnamed';
+  const fields: ShapeField[] = [];
+  const seen = new Set<string>();
+  const body = classNode.childForFieldName('body');
+  if (body) {
+    for (let i = 0; i < body.childCount; i++) {
+      const stmt = body.child(i);
+      if (!stmt) continue;
+      if (stmt.type === 'expression_statement') {
+        const assign = pyFindChild(stmt, 'assignment');
+        if (!assign) continue;
+        const left = assign.childForFieldName('left');
+        if (!left || left.type !== 'identifier' || seen.has(left.text)) continue;
+        seen.add(left.text);
+        const typeNode = assign.childForFieldName('type');
+        fields.push({
+          name: left.text,
+          type: typeNode ? typeNode.text : pyInferType(assign.childForFieldName('right')),
+          required: true,
+        });
+      } else if (stmt.type === 'function_definition') {
+        const fnName = stmt.childForFieldName('name');
+        if (fnName && fnName.text === '__init__') {
+          const fnBody = stmt.childForFieldName('body');
+          if (!fnBody) continue;
+          for (let j = 0; j < fnBody.childCount; j++) {
+            const s2 = fnBody.child(j);
+            if (!s2 || s2.type !== 'expression_statement') continue;
+            const a2 = pyFindChild(s2, 'assignment') ?? pyFindChild(s2, 'augmented_assignment');
+            if (!a2) continue;
+            const l2 = a2.childForFieldName('left');
+            if (!l2 || l2.type !== 'attribute') continue;
+            const obj = l2.childForFieldName('object');
+            if (!obj || obj.type !== 'identifier' || obj.text !== 'self') continue;
+            const attr = l2.childForFieldName('attribute');
+            if (!attr || attr.type !== 'identifier' || seen.has(attr.text)) continue;
+            seen.add(attr.text);
+            const typeNode = a2.childForFieldName('type');
+            fields.push({
+              name: attr.text,
+              type: typeNode ? typeNode.text : pyInferType(a2.childForFieldName('right')),
+              required: true,
+            });
+          }
+        }
+      }
+    }
+  }
+  return { name, kind: 'class', fields: fields.slice(0, 40), origin: 'ast' };
+}
+
+/**
+ * 一次 AST 遍历产出 Python 文件的全部静态契约信息。
+ * 返回 null = 解析器不可用/非 python（调用方回退既有行为）。
+ */
+async function analyzePyFile(abs: string, src: string): Promise<PyStatics | null> {
+  const parsed = await parseAstRoot(abs, src);
+  if (!parsed || parsed.langName !== 'python') return null;
+  const root = parsed.root;
+
+  const readsConfig = new Set<string>();
+  const writes = new Map<string, EffectTarget>();
+  const holds = new Map<string, EffectTarget>();
+  const emits = new Set<string>();
+  const shapes: ShapeSchema[] = [];
+
+  const addWrite = (t: EffectTarget) => writes.set(`${t.op}:${t.target}`, t);
+  const addHold = (t: EffectTarget) => holds.set(t.target, t);
+
+  const handleCall = (call: SyntaxNodeLike): void => {
+    const fn = call.childForFieldName('function');
+    if (!fn) return;
+    const argsNode = call.childForFieldName('arguments');
+    const pos = argsNode ? pyPositionalArgs(argsNode) : [];
+    const firstStr =
+      pos[0] && (pos[0].type === 'string' || pos[0].type === 'concatenated_string')
+        ? pyStripQuotes(pos[0].text)
+        : undefined;
+
+    if (fn.type === 'identifier') {
+      if (fn.text === 'open') {
+        const p = pyArgTarget(pos, 0);
+        if (p === undefined) return;
+        const modeArg = pos[1];
+        const mode =
+          modeArg && (modeArg.type === 'string' || modeArg.type === 'concatenated_string')
+            ? pyStripQuotes(modeArg.text)
+            : '';
+        if (mode && /^[wax]/i.test(mode)) {
+          addWrite({ target: `file:${p}`, op: mode.startsWith('a') ? 'append' : 'write', origin: 'ast' });
+        } else {
+          // 读模式或缺省 → 文件句柄占用（拔积木须 close）
+          addHold({ target: `file:${p}`, op: 'acquire', origin: 'ast' });
+        }
+      }
+      return;
+    }
+    if (fn.type !== 'attribute') return;
+    const obj = fn.childForFieldName('object');
+    const attr = fn.childForFieldName('attribute');
+    const attrName = attr ? attr.text : '';
+    const objName = obj ? obj.text : '';
+
+    // ② reads_config
+    if (objName === 'os' && attrName === 'getenv') {
+      if (firstStr) readsConfig.add(firstStr);
+      return;
+    }
+    if (attrName === 'get' && obj && obj.type === 'attribute' && obj.text === 'os.environ') {
+      if (firstStr) readsConfig.add(firstStr);
+      return;
+    }
+    // ③ 文件写/删
+    if (objName === 'os' && (attrName === 'remove' || attrName === 'unlink' || attrName === 'rmdir')) {
+      const p = pyArgTarget(pos, 0);
+      if (p !== undefined) addWrite({ target: `file:${p}`, op: 'delete', origin: 'ast' });
+      return;
+    }
+    if (objName === 'shutil' && attrName === 'rmtree') {
+      const p = pyArgTarget(pos, 0);
+      if (p !== undefined) addWrite({ target: `file:${p}`, op: 'delete', origin: 'ast' });
+      return;
+    }
+    if ((attrName === 'write_text' || attrName === 'write_bytes') && obj && obj.type === 'call') {
+      const inner = obj.childForFieldName('arguments');
+      const innerPos = inner ? pyPositionalArgs(inner) : [];
+      const p = pyArgTarget(innerPos, 0);
+      if (p !== undefined) addWrite({ target: `file:${p}`, op: 'write', origin: 'ast' });
+      return;
+    }
+    // ③ 资源占用
+    if (objName === 'threading' && attrName === 'Thread') {
+      addHold({ target: 'thread', op: 'acquire', origin: 'ast' });
+      return;
+    }
+    if (objName === 'threading' && attrName === 'Timer') {
+      addHold({ target: 'timer', op: 'acquire', origin: 'ast' });
+      return;
+    }
+    if (objName === 'subprocess' && attrName === 'Popen') {
+      addHold({ target: 'subprocess', op: 'acquire', origin: 'ast' });
+      return;
+    }
+    if (attrName === 'run' && (objName === 'uvicorn' || objName === 'app')) {
+      addHold({ target: `listen:${objName}`, op: 'acquire', origin: 'ast' });
+      return;
+    }
+    // ③ 事件发送
+    if ((attrName === 'emit' || attrName === 'publish') && firstStr) {
+      emits.add(`event:${firstStr}`);
+    }
+  };
+
+  const walk = (node: SyntaxNodeLike, atModule: boolean, depth: number): void => {
+    if (depth > 300) return;
+    const t = node.type;
+    switch (t) {
+      case 'assignment':
+      case 'augmented_assignment': {
+        // 模块级赋值 → "写模块状态"候选（缩进块内、函数/类内不算）
+        const left = node.childForFieldName('left');
+        if (atModule && left && left.type === 'identifier') {
+          addWrite({ target: left.text, op: 'write', origin: 'ast' });
+        }
+        break;
+      }
+      case 'call':
+        handleCall(node);
+        break;
+      case 'subscript': {
+        // os.environ['K'] 环境变量读取
+        const value = node.childForFieldName('value');
+        if (value && value.type === 'attribute' && value.text === 'os.environ') {
+          const k = pySubscriptIndex(node);
+          if (k) readsConfig.add(k);
+        }
+        break;
+      }
+      case 'class_definition':
+        shapes.push(parsePyClassShape(node));
+        break;
+      default:
+        break;
+    }
+    // 进入函数/类/推导式后不再是模块级（缩进块 if/for/try 仍是模块级语义）
+    const descendModule =
+      atModule && t !== 'function_definition' && t !== 'class_definition' && t !== 'lambda';
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) walk(c, descendModule, depth + 1);
+    }
+  };
+  walk(root, true, 0);
+
+  return {
+    readsConfig: [...readsConfig].sort(),
+    effects: {
+      writes: [...writes.values()].slice(0, 20),
+      holds: [...holds.values()].slice(0, 20),
+      emits: [...emits].slice(0, 20),
+    },
+    shapes,
+  };
+}
+
 /** effects 候选扫描总入口（每类上限 20 防大文件爆表；详情在 DSL 契约里） */
 function scanEffectCandidates(source: string, language: string): EffectCandidates {
   const isGo = language === 'go';
@@ -455,7 +774,7 @@ function scanEffectCandidates(source: string, language: string): EffectCandidate
 
 // ── 主流程 ────────────────────────────────────────────────────────
 
-export function extractContracts(input: ExtractContractsInput): ExtractContractsResult {
+export async function extractContracts(input: ExtractContractsInput): Promise<ExtractContractsResult> {
   const { project_dir, feature, write_dsl = true } = input;
   const root = path.resolve(project_dir);
 
@@ -509,11 +828,23 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
 
     let readsConfig: string[] = [];
     let effectCand: EffectCandidates = { writes: [], holds: [], emits: [] };
+    let fileShapes = shapesByFile.get(f.rel) ?? [];
     try {
       const src = fs.readFileSync(path.join(root, f.rel), 'utf-8');
+      // files.language 列存的是扩展名（symbols.ts 写 ext），Python 以扩展名判分支
       const lang = langOf.get(f.rel) ?? 'ts';
-      readsConfig = scanConfigKeys(src, lang);
-      effectCand = scanEffectCandidates(src, lang);
+      if (lang === 'python' || f.ext === '.py') {
+        // Python 走 AST 分支：一次解析产出 reads_config / effects / shapes
+        const st = await analyzePyFile(path.join(root, f.rel), src);
+        if (st) {
+          readsConfig = st.readsConfig;
+          effectCand = st.effects;
+          if (st.shapes.length > 0) fileShapes = st.shapes;
+        }
+      } else {
+        readsConfig = scanConfigKeys(src, lang);
+        effectCand = scanEffectCandidates(src, lang);
+      }
     } catch {
       // 源文件读取失败（可能已删除），config/effects 清单置空
     }
@@ -521,7 +852,7 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
     const contract: BrickContract = {
       schema_version: 1,
       role: cappedRole,
-      shapes: { exposes: shapesByFile.get(f.rel) ?? [], consumes: [] },
+      shapes: { exposes: fileShapes, consumes: [] },
       effects: {
         writes: effectCand.writes,
         holds: effectCand.holds,

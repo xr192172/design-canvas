@@ -9,6 +9,7 @@
  *   - reads_config：process.env.X 提取
  *   - confidence 封顶 0.7（静态判定无 runtime 证据）
  *   - dry-run（write_dsl=false）不写 DSL；feature 写回 SemanticFile.contract
+ *   - Python AST 分支：seed 入口 + class shapes + env reads_config + 文件写/占用 effects
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -93,7 +94,7 @@ afterEach(cleanupLive);
 describe('extract_contracts 契约提取', () => {
   it('role 依赖方向：main=business 种子，util=functional 高置信，service=functional', async () => {
     const root = await makeProject();
-    const r = extractContracts({ project_dir: root });
+    const r = await extractContracts({ project_dir: root });
 
     const byPath = new Map(r.files.map((f) => [f.path, f]));
     const main = byPath.get('src/main.ts')!;
@@ -113,7 +114,7 @@ describe('extract_contracts 契约提取', () => {
 
   it('shapes：interface 字段解析 + 可选标记 + 方法行不误入', async () => {
     const root = await makeProject();
-    const r = extractContracts({ project_dir: root });
+    const r = await extractContracts({ project_dir: root });
 
     const util = r.files.find((f) => f.path === 'src/util.ts')!;
     expect(util.shape_count).toBe(1);
@@ -123,7 +124,7 @@ describe('extract_contracts 契约提取', () => {
 
   it('reads_config：process.env 提取', async () => {
     const root = await makeProject();
-    const r = extractContracts({ project_dir: root });
+    const r = await extractContracts({ project_dir: root });
 
     const main = r.files.find((f) => f.path === 'src/main.ts')!;
     expect(main.reads_config).toContain('APP_NAME');
@@ -138,7 +139,7 @@ describe('extract_contracts 契约提取', () => {
       { id: 'f1', path: 'src/util.ts', responsibility: '工具' },
       { id: 'f2', path: 'src/main.ts', responsibility: '入口' },
     ]);
-    const r = extractContracts({ project_dir: root, feature });
+    const r = await extractContracts({ project_dir: root, feature });
 
     expect(r.written_to_dsl).toBe(true);
     const dsl = getDSL(feature)!;
@@ -166,7 +167,7 @@ describe('extract_contracts 契约提取', () => {
     const feature = 'contract_dryrun_test';
     const root = await makeProject(feature);
     makeFeatureDsl(feature, [{ id: 'f1', path: 'src/util.ts', responsibility: '工具' }]);
-    const r = extractContracts({ project_dir: root, feature, write_dsl: false });
+    const r = await extractContracts({ project_dir: root, feature, write_dsl: false });
 
     expect(r.written_to_dsl).toBe(false);
     const dsl = getDSL(feature)!;
@@ -278,7 +279,7 @@ async function makeGoEffectsProject(): Promise<string> {
 describe('extract_contracts effects 候选（origin=ast）', () => {
   it('TS：模块级变量写/文件写/listen/timer/emit + === 与 => 防误报', async () => {
     const root = await makeEffectsProject();
-    const r = extractContracts({ project_dir: root });
+    const r = await extractContracts({ project_dir: root });
 
     const byPath = new Map(r.files.map((f) => [f.path, f]));
     const fx = byPath.get('src/effects.ts')!;
@@ -302,7 +303,7 @@ describe('extract_contracts effects 候选（origin=ast）', () => {
     makeFeatureDsl(feature, [
       { id: 'f1', path: 'src/effects.ts', responsibility: 'effects' },
     ]);
-    extractContracts({ project_dir: root, feature });
+    await extractContracts({ project_dir: root, feature });
     const dsl = getDSL(feature)!;
     const c = dsl.semantic.files.find((f) => f.path === 'src/effects.ts')!.contract!;
 
@@ -323,7 +324,7 @@ describe('extract_contracts effects 候选（origin=ast）', () => {
     const root = await makeGoEffectsProject();
     const feature = 'contract_gofx';
     makeFeatureDsl(feature, [{ id: 'w1', path: 'worker.go', responsibility: 'worker' }]);
-    const r = extractContracts({ project_dir: root, feature });
+    const r = await extractContracts({ project_dir: root, feature });
 
     expect(r.written_to_dsl).toBe(true);
     const dsl = getDSL(feature)!;
@@ -343,5 +344,124 @@ describe('extract_contracts effects 候选（origin=ast）', () => {
     // chan：send 记 chan:events；receive 行（v := <-events）不产生额外 chan 项
     expect(c.effects.emits).toContain('chan:events');
     expect(c.effects.emits.filter((e) => e.startsWith('chan:'))).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Python 分支（AST 级）：seed 入口 + class shapes + env reads_config + 文件写/占用 effects
+// ─────────────────────────────────────────────────────────────
+
+/** Python 项目：app.py（app.* 种子=业务入口），类字段/环境变量/文件写删/占用/事件全覆盖 */
+async function makePyProject(): Promise<string> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'contract-py-'));
+  roots.push(root);
+  put(
+    root,
+    'app.py',
+    [
+      'import os',
+      'import threading',
+      'from pathlib import Path',
+      '',
+      'CONFIG_FILE = "config.yaml"',
+      'retries = 3',
+      '',
+      'class Hub:',
+      '    name: str = "hub"',
+      '    url: str = "https://x"',
+      '    _closed = False',
+      '',
+      '    def __init__(self, token: str):',
+      '        self.token = token',
+      '        self.max_retries = retries',
+      '',
+      '    def run(self):',
+      '        key = os.environ.get("API_KEY")',
+      '        host = os.getenv("HOST", "localhost")',
+      '        bucket = os.environ["BUCKET"]',
+      '        data = open("out.json", "w")',
+      '        handle = open("in.txt")',
+      '        thread = threading.Thread(target=self.run)',
+      '        thread.start()',
+      '        Path("log.txt").write_text("hi")',
+      '        os.remove("tmp.bin")',
+      '        self.emit("ready")',
+      '        self.publish("topic")',
+      '',
+      'def bootstrap():',
+      '    hub = Hub(os.getenv("TOKEN"))',
+      '    hub.run()',
+      '',
+      'if __name__ == "__main__":',
+      '    bootstrap()',
+    ].join('\n'),
+  );
+  const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+  await importProject({ project_dir: root, cache_db: db });
+  db.close();
+  return root;
+}
+
+describe('extract_contracts Python（AST 分支）', () => {
+  it('seed=app.py → business；env reads_config；class shapes；文件写删/占用/事件 effects（局部变量不误报）', async () => {
+    const root = await makePyProject();
+    const feature = 'contract_py';
+    makeFeatureDsl(feature, [{ id: 'a1', path: 'app.py', responsibility: '入口' }]);
+    const r = await extractContracts({ project_dir: root, feature });
+
+    expect(r.written_to_dsl).toBe(true);
+
+    // role：app.py 命中 app.* 服务装配入口种子
+    const app = r.files.find((f) => f.path === 'app.py')!;
+    expect(app.role.class).toBe('business');
+    expect(app.role.reasons?.[0]).toContain('种子');
+
+    // reads_config：os.environ.get / os.getenv / os.environ['K'] 三类都收
+    expect(app.reads_config).toEqual(expect.arrayContaining(['API_KEY', 'HOST', 'BUCKET', 'TOKEN']));
+
+    // effects 计数
+    expect(app.effects.writes).toBeGreaterThanOrEqual(5); // CONFIG_FILE + retries + 3 个文件
+    expect(app.effects.holds).toBeGreaterThanOrEqual(2); // file:in.txt + thread
+    expect(app.effects.emits).toBeGreaterThanOrEqual(2); // ready + topic
+
+    const dsl = getDSL(feature)!;
+    const c = dsl.semantic.files.find((f) => f.path === 'app.py')!.contract!;
+
+    // shapes：类属性（annotation 优先）+ __init__ self.x 实例属性 + 去重
+    const hub = c.shapes.exposes.find((s) => s.name === 'Hub');
+    expect(hub).toBeDefined();
+    expect(hub!.kind).toBe('class');
+    const fName = hub!.fields.find((f) => f.name === 'name');
+    expect(fName?.type).toBe('str'); // annotation
+    const fUrl = hub!.fields.find((f) => f.name === 'url');
+    expect(fUrl?.type).toBe('str');
+    const fClosed = hub!.fields.find((f) => f.name === '_closed');
+    expect(fClosed?.type).toBe('bool'); // RHS False 推断
+    const fToken = hub!.fields.find((f) => f.name === 'token');
+    expect(fToken).toBeDefined();
+    const fMax = hub!.fields.find((f) => f.name === 'max_retries');
+    expect(fMax).toBeDefined();
+    // self.name = "renamed" 被类属性 name 去重
+    expect(hub!.fields.filter((f) => f.name === 'name')).toHaveLength(1);
+
+    // writes 目标精确：模块级变量 + 文件写/删
+    const targets = c.effects.writes.map((w) => w.target);
+    expect(targets).toContain('CONFIG_FILE');
+    expect(targets).toContain('retries');
+    expect(targets).toContain('file:out.json');
+    expect(targets).toContain('file:log.txt');
+    expect(targets).toContain('file:tmp.bin');
+    // 函数内局部变量不误报
+    expect(targets.some((t) => ['key', 'host', 'bucket', 'data', 'handle', 'thread', 'hub'].includes(t))).toBe(false);
+
+    // holds：读模式 open + Thread
+    const holds = c.effects.holds.map((h) => h.target);
+    expect(holds).toContain('file:in.txt');
+    expect(holds).toContain('thread');
+    expect(c.effects.holds.every((h) => h.origin === 'ast')).toBe(true);
+
+    // emits：事件名
+    expect(c.effects.emits).toContain('event:ready');
+    expect(c.effects.emits).toContain('event:topic');
   });
 });

@@ -42,6 +42,8 @@ interface N {
 
 const TS_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
 const TS_LANG_NAMES = new Set(['typescript', 'tsx', 'javascript', 'jsx']);
+const PY_EXTS = new Set(['.py']);
+const PY_LANG_NAMES = new Set(['python']);
 
 type ScopeMap = Map<string, number>;
 
@@ -72,6 +74,18 @@ export interface ModuleRef {
   nodeType: NodeType;
 }
 
+/** Python 模块命名空间属性引用（`import util` → `util.format` 的 attribute） */
+export interface ModuleAttrRef {
+  /** 绑定的模块本地名（`import util as u` → 'u'；`from . import mod` → 'mod'） */
+  objectName: string;
+  /** import 源（相对路径才可能落到项目内） */
+  source: string;
+  /** 属性名（`util.format` 的 'format'） */
+  attrName: string;
+  /** 属性节点字节偏移 */
+  offset: number;
+}
+
 export interface ModuleAnalysis {
   /** 模块级绑定：名字 → 声明处字节偏移（import 本地名也在内） */
   rootOffsets: Map<string, number>;
@@ -83,6 +97,8 @@ export interface ModuleAnalysis {
   exportRefs: ModuleRef[];
   /** import / re-export 边 */
   imports: ImportEdge[];
+  /** Python 模块命名空间属性引用（`util.format`；仅非空） */
+  moduleAttrs: ModuleAttrRef[];
 }
 
 // ─────────────────────────────────────────────
@@ -134,9 +150,10 @@ function stripQuotes(s: string): string {
   return s;
 }
 
-/** 单文件模块级作用域解析（一次遍历） */
+/** 单文件模块级作用域解析（一次遍历；按扩展名路由 TS/JS/Go → Python） */
 export async function analyzeModuleSource(src: string, filePath = 'file.ts'): Promise<ModuleAnalysis | null> {
   const ext = path.extname(filePath);
+  if (PY_EXTS.has(ext)) return analyzePyModuleSource(src, filePath);
   if (!TS_EXTS.has(ext)) return null;
   const lang = findLanguageByExt(ext);
   if (!lang || !TS_LANG_NAMES.has(lang.name)) return null;
@@ -408,7 +425,358 @@ export async function analyzeModuleSource(src: string, filePath = 'file.ts'): Pr
   };
 
   walk(root, 0);
-  return { rootOffsets, rootKinds, rootRefs, exportRefs, imports };
+  return { rootOffsets, rootKinds, rootRefs, exportRefs, imports, moduleAttrs: [] };
+}
+
+// ─────────────────────────────────────────────
+// Python 模块级作用域解析（analyzeModuleSource 的 Python 分支）
+//
+// 与 TS 差异：
+//   - 无 export 关键字：模块级声明（def/class/顶层赋值）天然可被外部导入。
+//   - import 两种形态：
+//       `import util` / `import util as u`   → 模块命名空间绑定（u / util）
+//       `from .def import foo [as f]`        → 符号绑定（foo / f）
+//     `from . import mod` 视为"同包模块绑定"（mod → ./mod）。
+//   - 属性引用：`util.format(...)` 的 attribute 是模块符号引用（moduleAttrs）。
+//   - 作用域：只有 function / class / lambda / 推导式新开作用域，
+//     模块顶层 if/for/with 的 block 与根同作用域。
+// ─────────────────────────────────────────────
+
+const PY_COMPREHENSIONS = new Set(['list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']);
+
+/** 找子树内第一个 identifier（参数/模式绑定用） */
+function firstIdentifier(n: N): N | null {
+  if (n.type === 'identifier') return n;
+  for (let i = 0; i < n.childCount; i++) {
+    const c = n.child(i);
+    if (c) {
+      const hit = firstIdentifier(c);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/** 沿 attribute.object 链找最左基础标识符（`a.b.c` → `a`） */
+function leftmostObject(n: N): N | null {
+  const obj = n.childForFieldName('object');
+  if (!obj) return null;
+  if (obj.type === 'identifier') return obj;
+  if (obj.type === 'attribute') return leftmostObject(obj);
+  return null;
+}
+
+/** Python import 源 → 相对路径串（'.' / './mod' / '../pkg.mod' / 'pkg.mod'） */
+function pyImportSource(node: N): string {
+  // import_from_statement：module_name 字段（relative_import / dotted_name）
+  const mn = node.childForFieldName('module_name');
+  if (mn) {
+    if (mn.type === 'relative_import') {
+      let dots = 0;
+      let modPath = '';
+      for (let i = 0; i < mn.childCount; i++) {
+        const c = mn.child(i);
+        if (!c) continue;
+        if (c.type === 'import_prefix') {
+          const m = c.text.match(/\./g);
+          dots = m ? m.length : 0;
+        } else if (c.type === 'dotted_name') {
+          modPath = c.text;
+        }
+      }
+      return '.'.repeat(dots) + (modPath ? '/' + modPath : '');
+    }
+    return mn.type === 'dotted_name' ? mn.text : '';
+  }
+  // import_statement：name 字段（dotted_name / aliased_import）→ 绝对模块路径
+  const nm = node.childForFieldName('name');
+  if (nm) {
+    if (nm.type === 'dotted_name') return nm.text;
+    if (nm.type === 'aliased_import') {
+      const dn = nm.childForFieldName('name');
+      return dn ? dn.text : '';
+    }
+  }
+  return '';
+}
+
+export async function analyzePyModuleSource(src: string, filePath = 'file.py'): Promise<ModuleAnalysis | null> {
+  const lang = findLanguageByExt('.py');
+  if (!lang || !PY_LANG_NAMES.has(lang.name)) return null;
+  const parser = await getParser('.py', lang);
+  if (!parser) return null;
+  let root: N;
+  try {
+    root = (parseContent(parser as Parameters<typeof parseContent>[0], src) as unknown as { rootNode: N }).rootNode;
+  } catch {
+    return null;
+  }
+
+  const rootOffsets = new Map<string, number>();
+  const rootKinds = new Map<string, string>();
+  const rootRefs: ModuleRef[] = [];
+  const exportRefs: ModuleRef[] = [];
+  const imports: ImportEdge[] = [];
+  const moduleAttrs: ModuleAttrRef[] = [];
+  /** 模块命名空间绑定：本地名 → import 源（attribute 定位用） */
+  const moduleImportSrc = new Map<string, string>();
+
+  const rootScope: ScopeMap = rootOffsets as ScopeMap;
+  const stack: ScopeMap[] = [rootScope];
+
+  const declare = (scope: ScopeMap, name: string, offset: number, kind: string): void => {
+    if (!scope.has(name)) scope.set(name, offset);
+    if (scope === rootScope && !rootKinds.has(name)) rootKinds.set(name, kind);
+  };
+
+  const lookupIsRoot = (name: string): boolean => {
+    for (let i = stack.length - 1; i >= 0; i--) {
+      if (stack[i].has(name)) return i === 0;
+    }
+    return false;
+  };
+
+  const pushEdge = (e: Omit<ImportEdge, 'typeOnly'>) => imports.push({ ...e, typeOnly: false });
+
+  const handleImport = (node: N): void => {
+    const source = pyImportSource(node);
+    if (!source) return;
+
+    if (node.type === 'import_statement') {
+      // `import util` / `import util as u` / `import os.path` → 模块命名空间绑定
+      const bind = (nm: string, off: number, src: string): void => {
+        declare(rootScope, nm, off, 'import');
+        moduleImportSrc.set(nm, src);
+        pushEdge({ source: src, remoteName: null, remoteOffset: null, localName: nm, star: false, isReexport: false });
+      };
+      const nm = node.childForFieldName('name');
+      if (!nm) return;
+      if (nm.type === 'dotted_name') {
+        const first = nm.child(0);
+        if (first) bind(first.text, first.startIndex, source);
+      } else if (nm.type === 'aliased_import') {
+        const dn = nm.childForFieldName('name');
+        const alias = nm.childForFieldName('alias');
+        const first = dn ? dn.child(0) : null;
+        if (alias) bind(alias.text, alias.startIndex, source);
+        else if (first) bind(first.text, first.startIndex, source);
+      }
+      return;
+    }
+
+    // import_from_statement
+    const nm = node.childForFieldName('name');
+    if (!nm || nm.type === 'wildcard_import') {
+      // `from .def import *` → 星号无法按名追改下游，留星号边让改名端阻断
+      if (nm && nm.type === 'wildcard_import') pushEdge({ source, remoteName: null, remoteOffset: null, localName: null, star: true, isReexport: false });
+      return;
+    }
+    // `from . import mod` → 绑定名即同包模块（source 用 ./mod 才能解析到文件）
+    const fromDotModule = source === '.';
+    const pushSpec = (remote: string, remoteOff: number, local: string | null, localOff: number | null): void => {
+      const bindName = local || remote;
+      const bindOff = localOff ?? remoteOff;
+      if (fromDotModule) {
+        const moduleSrc = './' + remote;
+        declare(rootScope, bindName, bindOff, 'import');
+        moduleImportSrc.set(bindName, moduleSrc);
+        pushEdge({ source: moduleSrc, remoteName: null, remoteOffset: null, localName: bindName, star: false, isReexport: false });
+      } else {
+        declare(rootScope, bindName, bindOff, 'import');
+        pushEdge({ source, remoteName: remote, remoteOffset: remoteOff, localName: bindName, star: false, isReexport: false });
+      }
+    };
+    if (nm.type === 'dotted_name') {
+      const idn = nm.child(0);
+      if (idn) pushSpec(idn.text, idn.startIndex, null, null);
+    } else if (nm.type === 'aliased_import') {
+      const dn = nm.childForFieldName('name');
+      const alias = nm.childForFieldName('alias');
+      const idn = dn ? dn.child(0) : null;
+      if (idn) pushSpec(idn.text, idn.startIndex, alias ? alias.text : null, alias ? alias.startIndex : null);
+    }
+  };
+
+  const handleParams = (params: N, scope: ScopeMap, depth: number): void => {
+    for (let i = 0; i < params.childCount; i++) {
+      const p = params.child(i);
+      if (!p) continue;
+      if (p.type === 'identifier') {
+        declare(scope, p.text, p.startIndex, 'param');
+      } else if (p.type === 'typed_parameter') {
+        const idn = firstIdentifier(p);
+        if (idn) declare(scope, idn.text, idn.startIndex, 'param');
+        walk(p, depth + 1); // type 注解里的引用（如 `p: Foo`）
+      } else if (p.type === 'list_splat_pattern' || p.type === 'dictionary_splat_pattern') {
+        const idn = firstIdentifier(p);
+        if (idn) declare(scope, idn.text, idn.startIndex, 'param');
+      } else if (p.childForFieldName('name')) {
+        const nmNode = p.childForFieldName('name')!;
+        if (nmNode.type === 'identifier') declare(scope, nmNode.text, nmNode.startIndex, 'param');
+        walk(p, depth + 1); // default value 里的引用
+      } else {
+        walk(p, depth + 1);
+      }
+    }
+  };
+
+  const walk = (node: N, depth = 0): void => {
+    if (depth > 1000) return;
+    const t = node.type;
+
+    if (t === 'import_statement' || t === 'import_from_statement') {
+      handleImport(node);
+      return;
+    }
+    // 属性引用：模块命名空间 `util.format` 或对象是模块符号的 `obj.attr`
+    if (t === 'attribute') {
+      const base = leftmostObject(node);
+      const attr = node.childForFieldName('attribute');
+      if (base && lookupIsRoot(base.text)) {
+        const mSrc = moduleImportSrc.get(base.text);
+        if (mSrc && attr) {
+          moduleAttrs.push({ objectName: base.text, source: mSrc, attrName: attr.text, offset: attr.startIndex });
+        } else if (!mSrc) {
+          // 对象是普通模块符号（`obj.attr`）→ obj 本身是模块符号引用
+          rootRefs.push({ name: base.text, offset: base.startIndex, nodeType: 'value' });
+        }
+      }
+      const obj = node.childForFieldName('object');
+      if (obj) walk(obj, depth + 1); // 继续捕获 `a.b.c` 里 `a.b` 的边缘
+      return;
+    }
+    if (t === 'identifier') {
+      if (lookupIsRoot(node.text)) rootRefs.push({ name: node.text, offset: node.startIndex, nodeType: 'value' });
+      return;
+    }
+
+    // 声明/作用域节点
+    if (t === 'function_definition' || t === 'lambda') {
+      const ni = nameInfo(node);
+      if (ni && t === 'function_definition') declare(stack[stack.length - 1], ni.text, ni.offset, 'function');
+      const fnScope: ScopeMap = new Map();
+      stack.push(fnScope);
+      const params = node.childForFieldName('parameters') || node.childForFieldName('lambda_parameters');
+      if (params) handleParams(params, fnScope, depth);
+      const nameNode = t === 'function_definition' ? node.childForFieldName('name') : null;
+      // 默认参数值/返回类型注解在参数之后：整节点子级遍历（参数/名字已绑定不再当引用）
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (!c) continue;
+        if (c === params) continue;
+        if (c.type === 'parameters' || c.type === 'lambda_parameters') continue;
+        if (c === nameNode) continue;
+        walk(c, depth + 1);
+      }
+      stack.pop();
+      return;
+    }
+    if (t === 'class_definition') {
+      const ni = nameInfo(node);
+      if (ni) declare(stack[stack.length - 1], ni.text, ni.offset, 'class');
+      const clsScope: ScopeMap = new Map();
+      stack.push(clsScope);
+      const nameNode = node.childForFieldName('name');
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c && c !== nameNode) walk(c, depth + 1);
+      }
+      stack.pop();
+      return;
+    }
+    if (t === 'decorated_definition') {
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c) walk(c, depth + 1); // 装饰器引用 + definition 一起走
+      }
+      return;
+    }
+    if (PY_COMPREHENSIONS.has(t)) {
+      const compScope: ScopeMap = new Map();
+      stack.push(compScope);
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c) walk(c, depth + 1);
+      }
+      stack.pop();
+      return;
+    }
+    if (t === 'for_in_clause' || t === 'for_statement') {
+      const left = node.childForFieldName('left');
+      if (left) {
+        if (left.type === 'identifier') declare(stack[stack.length - 1], left.text, left.startIndex, 'const');
+        else {
+          const idn = firstIdentifier(left);
+          if (idn) declare(stack[stack.length - 1], idn.text, idn.startIndex, 'const');
+        }
+      }
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c && c !== left && c.type !== 'left') walk(c, depth + 1);
+      }
+      return;
+    }
+    if (t === 'assignment') {
+      const left = node.childForFieldName('left');
+      if (left) {
+        if (left.type === 'identifier') {
+          declare(stack[stack.length - 1], left.text, left.startIndex, 'const');
+        } else if (left.type === 'attribute') {
+          // self.x / obj.x 实例/对象属性：不绑定名字（非作用域变量）
+        } else {
+          const idn = firstIdentifier(left);
+          if (idn) declare(stack[stack.length - 1], idn.text, idn.startIndex, 'const');
+        }
+      }
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (!c) continue;
+        if (c.type === 'left' || c === left) continue;
+        walk(c, depth + 1); // type 注解 / right 里的引用
+      }
+      return;
+    }
+    // `with ... as x` / `except ... as e` 把别名绑定到当前作用域
+    if (t === 'with_statement' || t === 'with_clause') {
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c) walk(c, depth + 1);
+      }
+      return;
+    }
+    if (t === 'with_item') {
+      const val = node.childForFieldName('value');
+      if (val) walk(val, depth + 1);
+      return;
+    }
+    if (t === 'as_pattern') {
+      const alias = node.childForFieldName('alias');
+      if (alias) {
+        const idn = firstIdentifier(alias);
+        if (idn) declare(stack[stack.length - 1], idn.text, idn.startIndex, 'const');
+      }
+      const val = node.childForFieldName('value');
+      if (val) walk(val, depth + 1);
+      return;
+    }
+    if (t === 'except_clause') {
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c && c.type !== 'block') walk(c, depth + 1);
+      }
+      const body = node.childForFieldName('body');
+      if (body) walk(body, depth + 1);
+      return;
+    }
+
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) walk(c, depth + 1);
+    }
+  };
+
+  walk(root, 0);
+  return { rootOffsets, rootKinds, rootRefs, exportRefs, imports, moduleAttrs };
 }
 
 // ─────────────────────────────────────────────
@@ -445,7 +813,7 @@ function walkProjectFiles(dir: string, out: string[]): void {
     if (e.isDirectory()) {
       if (e.name === 'node_modules' || e.name === 'dist' || e.name === 'build' || e.name === '.git' || e.name.startsWith('.')) continue;
       walkProjectFiles(p, out);
-    } else if (e.isFile() && TS_EXTS.has(path.extname(e.name))) {
+    } else if (e.isFile() && (TS_EXTS.has(path.extname(e.name)) || PY_EXTS.has(path.extname(e.name)))) {
       out.push(p);
     }
   }
@@ -458,7 +826,7 @@ function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, st
   const target = path.posix.join(impRelDir, source);
   const hit = byNoExt.get(target);
   if (hit) return hit;
-  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']) {
+  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.py']) {
     const key = target.endsWith(ext) ? target.slice(0, -ext.length) : target;
     const h = byNoExt.get(key);
     if (h && h.endsWith(ext)) return h;
@@ -467,6 +835,27 @@ function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, st
   const dirKey = target.replace(/\/+$/, '');
   for (const f of byNoExt.values()) {
     if (f.startsWith(dirKey + '/') && /(^|\/)index\.[^.]+$/.test(f)) return f;
+  }
+  return null;
+}
+
+/**
+ * Python import 源解析：
+ *   - 相对（'./mod' / '../pkg.mod' / '.'）→ resolveRel
+ *   - 绝对模块路径（'pkg.mod'）→ 项目根/pk/mod.py 或 /pk/mod/__init__.py，
+ *     再整项目扫 noExt 以 /pkg.mod 结尾的文件兜底
+ */
+function resolvePySource(source: string, importerAbs: string, byNoExt: Map<string, string>, projectRoot: string): string | null {
+  if (source.startsWith('.')) return resolveRel(source, importerAbs, byNoExt);
+  const rel = source.replace(/\./g, '/');
+  const root = projectRoot.replace(/\\/g, '/');
+  const fileHit = byNoExt.get(path.posix.join(root, rel));
+  if (fileHit) return fileHit;
+  const pkgHit = byNoExt.get(path.posix.join(root, rel, 'index'));
+  if (pkgHit) return pkgHit;
+  for (const f of byNoExt.values()) {
+    const noExt = f.replace(/\\/g, '/').replace(/\.[^.]+$/, '');
+    if (noExt === rel || noExt.endsWith('/' + rel)) return f;
   }
   return null;
 }
@@ -544,7 +933,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
 
   const defAbs = path.isAbsolute(file) ? path.resolve(file) : path.resolve(String(project_dir), String(file));
   const defExt = path.extname(defAbs);
-  if (!TS_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS 系（${defExt}），跨文件改名暂只支持 TS/JS 模块级符号`] };
+  if (!TS_EXTS.has(defExt) && !PY_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS/JS/Python 系（${defExt}），跨文件改名暂只支持这些语言的模块级符号`] };
 
   const defSrc = readFileSync(defAbs, 'utf-8');
   const def = await analyzeModuleSource(defSrc, defAbs);
@@ -572,10 +961,14 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
 
   // 解析 importer 文件
   const importerEdits: Map<string, { edits: Edit[]; note: string }> = new Map();
+  const projRoot = path.resolve(project_dir);
   for (const f of files) {
     if (path.resolve(f) === defAbs) continue;
     const ext = path.extname(f);
-    if (!TS_EXTS.has(ext)) continue;
+    if (!TS_EXTS.has(ext) && !PY_EXTS.has(ext)) continue;
+    const isPy = PY_EXTS.has(ext);
+    // 按语言选解析器：Python 支持绝对模块路径（pkg.mod），其余只认相对
+    const resolve = (src: string): string | null => (isPy ? resolvePySource(src, f, byNoExt, projRoot) : resolveRel(src, f, byNoExt));
     let fmod: ModuleAnalysis | null;
     try {
       fmod = await analyzeModuleSource(readFileSync(f, 'utf-8'), f);
@@ -592,13 +985,13 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
       if (e.star) {
         // 星号转发：若指向目标文件 → 阻断
         if (e.remoteName === null) {
-          const resolved = resolveRel(e.source, f, byNoExt);
-          if (resolved && path.resolve(resolved) === defAbs) blocked.push(`${path.basename(f)} 用 export * 转发自定义文件，无法按名追改下游引用`);
+          const resolved = resolve(e.source);
+          if (resolved && path.resolve(resolved) === defAbs) blocked.push(`${path.basename(f)} 用 export */import * 转发自定义文件，无法按名追改下游引用`);
         }
         continue;
       }
       if (e.remoteName !== symbol) continue;
-      const resolved = resolveRel(e.source, f, byNoExt);
+      const resolved = resolve(e.source);
       if (!resolved || path.resolve(resolved) !== defAbs) continue;
 
       // 命中 importer。先做撞名检查（原子性：任一 importer 撞名 → 全阻断）
@@ -623,6 +1016,18 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
         note = 're-export';
       } else {
         note = `import 子句（别名 ${e.localName}）`;
+      }
+    }
+
+    // Python 模块命名空间属性引用（`import util` → `util.format`）
+    if (isPy) {
+      for (const a of fmod.moduleAttrs) {
+        if (a.attrName !== symbol) continue;
+        const resolved = resolve(a.source);
+        if (!resolved || path.resolve(resolved) !== defAbs) continue;
+        fileEdits.push({ pos: a.offset, len: symbol.length, text: to });
+        touched = true;
+        note = 'module 属性引用';
       }
     }
 
