@@ -251,7 +251,8 @@ export function aggregateRule(input: AggregateInput): AggregateResult {
   }
 
   if (candidates.length === 0) limitations.push('未建立符号缓存：症状解析得到的符号在缓存中无命中。请先运行 import_project。');
-  if (evidence_chain.every((s) => s.type === 'rule' || s.type === 'symbol_hit')) limitations.push('证据链未展开（缓存无 call/type_ref/import 边），只能给出文件级线索。');
+  if (evidence_chain.every((s) => s.type === 'rule' || s.type === 'symbol_hit'))
+    limitations.push('证据链未能沿 call/type_ref/import 边展开，仅给出文件级线索（该符号可能孤立/仅锚点到文件，或缓存该部分不完整，而非缓存整体缺失）。');
   if (impact.affected_files.length === 1) limitations.push('影响面仅根因文件本身，未发现上层调用方——缓存可能不完整或该文件确实孤立。');
 
   return { root_cause: rootCause, fix_suggestions, limitations, engine: 'rule' };

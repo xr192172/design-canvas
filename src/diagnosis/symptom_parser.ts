@@ -157,9 +157,41 @@ const STOPWORDS = new Set([
   'expected:', 'actual:', 'cannot', 'reading', 'there', 'than', 'into', 'over', 'under',
 ]);
 
+/** 绝对路径/URL 的噪声剥离——但只剥目录，保留文件名（basename）：
+ *  若把整段路径抹成空格，文件名（如 agent_demo.mjs 里的 agent_demo）这个最强
+ *  线索会一起丢失（"哪个文件出错"恰恰是最有用的搜索目标）。
+ *  做法：命中段替换为其 basename（去扩展名），目录组成词随之消失，避免污染 FTS
+ *  符号匹配（曾把症状路径 "Microsoft Edge" 的 Edge 误匹配成符号）。
+ *
+ *  三类匹配：
+ *   - 文件类绝对路径（盘符 / POSIX / file:///）：允许内部空格，以已知源码扩展名结尾
+ *   - file:// URL：无扩展名门槛（cache.db 之类也剥），允许内部空格（之前 [^\s…] 遇空格就断）
+ *   - http(s) URL：无空格，剥到 query 之前 */
+const ABS_FILE_RES =
+  /(?:[A-Za-z]:[\\/]|file:\/\/\/|\/(?!\/))(?:[^，。；：\s""''（）()<>'"]+(?:[ ][^，。；：\s""''（）()<>'"]+)*)\.(?:ts|tsx|js|jsx|mjs|cjs|go|py|java|rs|rb|vue|svelte|css|scss|json)\b/gi;
+const FILE_URL_RES = /file:\/\/[^，。；：\s""''（）()<>'"]+(?:[ ][^，。；：\s""''（）()<>'"]+)*/gi;
+const HTTP_URL_RES = /https?:\/\/[^，。；：\s""''（）()<>'"]+/gi;
+
+/** 取命中串的 basename：去扩展名 / query / 尾部标点；空则返回空格占位 */
+function basenameOf(matched: string): string {
+  const segs = matched.split(/[\\/]+/);
+  let base = segs[segs.length - 1] ?? '';
+  base = base.split(/[?#]/)[0].replace(/\.[A-Za-z0-9]+$/, '');
+  base = base.replace(/[，。；：""''()<>'"]+$/, '');
+  return base || ' ';
+}
+
+function stripAbsPaths(symptom: string): string {
+  return symptom
+    .replace(ABS_FILE_RES, basenameOf)
+    .replace(FILE_URL_RES, basenameOf)
+    .replace(HTTP_URL_RES, basenameOf);
+}
+
 /** 分词：保留 标识符 / 数字 / 中文词，去停用词与单字符，长度≥2 */
 export function extractKeywords(symptom: string): string[] {
-  const tokens = symptom.match(/[A-Za-z_$][\w$]*|[\u4e00-\u9fa5]{2,}|\d{2,}/g) ?? [];
+  const cleaned = stripAbsPaths(symptom);
+  const tokens = cleaned.match(/[A-Za-z_$][\w$]*|[\u4e00-\u9fa5]{2,}|\d{2,}/g) ?? [];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const t of tokens) {

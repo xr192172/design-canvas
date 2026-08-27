@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { configFilePath } from './llm_focus.js';
+import { configFileReadPath } from './llm_focus.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
 import { searchSymbols, type SymbolHit } from '../db/symbols.js';
 import { ensureFreshIndex, hasChanges } from './index_freshness.js';
@@ -47,7 +47,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig | null {
   if (process.env.EMBEDDING_DIM) fromEnv.dim = Number(process.env.EMBEDDING_DIM);
 
   let fileCfg: Partial<EmbeddingConfig> = {};
-  const cfgPath = configFilePath();
+  const cfgPath = configFileReadPath();
   if (fs.existsSync(cfgPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));

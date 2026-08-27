@@ -7,14 +7,16 @@
  *   - llm_focus：从全链里挑出值得聚焦的关键节点（判定点/汇聚点/高风险函数），附理由
  *
  * 配置（用户偏好：配置文件管理 API keys/model 参数，未来前端 HUB 集成）：
- *   <dataHome>/.design-canvas/config.json
+ *   <home>/.design-canvas/config.json        ← 默认（含密钥，放用户主目录，避免随项目打包/提交泄漏）
+ *   <projectRoot>/.design-canvas/config.json ← 旧默认位置，读取时回退兼容
  *   { "llm": { "apiKey": "sk-...", "model": "gpt-4o-mini", "baseURL": "https://api.openai.com/v1" } }
  *   环境变量覆盖：LLM_API_KEY / LLM_MODEL / LLM_BASE_URL
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { getDataHome } from '../storage.js';
+import * as storage from '../storage.js';
 
 // ─────────────────────────────────────────────────────────────
 // 配置
@@ -26,8 +28,25 @@ export interface LlmConfig {
   baseURL: string;
 }
 
+/** 配置主目录：DESIGN_CANVAS_HOME 显式覆盖（测试/部署用）优先，否则用户主目录 */
+export function getConfigHome(): string {
+  return process.env.DESIGN_CANVAS_HOME ?? os.homedir();
+}
+
+/** 写入/新位置：<configHome>/.design-canvas/config.json（默认用户主目录） */
 export function configFilePath(): string {
-  return path.join(getDataHome(), '.design-canvas', 'config.json');
+  return path.join(getConfigHome(), '.design-canvas', 'config.json');
+}
+
+/**
+ * 实际读取路径：新位置（主目录）优先；不存在时回退旧默认位置
+ * （<projectRoot>/.design-canvas/config.json），兼容升级前已落盘的配置。
+ */
+export function configFileReadPath(): string {
+  const home = configFilePath();
+  if (fs.existsSync(home)) return home;
+  const legacy = path.join(storage.getDataHome(), '.design-canvas', 'config.json');
+  return legacy !== home && fs.existsSync(legacy) ? legacy : home;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -60,7 +79,7 @@ export function loadAgentConfig(): AgentConfig | null {
     };
   }
 
-  const cfgPath = configFilePath();
+  const cfgPath = configFileReadPath();
   if (fs.existsSync(cfgPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
@@ -86,7 +105,7 @@ export function loadLlmConfig(): LlmConfig | null {
   if (process.env.LLM_BASE_URL) fromEnv.baseURL = process.env.LLM_BASE_URL;
 
   let fileCfg: Partial<LlmConfig> = {};
-  const cfgPath = configFilePath();
+  const cfgPath = configFileReadPath();
   if (fs.existsSync(cfgPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));

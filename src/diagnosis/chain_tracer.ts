@@ -106,18 +106,24 @@ export function traceChain(db: Database, input: ChainTraceInput): ChainTraceResu
   };
 
   let frontier = [...seeds];
+  // 标记符号级 BFS 是否真的走出过邻居。种子本身（尤其 anchor/file 级候选）在
+  // reached 里是 "先到"，不能据此认为链已展开——否则 file 种子会跳过 import 兜底，
+  // 聚合器误报"缓存无边"。
+  let expanded = false;
   for (let depth = 1; depth <= max_depth && frontier.length > 0; depth++) {
     const next: string[] = [];
     for (const id of frontier) {
       for (const t of symRev.get(id) ?? []) {
         if (reached.has(t.to)) continue;
         reached.set(t.to, depth);
+        expanded = true;
         pushHop(t.to, t.kind === 'call' ? '调用边' : '类型引用', 'callers←');
         next.push(t.to);
       }
       for (const t of symFwd.get(id) ?? []) {
         if (reached.has(t.to)) continue;
         reached.set(t.to, depth);
+        expanded = true;
         pushHop(t.to, t.kind === 'call' ? '调用边' : '类型引用', '→callees');
         next.push(t.to);
       }
@@ -125,8 +131,9 @@ export function traceChain(db: Database, input: ChainTraceInput): ChainTraceResu
     frontier = next;
   }
 
-  // 文件级 import 线索（符号边摸不到时的粗粒度兜底，只记一步）
-  if (reached.size === 0) {
+  // 符号级 BFS 未展开（file 种子 / 孤立符号 / 锚点只到文件）时，
+  // 用文件级 import 关系做粗粒度兜底，避免证据链退化成只有 symbol_hit。
+  if (!expanded) {
     const files = new Set(candidates.map((c) => c.file_path));
     for (const f of files) {
       for (const imp of importerOf.get(f) ?? []) {
