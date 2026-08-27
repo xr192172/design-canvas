@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { generatePatch, validatePatches, applyPatches, revertPatches, formatPatchDiff, allowedPatchFiles } from '../../src/diagnosis/repair';
+import { generatePatch, buildRepairPrompt, validatePatches, applyPatches, revertPatches, formatPatchDiff, allowedPatchFiles } from '../../src/diagnosis/repair';
 import type { FixSuggestion, RootCause } from '../../src/diagnosis/contract';
 
 const SERVICE_TS = `import { findById } from './db';
@@ -86,6 +86,22 @@ afterEach(() => {
 });
 
 const input = () => ({ project_dir: dir, root_cause: ROOT_CAUSE, fix_suggestions: [FIX] });
+
+describe('buildRepairPrompt（验证契约进 prompt，修复按验收标准生成）', () => {
+  it('test_contract 写入 prompt，LLM 能按验收标准生成补丁', () => {
+    const prompt = buildRepairPrompt(
+      { project_dir: dir, root_cause: ROOT_CAUSE, fix_suggestions: [FIX], test_contract: '测试命令: npm test\n期望: 空结果返回 null' },
+      ['src/service.ts'],
+    );
+    expect(prompt).toContain('【验证契约（修复必须满足；闭环验证阶段会实际运行它）】');
+    expect(prompt).toContain('空结果返回 null');
+    expect(prompt).toContain('src/service.ts:6');
+  });
+  it('无 test_contract → 标注（未提供）', () => {
+    const prompt = buildRepairPrompt({ project_dir: dir, root_cause: ROOT_CAUSE, fix_suggestions: [FIX] }, ['src/service.ts']);
+    expect(prompt).toContain('（未提供）');
+  });
+});
 
 describe('generatePatch（LLM 补丁生成）', () => {
   it('合法补丁 → 解析成 PatchPlan（文件/行区间/新内容）', async () => {

@@ -50,6 +50,30 @@ function print(...args: unknown[]): void {
   console.log(...args);
 }
 
+/**
+ * 读取验证契约文本（测试命令 + 测试文件内容前若干行）。
+ * 喂给修复 LLM，让它按验收标准生成补丁（修复"修对了方向但过不了测试"的常见失败）。
+ */
+function readTestContract(root: string): string | undefined {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8')) as { scripts?: Record<string, string> };
+    const testCmd = pkg?.scripts?.test;
+    if (!testCmd) return undefined;
+    const m = /node\s+([\w./\\-]+\.(?:js|ts|cjs|mjs))/.exec(testCmd);
+    const candidates = m ? [m[1]] : ['test.js', 'test.ts', 'tests/test.js', 'test/index.js'];
+    for (const c of candidates) {
+      const abs = path.resolve(root, c);
+      if (fs.existsSync(abs)) {
+        const body = fs.readFileSync(abs, 'utf-8');
+        return `测试命令: ${testCmd}\n测试文件 ${c}:\n${body.slice(0, 2000)}`;
+      }
+    }
+    return `测试命令: ${testCmd}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 交互确认：y 通过 / 其它拒绝（--apply/--auto 时跳过） */
 async function confirm(rl: ReturnType<typeof createInterface> | null, question: string): Promise<boolean> {
   if (!rl) return true;
@@ -134,7 +158,14 @@ async function main(): Promise<number> {
 
   // ── 阶段 3：修复（LLM 补丁 → 校验 → 审批 → 应用）
   print('\n━━ 阶段 3/5：修复 ━━');
-  const repairInput = { project_dir: root, root_cause: diag.root_cause, fix_suggestions: diag.fix_suggestions };
+  const kind = detectKind(root);
+  const repairInput = {
+    project_dir: root,
+    root_cause: diag.root_cause,
+    fix_suggestions: diag.fix_suggestions,
+    test_contract: readTestContract(root),
+  };
+  if (repairInput.test_contract) print('  已把验证契约（测试命令 + 测试文件摘要）喂给修复 LLM');
   const allowed = allowedPatchFiles(repairInput);
   const plan = await generatePatch(repairInput);
   if (!plan) {
@@ -173,7 +204,6 @@ async function main(): Promise<number> {
       print('⚠ 已跳过验证（--skip-verify）。未验证的改动不自动提交。');
       report.verify = { skipped: true };
     } else {
-      const kind = detectKind(root);
       if (!kind) {
         print('✗ 无法识别项目类型，无法自动验证。已回退补丁。');
         revertPatches(applied);

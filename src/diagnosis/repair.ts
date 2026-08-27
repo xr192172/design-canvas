@@ -47,6 +47,11 @@ export interface RepairInput {
   fix_suggestions: FixSuggestion[];
   /** 白名单：允许被修改的 posix 相对路径（默认 = 根因文件 + 建议 target_file） */
   allowed_files?: string[];
+  /**
+   * 验证契约（测试命令 + 测试期望）。闭环验证阶段要跑它，LLM 必须据此生成补丁，
+   * 否则修复常因"修对了方向、但对不上验收标准"而回退（例：可选链返回 undefined ≠ 测试期望 null）。
+   */
+  test_contract?: string;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -95,6 +100,9 @@ export function buildRepairPrompt(input: RepairInput, allowed: string[]): string
     '',
     '【修复建议】',
     input.fix_suggestions.slice(0, 5).map((s) => `  - [${s.action}] ${s.target_file}:${s.target_line ?? '?'} ${s.description}`).join('\n') || '（无）',
+    '',
+    '【验证契约（修复必须满足；闭环验证阶段会实际运行它）】',
+    input.test_contract?.trim() || '（未提供）',
   ].join('\n');
 }
 
@@ -126,7 +134,8 @@ export async function generatePatch(input: RepairInput): Promise<PatchPlan | nul
     '规则：1) 只能修改白名单文件：' + allowed.join('、') + '；' +
     '2) 补丁 = 行号区间替换：start_line..end_line 是要替换的原有行区间（1-based 含端点），new_content 是替换后的完整内容（可多行），只改必要行、不重写整文件；' +
     '3) start_line/end_line 必须在源码片段展示的真实行号范围内；' +
-    '4) 只输出 JSON：{"patches":[{"file":"","start_line":1,"end_line":1,"new_content":""}],"rationale":"一句话说明改动"}';
+    '4) 补丁必须满足给出的【验证契约】：若契约断言明确期望某个返回值（如空结果返回 null），补丁必须精确返回该值（null 与 undefined 不相等，需严格区分）；' +
+    '5) 只输出 JSON：{"patches":[{"file":"","start_line":1,"end_line":1,"new_content":""}],"rationale":"一句话说明改动"}';
 
   try {
     const raw = await callChat(cfg, [
