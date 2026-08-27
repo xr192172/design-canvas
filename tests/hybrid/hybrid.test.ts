@@ -118,6 +118,32 @@ describe('hybrid: judgeVerdict 判定', () => {
   });
 });
 
+describe('hybrid: judgeVerdict 健康度提醒（第四查，可选参数）', () => {
+  it('不传 health → 行为不变（兼容既有调用）', () => {
+    expect(judgeVerdict(0, 0, 0).reasons.length).toBe(1);
+  });
+
+  it('两侧健康（A/B）且三维全净 → ok + 健康度良好', () => {
+    const { verdict, reasons } = judgeVerdict(0, 0, 0, { aScore: 95, aGrade: 'A', bScore: 82, bGrade: 'B' });
+    expect(verdict).toBe('ok');
+    expect(reasons.some((x) => x.includes('健康度良好'))).toBe(true);
+  });
+
+  it('任一侧 C/D → 只追加提醒，不改变 verdict（健康度是参考非硬闸门）', () => {
+    const { verdict, reasons } = judgeVerdict(0, 0, 0, { aScore: 55, aGrade: 'D', bScore: 95, bGrade: 'A' });
+    expect(verdict).toBe('ok');
+    expect(reasons.some((x) => x.includes('健康度提醒：项目 A 健康分 55（D）'))).toBe(true);
+    expect(reasons.some((x) => x.includes('项目 B'))).toBe(false);
+  });
+
+  it('有硬冲突时健康提醒照常追加（不挤占 blocked）', () => {
+    const { verdict, reasons } = judgeVerdict(1, 0, 0, { aScore: 50, aGrade: 'D', bScore: 70, bGrade: 'C' });
+    expect(verdict).toBe('blocked');
+    expect(reasons.some((x) => x.includes('符号冲突'))).toBe(true);
+    expect(reasons.some((x) => x.includes('健康度提醒'))).toBe(true);
+  });
+});
+
 describe('hybrid: precheckHybrid 端到端（夹具 hybrid-a ↔ hybrid-b）', () => {
   it('三维体检：符号冲突 + 双胞胎重叠 + 依赖冲突，verdict=blocked', async () => {
     const r = await precheckHybrid(fix('hybrid-a'), fix('hybrid-b'));
@@ -142,5 +168,17 @@ describe('hybrid: precheckHybrid 端到端（夹具 hybrid-a ↔ hybrid-b）', (
     const deps = readManifestDeps(fix('hybrid-a'));
     const names = deps.map((d) => d.name).sort();
     expect(names).toEqual(['axios', 'lodash', 'react']);
+  });
+
+  it('第四查：健康度随报告返回，score∈[0,100]、grade∈A-D、理由含健康度提醒', async () => {
+    const r = await precheckHybrid(fix('hybrid-a'), fix('hybrid-b'));
+    expect(r.health.a.score).toBeGreaterThanOrEqual(0);
+    expect(r.health.a.score).toBeLessThanOrEqual(100);
+    expect(['A', 'B', 'C', 'D']).toContain(r.health.a.grade);
+    expect(r.health.b.fileCount).toBeGreaterThan(0);
+    // 夹具无内部引用 → 健康度偏低（孤儿/未用导出），应出现健康度提醒理由
+    expect(r.reasons.some((x) => x.includes('健康度提醒'))).toBe(true);
+    // 健康度提醒不应挤占既有三维理由
+    expect(r.reasons.some((x) => x.includes('符号冲突 1'))).toBe(true);
   });
 });

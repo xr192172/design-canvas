@@ -20,6 +20,7 @@
  */
 
 import { compareProjects, type SymbolCollision } from '../cross_repo/index.js';
+import { analyzeHealth, type HealthReport } from '../health/index.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -66,10 +67,20 @@ export interface HybridPrecheckReport {
   symbolDuplicates: SymbolCollision[];
   // 维度2：依赖对比
   deps: DepCompare;
+  // 维度4：健康度（两个候选项目的健康体检报告，独立可用，此处仅作选材参考）
+  health: { a: HealthReport; b: HealthReport };
   // 判定
   verdict: HybridVerdict;
-  /** 人类可读的理由（为什么是这个 verdict） */
+  /** 人类可读的理由（为什么是这个 verdict + 健康度提醒） */
   reasons: string[];
+}
+
+/** 健康度提醒输入（只取评分/等级，供 judgeVerdict 纯函数判定） */
+export interface HealthAdvisoryInput {
+  aScore: number;
+  aGrade: HealthReport['grade'];
+  bScore: number;
+  bGrade: HealthReport['grade'];
 }
 
 // ── manifest 解析（纯函数：输入内容 → 依赖列表） ────────────────
@@ -219,8 +230,17 @@ export function compareDeps(aDeps: ManifestDep[], bDeps: ManifestDep[]): DepComp
  *   - blocked：存在同名不同签符号冲突 —— 不处理会在融合仓互相遮蔽，必须先改名/错位
  *   - fix：无符号冲突，但依赖版本冲突或功能重叠（双胞胎）需处理
  *   - ok：三维全净，可直接融合
+ *
+ * health 可选：只追加健康度"提醒"理由，不改变 verdict（健康度是选材参考，不是硬闸门）：
+ *   - 任一侧 C/D（<75 分）→ 追加"建议先优化健康度再融合"
+ *   - 两侧 A/B 且三维全净 → 追加"健康度良好"正向确认
  */
-export function judgeVerdict(conflictCount: number, duplicateCount: number, depConflictCount: number): {
+export function judgeVerdict(
+  conflictCount: number,
+  duplicateCount: number,
+  depConflictCount: number,
+  health?: HealthAdvisoryInput,
+): {
   verdict: HybridVerdict;
   reasons: string[];
 } {
@@ -234,28 +254,51 @@ export function judgeVerdict(conflictCount: number, duplicateCount: number, depC
   if (depConflictCount > 0) {
     reasons.push(`依赖版本冲突 ${depConflictCount} 个（同名依赖版本范围不一致，融合前需统一）`);
   }
-  if (reasons.length === 0) {
+  const hasHardIssues = conflictCount > 0 || duplicateCount > 0 || depConflictCount > 0;
+
+  if (health) {
+    const aPoor = health.aGrade === 'C' || health.aGrade === 'D';
+    const bPoor = health.bGrade === 'C' || health.bGrade === 'D';
+    if (aPoor) {
+      reasons.push(`健康度提醒：项目 A 健康分 ${health.aScore}（${health.aGrade}），建议先优化健康度（清死代码/拆复杂度/修分层违规）再融合`);
+    }
+    if (bPoor) {
+      reasons.push(`健康度提醒：项目 B 健康分 ${health.bScore}（${health.bGrade}），建议先优化健康度（清死代码/拆复杂度/修分层违规）再融合`);
+    }
+    if (!hasHardIssues && !aPoor && !bPoor) {
+      reasons.push(`健康度良好：A ${health.aScore}（${health.aGrade}）/ B ${health.bScore}（${health.bGrade}），选材质量过关`);
+    }
+  }
+
+  if (!hasHardIssues && reasons.length === 0) {
     reasons.push('三维预检全净：无符号冲突、无依赖冲突、无功能重叠，可直接融合');
-    return { verdict: 'ok', reasons };
   }
   // 有符号冲突 → blocked（必须改名）；其余（重叠/依赖冲突）→ fix（处理后即可融合）
-  const verdict: HybridVerdict = conflictCount > 0 ? 'blocked' : 'fix';
+  const verdict: HybridVerdict = conflictCount > 0 ? 'blocked' : hasHardIssues ? 'fix' : 'ok';
   return { verdict, reasons };
 }
 
 // ── 预检入口（IO） ─────────────────────────────────────────────
 
-/** 对两个项目根做杂交预检：符号层复用 cross_repo，叠加依赖对比与功能重叠，输出融合判定 */
+/** 对两个项目根做杂交预检：符号层复用 cross_repo，叠加依赖对比、功能重叠与健康度（第四查），输出融合判定 */
 export async function precheckHybrid(aRoot: string, bRoot: string): Promise<HybridPrecheckReport> {
   const cross = await compareProjects(aRoot, bRoot);
   const deps = compareDeps(readManifestDeps(aRoot), readManifestDeps(bRoot));
-  const { verdict, reasons } = judgeVerdict(cross.conflicts.length, cross.duplicates.length, deps.conflicts.length);
+  // 第四查：健康度（独立能力，此处作选材参考；不改变三维 verdict，只追加提醒）
+  const [healthA, healthB] = await Promise.all([analyzeHealth(aRoot), analyzeHealth(bRoot)]);
+  const { verdict, reasons } = judgeVerdict(cross.conflicts.length, cross.duplicates.length, deps.conflicts.length, {
+    aScore: healthA.score,
+    aGrade: healthA.grade,
+    bScore: healthB.score,
+    bGrade: healthB.grade,
+  });
   return {
     aRoot: cross.aRoot,
     bRoot: cross.bRoot,
     symbolConflicts: cross.conflicts,
     symbolDuplicates: cross.duplicates,
     deps,
+    health: { a: healthA, b: healthB },
     verdict,
     reasons,
   };

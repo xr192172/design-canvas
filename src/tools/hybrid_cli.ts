@@ -2,7 +2,7 @@
  * hybrid_cli —— 项目杂交预检命令行入口
  *
  * 用法: node dist/src/tools/hybrid_cli.js <rootA> <rootB> [--json <out>]
- * 输出：三维体检（符号冲突 / 功能重叠 / 依赖冲突）+ 融合判定 verdict。
+ * 输出：四维体检（符号冲突 / 功能重叠 / 依赖冲突 / 健康度）+ 融合判定 verdict。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,6 +60,13 @@ async function main(): Promise<void> {
   if (r.deps.shared.length > 0) lines.push(`  共享: ${r.deps.shared.map((d) => d.name).join(', ')}`);
   if (r.deps.aOnly.length > 0) lines.push(`  仅A: ${r.deps.aOnly.map((d) => d.name).join(', ')}`);
   if (r.deps.bOnly.length > 0) lines.push(`  仅B: ${r.deps.bOnly.map((d) => d.name).join(', ')}`);
+  lines.push('');
+
+  lines.push('■ 健康度（第四查 · 选材体检）');
+  lines.push(`  A ${r.health.a.score} 分（${r.health.a.grade}）· ${r.health.a.fileCount} 文件`);
+  lines.push(`      ${r.health.a.summary}`);
+  lines.push(`  B ${r.health.b.score} 分（${r.health.b.grade}）· ${r.health.b.fileCount} 文件`);
+  lines.push(`      ${r.health.b.summary}`);
 
   const text = lines.join('\n');
   console.log(text);
