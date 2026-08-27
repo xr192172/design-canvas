@@ -1,6 +1,6 @@
 {
   "name": "design-canvas",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "人机共享的可视化协议层。LLM 输出结构化 DSL JSON → 协作前端渲染成可交互图 → 人看图改 JSON → LLM 读 JSON 迭代。本仓库是数据/协议层，可视化由独立前端承载，内置精简渲染器仅作预览兜底。作为 MCP 服务对外开放。",
   "license": "MIT",
   "type": "module",

@@ -61,38 +61,58 @@ node scripts/install_mcp.mjs --dry-run  # 预览将写入的内容（不落盘�
 node scripts/install_mcp.mjs --target claude  # 只写指定平台
 ```
 
-## MCP 工具一览（8 主工具 + 别名）
+## MCP 工具一览（33 个注册工具）
 
-> 工具从历史版本收敛为 **8 个主工具**（参数化分发），旧工具名**全部保留为别名**指向主工具，存量会话/脚本零破坏。新会话请直接使用主工具。
+> 工具已收敛为「主工具 + 专项工具」两级：8 个主工具承担 DSL 读写 / 生命周期 / 渲染 / 代码理解的统一入口，其余为单一职责的专项工具。**旧工具名别名已于 2026-08-17 移除**，不再保留兼容别名，存量脚本请改用下方主工具名。
+
+### 8 个主工具（统一入口）
 
 | 主工具 | 用途 |
 |------|------|
-| `get_dsl` | **统一只读入口**：`query`(dsl/features/annotations/approvals/snapshots/templates/simulation_state/diff) + `view`(design/live) + 过滤参数 |
+| `get_dsl` | **统一只读入口**：`query`(dsl/features/nodes/edges/node/decisions/files/file/calls/annotations/approvals/approval_history/snapshots/templates/simulation_state/diff) + `view`(design/live) + 过滤参数 |
 | `edit_dsl` | **统一写入口**：`operations[]` 批量增删改/平移/语义绑定/状态更新/标注/审批/快照/自动布局，按序执行、任一失败全量回滚（原子）。`view=live` 拒绝写入 |
 | `manage_feature` | **生命周期入口**：`action`(create/clone/template/list/delete) |
-| `render_dsl` | **渲染入口**：`format`(html 默认/svg/markdown) + `view`(design/live) + `output_path` |
-| `scaffold` | 从 DSL 语义层生成代码骨架 + 状态推断 |
+| `render_dsl` | **渲染入口**：`format`(mindmap/html/svg/markdown) + `view`(design/live) + `output_path` |
+| `scaffold` | 从 DSL 语义层生成代码骨架 + 状态推断（`ui_framework`: vue/react/html） |
 | `backfill_scaffold` | 解析实现代码 API 签名回填 actual_apis，输出差异报告 |
 | `consistency_check` | 对比 expected_apis vs 实际代码，输出一致性报告 + 跨文件不变式（只读） |
-| `explore_code` | **代码理解入口**：`action`(import/semantic_search/diff_impact/arch_layer/guided_tour/check_monolith/analyze_monolith/derive_split/derive_detail_chain/derive_anim_flow/derive_algorithm/inject_replay/run_simulation/reset_simulation/watch) + `args` |
+| `explore_code` | **代码理解入口**：`action`(search/diff_impact/arch_layer/guided_tour/check_monolith/derive_split/derive_chain/derive_anim_flow/derive_algorithm/derive_mind_map/inject_replay/run_simulation/reset_simulation/watch) + `args` |
 
 ### `view` 参数（design | live，默认 design）
 
 - **design**（默认）= 设计视图：活态 DSL + feature 存档，LLM 刻意设计的主战场。对应浏览器「🎭 设计」。
-- **live** = 实际视图：代码快照（只读），只能由 `explore_code action=import/watch` 重建。对应浏览器「⚡ 实际」。
+- **live** = 实际视图：代码快照（只读），只能由 `import_project` / `explore_code action=watch` 重建。对应浏览器「⚡ 实际」。
 - **判别口诀**：要改的那一版 = `design`；要看的代码现状 = `live`。
 
-### 别名（旧工具名 → 主工具）
+### 其余专项工具（25 个，独立注册）
 
-| 旧名 | 新归属 |
-|---|---|
-| `query_feature` | → `get_dsl` |
-| `update_feature` | → `edit_dsl` |
-| `create_feature` / `clone_feature` / `create_from_template` | → `manage_feature` |
-| `export_svg` / `export_markdown` | → `render_dsl` |
-| `check_status` | → `scaffold` |
-| `import_project` / `semantic_search` / `diff_impact` / `arch_layer` / `guided_tour` / `check_monolith` / `analyze_monolith` / `derive_split` / `derive_detail_chain` / `derive_anim_flow` / `derive_algorithm` / `inject_replay` / `run_simulation` / `reset_simulation` / `watch_project` | → `explore_code` |
-| `add_annotation` / `resolve_annotation` / `dag_layout` / `force_layout` / `grid_align` / `submit_approval` / `review_annotation` / `save_snapshot` / `rollback_snapshot` / `delete_snapshot` | → `edit_dsl` |
+| 工具 | 能力线 | 用途 |
+|------|------|------|
+| `import_project` | 代码理解 | 导入代码项目为 DSL（`project_dir` + `feature`） |
+| `diff_views` | 代码理解 | 对比设计视图与 live 代码快照 |
+| `render_sandbox` | 代码理解 | 渲染依赖驱动的功能社区工作台（brickify 预览） |
+| `harvest_closure` | 积木库 | 连同传递 import 闭包一起收割积木 |
+| `harvest_from_url` | 积木库 | 从 git URL / 本地项目收割积木入箱 |
+| `extract_contracts` | 积木库 | 抽取积木契约（role/shapes/effects） |
+| `reconcile_effects` | 积木库 | 用 camera 运行时观察对账 effect 候选 |
+| `reconcile_brick` | 积木库 | 用 camera 运行时观察对账积木契约 |
+| `search_bricks` | 积木库 | 搜索积木架（跨项目复用目录），`language` 过滤 |
+| `assemble_bricks` | 积木库 | 用箱装积木拼装新项目 |
+| `slim_brick` | 积木库 | 把 Go 积木瘦身为 -slim 派生积木（编译器式死码剪枝） |
+| `narrate_step` | 积木库 | 把流水线步骤叙述为受治理的叙述积木 |
+| `camera_instrument` | 摄像头 | 自动插桩 / 还原 TS 项目（instrument/uninstrument/restore） |
+| `camera_log` | 摄像头 | 按文件查询 Camera 运行时日志 |
+| `camera_judge` | 摄像头 | 批量裁决 Camera 事件 |
+| `chain_recon` | 摄像头 | 把宿主链与其真实运行事件对账（meso 层） |
+| `edit_code` | 改造 | 符号级代码编辑（`op`: replace/insert/delete/range） |
+| `rename_many` | 改造 | 批量重命名局部变量（作用域隔离） |
+| `rename_symbol` | 改造 | 跨文件模块级符号重命名 |
+| `rename_file` | 改造 | 文件级重命名 + import 引用改写（防文件悬空） |
+| `remove_dead_imports` | 改造 | 移除 dead_deps 报告的失效 import |
+| `refactor_pipeline` | 改造 | 确定性重构流水线（dead imports + dead statements + package migration） |
+| `suggest_renames` | 改造 | 为短名/无意义变量建议语义化名字 |
+| `find_similar_names` | 改造 | 检测易混淆相似名并消歧 |
+| `refactor_judge` | 审闭环 | LLM 审裁决门：采纳/驳回/上抛不确定项给人类 |
 
 ## 能力矩阵 & 多语言支持
 
