@@ -72,6 +72,8 @@ import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } fr
 import { rebuildChains } from './camera/chain.js';
 import { chainRecon } from './tools/chain_recon.js';
 import type { ChainReconInput } from './tools/chain_recon.js';
+import { analyzeImpact, analyzeHubs } from './impact/index.js';
+import type { ImpactChangePoint } from './impact/index.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -1156,6 +1158,52 @@ const TOOL_DEFS: ToolDef[] = [
         parts.push('\t无其它文件引用该符号');
       }
       return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'impact_analysis',
+    title: 'Impact analysis - pre-change risk closure report',
+    description:
+      '影响面分析（改前风险闭包报告）：从变更点（文件 + 可选顶层导出符号）沿 import/调用/类型引用依赖图做反向可达闭包，' +
+      '输出直接/间接受影响文件、引用证据与风险排序——回答"我要改这里，会炸哪里"。' +
+      'change_points=[{file, symbol?}] 支持改整个文件或只改某个符号；解析不到符号消费方时保守降级为整文件闭包（fell_back）。' +
+      'hubs=true 时切换为热区盘点模式（无变更点）：全项目按"被直接依赖数"排序，找出改哪些文件风险最高。' +
+      '风险启发式：受影响文件自身的波及半径 × 距离；depth=1 的直接消费方附带引用证据行。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      change_points: z
+        .array(z.object({ file: z.string().describe('相对 project_dir 的源码文件路径'), symbol: z.string().optional().describe('可选：顶层导出符号名') }))
+        .optional()
+        .describe('变更点列表；hubs 模式可省略'),
+      hubs: z.boolean().optional().describe('true = 热区盘点模式（不传 change_points）'),
+      top: z.number().optional().describe('热区只列前 N（默认 10）'),
+      max_depth: z.number().optional().describe('闭包最大距离（默认不限）'),
+    },
+    handler: wrap(async (a) => {
+      const root = String(a.project_dir);
+      if (a.hubs) {
+        const h = await analyzeHubs(root, typeof a.top === 'number' ? a.top : 10);
+        const lines = [`风险热区盘点 · ${root}（${h.fileCount} 文件 / ${h.edgeCount} 依赖边）`, '按"被直接依赖数"排序 —— 改这些文件会炸最多下游', ''];
+        for (const f of h.files) lines.push(`${f.risk === 'high' ? '⚠' : f.risk === 'medium' ? '·' : ' '} [${f.risk}] ${f.file}  被 ${f.dependents} 个文件依赖 / 依赖 ${f.dependencies} 个文件`);
+        return { message: lines.join('\n'), data: h };
+      }
+      const cps: ImpactChangePoint[] = Array.isArray(a.change_points)
+        ? (a.change_points as Array<{ file: string; symbol?: string }>).map((c) => ({ file: c.file, symbol: c.symbol }))
+        : [];
+      const r = await analyzeImpact(root, cps, typeof a.max_depth === 'number' ? { maxDepth: a.max_depth } : {});
+      const lines = [
+        `影响面报告 · ${root}`,
+        `变更点 ${r.changePoints.length} 个，受影响文件 ${r.total} 个（直接 ${r.direct}，高风险 ${r.high_risk}）`,
+      ];
+      if (r.fell_back) lines.push('⚠ 存在符号级消费方解析失败 → 已保守降级为"改整个文件"的闭包');
+      if (r.missing.length > 0) lines.push(`⚠ 未定位到变更点：${r.missing.join(', ')}`);
+      lines.push('');
+      if (r.files.length === 0) lines.push('（零波及：该变更点没有任何文件依赖链）');
+      for (const f of r.files) {
+        lines.push(`${f.risk === 'high' ? '⚠' : f.risk === 'medium' ? '·' : ' '} [${f.risk}] ${f.file}  (depth=${f.depth}, 被${f.dep_count}个文件依赖)`);
+        for (const s of f.sites) lines.push(`      ${s.kind.padEnd(9)} L${s.line}  ${s.detail}`);
+      }
+      return { message: lines.join('\n'), data: r };
     }),
   },
   {
