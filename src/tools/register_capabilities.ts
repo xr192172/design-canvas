@@ -210,10 +210,19 @@ declareCapability({
 declareCapability({
   id: 'hybrid_precheck',
   label: '项目杂交预检（符号冲突 + 依赖冲突 + 功能重叠）',
-  desc: '输入两个项目根：①顶层导出符号冲突清单（依赖 cross_repo_symbol_index）②依赖并集/版本冲突（复用工具链 manifest 解析）③功能重叠检测（语义相近的既有代码，避免双胞胎）',
+  desc: '输入两个项目根：①顶层导出符号冲突清单（复用 cross_repo_symbol_index）②依赖并集/版本冲突（读根级 manifest package.json/go.mod/pyproject.toml/requirements.txt）③功能重叠（同名同签双胞胎=可去重的语义重复）→ 输出 verdict ok/fix/blocked',
   default: 'unimplemented',
+  overrides: {
+    go: 'full_ast',
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
+    python: 'full_ast',
+  },
   notes: {
-    typescript: '立项：T9 第三阶段，站在 cross_repo_symbol_index + impact_analysis 之上',
+    typescript: 'T9 已落地：三维体检（符号层复用 cross_repo，依赖层读根级 manifest 比版本，重叠层用双胞胎强信号）',
+    javascript: '经 TS 家族同一解析路径',
   },
 });
 

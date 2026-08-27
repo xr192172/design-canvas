@@ -75,6 +75,7 @@ import type { ChainReconInput } from './tools/chain_recon.js';
 import { analyzeImpact, analyzeHubs } from './impact/index.js';
 import type { ImpactChangePoint } from './impact/index.js';
 import { compareProjects } from './cross_repo/index.js';
+import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -1241,6 +1242,47 @@ const TOOL_DEFS: ToolDef[] = [
       if (r.aOnly.length > 0) lines.push(`  ${r.aOnly.join(', ')}`);
       lines.push('', `■ 迁移范围：B→A 候选 ${r.bOnly.length} 个`);
       if (r.bOnly.length > 0) lines.push(`  ${r.bOnly.join(', ')}`);
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'hybrid_precheck',
+    title: 'Hybrid precheck - three-dimension fusion feasibility report',
+    description:
+      '项目杂交预检（两个项目能不能融合）：站在 cross_repo_symbol_index 之上做三维体检。' +
+      '①符号冲突（同名不同签 = 真冲突，杂交后互相遮蔽，需改名/错位）；' +
+      '②功能重叠（同名同签双胞胎 = 语义重复，可去重一个）；' +
+      '③依赖冲突（读两仓根级 manifest package.json/go.mod/pyproject.toml/requirements.txt，同名依赖版本范围不一致）。' +
+      '输出 verdict：ok 可直接融合 / fix 处理后融合 / blocked 必须先解决符号冲突，附理由清单。' +
+      'v1 边界：依赖冲突按版本范围字符串不等判定（^18 vs ~18 也报，宁多报不漏报）；manifest 只读根级。',
+    inputSchema: {
+      project_dir_a: z.string().describe('项目 A 根目录（绝对路径）'),
+      project_dir_b: z.string().describe('项目 B 根目录（绝对路径）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await precheckHybrid(String(a.project_dir_a), String(a.project_dir_b));
+      const fmtSym = (defs: Array<{ file: string; signature: string }>) => defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
+      const lines = [
+        `项目杂交预检 · ${r.aRoot} ↔ ${r.bRoot}`,
+        `判定：${VERDICT_LABEL[r.verdict]}（${r.verdict}）`,
+        ...r.reasons.map((x) => `  · ${x}`),
+        '',
+        `■ 符号冲突 ${r.symbolConflicts.length}（同名不同签，杂交前需改名/错位）`,
+      ];
+      for (const c of r.symbolConflicts) {
+        lines.push(`  ! ${c.name}`, `      A: ${fmtSym(c.a)}`, `      B: ${fmtSym(c.b)}`);
+      }
+      if (r.symbolConflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 功能重叠 ${r.symbolDuplicates.length}（同名同签双胞胎，可去重一个）`);
+      for (const c of r.symbolDuplicates) lines.push(`  = ${c.name}   A: ${c.a[0].file} ↔ B: ${c.b[0].file}`);
+      if (r.symbolDuplicates.length === 0) lines.push('  （无）');
+      lines.push('', `■ 依赖版本冲突 ${r.deps.conflicts.length}`);
+      for (const c of r.deps.conflicts) lines.push(`  ! ${c.name}   ${c.version}   [${c.source}]`);
+      if (r.deps.conflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 依赖共享 ${r.deps.shared.length} / 仅A ${r.deps.aOnly.length} / 仅B ${r.deps.bOnly.length}`);
+      if (r.deps.shared.length > 0) lines.push(`  共享: ${r.deps.shared.map((d) => d.name).join(', ')}`);
+      if (r.deps.aOnly.length > 0) lines.push(`  仅A: ${r.deps.aOnly.map((d) => d.name).join(', ')}`);
+      if (r.deps.bOnly.length > 0) lines.push(`  仅B: ${r.deps.bOnly.map((d) => d.name).join(', ')}`);
       return { message: lines.join('\n'), data: r };
     }),
   },
