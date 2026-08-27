@@ -145,20 +145,25 @@ declareCapability({
   },
 });
 
-/** 阶段 E：动态闸运行级探针 —— Python 全量可运行探测；Java 仅自包含 main 类；Go/Node 暂未实现 */
+/** 阶段 E：动态闸运行级探针 —— Python 全量可运行探测；Java 仅自包含 main 类；Node 家族已补；Go 暂未实现 */
 declareCapability({
   id: 'dynamic_gate',
   label: '动态闸（运行级契约差）',
-  desc: 'python: 解释器真跑捕获运行时异常；java: javac+java 运行自包含 main 类；go/node: 暂未实现',
+  desc: 'python: 解释器真跑捕获运行时异常；java: javac+java 运行自包含 main 类；node 家族: JS 直跑/TS 转 CJS 真跑（依赖隔离失败 skipped）；go: 暂未实现',
   default: 'unimplemented',
   overrides: {
     python: 'full_ast',
     java: 'partial_ast',
+    typescript: 'full_ast',
+    tsx: 'full_ast',
+    javascript: 'full_ast',
+    jsx: 'full_ast',
   },
   notes: {
     java: '仅自包含且带 main 入口的类可做运行探测，其余 skipped',
+    typescript: 'nodeRunProbe：.mjs/.cjs/.js 原生直跑零转译（保留 ESM 语义），.ts/.tsx/.jsx 经 transpileModule 转 CJS 后跑；依赖/跨文件引用无法单文件隔离 → skipped（改由项目级 verifyCommands）',
+    javascript: '经同一探针：.js 按 package.json type 判定 ESM/CJS 原生跑',
     go: '动态闸待实现',
-    javascript: '动态闸待实现',
   },
 });
 

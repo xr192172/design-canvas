@@ -156,10 +156,11 @@ describe('capability_matrix', () => {
     expect(dg.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
     expect(dg.cells.find((c) => c.lang === 'java')!.level).toBe('partial_ast');
     expect(dg.cells.find((c) => c.lang === 'go')!.level).toBe('unimplemented');
-    expect(dg.cells.find((c) => c.lang === 'javascript')!.level).toBe('unimplemented');
-    expect(dg.cells.find((c) => c.lang === 'typescript')!.level).toBe('unimplemented');
-    // 缺口 = 未全量的语言：go/js 家族（unimplemented）+ java（partial）
-    expect(dg.gaps.map((g) => g.lang).sort()).toEqual(['go', 'java', 'javascript', 'tsx', 'typescript']);
+    expect(dg.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
+    expect(dg.cells.find((c) => c.lang === 'typescript')!.level).toBe('full_ast');
+    expect(dg.cells.find((c) => c.lang === 'tsx')!.level).toBe('full_ast');
+    // 缺口 = 未全量的语言：go（unimplemented）+ java（partial）
+    expect(dg.gaps.map((g) => g.lang).sort()).toEqual(['go', 'java']);
     // 影响面/项目杂交线（T9）：impact_analysis / cross_repo_symbol_index / hybrid_precheck 已落地（TS 家族 + go/python full_ast）；
     // behavior_baseline：python + Node 家族已落地（金丝雀 harness 真跑），go 仍立项未实现；
     // code_health 仍为全景立项未实现

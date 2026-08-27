@@ -22,6 +22,7 @@ import {
 } from '../../src/version_upgrade/adapters/registry';
 import { pythonAdapter } from '../../src/version_upgrade/adapters/python';
 import { javaAdapter } from '../../src/version_upgrade/adapters/java';
+import { nodeAdapter } from '../../src/version_upgrade/adapters/node';
 import { scanToolchainDeclarations, versionSatisfies } from '../../src/version_upgrade/toolchain';
 import { scanFeatureHits } from '../../src/version_upgrade/features';
 import { scanRemovedApis } from '../../src/version_upgrade/removed';
@@ -178,5 +179,81 @@ describe('工具链盘点含 Python 声明', () => {
     const decls = scanToolchainDeclarations(root);
     const pys = decls.filter((d) => d.tool === 'python').map((d) => `${d.projectDir}=${d.declaredVersion}`).sort();
     expect(pys).toEqual(['api=3.10', 'svc=3.11']);
+  });
+});
+
+describe('nodeAdapter 动态闸（运行时探针真跑）', () => {
+  const run = (appDir: string, file: string, content: string) =>
+    nodeAdapter.dynamicGate!(appDir, 18, [{ path: file, content }]);
+
+  it('.cjs 干净顶层代码 → ok', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    write(root, 'app/a.cjs', 'const x = 1;\nconsole.log(x);\n');
+    const items = await run(appDir, 'a.cjs', 'const x = 1;\nconsole.log(x);\n');
+    expect(items[0].status).toBe('ok');
+  });
+
+  it('顶层抛异常 → fail（附异常摘要）', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    const src = 'throw new Error("boom");\n';
+    write(root, 'app/a.cjs', src);
+    const items = await run(appDir, 'a.cjs', src);
+    expect(items[0].status).toBe('fail');
+    expect(items[0].detail).toContain('boom');
+  });
+
+  it('跨文件引用无法隔离 → skipped', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    const src = 'const { K } = require("./dep");\nconsole.log(K);\n';
+    write(root, 'app/a.cjs', src);
+    const items = await run(appDir, 'a.cjs', src);
+    expect(items[0].status).toBe('skipped');
+  });
+
+  it('.mjs 原生 ESM 跑（import.meta 可用，零转译保留原生语义）→ ok', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    const src = 'console.log(typeof import.meta.url);\n';
+    write(root, 'app/a.mjs', src);
+    const items = await run(appDir, 'a.mjs', src);
+    expect(items[0].status).toBe('ok');
+  });
+
+  it('.js 在 type:module 项目按 ESM 原生跑 → ok', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    write(root, 'app/package.json', JSON.stringify({ type: 'module' }));
+    const src = 'console.log(typeof import.meta.url);\n';
+    write(root, 'app/a.js', src);
+    const items = await run(appDir, 'a.js', src);
+    expect(items[0].status).toBe('ok');
+  });
+
+  it('.ts 转译 CJS 后跑：干净 → ok；顶层抛异常 → fail', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    const okSrc = 'const x: number = 1;\nconsole.log(x);\n';
+    write(root, 'app/a.ts', okSrc);
+    const okItems = await run(appDir, 'a.ts', okSrc);
+    expect(okItems[0].status).toBe('ok');
+
+    const badSrc = 'function f(): number { return 1; }\nthrow new Error("ts-boom");\n';
+    write(root, 'app/b.ts', badSrc);
+    const badItems = await run(appDir, 'b.ts', badSrc);
+    expect(badItems[0].status).toBe('fail');
+    expect(badItems[0].detail).toContain('ts-boom');
+  });
+
+  it('.ts 语法错误（转译失败）→ fail', async () => {
+    const root = tempRoot();
+    const appDir = path.join(root, 'app');
+    const src = 'const x: number = ;\n';
+    write(root, 'app/bad.ts', src);
+    const items = await run(appDir, 'bad.ts', src);
+    expect(items[0].status).toBe('fail');
+    expect(items[0].detail).toContain('转译失败');
   });
 });
