@@ -109,6 +109,11 @@ describe('capability_matrix', () => {
       'version_upgrade_detection',
       'static_gate',
       'dynamic_gate',
+      'impact_analysis',
+      'cross_repo_symbol_index',
+      'hybrid_precheck',
+      'behavior_baseline',
+      'code_health',
     ]) {
       expect(ids).toContain(expectId);
     }
@@ -146,6 +151,12 @@ describe('capability_matrix', () => {
     expect(dg.cells.find((c) => c.lang === 'typescript')!.level).toBe('unimplemented');
     // 缺口 = 未全量的语言：go/js 家族（unimplemented）+ java（partial）
     expect(dg.gaps.map((g) => g.lang).sort()).toEqual(['go', 'java', 'javascript', 'tsx', 'typescript']);
+    // 影响面/项目杂交线（T9 全景登记）：均已立项、当前全部 unimplemented（缺口=整个语言名单）
+    for (const id of ['impact_analysis', 'cross_repo_symbol_index', 'hybrid_precheck', 'behavior_baseline', 'code_health']) {
+      const row = rows.find((r) => r.decl.id === id)!;
+      expect(row.cells.every((c) => c.level === 'unimplemented')).toBe(true);
+      expect(row.gaps.length).toBeGreaterThan(0);
+    }
     _resetRegistry();
   });
 

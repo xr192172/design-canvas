@@ -159,3 +159,65 @@ declareCapability({
     javascript: '动态闸待实现',
   },
 });
+
+// ─────────────────────────────────────────────
+// 影响面/项目杂交线：规划中的全景（T9 登记，逐项实现）
+// 统一 default: unimplemented —— 目前均为"已立项未实现"，全景缺口据此可视化
+// 语言层面的实现顺序：先 TS 家族（解析/调用边最全），再 go/python/java
+// ─────────────────────────────────────────────
+
+/** 影响面分析：改前风险报告 —— 从变更点做反向可达闭包传播，输出受影响文件+风险排序 */
+declareCapability({
+  id: 'impact_analysis',
+  label: '影响面分析（改前风险闭包报告）',
+  desc: '从变更点（文件+符号）沿调用边/类型引用做反向可达闭包传播，输出直接/间接受影响文件与风险排序；复用 ast_parse_skeleton 的调用边；跨项目版支撑杂交验证',
+  default: 'unimplemented',
+  notes: {
+    typescript: '立项：T9 首个落地项，单项目版起步、跨项目预留接口',
+    javascript: '经 TS 家族同一解析路径',
+  },
+});
+
+/** 跨项目符号索引：把单仓的符号解析/改名/影响面扩到两仓（杂交的地基） */
+declareCapability({
+  id: 'cross_repo_symbol_index',
+  label: '跨项目符号索引（两仓顶层导出交集）',
+  desc: '为 rename_symbol / package_migration / impact_analysis 提供跨项目符号集合：顶层导出求交=冲突清单、求差=迁移范围；单仓索引已有，跨项目是自然扩展',
+  default: 'unimplemented',
+  notes: {
+    typescript: '立项：T9 第二阶段，把现有单仓符号索引提到工作区级',
+  },
+});
+
+/** 杂交预检：把 X 塞进 Y 前，先回答"会不会打架" */
+declareCapability({
+  id: 'hybrid_precheck',
+  label: '项目杂交预检（符号冲突 + 依赖冲突 + 功能重叠）',
+  desc: '输入两个项目根：①顶层导出符号冲突清单（依赖 cross_repo_symbol_index）②依赖并集/版本冲突（复用工具链 manifest 解析）③功能重叠检测（语义相近的既有代码，避免双胞胎）',
+  default: 'unimplemented',
+  notes: {
+    typescript: '立项：T9 第三阶段，站在 cross_repo_symbol_index + impact_analysis 之上',
+  },
+});
+
+/** 行为基线：契约→金丝雀测试，验证"跑得对不对"（补动态闸只验"跑得动"的缺口） */
+declareCapability({
+  id: 'behavior_baseline',
+  label: '行为基线（契约→金丝雀测试对比）',
+  desc: '从 extract_contracts 的签名骨架生成金丝雀/属性测试，改动前后各跑一次对比行为差异；与动态闸（只验不炸）互补，是"行为级验证"闭环',
+  default: 'unimplemented',
+  notes: {
+    typescript: '立项：T9 第四阶段，复用契约提取 + 动态闸执行器',
+  },
+});
+
+/** 代码健康度：选材体检 + 三层架构违规检测（用工具守护积木/契约/胶水哲学） */
+declareCapability({
+  id: 'code_health',
+  label: '代码健康度（死代码/复杂度/分层违规）',
+  desc: '死代码检测（复用调用边反查未使用导出）+ 圈复杂度 + 依赖方向违规（胶水层反向依赖积木层）；独立性强可并行；是项目杂交"选材体检"的评分依据',
+  default: 'unimplemented',
+  notes: {
+    typescript: '立项：T9 第五阶段，死代码零成本起步',
+  },
+});
