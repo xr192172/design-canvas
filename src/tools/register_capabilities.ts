@@ -256,7 +256,7 @@ declareCapability({
     python: 'full_ast',
   },
   notes: {
-    typescript: 'T9 第五阶段已落地：死代码(未使用导出/import/孤儿) + 圈复杂度启发式 + 分层违规，复用 impact 解析路径与依赖图',
+    typescript: 'T9 第五阶段已落地 + health AST 化：死代码(未使用导出/import/孤儿) + 分层违规；圈复杂度=AST 分支节点计数、未使用 import=AST 绑定+使用集比对（正则仅作无解析器语言回退）',
     javascript: '经 TS 家族同一解析路径',
   },
 });

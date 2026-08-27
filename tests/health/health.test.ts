@@ -38,31 +38,43 @@ describe('health: 分层分类（路径启发式）', () => {
   });
 });
 
-describe('health: 圈复杂度启发式', () => {
-  it('无分支 = 1', () => {
-    expect(estimateComplexity('function a() { return 1; }')).toBe(1);
+describe('health: 圈复杂度（AST 分支节点计数）', () => {
+  it('无分支 = 1', async () => {
+    expect(await estimateComplexity('x.ts', 'function a() { return 1; }')).toBe(1);
   });
-  it('if/for/&&/|| 线性累加', () => {
+  it('if/for/&&/|| 线性累加', async () => {
     const src = `function f(n) {\n  if (n > 1) {}\n  for (let i = 0; i < n; i++) {}\n  if (a && b) {}\n  if (x || y) {}\n  return n;\n}`;
     // 基1 + if×3 + for×1 + &&×1 + ||×1 = 7
-    expect(estimateComplexity(src)).toBe(7);
+    expect(await estimateComplexity('x.ts', src)).toBe(7);
   });
-  it('剥离注释后计数（注释里的 if 不计）', () => {
+  it('剥离注释后计数（注释里的 if 不计）', async () => {
     const src = `function f() {\n  // if (true) x\n  if (false) {}\n  return 0;\n}`;
-    expect(estimateComplexity(src)).toBe(2);
+    expect(await estimateComplexity('x.ts', src)).toBe(2);
+  });
+  it('三元表达式计入（AST 不再漏 Python 三元）', async () => {
+    const py = `def f(a, b):\n    return a if a else b\n`;
+    // 基1 + conditional_expression×1 = 2
+    expect(await estimateComplexity('x.py', py)).toBe(2);
   });
 });
 
 describe('health: 未使用 import 提取', () => {
-  it('只导入未使用 → 报未使用；已使用不报', () => {
+  it('只导入未使用 → 报未使用；已使用不报', async () => {
     const src = `import { User, Order } from '../contracts/models';\n\nexport function f(u: User): number { return u.id; }\n`;
-    const unused = unusedImportsIn(src);
+    const unused = await unusedImportsIn('x.ts', src);
     expect(unused).toHaveLength(1);
     expect(unused[0].name).toBe('Order');
     expect(unused[0].module).toBe('../contracts/models');
   });
-  it('无 import → 空', () => {
-    expect(unusedImportsIn('export const a = 1;')).toEqual([]);
+  it('无 import → 空', async () => {
+    expect(await unusedImportsIn('x.ts', 'export const a = 1;')).toEqual([]);
+  });
+  it('Python 别名 import：别名未使用才报，原始名不报', async () => {
+    const src = `from mod import a, b as c\n\ndef f(x):\n    return a + x\n`;
+    const unused = await unusedImportsIn('x.py', src);
+    expect(unused).toHaveLength(1);
+    expect(unused[0].name).toBe('c');
+    expect(unused[0].module).toBe('mod');
   });
 });
 

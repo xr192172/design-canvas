@@ -18,9 +18,10 @@
  * v1 边界（诚实标注）：
  *   - 未使用导出/孤儿文件：项目内不可见引用即报，但"外部消费者"（包边界公共 API）
  *     看不见 → 一律标 potential（info），不自动删。
- *   - 未使用 import：TS/JS + Python + Java（正则提取命名导入；Go 不提取——Go 未用 import 本就是编译错）。
- *   - 复杂度：源码文本启发式（剥注释后数分支关键词），字符串里的关键词可能轻微高估；
- *     三元 `? :` 需带空格才计入（避免误计可选链/类型 `?`）。
+ *   - 未使用 import：tree-sitter AST 提取本地绑定名（TS/JS 家族 + Python），与全文件
+ *     标识符/类型标识符使用集比对；Go 不提取（Go 未用 import 本就是编译错）。
+ *   - 复杂度：tree-sitter AST 树遍历按分支节点计数（if/elif/for/while/switch-case/
+ *     catch/except/三元/&&/||），注释/字符串天然不进 AST 不再污染计数（原正则启发式已废弃）。
  *   - 未使用导出只查函数/类/接口/类型等可调用符号；顶层 const 跳过（模块级常量被函数/
  *     模块读取是常态，且解析器不提取"变量读"边，反查永远查不到 → 直接不报，避免噪音）。
  *   - 解析器只建"函数体内"的调用边，模块级引用（入口文件底部 `main();` / 模块级 IIFE）不建边；
@@ -29,7 +30,7 @@
  */
 
 import path from 'node:path';
-import { parseFileFull, listSupportedExtensions, type ParsedSymbol } from '../tools/ts_kernel/index.js';
+import { parseFileFull, parseAstRoot, listSupportedExtensions, type ParsedSymbol, type SyntaxNodeLike } from '../tools/ts_kernel/index.js';
 import { collectSourceFiles } from '../version_upgrade/detect.js';
 
 // ── 对外类型 ─────────────────────────────────────────────────
@@ -121,10 +122,68 @@ export function classifyLayer(rel: string): Layer {
   return 'brick';
 }
 
-// ── 复杂度启发式 ─────────────────────────────────────────────
+// ── 复杂度（tree-sitter AST 遍历计数）────────────────────────
 
-/** 剥注释（行/块 + python #）后再数分支关键词 → 圈复杂度估计 */
-export function estimateComplexity(body: string): number {
+/** TS/JS 家族语言名（共享同一套 AST 节点结构） */
+const TS_FAMILY = new Set(['typescript', 'tsx', 'javascript', 'jsx']);
+
+/**
+ * 各语言"分支/决策"节点类型（每个 +1）——节点名实测（_dbg_ast*.mjs）：
+ *   · TS/JS：if/for/for-in/while/do/switch(+case)/catch/三元
+ *   · Go：if/for/switch(+case)/select（default 不计——圈复杂度按 case 分支数）
+ *   · Python：if/for/while/match(+case)/except/三元（conditional_expression）
+ * else if / elif 在 AST 里是嵌套 if_statement（或 elif_clause 挂在 if 下），
+ * 计数与原正则"每个 if 关键字 +1"语义一致；注释/字符串天然不进 AST 不再污染。
+ */
+const COMPLEXITY_BRANCH_NODES: Record<string, string[]> = {
+  typescript: ['if_statement', 'for_statement', 'for_in_statement', 'while_statement', 'do_statement', 'switch_statement', 'switch_case', 'catch_clause', 'ternary_expression'],
+  tsx: ['if_statement', 'for_statement', 'for_in_statement', 'while_statement', 'do_statement', 'switch_statement', 'switch_case', 'catch_clause', 'ternary_expression'],
+  javascript: ['if_statement', 'for_statement', 'for_in_statement', 'while_statement', 'do_statement', 'switch_statement', 'switch_case', 'catch_clause', 'ternary_expression'],
+  jsx: ['if_statement', 'for_statement', 'for_in_statement', 'while_statement', 'do_statement', 'switch_statement', 'switch_case', 'catch_clause', 'ternary_expression'],
+  go: ['if_statement', 'for_statement', 'expression_switch_statement', 'type_switch_statement', 'select_statement', 'expression_case', 'type_case'],
+  python: ['if_statement', 'for_statement', 'while_statement', 'match_statement', 'case_clause', 'except_clause', 'conditional_expression'],
+};
+
+/** 各语言"逻辑短路"运算符节点（operator 为 &&/|| 或 and/or 时 +1） */
+const COMPLEXITY_LOGIC_NODES: Record<string, string[]> = {
+  typescript: ['binary_expression'],
+  tsx: ['binary_expression'],
+  javascript: ['binary_expression'],
+  jsx: ['binary_expression'],
+  go: ['binary_expression'],
+  python: ['boolean_operator'],
+};
+
+/**
+ * 圈复杂度：tree-sitter AST 树遍历按分支节点计数（见 COMPLEXITY_BRANCH_NODES），
+ * 运算符只认 &&/||（and/or）——注释/字符串不进 AST 不再污染计数。
+ * 语言无解析器（未装包/不支持）时回退正则启发式（estimateComplexityRegex）。
+ */
+export async function estimateComplexity(filePath: string, body: string): Promise<number> {
+  const ast = await parseAstRoot(filePath, body);
+  if (!ast) return estimateComplexityRegex(body);
+  const branch = new Set(COMPLEXITY_BRANCH_NODES[ast.langName] ?? []);
+  const logic = new Set(COMPLEXITY_LOGIC_NODES[ast.langName] ?? []);
+  if (branch.size === 0 && logic.size === 0) return estimateComplexityRegex(body);
+  let c = 1;
+  const walk = (n: SyntaxNodeLike): void => {
+    if (branch.has(n.type)) c += 1;
+    if (logic.has(n.type)) {
+      const op = n.childForFieldName('operator');
+      const t = op ? op.text : '';
+      if (t === '&&' || t === '||' || t === 'and' || t === 'or') c += 1;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const child = n.child(i);
+      if (child) walk(child);
+    }
+  };
+  walk(ast.root);
+  return c;
+}
+
+/** 正则回退：剥注释（行/块 + python #）后再数分支关键词 → 圈复杂度估计 */
+export function estimateComplexityRegex(body: string): number {
   const src = body
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|\n)[ \t]*\/\/[^\n]*/g, '\n')
@@ -140,7 +199,7 @@ export function estimateComplexity(body: string): number {
   return c;
 }
 
-// ── 未使用 import 提取 ───────────────────────────────────────
+// ── 未使用 import 提取（tree-sitter AST）────────────────────
 
 export interface NamedImportRef {
   line: number;
@@ -148,8 +207,164 @@ export interface NamedImportRef {
   name: string;
 }
 
-/** 提取"命名 import"（TS/JS named+default+CJS require；Python from/import；Java class） */
-export function extractNamedImports(source: string): NamedImportRef[] {
+/** AST 提取的绑定（额外带声明 identifier 的字节偏移，供"排除绑定自身"使用） */
+interface AstImportBind extends NamedImportRef {
+  /** 绑定 identifier 的 startIndex（tree-sitter 字节偏移） */
+  startIndex: number;
+}
+
+function stripQuotes(s: string): string {
+  s = s.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")) || (s.startsWith('`') && s.endsWith('`'))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+function isValidBindName(name: string): boolean {
+  return /^[A-Za-z_$][\w$]*$/.test(name);
+}
+
+/**
+ * 从 AST 提取命名 import 绑定（TS/JS 家族 named+default+namespace+CJS require；Python from/import）。
+ * Go 不提取（Go 未用 import 是编译错，编译器兜底）；其余语言返回空 → 走正则回退。
+ * 结构实测（_dbg_ast*.mjs）：
+ *   · TS：import_statement → import_clause → identifier(default) / named_imports → import_specifier(name/alias) / namespace_import → identifier
+ *   · CJS：variable_declarator 且 value 为 require(...) 调用 → 绑定名 = 声明 identifier
+ *   · Python：import_from_statement 的 module_name 字段 + 其后的 dotted_name / aliased_import(name/alias)；
+ *     import_statement 的每个 dotted_name（import os.path → 绑定名 os）
+ */
+function collectImportBinds(root: SyntaxNodeLike, lang: string): AstImportBind[] {
+  const binds: AstImportBind[] = [];
+  const push = (line: number, module: string, nameNode: SyntaxNodeLike): void => {
+    const name = nameNode.text;
+    if (isValidBindName(name)) binds.push({ line, module, name, startIndex: nameNode.startIndex ?? 0 });
+  };
+
+  if (TS_FAMILY.has(lang)) {
+    const walk = (n: SyntaxNodeLike): void => {
+      if (n.type === 'import_statement') {
+        // import type {...} → 类型专用导入，v1 跳过（常作 re-export，避免噪音）
+        if (/^\s*import\s+type\b/.test(n.text)) return;
+        const srcNode = n.childForFieldName('source');
+        const module = srcNode ? stripQuotes(srcNode.text) : '';
+        const line = n.startPosition.row + 1;
+        const sub = (m: SyntaxNodeLike): void => {
+          for (let i = 0; i < m.childCount; i++) {
+            const c = m.child(i);
+            if (!c) continue;
+            if (c.type === 'import_specifier') {
+              const b = c.childForFieldName('alias') ?? c.childForFieldName('name');
+              if (b) push(line, module, b);
+            } else if (c.type === 'namespace_import') {
+              for (let j = 0; j < c.childCount; j++) {
+                const k = c.child(j);
+                if (k && k.type === 'identifier') push(line, module, k);
+              }
+            } else if (c.type === 'identifier') {
+              push(line, module, c);
+            } else if (c.isNamed) {
+              sub(c);
+            }
+          }
+        };
+        sub(n);
+        return;
+      }
+      // CJS: const x = require('m')
+      if (n.type === 'variable_declarator') {
+        const nameNode = n.childForFieldName('name');
+        const value = n.childForFieldName('value');
+        if (nameNode && nameNode.type === 'identifier' && value && value.type === 'call_expression') {
+          const fn = value.childForFieldName('function');
+          if (fn && fn.text === 'require') {
+            const m = value.text.match(/['"]([^'"]+)['"]/);
+            push(n.startPosition.row + 1, m ? m[1] : '', nameNode);
+          }
+        }
+        // 不 return——继续递归（声明内部无嵌套 import）
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) walk(c);
+      }
+    };
+    walk(root);
+  } else if (lang === 'python') {
+    const walk = (n: SyntaxNodeLike): void => {
+      if (n.type === 'import_from_statement') {
+        const line = n.startPosition.row + 1;
+        const modNode = n.childForFieldName('module_name');
+        const module = modNode ? modNode.text : '';
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (!c || c === modNode) continue;
+          if (c.type === 'aliased_import') {
+            const b = c.childForFieldName('alias') ?? c.childForFieldName('name');
+            if (b) push(line, module, b);
+          } else if (c.type === 'dotted_name') {
+            push(line, module, c);
+          }
+        }
+        return;
+      }
+      if (n.type === 'import_statement') {
+        const line = n.startPosition.row + 1;
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (c && c.type === 'dotted_name') {
+            // import os.path → 绑定名 os（module 记录完整 dotted 名）
+            const name = c.text.split('.')[0];
+            if (isValidBindName(name)) binds.push({ line, module: c.text, name, startIndex: c.startIndex ?? 0 });
+          }
+        }
+        return;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) walk(c);
+      }
+    };
+    walk(root);
+  }
+  return binds;
+}
+
+/** 提取"命名 import"（AST；语言无解析器时回退正则） */
+export async function extractNamedImports(filePath: string, source: string): Promise<NamedImportRef[]> {
+  const ast = await parseAstRoot(filePath, source);
+  if (!ast) return extractNamedImportsRegex(source);
+  return collectImportBinds(ast.root, ast.langName).map((b) => ({ line: b.line, module: b.module, name: b.name }));
+}
+
+/**
+ * 文件里未被使用的命名 import。
+ * AST 版：收集全文件 identifier/type_identifier 使用集（排除 import 绑定声明自身的字节偏移），
+ * 绑定名不在使用集即未使用。比正则回退更准：字符串/注释里的同名文本不算引用；
+ * re-export（export { X }）的 X 是 identifier 会进使用集 → 正确不报。
+ */
+export async function unusedImportsIn(filePath: string, source: string): Promise<NamedImportRef[]> {
+  const ast = await parseAstRoot(filePath, source);
+  if (!ast) return unusedImportsInRegex(source);
+  const binds = collectImportBinds(ast.root, ast.langName);
+  if (binds.length === 0) return [];
+  const bindingRanges = new Set(binds.map((b) => b.startIndex));
+  const used = new Set<string>();
+  const walk = (n: SyntaxNodeLike): void => {
+    if (n.type === 'identifier' || n.type === 'type_identifier') {
+      if (!bindingRanges.has(n.startIndex ?? -1)) used.add(n.text);
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c);
+    }
+  };
+  walk(ast.root);
+  return binds.filter((b) => !used.has(b.name)).map((b) => ({ line: b.line, module: b.module, name: b.name }));
+}
+
+/** 正则回退：逐行提取命名 import（TS/JS/Python/Java 各形态） */
+export function extractNamedImportsRegex(source: string): NamedImportRef[] {
   const out: NamedImportRef[] = [];
   const push = (line: number, module: string, names: string[]): void => {
     for (const n of names) {
@@ -211,9 +426,9 @@ export function extractNamedImports(source: string): NamedImportRef[] {
   return out;
 }
 
-/** 文件里未被使用的命名 import（删掉 import 行自身后搜不到标识符） */
-export function unusedImportsIn(source: string): NamedImportRef[] {
-  const refs = extractNamedImports(source);
+/** 正则回退：删掉 import 行后搜不到标识符 → 未使用 */
+function unusedImportsInRegex(source: string): NamedImportRef[] {
+  const refs = extractNamedImportsRegex(source);
   if (refs.length === 0) return [];
   const importLines = new Set(refs.map((r) => r.line));
   const body = source
@@ -356,8 +571,9 @@ export async function analyzeHealth(root: string, options: HealthOptions = {}): 
       }
     }
 
-    // ── 维度1b：未使用 import ──
-    for (const u of unusedImportsIn(content)) {
+    // ── 维度1b：未使用 import（AST 提取 + 使用集比对）──
+    const unusedImports = await unusedImportsIn(p.rel, content);
+    for (const u of unusedImports) {
       issues.push({
         kind: 'unused_import',
         severity: 'warn',
@@ -379,11 +595,11 @@ export async function analyzeHealth(root: string, options: HealthOptions = {}): 
       });
     }
 
-    // ── 维度2：复杂度 ──
+    // ── 维度2：复杂度（AST 分支节点计数）──
     for (const s of p.parsed.symbols) {
       if (s.parent) continue;
       const slice = content.split('\n').slice(s.start_line - 1, s.end_line).join('\n');
-      const c = estimateComplexity(slice);
+      const c = await estimateComplexity(p.rel, slice);
       complexityEntries.push({ file: p.rel, symbol: s.name, line: s.start_line, complexity: c });
       if (c > threshold) {
         issues.push({
