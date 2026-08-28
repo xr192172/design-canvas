@@ -313,6 +313,16 @@
       "properties": {
         "id": { "type": "string", "description": "图元唯一 ID" },
         "groupId": { "type": "string", "description": "批注套 ID：同一次批注层会话（开启→关闭）内创建的图元共享同一套，一套=一个批注；历史数据缺省时按单元素处理" },
+        "anchor": {
+          "type": "object",
+          "description": "节点锚定：批注随锚定节点移动/布局重排而跟随；ox/oy = 基准点相对节点左上角的偏移（世界 px）。缺省=绝对坐标",
+          "properties": {
+            "nodeId": { "type": "string", "description": "锚定的画布节点 ID（geometry.nodes[].id）" },
+            "ox": { "type": "number", "description": "批注基准点相对节点左上角 x 偏移（世界 px）" },
+            "oy": { "type": "number", "description": "批注基准点相对节点左上角 y 偏移（世界 px）" }
+          },
+          "required": ["nodeId", "ox", "oy"]
+        },
         "type": {
           "type": "string",
           "enum": ["highlight", "arrow", "oval", "sticky", "text"],

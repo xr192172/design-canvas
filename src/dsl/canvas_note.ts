@@ -14,6 +14,8 @@ export interface CanvasNote {
   id: string;
   /** 批注套 ID：同一次批注层会话（开启→关闭）内创建的图元共享同一套，一套=一个批注；历史数据缺省时按单元素处理 */
   groupId?: string;
+  /** 节点锚定：批注随锚定节点移动/布局重排而跟随；ox/oy = 基准点相对节点左上角的偏移（世界 px）。缺省=绝对坐标 */
+  anchor?: { nodeId: string; ox: number; oy: number };
   /** 图元类型 */
   type: CanvasNoteType;
   /** 笔迹/箭头关键点序列 [[x,y],...]（世界坐标） */
