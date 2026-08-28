@@ -819,7 +819,11 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
   }
 }
 
-/** POST /api/mind-map：生成 L3 思维导图（feature → 功能 → 社区 → 文件），返回查看器 HTML */
+/** POST /api/mind-map：生成 L3 思维导图（feature → 功能 → 社区 → 文件），返回查看器 HTML
+ * body 支持 { feature, view?: 'structure'|'teach', gen_descriptions?, max_files_per_community? }：
+ *   structure = 结构树（功能→社区→文件，开发者下钻用）
+ *   teach     = 科普教学（功能 + 实现原理分镜 steps，小白用，供四层下钻导航）
+ */
 async function handleApiMindMap(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
@@ -829,12 +833,36 @@ async function handleApiMindMap(req: http.IncomingMessage, res: http.ServerRespo
       sendError(res, 400, '缺少 feature 参数');
       return;
     }
+    const view = params.view === 'teach' ? 'teach' : 'structure';
     const result = await deriveMindMap({
       feature,
+      view,
       gen_descriptions: params.gen_descriptions === true,
       max_files_per_community: typeof params.max_files_per_community === 'number' ? params.max_files_per_community : 20,
     });
     sendJson(res, 200, { success: true, ...result, mind_map: result.mind_map });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/mind-map-teach?feature=：读取已生成的科普教学导图（teach 版 .teach.json），
+ * 供前端四层下钻导航（功能 → 实现路径 steps → 涉及文件）消费。未生成则提示先 POST /api/mind-map（view=teach）。 */
+function handleApiMindMapTeachGet(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    if (!feature) {
+      sendError(res, 400, '缺少 feature 参数');
+      return;
+    }
+    const file = getMindMapFile(feature, 'teach');
+    if (!fs.existsSync(file)) {
+      sendError(res, 404, 'teach 导图未生成，请先 POST /api/mind-map（view=teach）或调用 derive_mind_map');
+      return;
+    }
+    const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    sendJson(res, 200, { success: true, mind_map: mindMap });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -2365,6 +2393,11 @@ export async function startServer(port?: number): Promise<void> {
     }
     if (url.startsWith('/api/opl') && method === 'POST') {
       void handleApiOpl(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/mind-map-teach') && method === 'GET') {
+      handleApiMindMapTeachGet(req, res);
       return;
     }
 

@@ -72,9 +72,10 @@ function writeCachedSummary(feature: string, dslRev: number, s: OverviewSummary)
 }
 
 /** 规则版摘要：无 LLM / LLM 失败时的兜底（从功能树拼装，不编造） */
-function ruleSummary(feature: string, title: string, mm: MindMap): OverviewSummary {
+function ruleSummary(feature: string, title: string, mm: MindMap, fileCount?: number): OverviewSummary {
   const feats = mm.root.children ?? [];
-  const fileTotal = mm.root.meta?.files ?? 0;
+  // 文件总数：teach 树 meta.files 缺失时用语义层文件数兜底（避免显示「0 个源码文件」）
+  const fileTotal = mm.root.meta?.files ?? fileCount ?? 0;
   if (feats.length === 0) {
     return {
       one_liner: `${title}（${fileTotal} 个源码文件）`,
@@ -399,7 +400,7 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
   // 2. 摘要：缓存 → LLM（允许时）→ 规则兜底
   let summary: OverviewSummary | null = refresh ? null : readCachedSummary(feature, dslRev);
   if (!summary) {
-    summary = (refresh_llm ? await llmSummary(feature, title, mindMap) : null) ?? ruleSummary(feature, title, mindMap);
+    summary = (refresh_llm ? await llmSummary(feature, title, mindMap) : null) ?? ruleSummary(feature, title, mindMap, dsl.semantic?.files?.length);
     writeCachedSummary(feature, dslRev, summary);
   }
 
