@@ -921,6 +921,93 @@ function buildTeachMaterial(
 }
 
 /**
+ * involves 管线兜底：LLM 产出的 involves 常有两类病——
+ *   1. 裸文件名（丢了目录前缀，如 `trace_exec.ts`，lookupFile/下钻都解析不到）；
+ *   2. 引用不全（只点出个别关键文件，功能其余文件在 L4 下钻不可达，如「能力矩阵」13 文件只引 2 个）。
+ * 以该功能真实文件全集 rels（file_map 目录优先归属，权威）为准：
+ *   - 裸文件名按 basename 归一到全路径，无法解析的条目丢弃；
+ *   - 未引用的文件**按文件名词元相似度匹配到最相关步骤**（以 LLM 已引用的关键文件为锚点，
+ *     如 leftover 里的 `arch_layer.ts` 会匹配到已含 `arch_layer/monolith` 的「识别架构分层」步骤，
+ *     而不是被轮流塞进无关步骤）；完全无相似锚点的文件才按轮转兜底。
+ *     文件均为该功能真实成员，非编造。
+ */
+function fileTokenSet(base: string): Set<string> {
+  return new Set(base.replace(/\.(tsx?|go|js)$/i, '').split(/[^a-z0-9]+/i).filter(Boolean));
+}
+
+/** 文件与步骤的语义相关度：该文件与步骤已引用文件的文件名词元最大重叠数 */
+function stepSimilarity(file: string, step: TeachStep): number {
+  const ft = fileTokenSet(file.split('/').pop() ?? file);
+  let best = 0;
+  for (const inv of step.involves ?? []) {
+    const it = fileTokenSet(inv.split('/').pop() ?? inv);
+    let hits = 0;
+    for (const t of ft) if (it.has(t)) hits++;
+    if (hits > best) best = hits;
+  }
+  return best;
+}
+
+function polishStepInvolves(script: { steps: TeachStep[] }, rels: string[]): void {
+  if (rels.length === 0) return;
+  const byBase = new Map<string, string>();
+  for (const p of rels) {
+    const b = p.split('/').pop() ?? p;
+    if (!byBase.has(b)) byBase.set(b, p);
+  }
+  const used = new Set<string>();
+  // 第一遍：归一化裸文件名 → 全路径；无法解析的条目丢弃
+  for (const s of script.steps) {
+    if (!s.involves) continue;
+    const out: string[] = [];
+    for (const p of s.involves) {
+      const full = rels.includes(p) ? p : byBase.get(p.split('/').pop() ?? '');
+      if (full) {
+        out.push(full);
+        used.add(full);
+      }
+    }
+    s.involves = out;
+  }
+  // 第二遍：未引用文件按语义相关度匹配到最相关步骤；无锚点可依的再轮转兜底
+  const leftover = rels.filter((p) => !used.has(p));
+  if (leftover.length === 0) return;
+  const unmatched: string[] = [];
+  for (const p of leftover) {
+    let bestS = -1;
+    let bestScore = 0;
+    script.steps.forEach((s, i) => {
+      const sc = stepSimilarity(p, s);
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestS = i;
+      }
+    });
+    if (bestScore > 0 && bestS >= 0) {
+      const s = script.steps[bestS];
+      if (!s.involves) s.involves = [];
+      s.involves.push(p);
+      used.add(p);
+    } else {
+      unmatched.push(p);
+    }
+  }
+  if (unmatched.length === 0) return;
+  const order = script.steps
+    .map((s, i) => ({ i, n: s.involves?.length ?? 0 }))
+    .sort((a, b) => a.n - b.n || a.i - b.i);
+  let k = 0;
+  while (k < unmatched.length) {
+    for (const { i } of order) {
+      if (k >= unmatched.length) break;
+      const s = script.steps[i];
+      if (!s.involves) s.involves = [];
+      s.involves.push(unmatched[k++]);
+    }
+  }
+}
+
+/**
  * 构建 teach 导图：root → 功能（what + 实现原理分镜 steps）。
  * useLlm=true 时各功能并行调科普编剧；失败/未配置降级规则版（无分镜，仅描述）。
  * teach 只落 JSON（小白入口是项目页圆框图，不需要独立 HTML 查看器）。
@@ -1032,8 +1119,10 @@ async function buildTeachMindMap(
       db = null;
     }
   }
-  // 功能 → 文件全集：社区文件（原子，保调用边证据）+ file_map 目录直挂文件
-  //（零社区功能的孤儿/补全文件，如 dsl/db/daemon 纯定义与基础设施）
+  // 功能 → 文件全集：以 file_map（目录/能力域优先归属，权威）为准。
+  // 社区按 cache.db 跨文件聚类，成员常横跨多个目录且混入测试/过滤文件——若整组并进来，
+  // 文件数会被虚高（「查询理解」43 文件被顶到 168）且 involves 会指向非语义文件，
+  // 下游 L4 下钻与 LLM 分镜材料都失真。社区节点仍单独按 f.communities 构建，不依赖 rels。
   const fidFiles = new Map<string, string[]>();
   if (ft.file_map) {
     for (const sf of dsl.semantic?.files ?? []) {
@@ -1044,9 +1133,7 @@ async function buildTeachMindMap(
       fidFiles.set(m.feature_id, arr);
     }
   }
-  const featureRels = ft.features.map((f) => [
-    ...new Set([...f.communities.flatMap((c) => c.files), ...(fidFiles.get(f.id) ?? [])]),
-  ]);
+  const featureRels = ft.features.map((f) => [...new Set(fidFiles.get(f.id) ?? [])]);
   const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
   // 跨功能依赖叠加层（树管归属、线管依赖）：真实调用边聚合 + 底座识别
   const { deps, foundations, shared } = db
@@ -1273,6 +1360,8 @@ async function buildTeachMindMap(
           return cNode;
         })
         .filter((c) => (c.children?.length ?? 0) > 0);
+      // involves 管线兜底：归一化裸文件名 + 空步回填（详见 polishStepInvolves）
+      if (script) polishStepInvolves(script, rels);
       const steps: TeachStep[] = script?.steps ?? [
         {
           title: hasEdges ? 'AI 分镜暂不可用' : '材料不足，暂无法讲解',

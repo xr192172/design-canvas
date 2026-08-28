@@ -78,23 +78,66 @@ const DIR_FEATURE_NAMES: Record<string, string> = {
 };
 
 /**
- * tools/ 能力域（对齐 classify_tools 8 域）：tools 大桶按文件名关键词打分归入能力域。
- * 命中不了默认归 'query'（查询理解）——诚实兜底，多数读/查类工具落这里。
+ * tools/ 能力域（对齐 classify_tools 8 域）：tools 大桶按文件名归类入能力域。
+ * 判定：显式清单（tools 目录真实文件名，确定性、可审计、对得上实际项目）优先；
+ * 未列出的新文件用关键词打分兜底（honest 默认归 query——多数读/查类工具落这里）。
  */
-const TOOL_DOMAINS: Array<{ id: string; label: string; kws: string[] }> = [
-  { id: 'design', label: '设计编辑', kws: ['scaffold', 'render_dsl', 'render_sandbox', 'render_workbench', 'render_cluster', 'workbench', 'wizard', 'overlay', 'animation', 'anim', 'shape', 'edge_', 'layout', 'simulation'] },
-  { id: 'query', label: '查询理解', kws: ['query', 'search', 'diff', 'explore', 'get_', 'list', 'dict', 'snapshot', 'language_concepts', 'arch_layer', 'layer_detect', 'feature_map', 'dag_layout', 'role_title'] },
-  { id: 'refactor', label: '重构治理', kws: ['rename', 'assemble', 'slim', 'refactor', 'split', 'dead', 'contract', 'effects', 'pipeline', 'extract', 'remov', 'repair', 'migration', 'brick', 'verify_refactor', 'ts_slim', 'similar'] },
-  { id: 'observe', label: '观测质检', kws: ['camera', 'probe', 'judge', 'instrument', 'narrate', 'trace', 'monitor', 'watch', 'log', 'diagnos', 'verify', 'consistency', 'chain', 'dogfood', 'freshness', 'signal', 'recon'] },
-  { id: 'judge', label: '治理裁决', kws: ['approval', 'submit_gate', 'review', 'gate'] },
-  { id: 'edit', label: '代码编辑', kws: ['edit_code', 'file_ops', 'api_ops', 'node_ops', 'batch_ops', 'edge_ops', 'apply', 'patch'] },
-  { id: 'harvest', label: '逆向采集', kws: ['harvest', 'import_', 'url', 'closure', 'collect_functions', 'cli_extract', 'registry_extract'] },
-  { id: 'export', label: '交付导出', kws: ['export', 'render_mindmap', 'render_anatomy', 'render_tools_map', 'render_wizard', 'registry', 'report', 'tour'] },
+export const TOOL_DOMAINS: Array<{ id: string; label: string; files: string[]; kws: string[] }> = [
+  {
+    id: 'design', label: '设计编辑',
+    files: ['render_dsl', 'render_sandbox', 'render_sandbox_canvas', 'render_dsl_workbench', 'render_cluster_workbench', 'code_workbench', 'workbench_data', 'workbench_page', 'workbench_shell_css', 'scaffold', 'backfill', 'wizard_steps', 'simulation', 'dag_layout', 'templates', 'overlay', 'serve', 'annotation_tools'],
+    kws: ['render_sandbox', 'workbench', 'wizard', 'scaffold', 'simulation', 'dag_layout', 'annotation'],
+  },
+  {
+    id: 'query', label: '查询理解',
+    files: ['query_feature', 'get_dsl', 'list_features', 'explore_code', 'diff', 'diff_views', 'diff_impact', 'semantic_search', 'search_bricks', 'snapshot', 'dict_gen', 'dictionary', 'language_concepts', 'role_title', 'feature_map', 'guided_tour', 'status_tools', 'ast_parser', 'layer_detect', 'arch_layer', 'monolith', 'analyze_monolith', 'derive_feature_tree', 'derive_mind_map', 'derive_reasoning', 'derive_chain', 'derive_algorithm', 'derive_anim_flow', 'llm_focus', 'explain_gen', 'impact_ledger_store'],
+    kws: ['query', 'get_dsl', 'explore', 'diff', 'search', 'snapshot', 'dict', 'language_concepts', 'role_title', 'feature_map', 'guided_tour', 'status_', 'monolith', 'derive_', 'ast_parser', 'layer_detect', 'arch_'],
+  },
+  {
+    id: 'refactor', label: '重构治理',
+    files: ['refactor_pipeline', 'rename_symbol', 'rename_file', 'refactor_langs', 'refactor_judge', 'refactor_judge_cli', 'remove_dead_imports', 'detect_dead_imports', 'dead_deps', 'dead_statements', 'ts_slim', 'slim_brick', 'assemble_bricks', 'extract_contracts', 'reconcile_brick', 'reconcile_effects', 'package_migration', 'ast_rename', 'ast_suggest', 'similar_names', 'verify_refactor', 'deprecate_offline', 'deprecate_offline_cli', 'split_stage', 'split_stage_cli', 'derive_split', 'brickify', 'brickify_cli', 'classify_bricks', 'brick_bag'],
+    kws: ['rename', 'refactor', 'dead', 'slim', 'brick', 'contract', 'reconcile', 'migration', 'similar', 'deprecate', 'split_', 'verify_refactor'],
+  },
+  {
+    id: 'observe', label: '观测质检',
+    files: ['camera_chain_view', 'chain_recon', 'cluster_narrator', 'narrate_step', 'consistency', 'trace_evidence', 'trace_exec', 'trace_reasoning', 'inject_replay', 'dogfood_stats', 'index_freshness', 'alert_inbox'],
+    kws: ['camera', 'chain_recon', 'narrat', 'consistency', 'trace', 'replay', 'dogfood', 'signal_', 'instrument'],
+  },
+  {
+    id: 'judge', label: '治理裁决',
+    files: ['approval', 'submit_gate', 'contract_gate', 'reason_validator', 'signal_review', 'signal_review_cli'],
+    kws: ['approval', 'submit_gate', 'gate', 'validat', 'review'],
+  },
+  {
+    id: 'edit', label: '代码编辑',
+    files: ['edit_code', 'edit_result', 'file_ops', 'api_ops', 'node_ops', 'batch_ops', 'edge_ops', 'feature_ops', 'update_feature', 'manage_feature', 'git', 'go_mod', 'npm_mod'],
+    kws: ['edit_', '_ops', 'update_', 'manage_'],
+  },
+  {
+    id: 'harvest', label: '逆向采集',
+    files: ['import_project', 'watch_project', 'watch_project_tool', 'harvest_closure', 'harvest_from_url', 'collect_functions', 'registry_extract', 'cli_extract', 'import_graph'],
+    kws: ['watch_', 'harvest', 'collect_functions', 'extract'],
+  },
+  {
+    id: 'export', label: '交付导出',
+    files: ['export', 'render_mindmap', 'render_anatomy', 'render_tools_map', 'render_wizard', 'registry', 'capability_matrix', 'capability_cli', 'overview', 'opl', 'register_capabilities', 'taxonomy', 'impact_report'],
+    kws: ['export', 'render_mindmap', 'render_anatomy', 'render_tools_map', 'render_wizard', 'registry', 'capability', 'overview', 'register_', 'taxonomy'],
+  },
+  {
+    id: 'kernel', label: '工具内核',
+    files: ['ts_kernel/cfg', 'ts_kernel/loader', 'ts_kernel/kernel', 'ts_kernel/languages', 'ts_kernel/index', 'ts_kernel/probe'],
+    kws: ['ts_kernel', 'cfg', 'loader', 'kernel', 'languages', 'probe'],
+  },
 ];
 
-/** tools/ 下文件 → 能力域 id（按文件名关键词打分取多数） */
-function toolDomainOf(relPath: string): string {
-  const base = (relPath.split('/').pop() ?? '').toLowerCase();
+/** tools/ 下文件 → 能力域 id（子目录先定家，再显式清单，最后关键词打分兜底） */
+export function toolDomainOf(relPath: string): string {
+  const nf = normPath(relPath);
+  // 子目录整体定家：ts_kernel 是工具执行内核，python_refactor 是重构子项目（避免同目录被拆到两个功能）
+  if (nf.startsWith('tools/ts_kernel/')) return 'kernel';
+  if (nf.startsWith('tools/python_refactor/')) return 'refactor';
+  const base = (nf.split('/').pop() ?? '').replace(/\.tsx?$/, '').replace(/\.go$/, '').toLowerCase();
+  for (const d of TOOL_DOMAINS) if (d.files.includes(base)) return d.id;
   let best = 'query';
   let bestHits = 0;
   for (const d of TOOL_DOMAINS) {
@@ -117,15 +160,37 @@ function isInfraPath(relPath: string): boolean {
   return seg[0] === 'dsl' || seg[0] === 'db' || seg[0] === 'daemon';
 }
 
+/** 路径归一化：cache.db 的 file_path 锚定仓库根（带 src/ 前缀），DSL 语义路径已剥 src/。
+ *  不剥一致则 communityKeyOf 会把所有社区都判成 'src' 主键 → 全部坍缩成一个"核心功能"大桶。
+ *  统一剥掉前导 src/，让两套路径空间对齐，目录/能力域判定一致。 */
+function normPath(p: string): string {
+  const seg = p.split('/');
+  if (seg[0] === 'src' && seg.length > 1) return seg.slice(1).join('/');
+  return p;
+}
+
+/** 测试文件：tests/ 目录或 *.test./*.spec./*_test.* 命名。
+ *  测试文件决定不了业务社区的家目录（否则社区被 tests 拉走成"测试套件"大桶），
+ *  但文件归属仍按社区走（跟被测模块走），仅孤儿测试文件直挂 tests。 */
+function isTestPath(p: string): boolean {
+  const nf = normPath(p);
+  const base = nf.split('/').pop() ?? '';
+  return nf.startsWith('tests/') || /\.(test|spec)\.[a-z0-9]+$/i.test(base) || /_test\.(go|ts|js|tsx|jsx)$/i.test(base);
+}
+
 /** 社区 → 规则归并主键：tools 桶按能力域，根级归"基础服务"，其余按首段目录 */
 function communityKeyOf(c: { files: string[] }): string {
   if (c.files.length === 0) return 'root-svc';
   const counts = new Map<string, number>();
+  let testOnly = true;
   for (const f of c.files) {
-    const seg = f.split('/');
+    if (isTestPath(f)) continue;
+    testOnly = false;
+    const seg = normPath(f).split('/');
     const key = seg.length > 1 ? (seg[0] === 'tools' ? `tools:${toolDomainOf(f)}` : seg[0]) : 'root-svc';
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
+  if (testOnly) return 'tests';
   let best = 'root-svc';
   let bestN = 0;
   for (const [k, n] of counts) if (n > bestN) { best = k; bestN = n; }
@@ -134,7 +199,7 @@ function communityKeyOf(c: { files: string[] }): string {
 
 /** 单个文件 → 规则归并主键（目录/能力域维度）：tools → tools:<domain>，根级 → root-svc，其余按首段目录 */
 function fileKeyOf(relPath: string): string {
-  const seg = relPath.split('/');
+  const seg = normPath(relPath).split('/');
   if (seg.length === 1) return 'root-svc';
   return seg[0] === 'tools' ? `tools:${toolDomainOf(relPath)}` : seg[0];
 }
@@ -330,21 +395,22 @@ export async function deriveFeatureTree(
     return undefined;
   }
   const fileMap: Record<string, { feature_id: string; community_id: number }> = {};
-  // 归属原则（E）：
-  //   - 有社区的成员文件 → 按社区归属（社区是原子单元，不拆开；社区所在功能由"主导目录"决定，
-  //     故结构上仍对得上目录）；
-  //   - 孤儿文件（无社区 / 社区被范围过滤）→ 按 fileKeyOf 目录直挂到对应功能
-  //     （infra 直挂、tools 按能力域），文件不凭空消失、不跨目录乱跑。
+  // 归属原则（E，v2 目录优先）：文件按"自己的目录/能力域"归属功能（fileKeyOf），
+  //   - L4 下钻是"文件层"，文件必须落在它实际所在的目录功能里（tools 文件按能力域、
+  //     camera 文件归观测探针），不能跟着"社区的主目录"跑——否则跨目录社区会把
+  //     camera/diagnosis 的文件拖进 tools 大功能，对不上实际项目。
+  //   - community_id 仅作参考保留（L3 实现路径仍按社区协作模块叙事）。
+  //   - 目录键对不上（理论上不会，keyToFeature 覆盖全部语义文件目录）→ 按社区兜底。
   for (const sf of semanticFiles) {
     const cid = fileToCommunity.get(sf.path) ?? communityOf(sf.path);
-    const fid = cid !== undefined ? commFeatureId.get(cid) : undefined;
-    if (fid) {
-      fileMap[sf.id] = { feature_id: fid, community_id: cid! };
-      continue;
-    }
     const dirFid = keyToFeature.get(fileKeyOf(sf.path));
     if (dirFid) {
       fileMap[sf.id] = { feature_id: dirFid, community_id: cid ?? -1 };
+      continue;
+    }
+    const fid = cid !== undefined ? commFeatureId.get(cid) : undefined;
+    if (fid) {
+      fileMap[sf.id] = { feature_id: fid, community_id: cid! };
     }
   }
   // file_count：按 file_map 实算（社区成员 + 目录直挂都算上）
