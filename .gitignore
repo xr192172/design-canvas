@@ -99,6 +99,8 @@ scaffold/
 docs/
 # 内部交接/狗食试产产物
 HANDOVER_DOGFOOD.md
+# 内部后续开发路径规划（含竞品/许可/变现/缺陷审计等内部结论，不入发布仓库）
+ROADMAP.md
 .tmp_test.mjs
 .brickify_agentshell_report.json
 *.report.json

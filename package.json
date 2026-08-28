@@ -4,6 +4,39 @@
   "description": "人机共享的可视化协议层。LLM 输出结构化 DSL JSON → 协作前端渲染成可交互图 → 人看图改 JSON → LLM 读 JSON 迭代。本仓库是数据/协议层，可视化由独立前端承载，内置精简渲染器仅作预览兜底。作为 MCP 服务对外开放。",
   "license": "MIT",
   "type": "module",
+  "author": "xr192172",
+  "homepage": "https://github.com/xr192172/design-canvas#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xr192172/design-canvas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xr192172/design-canvas/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "visualization",
+    "dsl",
+    "llm",
+    "code-refactoring",
+    "code-understanding",
+    "tree-sitter",
+    "brick",
+    "ai-agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/src/server.js",
+    "dist/src/**/*.js",
+    "schema/*.json",
+    "examples/*.json",
+    "assets/*.png",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "design-canvas": "dist/src/server.js"
   },

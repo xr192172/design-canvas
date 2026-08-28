@@ -1,8 +1,17 @@
 # design-canvas
 
+![CI](https://github.com/xr192172/design-canvas/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![Node](https://img.shields.io/badge/node-%3E%3D18-339933.svg)
+![MCP](https://img.shields.io/badge/MCP-server-7c3aed.svg)
+
 > 人机共享的可视化协议层：LLM 输出结构化 DSL JSON → 面向人类的协作前端把它渲染成可交互图 → 人看图改 JSON → LLM 读 JSON 继续迭代。
 >
 > 标准 MCP server，兼容所有支持 MCP 的 client（Claude Desktop / Cursor / VS Code / Cline 等）。前端采用前后端分离，可视化协作由独立配套项目承载（见下）。
+
+![design-canvas 配套前端 dsl-workbench 沙盘视图（真实 DSL 实时渲染）](assets/demo-workbench.png)
+
+> 上图是配套前端 **dsl-workbench** 的沙盘视图：左侧导航（沙盘/版本历史/问题清单/探针/契约）、顶部工具栏（网格/流向/径向布局、全局/详细视图、缩放）、画布节点按「数据名匹配」免连线渲染、右侧详情面板、底部版本对比滑块（v3 ↔ v4）。数据来自本仓库 `serve` 暴露的 HTTP 接口（`/api/features`、`/api/feature-dsl`、`/api/trace-exec` 等），前端连不上后端时自动回退本地快照。
 
 ---
 
@@ -14,9 +23,9 @@ design-canvas 让 LLM 直接输出**结构化 DSL JSON**（双层：几何 + 语
 
 ### 前端分工（前后端分离）
 
-- 本仓库（MCP server）是**数据/协议层**：负责 DSL 的存取、代码理解、生成/回填/一致性、重构防线、插桩对账，统一以 JSON 与 MCP 工具对外——
-- 可视化协作工作台是**独立的配套前端项目**，订阅本仓库产出的 DSL JSON 并渲染成交互图。
-- 内置一个**精简自包含 HTML 渲染器**（`render_dsl`）作快速预览兜底：无前端环境时也能 `npm run serve` 把单张 DSL 渲染成单文件 HTML 检查。
+- 本仓库（MCP server）是**数据/协议层**：负责 DSL 的存取、代码理解、生成/回填/一致性、重构防线、插桩对账，统一以 JSON 与 MCP 工具对外，同时 `npm run serve` 暴露一套 HTTP API（`/api/features`、`/api/feature-dsl`、`/api/trace-exec`、`/api/code/*` 等）供前端直连。
+- 可视化协作工作台是**独立的配套前端项目 dsl-workbench**（Vite + TypeScript），通过 HTTP 拉取本仓库的实时 DSL 渲染成交互图：沙盘（免连线·数据名匹配）、版本对比、问题清单、探针管理、运行时契约、代码审批。后端不可达时自动回退本地快照，保证页面总能打开。
+- 内置一个**精简自包含 HTML 渲染器**（`render_dsl`）仅作预览兜底：无前端环境时也能 `npm run serve` 把单张 DSL 渲染成单文件 HTML 快速检查。**它是兜底，不是可视化主力**——日常可视化用 dsl-workbench。
 
 ## 核心能力线
 
