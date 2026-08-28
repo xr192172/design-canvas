@@ -24,6 +24,11 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: package-lock.json
+      # derive_split 等测试含真实 Go 编译/测试验收闭环，macOS runner 默认无 go in PATH，
+      # 显式安装保证 Go 场景在所有平台都被真正执行（而非 skipIf 降级跳过）
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
       - name: 安装依赖
         run: npm ci
       - name: 单元测试（vitest）

@@ -21,14 +21,28 @@ function jsonResp(obj: unknown): Response {
   return { ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) } as unknown as Response;
 }
 
+// 覆盖的 LLM 环境变量：CI / 干净环境无 key，ingestTerm 首行 loadExplainConfig() 会直接抛错。
+// 测试用 fetch mock 替代真实外呼，这里用 dummy key 让配置层通过，测试本身与真实 LLM 解耦。
+const LLM_ENV_KEYS = ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'DEEPSEEK_MODEL', 'AGNES_API_KEY', 'AGNES_BASE_URL', 'AGNES_MODEL', 'LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'];
+const savedLlmEnv: Record<string, string | undefined> = {};
+
 beforeAll(() => {
   process.env.DESIGN_CANVAS_HOME = dataHome;
   fs.mkdirSync(projectRoot, { recursive: true });
   // 测试使用的临时目录需要显式加入安全白名单
   setAllowedProjectRoots([projectRoot, dataHome, process.cwd()]);
+  // 预设 dummy LLM 配置（fetch 已 mock，不会真实请求）；同时备份已有 env 便于还原
+  for (const k of LLM_ENV_KEYS) {
+    savedLlmEnv[k] = process.env[k];
+    if (k.endsWith('_API_KEY')) process.env[k] = process.env[k] ?? 'sk-test-dummy';
+  }
 });
 
 afterAll(() => {
+  for (const k of LLM_ENV_KEYS) {
+    if (savedLlmEnv[k] !== undefined) process.env[k] = savedLlmEnv[k];
+    else delete process.env[k];
+  }
   for (const r of [dataHome, projectRoot]) {
     try {
       fs.rmSync(r, { recursive: true, force: true });

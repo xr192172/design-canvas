@@ -15,7 +15,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { deriveSplit } from '../../src/tools/derive_split';
+
+// Go 工具链检测：macOS/部分环境默认无 go 在 PATH，真实编译+测试验收用例需降级跳过
+const goOk = spawnSync('go', ['version'], { encoding: 'utf8' }).status === 0;
 
 let root: string;
 
@@ -290,7 +294,7 @@ func keep(x int) int { return x }
   });
 });
 
-describe('deriveSplit · 测试级验收闭环（P3 收尾）', () => {
+describe.skipIf(!goOk)('deriveSplit · 测试级验收闭环（P3 收尾）', () => {
   const GO_MOD = `module probe
 
 go 1.21
