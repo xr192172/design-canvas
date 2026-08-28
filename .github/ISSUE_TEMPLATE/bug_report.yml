@@ -1,0 +1,65 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告问题。请尽量填全以下信息，缺失信息会拖慢排查。
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: OS + Node 版本（如 Windows 11 / Node 22）
+      placeholder: "Windows 11 / Node 22.18"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 所属模块
+      description: 问题出在哪个模块
+      options:
+        - 渲染器（render_dsl / HTML）
+        - DSL 校验 / schema
+        - 代码理解（explore_code / import_project）
+        - 积木线（harvest / brickify / assemble）
+        - camera 插桩 / 对账
+        - 诊断 / 审闭环（diagnose-loop）
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 最小可复现的步骤，最好附上触发用的 DSL JSON / 代码片段
+      placeholder: |
+        1. 执行 …
+        2. 调用 …
+        3. 观察到 …
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你期望看到什么
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际看到什么（含报错堆栈 / 截图）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / commit
+      description: 版本号或 commit hash
+    validations:
+      required: true

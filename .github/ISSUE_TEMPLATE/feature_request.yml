@@ -1,0 +1,47 @@
+name: 功能建议
+description: 提出一个新功能 / 能力改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        在提建议前，请先看 README 的「核心能力线」：本项目主线是 **任意代码 → 积木（原料端）→ 可信组合（质检端）**。如果新能力能挂到这条主线上，被采纳的概率会高很多。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 你在什么场景下遇到了什么痛点
+      placeholder: "我在 … 时，因为 … 感到不便。"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的能力
+      description: 你希望新增/改进什么，尽量具体（交互、接口、行为）
+    validations:
+      required: true
+  - type: dropdown
+    id: line
+    attributes:
+      label: 归属能力线
+      description: 这个能力主要服务哪一段
+      options:
+        - 可视化协议层（DSL / 渲染 / 双向绑定）
+        - 代码理解
+        - 积木线 · 原料端（收割 / 切块 / 契约 / 拼装）
+        - 杂交线 · 质检端（验证 / 对账 / 防线）
+        - 生成 / 回填 / 一致性
+        - 诊断 / 审闭环
+        - 多语言 AST 根基
+        - 不确定，需要讨论
+    validations:
+      required: false
+  - type: textarea
+    id: alt
+    attributes:
+      label: 备选方案
+      description: 有没有考虑过其他做法（含现有工具的组合）
+    validations:
+      required: false
