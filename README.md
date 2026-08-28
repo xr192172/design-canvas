@@ -20,14 +20,17 @@ design-canvas 让 LLM 直接输出**结构化 DSL JSON**（双层：几何 + 语
 
 ## 核心能力线
 
+一条主线：**任意代码 → 积木（原料端）→ 可信组合（质检端）**。两条线不冗余，是同一流水线的两段——积木线把 LLM 新写 / 开源抓来 / 现有工程的任意代码加工成「带契约插头的积木」；杂交线用验证栈（契约核对、行为对账、拼装校验、防线闸门）让拼装可信。「契约」是两线共享的唯一插头：积木线生产它，杂交线验证它。
+
 | 能力线 | 说明 | 代表工具 |
 |---|---|---|
-| **可视化 DSL** | DSL 写读与编辑（JSON），渲染交给配套前端；内置 `render_dsl` 作快速预览兜底 | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` |
-| **代码理解** | 工程导入、语义搜索、影响分析、架构分层、微服务拆分、算法流推导、数据流追踪 | `explore_code`（`import/semantic_search/diff_impact/arch_layer/derive_split/…`） |
+| **可视化协议层** | 人 / LLM ↔ 契约 ↔ 代码 的双向绑定：DSL 写读编辑、设计视图 vs 代码快照对比、内置渲染兜底 | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` / `diff_views` |
+| **代码理解** | 看懂任意代码：工程导入、语义搜索、影响分析、架构分层、微服务拆分、算法流 / 数据流推导 | `import_project` / `explore_code`（`semantic_search` / `diff_impact` / `arch_layer` / `derive_split` / …） |
+| **代码积木线 · 原料端** | 任意来源代码 → 带契约插头的积木：收割 → 切块 → 抽契约 → 瘦身入箱 → 搜索 → 拼装 | `harvest_from_url` / `harvest_closure` / `brickify` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
+| **代码杂交线 · 质检端** | 让拼装可信：契约核对、camera 运行探针对账、行为基线、拼装校验、防线闸门（验证通过才提交，失败回滚） | `contract_gate` / `camera_instrument` / `camera_judge` / `chain_recon` / `reconcile_brick` / `verify_refactor` / `submit_gate` |
 | **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架；解析实现回填 actual_apis；对比期望契约输出一致性报告 | `scaffold` / `backfill_scaffold` / `consistency_check` |
-| **重构防线** | 重构前基线验证、重构后契约对账、提交层产物完整性自检、失败回滚的闭环 | `verify_refactor` / `refactor_pipeline` / `contract_gate` / `submit_gate` / `release tools` |
-| **插桩 / 摄像头** | 对被测代码动态插桩，采集真实行为与契约比对，识别行为偏差（TS + Go 双语言链） | `src/camera/`（TS 插桩）+ `go-camera/`（Go 插桩 + probe） |
-| **多语言 AST 根基** | 内置 TreeSitterKernel（Go/TypeScript/Python/JavaScript），符号/import/调用边/类型引用统一产出，支撑改造能力（提升别名清洗等） | `ts_kernel` / `package_migration` |
+| **诊断 / 审闭环** | 症状 → 根因 → 修复 → 验证 → 提交（或回退）的闭环；LLM 审裁决门 | `diagnose-loop` / `diagnose` / `refactor_judge` |
+| **多语言 AST 根基** | 内置 TreeSitterKernel（Go / TypeScript / Python / JavaScript），符号 / import / 调用边 / 类型引用统一产出，支撑全部改造能力 | `ts_kernel` / `package_migration` |
 
 ## 快速开始
 
