@@ -7,13 +7,16 @@
  * 数据来源：
  *   - analyze_monolith：基于 cache.db 调用边做跨文件 Louvain 功能社区圈定，
  *     产出 communities（功能社区，锚点名 + 横跨文件）与 file_view（文件内社区分布）。
- *   - 本工具把社区**二次归并**成"几大功能"（社区锚点归并），并建立
+ *   - 本工具把社区**二次归并**成"几大功能"，并建立
  *     文件 → 主导社区 → 功能 的归属映射（file_map）。
  *
- * 归并策略：
- *   - gen_names=true（配置了 LLM，llm_focus / explain_gen 兼容 DEEPSEEK/AGNES）：
- *     把全部社区描述交给 LLM，让它按业务语义归并成 3-8 个功能并起中文名。
- *   - 否则 / LLM 输出非法：规则兜底——按社区成员文件的首段目录归并。
+ * 归并策略（目录优先，结构保真——功能树必须对得上实际项目、符合人类阅读习惯）：
+ *   - 社区按"成员文件主导目录"聚成功能（dsl/db/daemon/renderer/camera… 各成功能，
+ *     tools 大桶再按能力域拆成 8 类，杜绝"工具"一口大锅）；
+ *   - 零社区的目录（纯定义/配置/入口文件，如 dsl 类型、db 存储、daemon 守护、tools 脚本）
+ *     按目录直挂补成功能，不凭空消失；
+ *   - gen_names=true（配置了 LLM）时 LLM 只做**命名润色**（目录分组 → 中文功能名），
+ *     不重新归并——避免 LLM 按猜的业务语义把目录打散/吞并，导致对不上实际项目。
  * 结果写入 DSL 顶层 feature_tree 字段，供渲染端逐级下钻。
  */
 
@@ -30,7 +33,7 @@ export interface FeatureTreeInput {
   db?: import('../db/db.js').Database;
   /** 可选：写入哪个 feature 的 DSL（缺省不落盘，仅返回） */
   feature?: string;
-  /** 是否用 LLM 归并社区成功能并起中文名（默认 false，未配置 LLM 时静默降级为目录归并） */
+  /** 是否用 LLM 润色功能名（默认 false；未配置 LLM 时静默降级为规则中文名） */
   gen_names?: boolean;
 }
 
@@ -40,7 +43,7 @@ export interface FeatureTreeResult {
   features: Array<FeatureNode & { file_count: number }>;
   /** 参与归属的文件总数 */
   file_count: number;
-  /** 未归入任何社区的孤立文件数（通常无调用边，如纯配置/定义） */
+  /** 未归入任何功能的孤立文件数（通常无调用边也无目录归属，如纯配置） */
   unassigned_count: number;
   message: string;
 }
@@ -146,53 +149,6 @@ function ruleLabelOf(key: string): string {
   return DIR_FEATURE_NAMES[key] ?? key;
 }
 
-/** 用 LLM 把全部社区归并成几大功能：返回 [{ name, community_ids }] 或 null（调用失败/输出非法） */
-async function groupFeaturesByLLM(
-  comms: Array<{ id: number; name: string; files: string[]; est_lines: number }>,
-): Promise<Array<{ name: string; community_ids: number[] }> | null> {
-  if (comms.length === 0) return null;
-  const cfg = loadLlmConfig() ?? toLlmCfg(loadExplainConfig());
-  if (!cfg) return null;
-
-  const list = comms
-    .map((c) => `- ${c.id}: 锚点[${c.name}] · ${c.files.slice(0, 2).join(',')} 等${c.files.length}文件`)
-    .join('\n');
-  const prompt =
-    `下面是一个软件项目的 ${comms.length} 个"功能社区"（每个社区 = 一个按调用边聚到一起的功能锚点及成员文件）。` +
-    `一个社区内部高度内聚，不应再拆开；但多个社区可能属于同一个更大的**业务功能**。` +
-    `请把这些社区归并成 **3-8 个"功能"**，每个功能给一个简短的**中文名**（4-8 字，如"渲染引擎""配置加载""命令分发"）。` +
-    `要求：\n` +
-    `1) 每个社区必须且只能归入一个功能；\n` +
-    `2) 归并依据是业务语义（锚点/文件体现的职责），不是目录名；\n` +
-    `3) 社区特别大时可单独成功能，不要强行塞进无关功能。\n` +
-    `只输出紧凑 JSON（无空格无解释）：{"features":[{"name":"渲染引擎","community_ids":[1,5,7]}]}\n\n${list}`;
-  try {
-    const text = await callChat(cfg, [{ role: 'user', content: prompt }], 0.2, 120_000);
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    const parsed = JSON.parse(m[0]) as { features?: Array<{ name?: string; community_ids?: unknown }> };
-    if (!Array.isArray(parsed.features) || parsed.features.length < 1) return null;
-    const out: Array<{ name: string; community_ids: number[] }> = [];
-    const seen = new Set<number>();
-    for (const f of parsed.features) {
-      const name = String(f.name ?? '').trim();
-      const ids = Array.isArray(f.community_ids) ? f.community_ids.filter((x) => Number.isInteger(x)).map(Number) : [];
-      if (!name || name.length > 12 || ids.length === 0) continue;
-      const validIds = ids.filter((id) => comms.some((c) => c.id === id) && !seen.has(id));
-      if (validIds.length === 0) continue;
-      for (const id of validIds) seen.add(id);
-      out.push({ name, community_ids: validIds });
-    }
-    // 校验：所有社区都被归并（漏的归入"其他"），无重复
-    if (seen.size === 0) return null;
-    const missing = comms.filter((c) => !seen.has(c.id)).map((c) => c.id);
-    if (missing.length > 0) out.push({ name: '其他', community_ids: missing });
-    return out;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * 规则兜底归并：社区按"成员文件主导目录"聚成功能（先目录聚）；
  *   - tools/ 大桶按能力域再拆（design/query/refactor/observe/judge/edit/harvest/export）
@@ -217,9 +173,9 @@ function groupByDir(
 }
 
 /**
- * LLM 仅重命名（降级路径）：全量语义归并失败/超时时的保底人话化。
- * 分组沿用目录归并（快而稳），只让 LLM 给每组起中文名——输出极小（N 个名字），
- * 秒级返回。返回与 groups 等长的名字数组，或 null（失败保持原名）。
+ * LLM 仅重命名（命名润色路径）：目录归并结构不动，只让 LLM 给每组起中文名——
+ * 结构对得上实际项目，名字又符合人类阅读习惯。输出极小（N 个名字），秒级返回。
+ * 返回与 groups 等长的名字数组，或 null（失败保持规则中文名）。
  */
 async function renameGroupsByLLM(groups: FeatureNode[]): Promise<string[] | null> {
   if (groups.length === 0) return null;
@@ -282,56 +238,64 @@ export async function deriveFeatureTree(
     return { feature: input.feature, features: [], file_count: 0, unassigned_count: 0, message: '无有效功能社区' };
   }
 
-  // 3. 归并成功能：LLM 优先，规则兜底
-  let named: Array<{ name: string; community_ids: number[] }> | null = null;
+  // 3. 归并成功能：目录优先（结构保真，对得上实际项目）——社区按"成员文件主导目录"聚成功能，
+  //    再按能力域拆 tools 大桶；LLM 只做命名润色（不重新归并，避免把目录打散成猜的业务功能）。
+  let nodes: FeatureNode[] = groupByDir(comms);
   let usedLlm = false;
-  let renameOnly = false; // 语义归并失败，仅做了目录分组 + LLM 重命名
+  let renameOnly = false;
   if (input.gen_names) {
-    named = await groupFeaturesByLLM(comms);
-    usedLlm = named !== null;
-  }
-  let nodes: FeatureNode[] = [];
-  if (named) {
-    const byId = new Map(comms.map((c) => [c.id, c]));
-    nodes = named.map((f) => ({
-      id: '',
-      name: f.name,
-      communities: f.community_ids
-        .map((id) => byId.get(id)!)
-        .sort((a, b) => b.est_lines - a.est_lines),
-    }));
-  } else {
-    nodes = groupByDir(comms);
-    // 降级人话化：语义归并失败时至少把目录名换成中文名（小输出，秒级）
-    if (input.gen_names) {
-      const names = await renameGroupsByLLM(nodes);
-      if (names) {
-        nodes.forEach((n, i) => {
-          if (names[i]) n.name = names[i];
-        });
-        usedLlm = true;
-        renameOnly = true;
-      }
+    const names = await renameGroupsByLLM(nodes);
+    if (names) {
+      nodes.forEach((n, i) => {
+        if (names[i]) n.name = names[i];
+      });
+      usedLlm = true;
+      renameOnly = true;
     }
   }
 
   // 4. 稳定功能 id（f0, f1, …），供 file_map 引用
-  const fileCount = new Map<number, number>();
+  nodes.forEach((n, i) => {
+    n.id = `f${i}`;
+  });
+  // 语义基准：live 视图（功能树是"实际代码结构"的产物，必须对齐 cache.db 索引的代码快照）。
+  // 不能用设计视图（design）：设计视图是人工/历史拼装态，可能混入跨项目残留文件
+  //（曾因 cwd 漂移把 go-camera、camera-conformance 等并进来），命中率闸门会误判"不相关"而拒生成。
+  const liveDsl = input.feature ? getDSLByView(input.feature, 'live') : null;
+  const semanticFiles = liveDsl?.semantic?.files ?? [];
+
+  // 4.5 建"目录主键 → 功能"索引 + 补零社区目录功能（B）：
+  //     数据/协议/服务/工具等目录的纯定义/配置/入口文件（dsl/db/daemon/tools/camera 等）没有调用边，
+  //     进不了社区；按目录直挂补成功能，保证 L2 层体现真实目录，而不是凭空消失。
+  const keyToFeature = new Map<string, string>();
+  const coveredKeys = new Set<string>();
   for (const n of nodes) {
-    let fc = 0;
-    const s = new Set<string>();
-    for (const c of n.communities) for (const f of c.files) s.add(f);
-    fc = s.size;
-    fileCount.set(n.communities[0]?.id ?? -1, fc);
+    if (n.communities.length === 0) continue;
+    const k = communityKeyOf(n.communities[0]);
+    if (!keyToFeature.has(k)) {
+      keyToFeature.set(k, n.id);
+      coveredKeys.add(k);
+    }
+  }
+  const dirFileCount = new Map<string, number>();
+  for (const sf of semanticFiles) {
+    const k = fileKeyOf(sf.path);
+    dirFileCount.set(k, (dirFileCount.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of dirFileCount) {
+    if (coveredKeys.has(k) || n === 0) continue;
+    const id = `f${nodes.length}`;
+    keyToFeature.set(k, id);
+    nodes.push({ id, name: ruleLabelOf(k), communities: [] });
+    coveredKeys.add(k);
   }
   // 社区 → 功能 id
   const commFeatureId = new Map<number, string>();
-  nodes.forEach((n, i) => {
-    n.id = `f${i}`;
+  nodes.forEach((n) => {
     for (const c of n.communities) commFeatureId.set(c.id, n.id);
   });
 
-  // 组装带 file_count + FeatureCommunity 的 features
+  // 组装 features（file_count 按 file_map 归属实算，见下方）
   const features: Array<FeatureNode & { file_count: number }> = nodes.map((n) => ({
     id: n.id,
     name: n.name,
@@ -342,11 +306,10 @@ export async function deriveFeatureTree(
       est_lines: c.est_lines,
       symbol_count: c.symbol_count,
     })),
-    file_count: fileCount.get(n.communities[0]?.id ?? -1) ?? 0,
+    file_count: 0,
   }));
-  features.sort((a, b) => b.file_count - a.file_count);
 
-  // 5. file_map：文件 → 主导社区 → 功能
+  // 5. file_map：文件 → 功能（社区优先保原子性，孤儿文件目录直挂补全）
   // 路径形态可能不一致：cache.db 的路径相对其项目根（如本仓库 camera/internal/...），
   // DSL 的路径相对导入快照根（顶层目录已剥，如 internal/...）。
   // 用后缀索引兜底（≥2 段，避免单文件名误命中）。
@@ -367,18 +330,30 @@ export async function deriveFeatureTree(
     return undefined;
   }
   const fileMap: Record<string, { feature_id: string; community_id: number }> = {};
-  // 功能树是"实际代码结构"的产物，语义基准必须对齐 cache.db 索引的代码快照（live 视图）。
-  // 不能用设计视图（design）：设计视图是人工/历史拼装态，可能混入跨项目残留文件
-  //（曾因 cwd 漂移把 go-camera、camera-conformance 等并进来），命中率闸门会误判"不相关"而拒生成。
-  const liveDsl = input.feature ? getDSLByView(input.feature, 'live') : null;
-  const semanticFiles = liveDsl?.semantic?.files ?? [];
+  // 归属原则（E）：
+  //   - 有社区的成员文件 → 按社区归属（社区是原子单元，不拆开；社区所在功能由"主导目录"决定，
+  //     故结构上仍对得上目录）；
+  //   - 孤儿文件（无社区 / 社区被范围过滤）→ 按 fileKeyOf 目录直挂到对应功能
+  //     （infra 直挂、tools 按能力域），文件不凭空消失、不跨目录乱跑。
   for (const sf of semanticFiles) {
     const cid = fileToCommunity.get(sf.path) ?? communityOf(sf.path);
-    if (cid === undefined) continue;
-    const fid = commFeatureId.get(cid);
-    if (!fid) continue;
-    fileMap[sf.id] = { feature_id: fid, community_id: cid };
+    const fid = cid !== undefined ? commFeatureId.get(cid) : undefined;
+    if (fid) {
+      fileMap[sf.id] = { feature_id: fid, community_id: cid! };
+      continue;
+    }
+    const dirFid = keyToFeature.get(fileKeyOf(sf.path));
+    if (dirFid) {
+      fileMap[sf.id] = { feature_id: dirFid, community_id: cid ?? -1 };
+    }
   }
+  // file_count：按 file_map 实算（社区成员 + 目录直挂都算上）
+  const perFeatureFiles = new Map<string, number>();
+  for (const m of Object.values(fileMap)) {
+    perFeatureFiles.set(m.feature_id, (perFeatureFiles.get(m.feature_id) ?? 0) + 1);
+  }
+  for (const f of features) f.file_count = perFeatureFiles.get(f.id) ?? 0;
+  features.sort((a, b) => b.file_count - a.file_count);
 
   // 5.5 范围过滤 + 命中率闸门：cache.db 覆盖整个 project_dir，而 feature 可能只是
   // 其中一个子目录，甚至属于完全无关的代码库（早期无 source_root 的数据）。

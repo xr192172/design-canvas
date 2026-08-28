@@ -73,6 +73,20 @@ function basename(p: string): string {
   return seg[seg.length - 1] || p;
 }
 
+/**
+ * 噪音社区名（C）：聚类锚点常把"数据结构/通用辅助器"类名当社区名
+ * （MinHeap、Trie、LruCache、RingBuffer…），LLM 直译成"最小堆"仍是噪音。
+ * 命中的社区不送 LLM 翻译、不占"协作模块"注意力，统一标为「内部组件」——
+ * 它确实是功能内部的一颗螺丝钉，只是不配当 L3 的叙事主角。
+ */
+const NOISE_COMMUNITY_RE =
+  /^(min|max|small|big)?(heap|hash|map|set|list|stack|queue|tree|trie|lru|fifo|ring|buffer|pool|sync|mutex|lock|timer|clock|util|helper|common|base|const|types?|dto|vo|enums?|errs?|warn|log|metrics?|stats?|configs?|opts?|params?)$/i;
+function isNoiseCommunity(name: string): boolean {
+  return NOISE_COMMUNITY_RE.test(name.trim());
+}
+/** 噪音社区的统一中文兜底名（比裸英文"MinHeap"可读，也比直译"最小堆"诚实） */
+const NOISE_ZH = '内部组件';
+
 export interface FileInfo {
   id: string;
   path: string;
@@ -863,17 +877,22 @@ async function llmTeachFeature(material: string, featureName = ''): Promise<Teac
   }
 }
 
-/** 组装单个功能的实现材料 v2：职责 + 调用记录（顺序证据）+ 主人批注 */
+/** 组装单个功能的实现材料 v2：职责 + 调用记录（顺序证据）+ 主人批注
+ *  rels 传入功能的**文件全集**（社区文件 + 目录直挂文件），
+ *  零社区功能（dsl/db/daemon 等纯定义/服务目录）也能拿到真实文件喂给分镜。 */
 function buildTeachMaterial(
   projectTitle: string,
   fName: string,
+  rels: string[],
   communities: FeatureTree['features'][number]['communities'],
   fileIndex: ReturnType<typeof buildFileIndex>,
   callEdges: string[],
   ownerNotes: string[],
 ): string {
-  const anchors = communities.slice(0, 8).map((c) => c.name);
-  const rels = [...new Set(communities.flatMap((c) => c.files))];
+  const anchors = communities
+    .filter((c) => !isNoiseCommunity(c.name))
+    .slice(0, 8)
+    .map((c) => c.name);
   const MAX = 25;
   const shown = rels.slice(0, MAX);
   const parts: string[] = [
@@ -1013,7 +1032,21 @@ async function buildTeachMindMap(
       db = null;
     }
   }
-  const featureRels = ft.features.map((f) => [...new Set(f.communities.flatMap((c) => c.files))]);
+  // 功能 → 文件全集：社区文件（原子，保调用边证据）+ file_map 目录直挂文件
+  //（零社区功能的孤儿/补全文件，如 dsl/db/daemon 纯定义与基础设施）
+  const fidFiles = new Map<string, string[]>();
+  if (ft.file_map) {
+    for (const sf of dsl.semantic?.files ?? []) {
+      const m = ft.file_map[sf.id];
+      if (!m) continue;
+      const arr = fidFiles.get(m.feature_id) ?? [];
+      arr.push(sf.path);
+      fidFiles.set(m.feature_id, arr);
+    }
+  }
+  const featureRels = ft.features.map((f) => [
+    ...new Set([...f.communities.flatMap((c) => c.files), ...(fidFiles.get(f.id) ?? [])]),
+  ]);
   const callEdgeLists = featureRels.map((rels) => (db ? loadCallEdges(db, rels) : []));
   // 跨功能依赖叠加层（树管归属、线管依赖）：真实调用边聚合 + 底座识别
   const { deps, foundations, shared } = db
@@ -1089,8 +1122,10 @@ async function buildTeachMindMap(
   } catch {
     /* 旧文件损坏则忽略 */
   }
-  // 缺译名的社区 → LLM 批量翻译（一次性，之后走缓存；开销与分镜无关独立判断）
+  // 缺译名的社区 → LLM 批量翻译（一次性，之后走缓存；开销与分镜无关独立判断）。
+  // 噪音名（数据结构/辅助器类）不送 LLM：直译（最小堆）还是噪音，统一按「内部组件」兜底。
   const allCommNames = [...new Set(ft.features.flatMap((f) => f.communities.map((c) => c.name)))];
+  for (const n of allCommNames) if (!communityZh[n] && isNoiseCommunity(n)) communityZh[n] = NOISE_ZH;
   const needZh = allCommNames.filter((n) => !communityZh[n]);
   if (needZh.length > 0) {
     const cfg = loadAgentConfig();
@@ -1144,7 +1179,7 @@ async function buildTeachMindMap(
           const prev = prevScripts.get(f.name);
           if (prev && prev.steps.length >= 3) return prev;
           return llmTeachFeature(
-            buildTeachMaterial(title, f.name, f.communities, fileIndex, callEdgeLists[i], notesPerFeature[i]),
+            buildTeachMaterial(title, f.name, featureRels[i], f.communities, fileIndex, callEdgeLists[i], notesPerFeature[i]),
             f.name,
           );
         },
