@@ -19,15 +19,16 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getStorageRoot } from '../storage.js';
+import { getStorageRoot, getDSL, saveDSL } from '../storage.js';
 import { renameFile, type RenameFileInput } from './rename_file.js';
 import { editCode, type EditCodeArgs } from './edit_code.js';
+import type { DesignDSL } from '../dsl/types.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
 // ─────────────────────────────────────────────────────────────
 
-export type ChangeKind = 'rename_file' | 'edit_code';
+export type ChangeKind = 'rename_file' | 'edit_code' | 'dsl_rename';
 
 export interface ChangeOp {
   /** rename_file */
@@ -39,6 +40,11 @@ export interface ChangeOp {
   start?: number;
   end?: number;
   code?: string;
+  /** dsl_rename：目标 feature + 数据名（= 产出节点 label）新旧名 + 产出节点 id */
+  feature?: string;
+  oldName?: string;
+  newName?: string;
+  producer?: string;
 }
 
 export type ChangeStatus = 'pending' | 'approved' | 'rejected' | 'executed';
@@ -147,6 +153,7 @@ function absPath(project_dir: string, p: string): string {
 
 function buildLabel(kind: ChangeKind, op: ChangeOp): string {
   if (kind === 'rename_file') return `移动/重命名文件 ${op.from ?? ''} → ${op.to ?? ''}`;
+  if (kind === 'dsl_rename') return `数据名重命名 ${op.oldName ?? ''} → ${op.newName ?? ''}`;
   return `行区间编辑 ${op.file ?? ''} L${op.start}-${op.end}`;
 }
 
@@ -229,6 +236,111 @@ async function previewRename(project_dir: string, op: ChangeOp): Promise<{ diffs
 }
 
 // ─────────────────────────────────────────────────────────────
+// dsl_rename：数据名（= 产出节点 label）全图谱同步重命名
+// 干跑只算影响面不写盘；approve 时真实改 DSL 并通过 saveDSL 广播。
+// ─────────────────────────────────────────────────────────────
+
+/** 一次重命名命中点 */
+export interface DslRenameEdit {
+  kind: 'node_label' | 'node_title' | 'edge_label';
+  node?: string;
+  edge?: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * 计算重命名影响面（纯读，不改 dsl）：
+ * 1. 产出节点（op.producer 指定 id，或按 label 首匹配）label / title 命中 → 改名
+ * 2. 引用该数据名的 flow 边（label === oldName）→ 同步
+ */
+export function collectDslRenameEdits(dsl: DesignDSL, op: ChangeOp): DslRenameEdit[] {
+  const oldName = op.oldName ?? '';
+  const newName = op.newName ?? '';
+  if (!oldName || !newName || oldName === newName) return [];
+  const nodes = dsl.geometry?.nodes ?? [];
+  const edges = dsl.geometry?.edges ?? [];
+  const edits: DslRenameEdit[] = [];
+
+  // 产出节点：优先按 id，其次按 label 首匹配
+  const producer = op.producer
+    ? nodes.find((n) => n.id === op.producer)
+    : nodes.find((n) => n.label === oldName);
+  if (producer) {
+    if (producer.label === oldName) edits.push({ kind: 'node_label', node: producer.id, from: oldName, to: newName });
+    if (producer.title === oldName) edits.push({ kind: 'node_title', node: producer.id, from: oldName, to: newName });
+  }
+  // 引用边：凡是 label 承载该数据名的边（via）都同步改名
+  for (const e of edges) {
+    if (e.label === oldName) edits.push({ kind: 'edge_label', edge: e.id, from: oldName, to: newName });
+  }
+  return edits;
+}
+
+/** 真正把 edits 落到 dsl 对象上（approve 时用） */
+export function applyDslRenameEdits(dsl: DesignDSL, edits: DslRenameEdit[]): number {
+  let n = 0;
+  for (const ed of edits) {
+    if (ed.kind === 'node_label') {
+      const node = (dsl.geometry?.nodes ?? []).find((x) => x.id === ed.node);
+      if (node && node.label === ed.from) { node.label = ed.to; n++; }
+    } else if (ed.kind === 'node_title') {
+      const node = (dsl.geometry?.nodes ?? []).find((x) => x.id === ed.node);
+      if (node && node.title === ed.from) { node.title = ed.to; n++; }
+    } else if (ed.kind === 'edge_label') {
+      const edge = (dsl.geometry?.edges ?? []).find((x) => x.id === ed.edge);
+      if (edge && edge.label === ed.from) { edge.label = ed.to; n++; }
+    }
+  }
+  return n;
+}
+
+/** dsl_rename 干跑：定位 DSL → 算影响面 → 转可视化 diff + 预览文本 */
+async function previewDslRename(project_dir: string, op: ChangeOp): Promise<{ diffs: ChangeDiff[]; preview: string }> {
+  const feature = op.feature;
+  if (!feature) throw new Error('dsl_rename 变更缺 feature');
+  const dsl = getDSL(feature);
+  if (!dsl) throw new Error(`DSL 不存在: feature "${feature}"（请先 import/save 该 feature）`);
+  const edits = collectDslRenameEdits(dsl, op);
+  if (edits.length === 0) {
+    throw new Error(`在 feature "${feature}" 中找不到数据名「${op.oldName}」的产出节点或引用边`);
+  }
+  const labelEdits = edits.filter((e) => e.kind === 'node_label');
+  const titleEdits = edits.filter((e) => e.kind === 'node_title');
+  const edgeEdits = edits.filter((e) => e.kind === 'edge_label');
+  const lines: string[] = [];
+  if (labelEdits.length) lines.push(`产出节点 ${labelEdits[0].node}  label: "${op.oldName}" → "${op.newName}"`);
+  if (titleEdits.length) lines.push(`产出节点 title: "${op.oldName}" → "${op.newName}"`);
+  if (edgeEdits.length) lines.push(`引用边 ${edgeEdits.length} 条（via label）同步改名`);
+  const before = [`数据名「${op.oldName}」定义于节点 ${labelEdits[0]?.node ?? op.producer ?? '（未定位）'}`];
+  const after = [...lines];
+  const diffs: ChangeDiff[] = [
+    {
+      file: `DSL · ${feature}`,
+      kind: 'rename',
+      before,
+      after,
+      note: `共 ${edits.length} 处同步：${labelEdits.length} 定义 + ${titleEdits.length} 标题 + ${edgeEdits.length} 引用边`,
+    },
+  ];
+  const preview = `数据名「${op.oldName}」→「${op.newName}」\n` + lines.map((l) => '  ' + l).join('\n');
+  return { diffs, preview };
+}
+
+/** dsl_rename 真改：定位 DSL → 算影响面 → 落盘 + 广播（source=mcp 触发浏览器刷新） */
+async function executeDslRename(project_dir: string, op: ChangeOp): Promise<string> {
+  const feature = op.feature;
+  if (!feature) throw new Error('dsl_rename 变更缺 feature');
+  const dsl = getDSL(feature);
+  if (!dsl) throw new Error(`DSL 不存在: feature "${feature}"`);
+  const edits = collectDslRenameEdits(dsl, op);
+  if (edits.length === 0) throw new Error(`找不到数据名「${op.oldName}」的产出节点或引用边`);
+  const n = applyDslRenameEdits(dsl, edits);
+  saveDSL(dsl, 'mcp');
+  return `已重命名「${op.oldName}」→「${op.newName}」，同步 ${n}/${edits.length} 处（节点 label/title + 引用边），feature "${feature}" 已回写`;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 提案 / 列表 / 审批 / 驳回
 // ─────────────────────────────────────────────────────────────
 
@@ -249,6 +361,12 @@ export async function proposeChange(input: ProposeInput): Promise<{ change: Pend
       preview = p.preview;
       diffs = p.diffs;
       summary = [`移动/重命名 ${op.from} → ${op.to}`, `引用改写 ${diffs[0]?.after.length ?? 0} 处`];
+    } else if (input.kind === 'dsl_rename') {
+      const p = await previewDslRename(project_dir, op);
+      preview = p.preview;
+      diffs = p.diffs;
+      const edgeN = diffs[0]?.note ?? '';
+      summary = [`数据名重命名 ${op.oldName} → ${op.newName}`, edgeN, '干跑预览（未写盘）'];
     } else {
       throw new Error(`未知变更类型: ${input.kind}`);
     }
@@ -317,6 +435,17 @@ export async function approveChange(project_dir: string, id: string): Promise<Ap
         return { ok: false, status: 'pending', error: '阻断：' + rblocked.join('；') };
       }
       const result = `已移动 ${r.fromRel} → ${r.toRel}，改写 ${r.editCount} 处引用，重建索引`;
+      findAndUpdate(project_dir, id, (x) => {
+        x.result = result;
+        x.lastError = undefined;
+        x.status = 'executed';
+        x.decided_at = nowIso();
+      });
+      return { ok: true, status: 'executed', result };
+    }
+
+    if (c.kind === 'dsl_rename') {
+      const result = await executeDslRename(c.project_dir, c.op);
       findAndUpdate(project_dir, id, (x) => {
         x.result = result;
         x.lastError = undefined;
