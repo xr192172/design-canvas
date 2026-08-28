@@ -11,9 +11,12 @@
  * 工具统一由 server_registry 注册：13 个主工具（旧工具名别名已于 2026-08-17 全部移除）。
  */
 
+import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerAllTools } from './server_registry.js';
+import { importProject } from './tools/import_project.js';
+import { watchProjectTool } from './tools/watch_project_tool.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -60,12 +63,70 @@ const server = new McpServer(
 registerAllTools(server);
 
 // ─────────────────────────────────────────────────────────────
+// 启动钩子（常驻模式）：DC_AUTO_WATCH=1 时，启动即导入并监听工作空间
+// ─────────────────────────────────────────────────────────────
+
+/** 项目根：默认 process.cwd()，可用 DC_PROJECT_DIR 覆盖（相对 cwd 或绝对路径，语义同 serve） */
+function resolveProjectDir(): string {
+  const override = process.env.DC_PROJECT_DIR;
+  return override ? path.resolve(process.cwd(), override) : process.cwd();
+}
+
+/** 从目录名推导合法 feature 名（^[a-zA-Z0-9_-]+$），兜底 workspace */
+function deriveFeatureName(projectDir: string): string {
+  const name = path.basename(path.resolve(projectDir)).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return name || 'workspace';
+}
+
+/**
+ * 启动钩子主体：
+ *   1. import_project 全量导入工作空间 → 建索引（cache.db + 设计 DSL）
+ *   2. watch_project 常驻监听 → 文件变更增量保鲜 + 影响报告
+ * 环境变量（与 serve.ts 约定一致）：
+ *   DC_AUTO_WATCH=1            开启本钩子
+ *   DC_PROJECT_DIR=<dir>       目标工作空间（默认 cwd）
+ *   DC_WATCH_FEATURE=<name>    feature 名（默认取目录名）
+ *   DC_WATCH_INTERVAL_MS=<ms>  reconcile 兜底扫描间隔（默认 30000）
+ * 失败不致命：任何一步出错仅打日志，不影响 MCP 工具服务。
+ */
+async function runAutoWatchHook(): Promise<void> {
+  if (process.env.DC_AUTO_WATCH !== '1') return;
+  const projectDir = resolveProjectDir();
+  const feature = process.env.DC_WATCH_FEATURE?.trim() || deriveFeatureName(projectDir);
+  const reconcileMs = parseInt(process.env.DC_WATCH_INTERVAL_MS ?? '30000', 10) || 30000;
+
+  try {
+    const imp = await importProject({ project_dir: projectDir, feature });
+    console.error(
+      `[Auto Watch] 已导入工作空间 ${projectDir} → feature="${feature}" ` +
+        `（解析 ${imp.files_parsed} 文件 / ${imp.symbols_found} 符号 / ${imp.dep_edges} 调用边）`,
+    );
+  } catch (e) {
+    console.error(`[Auto Watch] 初始导入失败: ${(e as Error).message}`);
+  }
+
+  try {
+    const w = await watchProjectTool({
+      project_dir: projectDir,
+      action: 'start',
+      feature,
+      impact_on_change: true,
+      reconcile_interval_ms: reconcileMs,
+    });
+    console.error(`[Auto Watch] 常驻监听已启动: ${w.message}`);
+  } catch (e) {
+    console.error(`[Auto Watch] 监听启动失败: ${(e as Error).message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // 启动
 // ─────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[${SERVER_NAME} v${SERVER_VERSION}] MCP server started (stdio)`);
+  await runAutoWatchHook();
 }
 
 main().catch((e) => {
