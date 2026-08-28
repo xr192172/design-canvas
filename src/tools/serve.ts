@@ -52,6 +52,7 @@ import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, op
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { deriveDetailChain } from './derive_chain.js';
 import { chainRecon } from './chain_recon.js';
+import type { DesignDSL } from '../dsl/types.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
   loadExplainConfig,
@@ -1144,6 +1145,55 @@ function handleApiFeatureDsl(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
     sendJson(res, 200, dsl);
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/canvas-notes?feature=<name>：返回某 feature 的批注层数据（canvas_notes 字段，读 live DSL，缺失返回空数组） */
+function handleApiCanvasNotesGet(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url!, 'http://localhost');
+    const feature = url.searchParams.get('feature') || '';
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    sendJson(res, 200, { feature, canvas_notes: dsl.canvas_notes || [] });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/canvas-notes：写回某 feature 的批注层数据（只动 canvas_notes 字段，不动语义模型） */
+async function handleApiCanvasNotesSave(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const feature = params.feature || '';
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    const notes: unknown[] = Array.isArray(params.canvas_notes) ? params.canvas_notes : [];
+    dsl.canvas_notes = notes as DesignDSL['canvas_notes'];
+    saveDSL(dsl, 'frontend');
+    sendJson(res, 200, {
+      success: true,
+      feature,
+      count: notes.length,
+      saved_at: new Date().toISOString(),
+    });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -2387,6 +2437,16 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/feature-dsl') && method === 'GET') {
       handleApiFeatureDsl(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/canvas-notes') && method === 'GET') {
+      handleApiCanvasNotesGet(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/canvas-notes') && method === 'POST') {
+      void handleApiCanvasNotesSave(req, res);
       return;
     }
 

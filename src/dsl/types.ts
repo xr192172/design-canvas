@@ -14,6 +14,7 @@ import type { Annotation } from './annotation.js';
 import type { Animation, AnimationSystem } from './animation.js';
 import type { Simulation } from './simulation.js';
 import type { ReasoningSystem } from './reasoning.js';
+import type { CanvasNote } from './canvas_note.js';
 
 export type {
   DiagramStatus,
@@ -91,6 +92,11 @@ export type {
   ReasoningEntry,
   ReasoningSystem,
 } from './reasoning.js';
+
+export type {
+  CanvasNote,
+  CanvasNoteType,
+} from './canvas_note.js';
 
 /** 主题配置 */
 export interface ThemeConfig {
@@ -200,6 +206,9 @@ export interface DesignDSL {
   /** 语义层（无则纯示意图） */
   semantic?: Semantic;
   annotations?: Annotation[];
+  /** 批注层数据（阶段 C）：画布手绘批注覆盖层（高亮/箭头/便签/文本），
+   * 独立于语义模型，仅前端渲染与协作，不参与 get_dsl 语义/代码侧逻辑 */
+  canvas_notes?: CanvasNote[];
   /** 动画序列（旧版阶段快照式，保留向后兼容） */
   animations?: Animation[];
   /** 动画系统 V2（分层精度 L0-L5，声明式数据流可视化，详见 docs/animation-design.md） */

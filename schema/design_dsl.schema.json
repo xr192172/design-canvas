@@ -55,6 +55,11 @@
     },
     "reasoning": {
       "$ref": "#/definitions/ReasoningSystem"
+    },
+    "canvas_notes": {
+      "type": "array",
+      "description": "批注层数据（阶段 C）：手绘批注覆盖层持久化（高亮/箭头/便签/文本），独立于语义模型，仅供前端画布渲染与协作",
+      "items": { "$ref": "#/definitions/CanvasNote" }
     }
   },
   "definitions": {
@@ -300,6 +305,38 @@
         "author": { "type": "string", "enum": ["human", "llm"] },
         "created": { "type": "string", "format": "date-time" }
       }
+    },
+    "CanvasNote": {
+      "type": "object",
+      "required": ["id", "type"],
+      "description": "批注层图元：手绘自由笔迹 / 箭头 / 便签 / 文本。坐标均为画布世界坐标（world px）",
+      "properties": {
+        "id": { "type": "string", "description": "图元唯一 ID" },
+        "type": {
+          "type": "string",
+          "enum": ["highlight", "arrow", "sticky", "text"],
+          "description": "highlight=高亮笔自由笔迹；arrow=箭头；sticky=便签；text=文本"
+        },
+        "points": {
+          "type": "array",
+          "description": "笔迹/箭头关键点序列 [[x,y],...]（世界坐标）",
+          "items": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "x": { "type": "number", "description": "便签/文本锚点 x（世界坐标）" },
+        "y": { "type": "number", "description": "便签/文本锚点 y（世界坐标）" },
+        "w": { "type": "number", "description": "便签/文本宽度（世界 px）" },
+        "h": { "type": "number", "description": "便签/文本高度（世界 px）" },
+        "text": { "type": "string", "description": "便签/文本内容" },
+        "color": { "type": "string", "description": "颜色（CSS 色值）" },
+        "strokeWidth": { "type": "number", "description": "笔迹/箭头线宽（世界 px）" },
+        "created": { "type": "string", "format": "date-time", "description": "创建时间" }
+      },
+      "additionalProperties": true
     },
     "Simulation": {
       "type": "object",
