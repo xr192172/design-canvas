@@ -24,7 +24,7 @@ design-canvas 让 LLM 直接输出**结构化 DSL JSON**（双层：几何 + 语
 ### 前端分工（前后端分离）
 
 - 本仓库（MCP server）是**数据/协议层**：负责 DSL 的存取、代码理解、生成/回填/一致性、重构防线、插桩对账，统一以 JSON 与 MCP 工具对外，同时 `npm run serve` 暴露一套 HTTP API（`/api/features`、`/api/feature-dsl`、`/api/trace-exec`、`/api/code/*` 等）供前端直连。
-- 可视化协作工作台是**独立的配套前端项目 dsl-workbench**（Vite + TypeScript），通过 HTTP 拉取本仓库的实时 DSL 渲染成交互图：沙盘（免连线·数据名匹配）、版本对比、问题清单、探针管理、运行时契约、代码审批。后端不可达时自动回退本地快照，保证页面总能打开。
+- 可视化协作工作台是**独立的配套前端项目 [dsl-workbench](https://github.com/xr192172/dsl-workbench)**（Vite + TypeScript），通过 HTTP 拉取本仓库的实时 DSL 渲染成交互图：沙盘（免连线·数据名匹配）、版本对比、问题清单、探针管理、运行时契约、代码审批。后端不可达时自动回退本地快照，保证页面总能打开。
 - 内置一个**精简自包含 HTML 渲染器**（`render_dsl`）仅作预览兜底：无前端环境时也能 `npm run serve` 把单张 DSL 渲染成单文件 HTML 快速检查。**它是兜底，不是可视化主力**——日常可视化用 dsl-workbench。
 
 ## 核心能力线
