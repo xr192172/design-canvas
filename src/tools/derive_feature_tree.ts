@@ -56,6 +56,96 @@ function dirOf(p: string): string {
   return seg.length > 1 ? seg[0] : '(根)';
 }
 
+/**
+ * 顶层目录 → 中文功能名（规则归并时功能名符合人类阅读习惯，而非裸目录名）。
+ * 未列出的目录保持原名（如 go-camera、go-slim 等外部子项目）。
+ */
+const DIR_FEATURE_NAMES: Record<string, string> = {
+  dsl: 'DSL 协议定义',
+  db: '数据存储',
+  daemon: '守护进程',
+  renderer: '渲染引擎',
+  camera: '观测探针',
+  diagnosis: '诊断分析',
+  go_camera: 'Go 探针引擎',
+  go_slim: '轻量探针',
+  scripts: '构建脚本',
+  schema: 'Schema 定义',
+  tests: '测试套件',
+};
+
+/**
+ * tools/ 能力域（对齐 classify_tools 8 域）：tools 大桶按文件名关键词打分归入能力域。
+ * 命中不了默认归 'query'（查询理解）——诚实兜底，多数读/查类工具落这里。
+ */
+const TOOL_DOMAINS: Array<{ id: string; label: string; kws: string[] }> = [
+  { id: 'design', label: '设计编辑', kws: ['scaffold', 'render_dsl', 'render_sandbox', 'render_workbench', 'render_cluster', 'workbench', 'wizard', 'overlay', 'animation', 'anim', 'shape', 'edge_', 'layout', 'simulation'] },
+  { id: 'query', label: '查询理解', kws: ['query', 'search', 'diff', 'explore', 'get_', 'list', 'dict', 'snapshot', 'language_concepts', 'arch_layer', 'layer_detect', 'feature_map', 'dag_layout', 'role_title'] },
+  { id: 'refactor', label: '重构治理', kws: ['rename', 'assemble', 'slim', 'refactor', 'split', 'dead', 'contract', 'effects', 'pipeline', 'extract', 'remov', 'repair', 'migration', 'brick', 'verify_refactor', 'ts_slim', 'similar'] },
+  { id: 'observe', label: '观测质检', kws: ['camera', 'probe', 'judge', 'instrument', 'narrate', 'trace', 'monitor', 'watch', 'log', 'diagnos', 'verify', 'consistency', 'chain', 'dogfood', 'freshness', 'signal', 'recon'] },
+  { id: 'judge', label: '治理裁决', kws: ['approval', 'submit_gate', 'review', 'gate'] },
+  { id: 'edit', label: '代码编辑', kws: ['edit_code', 'file_ops', 'api_ops', 'node_ops', 'batch_ops', 'edge_ops', 'apply', 'patch'] },
+  { id: 'harvest', label: '逆向采集', kws: ['harvest', 'import_', 'url', 'closure', 'collect_functions', 'cli_extract', 'registry_extract'] },
+  { id: 'export', label: '交付导出', kws: ['export', 'render_mindmap', 'render_anatomy', 'render_tools_map', 'render_wizard', 'registry', 'report', 'tour'] },
+];
+
+/** tools/ 下文件 → 能力域 id（按文件名关键词打分取多数） */
+function toolDomainOf(relPath: string): string {
+  const base = (relPath.split('/').pop() ?? '').toLowerCase();
+  let best = 'query';
+  let bestHits = 0;
+  for (const d of TOOL_DOMAINS) {
+    let hits = 0;
+    for (const k of d.kws) if (base.includes(k)) hits++;
+    if (hits > bestHits) { bestHits = hits; best = d.id; }
+  }
+  return best;
+}
+
+/**
+ * 全局基础设施文件：真身是数据层/协议层/服务层（dsl/db/daemon/根级 storage/server），
+ * 不应随调用边被吸进业务社区——文件归属按目录直挂，不跟社区走。
+ */
+function isInfraPath(relPath: string): boolean {
+  const seg = relPath.split('/');
+  if (seg.length === 1) {
+    return /^(storage|server|server_registry|storage_overlay)\./.test(seg[0]);
+  }
+  return seg[0] === 'dsl' || seg[0] === 'db' || seg[0] === 'daemon';
+}
+
+/** 社区 → 规则归并主键：tools 桶按能力域，根级归"基础服务"，其余按首段目录 */
+function communityKeyOf(c: { files: string[] }): string {
+  if (c.files.length === 0) return 'root-svc';
+  const counts = new Map<string, number>();
+  for (const f of c.files) {
+    const seg = f.split('/');
+    const key = seg.length > 1 ? (seg[0] === 'tools' ? `tools:${toolDomainOf(f)}` : seg[0]) : 'root-svc';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let best = 'root-svc';
+  let bestN = 0;
+  for (const [k, n] of counts) if (n > bestN) { best = k; bestN = n; }
+  return best;
+}
+
+/** 单个文件 → 规则归并主键（目录/能力域维度）：tools → tools:<domain>，根级 → root-svc，其余按首段目录 */
+function fileKeyOf(relPath: string): string {
+  const seg = relPath.split('/');
+  if (seg.length === 1) return 'root-svc';
+  return seg[0] === 'tools' ? `tools:${toolDomainOf(relPath)}` : seg[0];
+}
+
+/** 规则归并主键 → 功能展示名 */
+function ruleLabelOf(key: string): string {
+  if (key.startsWith('tools:')) {
+    const d = TOOL_DOMAINS.find((x) => x.id === key.slice('tools:'.length));
+    return d ? d.label : '工具集';
+  }
+  if (key === 'root-svc') return '基础服务';
+  return DIR_FEATURE_NAMES[key] ?? key;
+}
+
 /** 用 LLM 把全部社区归并成几大功能：返回 [{ name, community_ids }] 或 null（调用失败/输出非法） */
 async function groupFeaturesByLLM(
   comms: Array<{ id: number; name: string; files: string[]; est_lines: number }>,
@@ -103,23 +193,17 @@ async function groupFeaturesByLLM(
   }
 }
 
-/** 规则兜底：按社区成员文件首段目录归并成功能 */
+/**
+ * 规则兜底归并：社区按"成员文件主导目录"聚成功能（先目录聚）；
+ *   - tools/ 大桶按能力域再拆（design/query/refactor/observe/judge/edit/harvest/export）
+ *   - 根级文件（storage/server…）聚成"基础服务"，消除"(根)"伪功能
+ * 功能名用中文（DIR_FEATURE_NAMES / 能力域 label），符合人类阅读习惯。
+ */
 function groupByDir(
   comms: Array<{ id: number; name: string; files: string[]; est_lines: number; symbol_count: number }>,
 ): FeatureNode[] {
   const bucketOf = new Map<number, string>();
-  for (const c of comms) {
-    if (c.files.length === 0) { bucketOf.set(c.id, '(根)'); continue; }
-    const dirs = new Map<string, number>();
-    for (const f of c.files) {
-      const d = dirOf(f);
-      dirs.set(d, (dirs.get(d) || 0) + 1);
-    }
-    let best = '(根)';
-    let bestN = 0;
-    for (const [d, n] of dirs) if (n > bestN) { best = d; bestN = n; }
-    bucketOf.set(c.id, best);
-  }
+  for (const c of comms) bucketOf.set(c.id, communityKeyOf(c));
   const byKey = new Map<string, number[]>();
   for (const [cid, key] of bucketOf) {
     if (!byKey.has(key)) byKey.set(key, []);
@@ -127,7 +211,7 @@ function groupByDir(
   }
   const features: FeatureNode[] = [];
   for (const [key, ids] of byKey) {
-    features.push({ id: '', name: key, communities: ids.map((id) => comms.find((c) => c.id === id)!) });
+    features.push({ id: '', name: ruleLabelOf(key), communities: ids.map((id) => comms.find((c) => c.id === id)!) });
   }
   return features;
 }
