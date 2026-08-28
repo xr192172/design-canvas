@@ -6,12 +6,14 @@
  */
 
 /** 批注图元类型 */
-export type CanvasNoteType = 'highlight' | 'arrow' | 'sticky' | 'text';
+export type CanvasNoteType = 'highlight' | 'arrow' | 'oval' | 'sticky' | 'text';
 
 /** 批注层图元 */
 export interface CanvasNote {
   /** 图元唯一 ID */
   id: string;
+  /** 批注套 ID：同一次批注层会话（开启→关闭）内创建的图元共享同一套，一套=一个批注；历史数据缺省时按单元素处理 */
+  groupId?: string;
   /** 图元类型 */
   type: CanvasNoteType;
   /** 笔迹/箭头关键点序列 [[x,y],...]（世界坐标） */

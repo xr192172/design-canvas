@@ -309,17 +309,18 @@
     "CanvasNote": {
       "type": "object",
       "required": ["id", "type"],
-      "description": "批注层图元：手绘自由笔迹 / 箭头 / 便签 / 文本。坐标均为画布世界坐标（world px）",
+      "description": "批注层图元：手绘自由笔迹 / 箭头 / 圈注椭圆 / 便签 / 文本。坐标均为画布世界坐标（world px）",
       "properties": {
         "id": { "type": "string", "description": "图元唯一 ID" },
+        "groupId": { "type": "string", "description": "批注套 ID：同一次批注层会话（开启→关闭）内创建的图元共享同一套，一套=一个批注；历史数据缺省时按单元素处理" },
         "type": {
           "type": "string",
-          "enum": ["highlight", "arrow", "sticky", "text"],
-          "description": "highlight=高亮笔自由笔迹；arrow=箭头；sticky=便签；text=文本"
+          "enum": ["highlight", "arrow", "oval", "sticky", "text"],
+          "description": "highlight=高亮笔自由笔迹；arrow=箭头；oval=圈注红色虚线椭圆（points=[中心,边缘]）；sticky=便签；text=文本"
         },
         "points": {
           "type": "array",
-          "description": "笔迹/箭头关键点序列 [[x,y],...]（世界坐标）",
+          "description": "笔迹/箭头关键点序列 [[x,y],...]（世界坐标）；oval 时 [中心点, 边缘点]",
           "items": {
             "type": "array",
             "items": { "type": "number" },
