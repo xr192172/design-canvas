@@ -474,14 +474,24 @@ async function handleApiSplitPlan(req: http.IncomingMessage, res: http.ServerRes
       sendError(res, 404, `文件不存在：src/${relPath}`);
       return;
     }
-    const result = await checkMonolith({ files: [absPath], warn_lines: 300, crit_lines: 600 });
+    const result = await checkMonolith({ files: [absPath], warn_lines: 500, crit_lines: 1000 });
     const report = result.reports[0];
     if (!report) {
       sendError(res, 500, 'checkMonolith 未返回该文件报告');
       return;
     }
     if (report.status === 'ok') {
-      sendJson(res, 200, { ok: true, markdown: `# ${relPath}\n\n该文件 ${report.lines} 行，未超阈值（警告≥300 行），无需拆分。\n` });
+      sendJson(res, 200, { ok: true, markdown: `# ${relPath}\n\n该文件 ${report.lines} 行，未超阈值（警告≥500 行），无需拆分。\n` });
+      return;
+    }
+    if (report.status === 'cohesive') {
+      sendJson(res, 200, {
+        ok: true,
+        markdown: `# ${relPath}\n\n该文件 ${report.lines} 行，超过体积阈值但引用高度内聚（仅 1 个社区），不构成拆分候选。\n`,
+        filename: 'split_' + relPath.replace(/[^a-zA-Z0-9_-]/g, '_') + '.md',
+        lines: report.lines,
+        communities: report.communities.length,
+      });
       return;
     }
     const markdown = buildSplitPlanMarkdown(report, relPath, new Date().toLocaleString('zh-CN'));
@@ -510,6 +520,7 @@ async function handleApiMonolith(req: http.IncomingMessage, res: http.ServerResp
       warn_lines: typeof params.warn_lines === 'number' ? params.warn_lines : undefined,
       crit_lines: typeof params.crit_lines === 'number' ? params.crit_lines : undefined,
       max_files: typeof params.max_files === 'number' ? params.max_files : undefined,
+      flag_cohesive: typeof params.flag_cohesive === 'boolean' ? params.flag_cohesive : undefined,
     };
     if (params.feature) {
       const dsl = getDSL(String(params.feature));
@@ -1393,9 +1404,11 @@ async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerRes
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
-    const result = archLayer({
+    const result = await archLayer({
       feature: params.feature || 'design-canvas',
       persist: params.persist,
+      layers: params.layers,
+      check_violations: params.check_violations,
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {

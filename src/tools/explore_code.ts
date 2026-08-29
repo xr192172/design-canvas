@@ -18,6 +18,7 @@
 import { semanticSearch } from './semantic_search.js';
 import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
+import type { LayerDef } from './layer_detect.js';
 import { guidedTour } from './guided_tour.js';
 import { assessLines, buildSplitPreviewDsl } from './monolith.js';
 import { injectReplay } from './inject_replay.js';
@@ -108,6 +109,9 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
     case 'arch_layer': {
       const r = await archLayer({
         feature: requireStr(args, 'feature'),
+        persist: bool(args, 'persist'),
+        layers: args['layers'] as LayerDef[] | undefined,
+        check_violations: bool(args, 'check_violations'),
       });
       return toResult(r, true);
     }
