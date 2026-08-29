@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { validateDSL, validateDSLJson } from '../../src/dsl/validator';
 import type { DesignDSL } from '../../src/dsl/types';
-import conveyor from '../../examples/conveyor.json';
 
 /** 构造一个最小合法 DSL 用于测试 */
 function makeValid(): DesignDSL {
@@ -45,11 +44,6 @@ describe('validateDSL - 合法 DSL', () => {
     const result = validateDSL(makeValid());
     expect(result.valid).toBe(true);
     expect(result.errors).toEqual([]);
-  });
-
-  it('conveyor 示例通过校验', () => {
-    const result = validateDSL(conveyor);
-    expect(result.valid).toBe(true);
   });
 
   it('无 semantic 的纯示意图通过校验', () => {

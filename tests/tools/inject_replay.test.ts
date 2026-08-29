@@ -1,7 +1,7 @@
 /**
  * inject_replay（D3 注入回放）测试
  *
- * 蓝本：examples/conveyor.json 的 flow_budget_check
+ * 蓝本：预算检查流 flow_budget_check（原 conveyor 示例，已下线）
  *  - handler.errors: ErrBudgetExceeded(expected→draft_zone) / panic(unexpected→compose)
  *  - branches: 超80%预算→section_queue(红) / else→current_round(绿)
  */

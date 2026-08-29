@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderHTML } from '../../src/renderer/html_renderer';
 import type { DesignDSL } from '../../src/dsl/types';
-import conveyor from '../../examples/conveyor.json';
 
 function makeMinimalDSL(): DesignDSL {
   return {
@@ -182,39 +181,6 @@ describe('renderHTML - 顶部 / 底部', () => {
     expect(html).toContain('id="export-json"');
     expect(html).toContain('id="rerender"');
     expect(html).toContain('导出 design-canvas.json');
-  });
-});
-
-describe('renderHTML - conveyor 示例', () => {
-  it('完整 conveyor DSL 能渲染', () => {
-    const html = renderHTML(conveyor as DesignDSL);
-    expect(html).toContain('<svg');
-    expect(html).toContain('L0 永久层');
-    expect(html).toContain('CurrentRound');
-    expect(html).toContain('SectionQueue');
-    expect(html).toContain('DraftZone');
-    expect(html).toContain('DynamicInjection');
-  });
-
-  it('conveyor 的 33 个节点都有 rect', () => {
-    const html = renderHTML(conveyor as DesignDSL);
-    const nodeMatches = html.match(/class="node[^"]*"/g);
-    expect(nodeMatches).not.toBeNull();
-    expect(nodeMatches!.length).toBe(33);
-  });
-
-  it('conveyor 的 33 条边（5 条流向 + 21 条 contains + 4 条扩展 + 3 条 detail 变形链）', () => {
-    const html = renderHTML(conveyor as DesignDSL);
-    const edgeMatches = html.match(/class="edge"/g);
-    expect(edgeMatches).not.toBeNull();
-    expect(edgeMatches!.length).toBe(33);
-  });
-
-  it('conveyor 的 3 条标注通过 window.__DSL__ 暴露（供 tooltip 使用）', () => {
-    const html = renderHTML(conveyor as DesignDSL);
-    expect(html).toContain('anno_kv_cache');
-    expect(html).toContain('anno_fold_params');
-    expect(html).toContain('anno_gc_removed');
   });
 });
 
