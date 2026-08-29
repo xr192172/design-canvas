@@ -270,3 +270,18 @@
 * 无配置时 `configured=false`，LLM 决策停用；`/v1/chat/completions` 可被 OpenAI 客户端纳管。
 * 遗留：真实 Key 池多 Key 轮询/失败转移的自动化回归用例未固化（手工验证过），后续可补 vitest。
 
+### 8.4 mock 清理 + 反馈通道真接通（2026-08-29 完成）
+
+> 用户定调：**mock 数据除了混淆视野没有任何作用**。前端所有"假数据/假状态/占位"一律改真或明确停用，绝不假装执行。
+
+* **「提交你的看法」面板真接通**（`src/tools/render_dsl_workbench.ts`）：点击发送 → 经 `/api/canvas-notes` 保存为真实批注（带锚点槽位）；无后端 → "未连接后端（serve），反馈通道停用"；无 LLM → "批注已保存；LLM 未配置，AI 决策停用"（仍保存但决策停用，不假装 AI 处理）。
+* **字段契约修复**：前端发送体由 `notes` 改为 `canvas_notes`，与 `POST /api/canvas-notes` 后端契约对齐（此前 toast 显示成功但实际存了空数组）。
+* **沙盘假时间戳清除**（`src/tools/render_sandbox.ts`）："最后扫描：刚完成" → 真实的"管线快照"（scanned_files/语言/积木数）。
+* **静态推演如实标注**（`src/renderer/scripts.ts`）：无执行环境时 `fallbackMockTrace` 状态标 `unsupported` + "静态推演（未连接后端/请求失败，非真实执行）"，不再混充真实执行。
+* **workbench 单出口链路修复**：① `workbench_page.ts` 代码审批 rail 缺 `id="rail"`（既有 bug，`$('rail')` 抛 null 阻断整个 `activate()`，iframe 永不加载）→ 补 id；② iframe 传递 `?feature=` 让静态产物拿到项目上下文；③ `brickify_cli --dsl-workbench` 产物自注册到产物注册表（`type: feature_workbench`），`/workbench` 的 feature-meta 据此发现画布产物。
+* **`/api/canvas-notes` 纳入 CSRF 写保护**（`src/tools/serve.ts`）。
+* **保留（非混淆性）**：`workbench_data.ts` 的 `MOCK_PATHS` 是画布视觉连线几何（照抄 mock 保形，非业务假数据）；`dsl/animation.ts`/`anim_core.ts` 的 L3 mock 数据源是动画引擎零风险推演的设计特性。
+
+**验收（浏览器端到端，death-source-fixture）**：网关已配置时提交 → toast「已提交批注，AI 将决策处理」，`GET /api/canvas-notes` 返回真实批注（anchor=compute）；禁用供应商后 → 状态 `configured=false`，toast「批注已保存；LLM 未配置，AI 决策停用」；全程无 console 报错；配置操作后已还原。
+
+

@@ -454,7 +454,7 @@ ul.lims li{font-size:11px}
     <div class="nav" data-page="sync">同步记录</div>
     <div class="navdiv"></div>
     <div class="navsec">当前项目</div>
-    <div class="proj"><div class="pn">${esc(projectName)}</div><div class="pm">${m.scanned_files} 文件 · 语言 ${m.langs.join('/')}<br/>${bag.bricks.length} 块积木 · 最后扫描: 刚完成</div></div>
+    <div class="proj"><div class="pn">${esc(projectName)}</div><div class="pm">${m.scanned_files} 文件 · 语言 ${m.langs.join('/')}<br/>${bag.bricks.length} 块积木 · 管线快照</div></div>
     <div class="sidebottom">
       <div class="safemode"><div class="toggle on"></div><div class="safetext"><b>安全模式</b><span style="color:var(--wmuted)">逐层确认后回写</span></div></div>
       <div class="user"><div class="avatar"></div><div><div style="font-size:12px;font-weight:500">你</div><div style="font-size:11px;color:var(--wmuted)">评审中</div></div></div>

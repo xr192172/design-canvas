@@ -2605,13 +2605,13 @@ ${I18N_SOURCE}
     }
   }
 
-  // 回退：静态 mock 推演（无执行环境时看处理/判定/分流结构）
+  // 回退：静态 mock 推演（无执行环境时看处理/判定/分流结构）——每个步骤如实标注，不与真实执行混淆
   function fallbackMockTrace(entry, inputValue) {
     const nodes = (dsl.geometry?.nodes || []).map(n => ({ id: n.id, label: n.label, layer: n.layer, host: n.host, shapes: n.shapes || null }));
     const edges = (dsl.geometry?.edges || []).map(e => ({ id: e.id, from: e.from, to: e.to, type: e.type }));
     const trace = buildDataTrace(nodes, edges, entry.id, inputValue);
     if (trace.steps.length === 0) { showToast('该节点没有可追踪的调用链'); return; }
-    trace.steps.forEach((s) => { s.status = 'ok'; });
+    trace.steps.forEach((s) => { s.status = 'unsupported'; s.note = '静态推演（未连接后端 / 请求失败，非真实执行）'; });
     playTrace(trace.steps, entry, inputValue, trace.branchEdgeIds);
   }
 

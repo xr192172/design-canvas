@@ -2394,7 +2394,7 @@ export async function startServer(port?: number): Promise<void> {
       (url.startsWith('/api/save') || url.startsWith('/api/dict/ingest') ||
         url.startsWith('/api/registry') || url.startsWith('/api/import') ||
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
-        url.startsWith('/api/mind-map') ||
+        url.startsWith('/api/mind-map') || url.startsWith('/api/canvas-notes') ||
         url.startsWith('/api/code/approve') || url.startsWith('/api/code/reject') ||
         url.startsWith('/api/code/propose') || url.startsWith('/api/gateway'));
     if (isWriteApi && !isSafeOrigin(origin)) {

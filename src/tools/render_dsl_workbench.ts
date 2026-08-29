@@ -356,7 +356,7 @@ ${WORKBENCH_SHELL_CSS}
     </div>
     <textarea class="dslw-feedback-textarea" placeholder="用自然语言描述你的想法，AI会理解并重新生成..."></textarea>
     <div class="dslw-feedback-foot">
-      <span class="dslw-feedback-hint">提示：反馈通道建设中——当前数据为真实管线快照</span>
+      <span class="dslw-feedback-hint" id="fbHint">连接后端（serve）后，你的看法将作为批注进入 AI 决策管线；未配置 LLM 时决策停用。</span>
       <button class="dslw-feedback-send" id="btnSend"><i data-lucide="send"></i>发送</button>
     </div>
   </div>
@@ -448,7 +448,40 @@ function toast(msg) {
 }
 document.getElementById('btnRegen').addEventListener('click', () => toast('演示按钮：重新生成请跑 brickify_cli --dsl-workbench'));
 document.getElementById('btnSync').addEventListener('click', () => toast('演示按钮：定稿同步走 edit_dsl / backfill_scaffold 管线'));
-document.getElementById('btnSend').addEventListener('click', () => toast('反馈通道建设中——当前为真实管线只读快照'));
+// 提交你的看法 → 真实批注通道（serve + LLM 网关）：无后端/无 LLM 明确停用，不假装执行
+function fbFeature() { try { return new URLSearchParams(location.search).get('feature') || ''; } catch (e) { return ''; } }
+document.getElementById('btnSend').addEventListener('click', async () => {
+  const ta = document.querySelector('.dslw-feedback-textarea');
+  const text = (ta.value || '').trim();
+  if (!text) { toast('请先写下你的看法'); return; }
+  const feature = fbFeature();
+  if (!feature) { toast('未关联项目（?feature=），反馈通道停用'); return; }
+  let gw = null;
+  try { gw = await (await fetch('/api/gateway/status')).json(); }
+  catch (e) { toast('未连接后端（serve），反馈通道停用'); return; }
+  const intent = document.querySelector('.dslw-fb-btn.active');
+  const action = intent ? intent.textContent.trim() : '修改';
+  const curLabel = (curSlot && SLOTS[curSlot]) ? SLOTS[curSlot].label : '';
+  const note = {
+    id: 'fb-' + Date.now().toString(36),
+    type: 'text',
+    text: (action === '修改' && curLabel ? '[' + curLabel + '] ' : '[' + action + (curLabel ? ' ' + curLabel : '') + '] ') + text,
+    anchor: curSlot ? { nodeId: curSlot, ox: 0, oy: 0 } : undefined,
+    status: 'open',
+    created: new Date().toISOString(),
+    source: 'workbench-feedback',
+  };
+  try {
+    const r = await (await fetch('/api/canvas-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feature, canvas_notes: [note] }),
+    })).json();
+    if (r && r.error) { toast('保存失败：' + r.error); return; }
+  } catch (e) { toast('保存失败：' + e.message); return; }
+  ta.value = '';
+  toast(gw && gw.configured ? '已提交批注，AI 将决策处理' : '批注已保存；LLM 未配置，AI 决策停用');
+});
 
 selectSlot(DEFAULT_SLOT);
 if (window.lucide) lucide.createIcons();

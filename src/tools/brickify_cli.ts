@@ -31,6 +31,7 @@ import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
 import { renderWizardHtml } from './render_wizard.js';
 import { renderDslWorkbenchHtml } from './render_dsl_workbench.js';
+import { registerArtifact } from './registry.js';
 import { buildWorkbenchData, writeWorkbenchDataJson } from './workbench_data.js';
 
 function readArg(name: string): string | undefined {
@@ -226,6 +227,14 @@ async function main(): Promise<void> {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
     console.log(`[brickify] DSL 协作工作台 HTML → ${abs}`);
+    // 自注册到产物注册表：唯一前端出口 /workbench 的 feature-meta 靠 registry 发现 iframe 画布产物
+    try {
+      const feature = path.basename(path.resolve(project));
+      registerArtifact({ path: path.basename(abs), feature, title: feature + ' 协作工作台', type: 'feature_workbench', status: 'done' });
+      console.log(`[dsl-workbench] 已注册到产物注册表: ${path.basename(abs)}`);
+    } catch (e) {
+      console.warn(`[dsl-workbench] 注册失败（不影响产物生成）: ${(e as Error).message}`);
+    }
   }
   if (workbenchDataOut && narratives) {
     // 工作台数据契约（v1 冻结）：前端窗口B 的对接物——先 mock 跑通交互，

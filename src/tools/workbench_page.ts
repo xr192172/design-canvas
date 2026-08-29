@@ -167,7 +167,7 @@ export function renderWorkbenchPage(): string {
       </div>
     </div>
 
-    <div class="rail">
+    <div class="rail" id="rail">
       <div style="display:flex;align-items:center;gap:8px;">
         <h2>代码审批</h2>
         <span style="flex:1"></span>
@@ -250,7 +250,8 @@ export function renderWorkbenchPage(): string {
         META = j;
         $('canvasSub').textContent = esc(j.title)+' ｜ source_root: '+(j.source_root||'（未设置）');
         if(j.workbench_artifact){
-          $('canvasWrap').innerHTML = '<iframe id="wbFrame" src="'+j.workbench_artifact+'" loading="lazy"></iframe>';
+          var wbSrc = j.workbench_artifact + (j.feature ? '?feature='+encodeURIComponent(j.feature) : '');
+          $('canvasWrap').innerHTML = '<iframe id="wbFrame" src="'+wbSrc+'" loading="lazy"></iframe>';
         } else {
           $('canvasWrap').innerHTML = '<div class="note" id="canvasEmpty">该 feature 尚无工作台产物。<br>请跑<br><code>brickify_cli --dsl-workbench</code><br>生成后刷新加载。</div>';
         }
