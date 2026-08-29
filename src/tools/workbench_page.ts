@@ -141,6 +141,17 @@ export function renderWorkbenchPage(): string {
     .gw-hint{font-size:11px;opacity:.55;line-height:1.7;}
     .gw-hint code{background:rgba(125,211,252,.1);padding:1px 5px;border-radius:4px;color:var(--sky);}
     .gw-stat-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 2px;border-bottom:1px solid rgba(255,255,255,.05);}
+
+    /* 四步配置向导（新用户引导：了解 → 填写 Key → 测试 → 完成） */
+    .gw-wiz{background:rgba(2,6,19,.5);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
+    .gw-wiz-steps{display:flex;gap:4px;margin-bottom:10px;}
+    .gw-wiz-step{flex:1;text-align:center;font-size:11px;color:var(--mut);padding:6px 0;border-radius:8px;background:rgba(255,255,255,.03);}
+    .gw-wiz-step b{display:block;font-size:13px;margin-bottom:2px;}
+    .gw-wiz-step.cur{background:rgba(125,211,252,.15);color:var(--sky);font-weight:700;}
+    .gw-wiz-step.done{background:rgba(74,222,128,.12);color:var(--ok);}
+    .gw-wiz-title{font-size:13px;font-weight:800;color:#e8f1ff;margin-bottom:6px;}
+    .gw-wiz-desc{font-size:12px;line-height:1.7;opacity:.8;margin-bottom:10px;}
+    .gw-wiz-desc code{background:rgba(125,211,252,.1);padding:1px 5px;border-radius:4px;color:var(--sky);}
   </style>
 
   <div class="topbar">
@@ -183,6 +194,15 @@ export function renderWorkbenchPage(): string {
   <div class="gw-panel hidden" id="gwPanel">
     <div class="gw-head"><h2>LLM 网关</h2><button id="gwClose" class="ghost">✕</button></div>
     <div class="gw-status"><span class="gw-dot" id="gwDot"></span><span id="gwStatusTxt">加载中…</span></div>
+    <div class="gw-wiz hidden" id="gwWizard">
+      <div class="gw-wiz-steps">
+        <div class="gw-wiz-step" id="wzS1"><b>1</b>了解</div>
+        <div class="gw-wiz-step" id="wzS2"><b>2</b>填写 Key</div>
+        <div class="gw-wiz-step" id="wzS3"><b>3</b>测试</div>
+        <div class="gw-wiz-step" id="wzS4"><b>4</b>完成</div>
+      </div>
+      <div id="wzBody"></div>
+    </div>
     <div class="tc">供应商与 Key 池</div>
     <div id="gwProviders">—</div>
     <details id="gwFormWrap"><summary style="cursor:pointer;font-size:12px;color:var(--sky);">＋ 注册 / 编辑供应商</summary>
@@ -426,6 +446,84 @@ export function renderWorkbenchPage(): string {
   });
 
   // ── 小网关设置悬浮窗 ──
+  // 四步配置向导（新用户引导：了解 → 填写 Key → 测试 → 完成）
+  var GW_STEP = 1;         // 1 了解 / 2 填写 / 3 测试 / 4 完成
+  var GW_ID = 'agnes';     // 向导引导创建的第一个供应商 id
+  function gwWizShow(show){ $('gwWizard').classList.toggle('hidden', !show); }
+  function gwWizRender(){
+    for(var i=1;i<=4;i++) $('wzS'+i).className = 'gw-wiz-step' + (i<GW_STEP?' done':i===GW_STEP?' cur':'');
+    var b = $('wzBody'), h = '';
+    if(GW_STEP===1){
+      h = '<div class="gw-wiz-title">这个工具要 LLM 才能发挥全力</div>'
+        + '<div class="gw-wiz-desc">LLM 读批注改代码、四层导航生成讲解、诊断修复闭环都依赖 LLM。'
+        + '没有 Key 时这些功能<b>直接停用</b>（不会用假数据冒充）。推荐注册 AGNES（<code>apihub.agnes-ai.com</code>），'
+        + '也支持任意 OpenAI 兼容服务或本地 Ollama。</div>'
+        + '<button id="wzNext1">开始配置（约 1 分钟）</button>';
+    } else if(GW_STEP===2){
+      h = '<div class="gw-wiz-title">填入你的 API Key</div>'
+        + '<div class="gw-form">'
+        + '<label>API Key 池（每行一个 Key；同一家多个 Key 自动轮询 + 失败切换）</label>'
+        + '<textarea id="wz_keys" rows="3" placeholder="粘贴你的 Key，每行一个"></textarea>'
+        + '<div class="gw-grid">'
+        + '<div><label>base_url（默认 AGNES，可改任意 OpenAI 兼容）</label><input id="wz_base" type="text" value="https://apihub.agnes-ai.com/v1"/></div>'
+        + '<div><label>默认模型</label><input id="wz_model" type="text" value="agnes-2.0-flash"/></div>'
+        + '</div>'
+        + '<div class="gw-hint" style="margin-top:6px;">还没 Key？去 AGNES 控制台申请，或填本地 Ollama 的 <code>http://localhost:11434/v1</code>。</div>'
+        + '</div>'
+        + '<div class="row" style="margin-top:10px;"><button id="wzSave">保存并测试</button><button id="wzBack2" class="ghost">上一步</button></div>'
+        + '<div id="wzMsg" style="font-size:11px;margin-top:6px;white-space:pre-wrap;opacity:.8;"></div>';
+    } else if(GW_STEP===3){
+      h = '<div class="gw-wiz-title">连通性测试</div>'
+        + '<div id="wzTestRes" class="gw-wiz-desc">测试中…</div>'
+        + '<div class="row" style="margin-top:10px;"><button id="wzTestAgain" class="ghost">重新测试</button><button id="wzBack3" class="ghost">返回修改</button></div>';
+    } else {
+      h = '<div class="gw-wiz-title" style="color:var(--ok);">✓ 配置完成，LLM 已启用</div>'
+        + '<div class="gw-wiz-desc">供应商已就绪，Key 只存在本机 <code>&lt;home&gt;/.design-canvas/gateway.json</code>，不会上传。'
+        + '现在可用：LLM 读批注改代码、四层导航讲解、诊断修复闭环。</div>'
+        + '<button id="wzDone">知道了，关闭</button>';
+    }
+    b.innerHTML = h; bindWiz();
+  }
+  function bindWiz(){
+    var n1=$('wzNext1'); if(n1) n1.onclick=function(){ GW_STEP=2; gwWizRender(); };
+    var b2=$('wzBack2'); if(b2) b2.onclick=function(){ GW_STEP=1; gwWizRender(); };
+    var save=$('wzSave');
+    if(save) save.onclick=function(){
+      var keys=$('wz_keys').value.split(/\\r?\\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+      if(!keys.length){ $('wzMsg').textContent='至少填一个 Key'; return; }
+      var payload = {
+        id: GW_ID, name: 'AGNES',
+        base_url: $('wz_base').value.trim().replace(/\\/+$/,''),
+        model: $('wz_model').value.trim() || 'agnes-2.0-flash',
+        keys: keys, enabled: true
+      };
+      $('wzMsg').textContent='保存中…';
+      fetch('/api/gateway/providers', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if(j.error){ $('wzMsg').textContent='保存失败：'+j.error; return; }
+          GW_STEP=3; gwWizRender(); wzTest();
+        })
+        .catch(function(e){ $('wzMsg').textContent='请求失败：'+e.message; });
+    };
+    var b3=$('wzBack3'); if(b3) b3.onclick=function(){ GW_STEP=2; gwWizRender(); };
+    var again=$('wzTestAgain'); if(again) again.onclick=wzTest;
+    var done=$('wzDone'); if(done) done.onclick=function(){ gwWizShow(false); gwRefresh(); };
+  }
+  function wzTest(){
+    $('wzTestRes').innerHTML='测试中…（向 '+GW_ID+' 发一条 ping，约几秒）';
+    fetch('/api/gateway/providers/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:GW_ID})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j.ok){
+          $('wzTestRes').innerHTML='<span style="color:var(--ok);">✓ 连通正常（'+j.ms+'ms，模型 '+j.model+'），Key 池已生效。</span>';
+          GW_STEP=4; gwWizRender();
+        } else {
+          $('wzTestRes').innerHTML='<span style="color:var(--bad);">✕ 测试失败：'+esc(j.error||'未知错误')+'</span>　可「重新测试」或「返回修改」检查 Key / base_url。';
+        }
+      })
+      .catch(function(e){ $('wzTestRes').innerHTML='<span style="color:var(--bad);">请求失败：'+esc(e.message)+'</span>'; });
+  }
   function gwOpen(){ $('gwPanel').classList.remove('hidden'); gwRefresh(); }
   function gwRefresh(){
     fetch('/api/gateway/status').then(function(r){ return r.json(); }).then(function(j){
@@ -434,6 +532,9 @@ export function renderWorkbenchPage(): string {
         ? '已配置 '+j.provider_count+' 个供应商，LLM 功能可用'
         : '未配置可用供应商，LLM 功能已停用（无 mock）';
       gwRenderProviders(j.providers||[]);
+      // 无可用供应商 → 展示四步配置向导；配好后隐藏，重进高级表单
+      gwWizShow(!j.configured);
+      if(!j.configured){ GW_STEP=1; gwWizRender(); }
     }).catch(function(e){ $('gwStatusTxt').textContent='网关状态加载失败：'+e.message; });
     fetch('/api/gateway/stats').then(function(r){ return r.json(); }).then(function(j){ gwRenderStats(j.stats); }).catch(function(){});
   }
