@@ -123,6 +123,8 @@
 
 * [x] LLM 通过后端读取批注照改 → 走现有审批流回写（人画"需求"，LLM 改"代码"，批注=中间语言）：语义化契约回传（`canvas_notes` status + `derive_mind_map` 语义工单 digest + MCP 双通道：`design-canvas://{feature}/notes` Resource 订阅 + `read_canvas_notes`/`mark_canvas_notes_status`/`decide_canvas_notes` 工具显式调用）；`decide_canvas_notes` = 内置 LLM 决策内核（`llm_decider.ts`）读 open 工单 → 逐单决策（change 映射 `code_workbench` 审批流 propose 干跑 / done 标已处理 / reject 标已驳回），LLM / mock / 规则降级三模式（mock 确定性验证接线，规则降级无 key 时诚实分类不伪造代码）。`agent_notes_loop.mjs` 双模式端到端验收：mock 18/18、真实 LLM（AGNES agnes-2.0-flash）16/16 —— 真实 LLM 对信息不足工单诚实 reject（引用 chain.ts 真实常量 512/4096/128、识别 server.ts 目标不匹配），未编造代码。（完成）
 
+* [x] 项目文档注入（`project_docs.ts`，按批关联注入）：每项目一个文档夹（`<project_dir>/docs/`，兜底受管目录 `.design-canvas/docs/<feature>/`）丢 `.md` 即被索引；frontmatter 写 `files/steps/features` 精确关联、未标记文档按文件名关键词兜底匹配。`decide_canvas_notes` 决策一批工单时汇总批内涉及节点 → 只注入命中文档正文（TOC 全量 + 正文封顶 5 篇/300 行），token 省噪音小。双通道：`design-canvas://{feature}/docs` Resource（订阅式清单）+ `read_project_docs` 工具（清单/按名读正文/按 targets 匹配）。验收：清单/匹配/注入/Resource 全通；真实 LLM 借助文档后阈值类工单从 reject 转 done（"信息性备注，阈值需人工评估"）、目标错位识别更准。（完成）
+
 * **决策（2026-08-28）**：批注层 vs 右侧「提交你的看法」→ **双通道并存**。批注=画布视觉标记（已真持久化 canvas\_notes），看法=针对节点的文本指令（当前 mock，属阶段 D 清理对象）。两者是「人→AI 改代码」的同族反馈通道但形态不同，统一收敛推迟到「LLM 读批注照改」落地时再议。
 
 * [ ] mockup 已出（本会话 widget），实现时对照

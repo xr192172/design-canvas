@@ -25,6 +25,7 @@ import { getDSL, saveDSL } from '../storage.js';
 import { loadLlmConfig, callChat, type LlmConfig, type ChatMessage } from './llm_focus.js';
 import { resolveCanvasNoteTargets, markCanvasNotesStatus, type ResolvedCanvasNote } from './derive_mind_map.js';
 import { proposeChange, type ChangeKind, type ChangeOp } from './code_workbench.js';
+import { listProjectDocs, buildDocsPromptBlock, type DocTargetSet } from './project_docs.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -79,6 +80,8 @@ export interface DecideCanvasNotesResult {
   applied_statuses: Array<{ id: string; status: 'done' | 'rejected' }>;
   /** 成功进入审批流的提案数 */
   proposed: number;
+  /** 项目文档：目录 + 按批命中注入的正文数 */
+  docs?: { dir: string | null; total: number; injected: number };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -238,8 +241,21 @@ function mockDecide(n: ResolvedCanvasNote, file: FileExcerpt | null): { action: 
   return { action: 'done', reason: '信息性批注，无需改码（mock 决策）' };
 }
 
-/** 构建单条工单的 LLM prompt（系统约束 + 工单 + 目标文件内容） */
-function buildNotePrompt(n: ResolvedCanvasNote, file: FileExcerpt | null): ChatMessage[] {
+/** 汇总一批工单涉及的功能/步骤/文件（按批关联注入的匹配目标集） */
+function collectBatchTargets(notes: ResolvedCanvasNote[]): DocTargetSet {
+  const t: DocTargetSet = { features: [], steps: [], files: [] };
+  for (const n of notes) {
+    const tg = n.target;
+    if (!tg) continue;
+    if (tg.feature && !t.features.includes(tg.feature)) t.features.push(tg.feature);
+    if (tg.step && tg.step.title && !t.steps.includes(tg.step.title)) t.steps.push(tg.step.title);
+    if (tg.file && tg.file.path && !t.files.includes(tg.file.path)) t.files.push(tg.file.path);
+  }
+  return t;
+}
+
+/** 构建单条工单的 LLM prompt（系统约束 + 工单 + 目标文件内容 + 批内命中的项目文档） */
+function buildNotePrompt(n: ResolvedCanvasNote, file: FileExcerpt | null, docsBlock: string): ChatMessage[] {
   const system =
     '你是代码批注工单的自动决策器。用户在画布上对代码工程画了批注，每条批注是一条"工单"，捆绑了功能/步骤/文件/契约上下文。' +
     '请判断对每条工单应如何处理，只输出一个 JSON 对象（不要 markdown，不要注释）：\n' +
@@ -259,6 +275,7 @@ function buildNotePrompt(n: ResolvedCanvasNote, file: FileExcerpt | null): ChatM
   const user =
     `## 工单\n${JSON.stringify({ id: n.id, type: n.type, text: n.text, status: n.status, target: targetJson }, null, 2)}\n` +
     fileBlock +
+    (docsBlock ? `\n${docsBlock}` : '') +
     '\n\n请按上面契约输出决策 JSON。';
   return [
     { role: 'system', content: system },
@@ -267,9 +284,9 @@ function buildNotePrompt(n: ResolvedCanvasNote, file: FileExcerpt | null): ChatM
 }
 
 /** LLM 决策单条（失败降级到规则） */
-async function llmDecide(cfg: LlmConfig, n: ResolvedCanvasNote, file: FileExcerpt | null): Promise<{ action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean }> {
+async function llmDecide(cfg: LlmConfig, n: ResolvedCanvasNote, file: FileExcerpt | null, docsBlock: string): Promise<{ action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean }> {
   try {
-    const raw = await callChat(cfg, buildNotePrompt(n, file), 0.2, 60_000);
+    const raw = await callChat(cfg, buildNotePrompt(n, file, docsBlock), 0.2, 60_000);
     const parsed = parseRawDecision(raw);
     if (!parsed || !parsed.action) return { ...ruleDecide(n), llm: false };
     if (parsed.action === 'change') {
@@ -303,6 +320,12 @@ export async function decideCanvasNotes(input: DecideCanvasNotesInput): Promise<
   const resolved = resolveCanvasNoteTargets(feature);
   const open = resolved.filter((n) => n.status === 'open');
 
+  // 按批关联注入：汇总批内工单涉及节点 → 只取命中的项目文档（TOC 全量 + 正文封顶）
+  const docMan = listProjectDocs(projectDir, feature);
+  const batchTargets = collectBatchTargets(open);
+  const docsBlock = buildDocsPromptBlock(docMan, batchTargets);
+  const docsInjected = docsBlock ? docMan.docs.filter((d) => docsBlock.includes(d.id)).length : 0;
+
   const mode = decideMode(loadLlmConfig());
   const statusUpdates: Array<{ id: string; status: 'done' | 'rejected' }> = [];
   const decisions: NoteDecisionResult[] = [];
@@ -315,7 +338,7 @@ export async function decideCanvasNotes(input: DecideCanvasNotesInput): Promise<
     // 1) 决策
     let raw: { action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean };
     if (mode.mode === 'llm' && mode.cfg) {
-      raw = await llmDecide(mode.cfg, n, file);
+      raw = await llmDecide(mode.cfg, n, file, docsBlock);
     } else if (mode.mode === 'mock') {
       const m = mockDecide(n, file);
       raw = { action: m.action, reason: m.reason, change: m.change, llm: false };
@@ -373,5 +396,6 @@ export async function decideCanvasNotes(input: DecideCanvasNotesInput): Promise<
     decisions,
     applied_statuses: applied,
     proposed,
+    docs: { dir: docMan.dir, total: docMan.docs.length, injected: docsInjected },
   };
 }

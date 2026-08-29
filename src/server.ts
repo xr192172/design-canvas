@@ -17,8 +17,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerAllTools } from './server_registry.js';
 import { importProject } from './tools/import_project.js';
 import { watchProjectTool } from './tools/watch_project_tool.js';
-import { listFeatures } from './storage.js';
+import { listFeatures, getDSL } from './storage.js';
 import { resolveCanvasNoteTargets, renderCanvasNotesDigest } from './tools/derive_mind_map.js';
+import { listProjectDocs } from './tools/project_docs.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -93,6 +94,55 @@ server.resource(
     const digest = renderCanvasNotesDigest(feature, resolved);
     return {
       contents: [{ uri: `design-canvas://${feature}/notes`, mimeType: 'text/markdown', text: digest.markdown }],
+    };
+  },
+);
+
+// Resource：项目文档清单（订阅式返回给外部 agent；正文按需用 read_project_docs 工具显式读）
+// 与 read_project_docs 工具互为双通道，风格对齐 notes Resource。
+server.resource(
+  'project-docs',
+  new ResourceTemplate('design-canvas://{feature}/docs', {
+    list: async () => {
+      const resources = listFeatures()
+        .map((d) => ({
+          uri: `design-canvas://${d.feature}/docs`,
+          name: `项目文档 · ${d.feature}`,
+          mimeType: 'text/markdown',
+          description: `${d.feature} 的项目文档夹清单（<project_dir>/docs/ 或 .design-canvas/docs/${d.feature}/）`,
+        }));
+      return { resources };
+    },
+  }),
+  async (_uri, variables) => {
+    const feature = String(variables.feature ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!feature) {
+      return { contents: [{ uri: 'design-canvas:///docs', mimeType: 'text/markdown', text: '缺少 feature 参数。' }] };
+    }
+    const dsl = getDSL(feature);
+    const man = listProjectDocs(dsl?.source_root ?? '', feature);
+    if (man.docs.length === 0) {
+      return {
+        contents: [
+          {
+            uri: `design-canvas://${feature}/docs`,
+            mimeType: 'text/markdown',
+            text: `# 项目文档 · ${feature}\n\n（docs/ 目录暂无文档——往 ${man.dir ?? '<project_dir>/docs/'} 丢 .md 即可被索引）`,
+          },
+        ],
+      };
+    }
+    const toc = man.docs
+      .map((d) => `- \`${d.id}\`（${d.lines} 行${d.tagged ? '·已关联' : '·未标记'}）：${d.title}`)
+      .join('\n');
+    return {
+      contents: [
+        {
+          uri: `design-canvas://${feature}/docs`,
+          mimeType: 'text/markdown',
+          text: `# 项目文档 · ${feature}\n\n来源目录：\`${man.dir}\`\n\n${toc}\n\n（正文用 read_project_docs 工具按 name= 读取）`,
+        },
+      ],
     };
   },
 );
