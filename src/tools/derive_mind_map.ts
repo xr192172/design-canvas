@@ -30,7 +30,7 @@ import type { ChatMessage } from './llm_focus.js';
 import { openDb } from '../db/db.js';
 import type { Database } from '../db/db.js';
 import type { DesignDSL, FeatureNode, FeatureTree, SemanticFile } from '../dsl/types.js';
-import type { MindMap, MindMapNode, TeachStep, TeachPin, ProposalFeature } from '../dsl/mindmap.js';
+import type { MindMap, MindMapNode, TeachStep, TeachPin, TeachFlowEdge, TeachGap, ProposalFeature } from '../dsl/mindmap.js';
 import { buildScenes } from '../dsl/narration.js';
 
 export interface DeriveMindMapInput {
@@ -116,7 +116,7 @@ export function buildFileIndex(dsl: DesignDSL): FileIndex {
       lines: f.lines,
       status: f.status,
       layer: f.layer,
-      apis: (f.actual_apis ?? f.expected_apis ?? []).slice(0, 4).map((a) => a.signature),
+      apis: (f.actual_apis ?? f.expected_apis ?? []).slice(0, 24).map((a) => a.signature),
     };
     exact.set(f.path, info);
     const segs = f.path.split('/');
@@ -279,22 +279,380 @@ function toHumanName(param: string, typeToken: string): string {
 }
 
 /**
+ * 签名"代表力"打分：挑「最能代表该步数据流」的主签名，而不是首文件首 API。
+ * 主函数强信号 = 返回复杂类型（非泛型/非 boolean/this/error）；纯辅助函数（返回基础类型
+ * 且无业务入参）降权——否则投影出来全是 boolean/this 占位，跨步连线永远 0 条。
+ */
+function signatureScore(sig: string): number {
+  const shape = projectSignature(sig);
+  if (!shape) return -Infinity;
+  const isGenericT = (t: string): boolean => {
+    const c = cleanPinStr(t).replace(/\|.*$/, '').replace(/[\[\]*<>].*$/, '').split('.').pop()?.trim() ?? '';
+    // 含 [ ] < > 的原始类型=泛型容器/粘连类型（如 Mapstring[...] / Promise<T>），代表力弱
+    return !c || c.length < 2 || GENERIC_T.has(c) || c.startsWith('{') || /[\[\]<>]/.test(t);
+  };
+  let score = 0;
+  for (const o of shape.outs) score += isGenericT(o.t) ? 1 : 4; // 有意义的返回类型=主函数强信号
+  for (const i of shape.ins) score += isGenericT(i.t) ? 0 : 2;  // 业务入参加分
+  if (shape.outs.length === 0) score -= 2;                      // 无返回弱
+  return score;
+}
+
+/**
  * 契约投影主入口：拿步骤的 involves 文件 → actual_apis 签名 → 汇总针脚。
- * 多文件签名取第一个成功投影的结果（同一步通常一个入口函数主宰该步数据流）。
- * 返回 {inputs, outputs}；无任何投影成功返回 null（前端回落到顺序推导，宁缺毋滥）。
+ * 不只挑一个主签名——收集涉及的所有文件 × 全部 API 的可投影签名，按「有意义身份优先、
+ * 代表力降序」收敛去重到每侧 Top-N（cap）。有意义针脚（能跨步连线）必在前，
+ * 泛型针脚（boolean/string/this…）仅作展示补充、不参与连线，避免噪声淹没卡片。
  */
 export function projectStepDataShape(
   involves: string[] | undefined,
   fileIndex: FileIndex,
+  cap = 6,
 ): { inputs: TeachPin[]; outputs: TeachPin[] } | null {
   if (!involves || involves.length === 0) return null;
+  const inCand: Array<{ p: TeachPin; score: number; meaningful: boolean }> = [];
+  const outCand: Array<{ p: TeachPin; score: number; meaningful: boolean }> = [];
   for (const rel of involves) {
     const info = lookupFile(fileIndex, rel);
     if (!info || !info.apis || info.apis.length === 0) continue;
-    const shape = projectSignature(info.apis[0]);
-    if (shape) return { inputs: shape.ins, outputs: shape.outs }; // 一步一个主导签名：取首个可投影文件
+    for (const sig of info.apis) {
+      const shape = projectSignature(sig);
+      if (!shape) continue;
+      const score = signatureScore(sig);
+      for (const p of shape.ins) inCand.push({ p, score, meaningful: pinIdentity(p) !== null });
+      for (const p of shape.outs) outCand.push({ p, score, meaningful: pinIdentity(p) !== null });
+    }
   }
+  const pick = (cand: Array<{ p: TeachPin; score: number; meaningful: boolean }>): TeachPin[] => {
+    cand.sort((a, b) => Number(b.meaningful) - Number(a.meaningful) || b.score - a.score);
+    const seen = new Set<string>();
+    const out: TeachPin[] = [];
+    for (const { p } of cand) {
+      const id = pinIdentity(p);
+      const key = id ? id.key : `${p.n}|${p.t}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+      if (out.length >= cap) break;
+    }
+    return out;
+  };
+  const inputs = pick(inCand);
+  const outputs = pick(outCand);
+  if (inputs.length === 0 && outputs.length === 0) return null;
+  return { inputs, outputs };
+}
+
+/**
+ * 逐文件契约投影：单独投影【一个文件】的 API 签名针脚（L4 文件视图高亮用）。
+ * 与步骤级投影同款逻辑（有意义身份优先、代表力降序、去重收敛），只是材料收敛到单个文件，
+ * cap 更小——单文件 API 少，只留最能代表「这文件吃什么/吐什么」的 Top-N 针脚。
+ */
+export function projectFileDataShape(
+  file: string,
+  fileIndex: FileIndex,
+  cap = 3,
+): { inputs: TeachPin[]; outputs: TeachPin[] } | null {
+  const info = lookupFile(fileIndex, file);
+  if (!info || !info.apis || info.apis.length === 0) return null;
+  const inCand: Array<{ p: TeachPin; score: number; meaningful: boolean }> = [];
+  const outCand: Array<{ p: TeachPin; score: number; meaningful: boolean }> = [];
+  for (const sig of info.apis) {
+    const shape = projectSignature(sig);
+    if (!shape) continue;
+    const score = signatureScore(sig);
+    for (const p of shape.ins) inCand.push({ p, score, meaningful: pinIdentity(p) !== null });
+    for (const p of shape.outs) outCand.push({ p, score, meaningful: pinIdentity(p) !== null });
+  }
+  const pick = (cand: Array<{ p: TeachPin; score: number; meaningful: boolean }>): TeachPin[] => {
+    cand.sort((a, b) => Number(b.meaningful) - Number(a.meaningful) || b.score - a.score);
+    const seen = new Set<string>();
+    const out: TeachPin[] = [];
+    for (const { p } of cand) {
+      const id = pinIdentity(p);
+      const key = id ? id.key : `${p.n}|${p.t}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+      if (out.length >= cap) break;
+    }
+    return out;
+  };
+  const inputs = pick(inCand);
+  const outputs = pick(outCand);
+  if (inputs.length === 0 && outputs.length === 0) return null;
+  return { inputs, outputs };
+}
+
+/* ============================================================
+   产线数据流推导（二期：真实出边/入边 + 管线缺口）
+   各步入/出针脚来自契约投影（涉及文件 API 签名，非 LLM 编造）。跨步骤连线同样不编造——
+   按「数据形态名」保守匹配：输出针脚与【后续步骤】的输入针脚，清洗后的类型或中文人话名
+   一致才连一条真边；泛型噪声（string/number/boolean/this/...）不参与匹配，避免全连。
+   缺口 = 某步的入/出无法在本功能内闭环 → 管线可能漏了一步 / 该步投影失败，如实标记。
+   ============================================================ */
+/** 泛型噪声类型：不承载业务语义，不能作为跨步连线身份 */
+const GENERIC_T = new Set([
+  'string', 'number', 'boolean', 'bool', 'int', 'int32', 'int64', 'uint', 'uint32', 'uint64',
+  'float', 'float32', 'float64', 'this', 'void', 'any', 'unknown', 'null', 'undefined', 'nil',
+  'object', 'Object', 'true', 'false', 'never', 'bigint', 'symbol', 'byte', 'rune', 'error',
+  'func', 'function', 'promise', 'Promise', 'array', 'Array', 'map', 'Map', 'record', 'Record',
+  // JS/Node/浏览器内置：到处出现、不承载本项目数据语义，同样不能当连线身份
+  'Date', 'Set', 'WeakMap', 'WeakSet', 'RegExp', 'Error', 'String', 'Number', 'Boolean', 'Function',
+  'BigInt', 'Symbol', 'Buffer', 'URL', 'URLSearchParams', 'JSON', 'Math', 'console', 'process',
+  'PromiseLike', 'Iterator', 'Iterable', 'Generator', 'AsyncIterable', 'ArrayLike', 'Timer',
+  'Timeout', 'Interval', 'AbortSignal', 'AbortController', 'Event', 'EventTarget', 'Node',
+]);
+
+/** 泛型中文人话名：与 GENERIC_T 同义的中文写法（文本=string / 数字=number …），同样不参与连线 */
+const GENERIC_T_ZH = new Set([
+  '文本', '字符串', '数字', '数值', '布尔', '数组', '对象', '字典', '映射', '列表', '集合',
+  '空', '无', '任意', '未知', '函数', '键值对', '标识',
+]);
+
+/** 清洗针脚字段：去前导 `:` `*` 空白、尾部空白/右括号 */
+function cleanPinStr(s: string): string {
+  return (s || '').replace(/^[:*\s]+/, '').replace(/[\s\]\)]+$/, '').trim();
+}
+
+/**
+ * 针脚 → 语义身份（供跨步连线匹配）：
+ * 优先「清洗后非泛型的类型」（契约身份，两端都是同一代码类型才算同一数据）；
+ * 泛型类型（string→文本 / void→标识…）不再回退中文名——否则文本/标识这种最普遍的
+ * 针脚会全连，淹没真实缺口。中文人话名兜底仅限「无类型信息」且非泛型中文词时。
+ * 两者皆无 → null（不参与连线）。
+ */
+function pinIdentity(p: TeachPin): { key: string; name: string } | null {
+  const t = cleanPinStr(p.t)
+    .replace(/\|.*$/, '')            // 联合类型取首成员：string | undefined → string
+    .replace(/[\[\]*<>].*$/, '')     // 泛型/下标/指针取基底：ParsedSymbol['kind'] → ParsedSymbol
+    .split('.').pop()                // 取包内简名
+    ?.trim() ?? '';
+  const n = cleanPinStr(p.n);
+  // 字面量值（'static-rule' / "x" / 42）不是数据形态，不能当数据身份
+  if (t && (t.startsWith("'") || t.startsWith('"') || /^\d+$/.test(t))) return null;
+  // 内联对象类型碎片（含 { }）与函数调用签名（含 ( )）不是数据形态：
+  // 契约投影常把多行对象字面量切成「string }」「Array<...>;\r\n }」、把调用捕获成「now(」
+  if (t && /[{}()\r\n]/.test(t)) return null;
+  if (t && t.length >= 2 && !GENERIC_T.has(t) && !t.startsWith('{')) return { key: t, name: n || t };
+  if (!t && n && /[\u4e00-\u9fa5]/.test(n) && !GENERIC_T_ZH.has(n)) return { key: n, name: n };
   return null;
+}
+
+/** 针脚列表 → 去重后的语义身份 key 集合（与 pinIdentity 同款清洗，供跨功能 global 集用） */
+export function pinIdentityKeys(pins: TeachPin[] | undefined): Set<string> {
+  const s = new Set<string>();
+  for (const p of pins ?? []) {
+    const id = pinIdentity(p);
+    if (id) s.add(id.key);
+  }
+  return s;
+}
+
+export interface StepFlowOut {
+  edges: TeachFlowEdge[];
+  gaps: TeachGap[];
+}
+
+/**
+ * 按数据形态名推导跨步骤真实出边/入边 + 管线缺口（steps 与 stepIds 同序对应）。
+ * global：跨功能视角的产出/消费集合（可缺省）。有它时，「无源/悬空」缺口只在
+ * 全项目都没有产出者/消费方时才报——避免把「来自其它功能的外部输入」误判成漏步。
+ */
+export function deriveStepFlow(
+  steps: TeachStep[],
+  stepIds: string[],
+  global?: { produced?: Set<string>; consumed?: Set<string> },
+): StepFlowOut {
+  const edges: TeachFlowEdge[] = [];
+  const gaps: TeachGap[] = [];
+  const N = steps.length;
+  if (N === 0) return { edges, gaps };
+
+  // 各步针脚身份（identity 为 null 的泛型针脚不参与连线/缺口闭环判定）
+  const pinIn = steps.map((s) => (s.inputs ?? []).map((p) => pinIdentity(p)));
+  const pinOut = steps.map((s) => (s.outputs ?? []).map((p) => pinIdentity(p)));
+
+  // —— 0) 唯一产出者：同一数据名被 ≥2 个步骤产出 → 太泛（基础设施类型 / 事件总线），
+  //    不配做跨步连线身份，否则 SyntaxNodeLike/ParsedSymbol 这类"每步都出现"的共享类型
+  //    会把相邻步骤全连成噪声。仅"全功能内唯一产出"的数据名参与连线（缺口判定同款过滤）。
+  const prodByKey = new Map<string, number>();
+  for (let i = 0; i < N; i++) for (const o of pinOut[i]) if (o) prodByKey.set(o.key, (prodByKey.get(o.key) ?? 0) + 1);
+  const isUniqueProducer = (key: string): boolean => (prodByKey.get(key) ?? 0) === 1;
+
+  // —— 1) 跨步连线：仅前 → 后，输出身份 == 输入身份，且产出者唯一 ——
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      for (const o of pinOut[i]) {
+        if (!o || !isUniqueProducer(o.key)) continue;
+        for (const k of pinIn[j]) {
+          if (k && k.key === o.key && !edges.some((e) => e.from === stepIds[i] && e.to === stepIds[j] && e.data === o.key)) {
+            edges.push({ from: stepIds[i], to: stepIds[j], data: o.key });
+          }
+        }
+      }
+    }
+  }
+
+  // —— 1.5) 共享文件连续边：相邻两步共享源码文件 → 结构上必有承接关系（弱数据流信号）。
+  //    类型匹配太严格导致大部分连续步（约 30/72）无数据边、节点孤立，补上共享文件边让管线可见。
+  //    已在同一对上画了数据边的，不再重复画共享边。
+  const fileBasename = (p: string): string => {
+    const seg = p.split(/[\\/]/);
+    return seg[seg.length - 1] || p;
+  };
+  for (let i = 0; i + 1 < N; i++) {
+    if (edges.some((e) => e.from === stepIds[i] && e.to === stepIds[i + 1])) continue;
+    const cur = new Set(steps[i].involves ?? []);
+    let shared = '';
+    for (const p of steps[i + 1].involves ?? []) {
+      if (cur.has(p)) { shared = fileBasename(p); break; }
+    }
+    if (shared) edges.push({ from: stepIds[i], to: stepIds[i + 1], data: `共件·${shared}` });
+  }
+
+  // —— 2) 缺口（只报真异常，把噪声压到最低）——
+  //    此前「入边在本功能/全项目都没有产出者就报无源」会把大量合法的外部输入（跨功能类型、
+  //    标准库、共享模型）误判成漏步（实测 413 → 全是噪声）。新口径：
+  //      · in_missing / out_missing：不再报（投影缺料由前端面板「未投影出/入边」info 提示兜底）；
+  //      · 顺序倒挂（in_no_source / out_no_consumer）：数据在管线里真实存在，但先消费后产出。
+  //        仅当消费步与产出步共享至少一个涉及源码文件时才报——两步不共享文件，多半是
+  //        Database/Impact/WorkbenchData 这类跨文件独立使用的「共享基础类型」，并非管线数据流，
+  //        把它们当「漏步/错序」报会再次制造误报（实测 Database/WorkbenchData/Impact 4 例全中）。
+  // 唯一产出步序号（该数据名被哪个步骤产出；无则 -1）
+  const producerSeqOf = (key: string): number => {
+    for (let j = 0; j < N; j++) for (const o of pinOut[j]) if (o && o.key === key) return j;
+    return -1;
+  };
+  // 该数据名「任一消费步」序号（无则 -1）
+  const consumerSeqOf = (key: string): number => {
+    for (let j = 0; j < N; j++) for (const k of pinIn[j]) if (k && k.key === key) return j;
+    return -1;
+  };
+  // 两步是否共享至少一个涉及源码文件（不共享 → 共享基础类型，非管线数据流 → 不报缺口）
+  const sharesFile = (a: number, b: number): boolean => {
+    if (a < 0 || b < 0 || a === b) return false;
+    const ia = new Set(steps[a]?.involves ?? []);
+    return (steps[b]?.involves ?? []).some((p) => ia.has(p));
+  };
+
+  for (let i = 0; i < N; i++) {
+    const id = stepIds[i];
+    const ins = pinIn[i], outs = pinOut[i];
+    // 入边无源：唯一产出者排在本步之后，且两步共享文件 → 顺序倒挂（疑漏/错序）
+    if (i !== 0) {
+      for (const k of ins) {
+        if (!k || !isUniqueProducer(k.key)) continue;
+        const p = producerSeqOf(k.key);
+        if (p <= i) continue;          // 产出者不晚于本步 → 非倒挂
+        if (!sharesFile(i, p)) continue; // 不共享文件 → 共享基础类型 → 非管线数据流
+        gaps.push({ step: id, seq: i, kind: 'in_no_source', data: k.key, msg: `入边「${k.key}」的产出步骤排在本步之后——先消费后产出，疑似中间漏了一步或步骤顺序错乱。` });
+      }
+    }
+    // 出边悬空：唯一消费方排在本步之前，且两步共享文件 → 同样先消费后产出的顺序倒挂
+    if (i !== N - 1) {
+      for (const o of outs) {
+        if (!o || !isUniqueProducer(o.key)) continue;
+        const c = consumerSeqOf(o.key);
+        if (c < 0 || c >= i) continue; // 消费方不早于本步 → 非倒挂
+        if (!sharesFile(i, c)) continue;
+        gaps.push({ step: id, seq: i, kind: 'out_no_consumer', data: o.key, msg: `出边「${o.key}」的消费步骤排在本步之前——先消费后产出，疑似中间漏了一步或步骤顺序错乱。` });
+      }
+    }
+  }
+  return { edges, gaps };
+}
+
+/* ============================================================
+   跨功能数据流（L2 功能介绍视图高亮用）：数据名跨功能「产出 → 消费」。
+   保守规则同 deriveStepFlow 升级版：一个数据名只被【一个功能】产出（唯一产出者）
+   才连线——被多个功能产出说明是公共基础设施（事件总线 / 共享模型），连了反而全亮成噪声。
+   ============================================================ */
+export interface CrossFeatureFlowEdge {
+  /** 产出功能 id（源） */
+  from: string;
+  /** 消费功能 id（目标） */
+  to: string;
+  /** 流转的数据形态名 */
+  data: string;
+}
+
+/** 跨功能数据流推导：features 为 { id, steps } 列表，返回唯一产出者的跨功能连线 */
+export function deriveCrossFeatureFlow(
+  features: Array<{ id: string; steps: TeachStep[] }>,
+): CrossFeatureFlowEdge[] {
+  const edges: CrossFeatureFlowEdge[] = [];
+  const outsByFeature = new Map<string, Set<string>>();
+  const insByFeature = new Map<string, Set<string>>();
+  const prodCount = new Map<string, number>();
+  for (const f of features) {
+    const outs = new Set<string>(), ins = new Set<string>();
+    for (const s of f.steps) {
+      for (const p of s.outputs ?? []) {
+        const id = pinIdentity(p);
+        if (id && !outs.has(id.key)) {
+          outs.add(id.key);
+          prodCount.set(id.key, (prodCount.get(id.key) ?? 0) + 1);
+        }
+      }
+      for (const p of s.inputs ?? []) {
+        const id = pinIdentity(p);
+        if (id) ins.add(id.key);
+      }
+    }
+    outsByFeature.set(f.id, outs);
+    insByFeature.set(f.id, ins);
+  }
+  for (const a of features) {
+    for (const key of outsByFeature.get(a.id) ?? []) {
+      if ((prodCount.get(key) ?? 0) !== 1) continue; // 非唯一产出者不连（公共基础设施）
+      for (const b of features) {
+        if (b.id === a.id) continue;
+        if (insByFeature.get(b.id)?.has(key)) edges.push({ from: a.id, to: b.id, data: key });
+      }
+    }
+  }
+  return edges;
+}
+
+/* ============================================================
+   文件级数据流（L4 文件视图高亮用）：某功能内「文件产出 → 文件消费」。
+   材料 = 逐文件契约投影的针脚（projectFileDataShape，非 LLM 编造）；
+   连线规则与 deriveStepFlow 同款保守：数据身份一致、且唯一产出者才连，
+   方向不限（文件间无工序顺序，只要 A 产 B 吃即可）。id 用文件路径（l2_ref）。
+   ============================================================ */
+export interface FileFlowNode {
+  /** 文件路径（与 teach 文件节点 meta.l2_ref 一致） */
+  id: string;
+  inputs?: TeachPin[];
+  outputs?: TeachPin[];
+}
+
+/** 文件级数据流推导：files 为功能内全部文件（跨步骤去重收集），返回唯一产出者的文件连线 */
+export function deriveFileFlow(files: FileFlowNode[]): TeachFlowEdge[] {
+  const edges: TeachFlowEdge[] = [];
+  const N = files.length;
+  if (N < 2) return edges;
+  const pinIn = files.map((f) => (f.inputs ?? []).map((p) => pinIdentity(p)));
+  const pinOut = files.map((f) => (f.outputs ?? []).map((p) => pinIdentity(p)));
+  // 唯一产出者：同一数据名被 ≥2 个文件产出 → 共享类型/基础设施，不连线（防噪声全连）
+  const prodByKey = new Map<string, number>();
+  for (const outs of pinOut) for (const o of outs) if (o) prodByKey.set(o.key, (prodByKey.get(o.key) ?? 0) + 1);
+  const isUnique = (key: string): boolean => (prodByKey.get(key) ?? 0) === 1;
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      if (i === j) continue;
+      for (const o of pinOut[i]) {
+        if (!o || !isUnique(o.key)) continue;
+        for (const k of pinIn[j]) {
+          if (k && k.key === o.key && !edges.some((e) => e.from === files[i].id && e.to === files[j].id && e.data === o.key)) {
+            edges.push({ from: files[i].id, to: files[j].id, data: o.key });
+          }
+        }
+      }
+    }
+  }
+  return edges;
 }
 
 /** 规则描述：功能节点 */
@@ -1376,13 +1734,38 @@ async function buildTeachMindMap(
       const isLine = !(prevPipelineLike && prevPipelineLike[f.name] === false);
       // 产线内涉及文件的去重集合：一个文件只入住首个引用它的工序盒
       const usedInLine = new Set<string>();
+      // 二期：按数据形态名推导跨步骤真实出边/入边 + 管线缺口（契约投影针脚，非 LLM 编造）
+      const flow = deriveStepFlow(steps, steps.map((_, j) => `f${i}:${j}`));
+      // 二期·L4：逐文件契约投影针脚（每个涉及文件单独投影「吃什么/吐什么」，供文件视图渲染+连线）
+      const filePinsByStep = steps.map((s) =>
+        (s.involves ?? []).map((p) => {
+          const fs = projectFileDataShape(p, fileIndex);
+          return { path: p, inputs: fs?.inputs, outputs: fs?.outputs };
+        }),
+      );
+      // 二期·L4：文件级数据流边（功能内全部文件跨步骤去重收集 → 唯一产出者连线，供 L4 高亮）
+      const allFiles: Array<{ id: string; inputs?: TeachPin[]; outputs?: TeachPin[] }> = [];
+      const seenFile = new Set<string>();
+      filePinsByStep.forEach((fps) => fps.forEach((fp) => {
+        if (seenFile.has(fp.path)) return;
+        seenFile.add(fp.path);
+        allFiles.push({ id: fp.path, inputs: fp.inputs, outputs: fp.outputs });
+      }));
+      const fileEdges = deriveFileFlow(allFiles);
       const stepGroup: MindMapNode = {
         id: `f${i}:sg`,
         label: '工作步骤',
         description: `${steps.length} 步讲清这个功能怎么跑起来`,
         kind: 'stepgroup',
         // pending 标记：分镜是"AI 分镜暂不可用/材料不足"占位（script 为空）时挂上，前端据此显示待生成态、不伪装成品
-        meta: { pending: !script },
+        meta: {
+          pending: !script,
+          // 跨步骤数据流边 + 管线缺口（二期：前端据此画真连线、标漏步）
+          ...(flow.edges.length ? { flowEdges: flow.edges } : {}),
+          ...(flow.gaps.length ? { gaps: flow.gaps } : {}),
+          // 文件级数据流边（二期·L4：前端各文件视图按可见性过滤展示 → 点击文件高亮上下游）
+          ...(fileEdges.length ? { fileEdges } : {}),
+        },
         children: steps.map((s, j) => {
           // 契约投影·数据形态（仅产线步骤才需要，但统一投影成本低且无害）：
           // 从涉及文件的 actual_apis 签名推导 inputs/outputs（非 LLM 编造）。
@@ -1396,6 +1779,8 @@ async function buildTeachMindMap(
               involves: s.involves,
               inputs: shape?.inputs,
               outputs: shape?.outputs,
+              // 逐文件针脚（L4 文件视图：每张文件卡渲染自己的入/出针脚）
+              filePins: filePinsByStep[j],
               // 叙事分镜（manim 式：进料口→工序→出料口）：针脚即契约投影的代码事实，
               // 前端点开工序盒折叠面板即可看这步"吃了什么/做什么/吐出什么"
               narration: buildScenes(shape ?? undefined, s.title, s.detail),
@@ -1409,12 +1794,13 @@ async function buildTeachMindMap(
               if (usedInLine.has(p)) continue;
               usedInLine.add(p);
               const info = lookupFile(fileIndex, p);
+              const fp = filePinsByStep[j].find((x) => x.path === p);
               kids.push({
                 id: `f${i}:sg:${j}:${kids.length}`,
                 label: basename(p),
                 description: info?.responsibility ?? '涉及文件',
                 kind: 'file',
-                meta: { l2_ref: p },
+                meta: { l2_ref: p, inputs: fp?.inputs, outputs: fp?.outputs },
               });
             }
             if (kids.length) stepNode.children = kids;

@@ -52,6 +52,28 @@ export interface TeachPin {
   t: string;
 }
 
+/** 跨步骤数据流边（teach 产线：由各步入/出针脚按「数据形态名」保守匹配推导，非 LLM 编造）。
+ *  from → to 为步骤节点 id（如 f3:0 → f3:2），data 为流转的数据形态名（如 文本 / EditResult）。 */
+export interface TeachFlowEdge {
+  from: string;
+  to: string;
+  data: string;
+}
+
+/** 产线缺口（teach 产线：某步的入/出边无法在本功能内闭环 → 管线可能漏了一步/该步投影失败）。
+ *  kind：in_missing=无入边 · out_missing=无出边 · in_no_source=入边无产出者 · out_no_consumer=出边无消费方 */
+export interface TeachGap {
+  /** 步骤节点 id（如 f3:2） */
+  step: string;
+  /** 步骤顺序号（0 起） */
+  seq: number;
+  kind: 'in_missing' | 'out_missing' | 'in_no_source' | 'out_no_consumer';
+  /** 相关数据形态名（in_no_source / out_no_consumer 时） */
+  data?: string;
+  /** 人话说明（管线可能漏了什么） */
+  msg: string;
+}
+
 /** 思维导图节点 */
 export interface MindMapNode {
   /** 锚点 id，尽力与 L2/L1 共享（文件节点 = file_xxx） */
@@ -77,6 +99,14 @@ export interface MindMapNode {
     /** 产线针脚·数据形态（step 节点挂载，契约投影自 actual_apis 签名，非 LLM 编造） */
     inputs?: TeachPin[];
     outputs?: TeachPin[];
+    /** 逐文件针脚（step 节点挂载，L4 文件视图用：每个涉及文件单独投影「吃什么/吐什么」，路径 → 针脚） */
+    filePins?: Array<{ path: string; inputs?: TeachPin[]; outputs?: TeachPin[] }>;
+    /** 跨步骤数据流边（stepgroup 节点挂载：各步针脚按数据形态名保守匹配的连线，前端画箭头） */
+    flowEdges?: TeachFlowEdge[];
+    /** 文件级数据流边（stepgroup 节点挂载，L4 文件视图高亮用：功能内文件「产出→消费」，唯一产出者保守连线） */
+    fileEdges?: TeachFlowEdge[];
+    /** 产线缺口（stepgroup 节点挂载：有入无源/有出无人接/入出缺失 → 管线可能漏了一步） */
+    gaps?: TeachGap[];
     /** 叙事分镜（step 节点挂载：进料口→工序→出料口，facts 逐条来自契约投影，前端点开工序盒折叠面板展示） */
     narration?: NarrScene[];
     /** 暴露接口签名清单（brick 节点挂载：契约投影自盒内 manifest） */

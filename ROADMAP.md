@@ -216,6 +216,29 @@
 
 * [ ] **分镜缓存 key 升级**（重要）：当前 key=功能名，若只改文件分组（名不变、文件集变）会复用**陈旧分镜**。升级为「功能名 + 该功能文件集哈希 / dsl\_rev」，分组变化自动失效重生成，分组不变则跳过 LLM。
 * [ ] **L1「intro」前缀清理**：后端 overview one\_liner 本身干净（`design-canvas：由 16 个功能…`），「intro」是前端 adapter 拼接的模板前缀，应清成一句人话。
-* [ ] **derive\_feature_tree 日志 off-by-one**：message 报「17 个功能」而 DSL 实际 16，纠正日志计数。
+* [ ] **derive_feature_tree 日志 off-by-one**：message 报「17 个功能」而 DSL 实际 16，纠正日志计数。
 * [ ] **export 域落位抽查**：export/render\_mindmap/registry/capability\_matrix/overview 等已并回能力矩阵/设计工作台，抽查落位合理性（已验证 200/200 无丢失）。
+
+### 7.5 出边/入边保留 + 两期落地 + 画线方案改版（2026-08-28 已定）
+
+* **结论：出边/入边设定保留并增强**（用户拍板）。新数据没体现「出边/入边调度」不是删掉它的理由——正是管线可能**少了、漏了这一步**的信号，所以保留设定并补上「推导 + 提示」能力。
+
+* **一期（前端可见化，已完成）**：L3 步骤卡直接渲染 IN/OUT 针脚（`NavPin`：人话名 n + 来源类型简写 t；投影自涉及文件 API 签名，非编造），无针脚时面板给出「无法判断数据流向」的保守提示。
+
+* **二期（后端真推导 + 前端缺口检测，已完成）**：
+  * 后端 `deriveStepFlow`（`design-canvas/src/tools/derive_mind_map.ts`）按「数据形态名」保守匹配跨步连线（`TeachFlowEdge`）与管线缺口（`TeachGap`）：
+    * `in_missing` 无入边 / `out_missing` 无出边 / `in_no_source` 入边无产出者 / `out_no_consumer` 出边无消费方。
+    * 当前 teach 数据推导结果：**16 功能 · 0 连线 · 66 缺口**——连线 0 条是保守策略（跨步同数据名几乎无命中），缺口 66 条即「疑漏一步」的线索。
+  * 前端：步骤卡右上角「疑漏步」警示角标（`unlink` 图标，悬停看原因），点击进面板看缺口明细；`backfill_stepflow.mjs` 幂等回填 gaps/flowEdges 到 teach JSON（不重生成 LLM 描述）。
+
+* **画线方案改版（用户新思路，已实现）**：**不做连线，改做「上下游一度邻居高亮」**——点击某节点，不再画依赖线，而是把上游一度节点染蓝、下游一度节点染红，无关节点轻度虚化（`dslw-node-hl-in/out/dim`）；无连线时不高亮也不虚化。比画线干净、不铺满底图，与「埋点」哲学一致。
+
+* **全视图高亮打通（用户决策：所有视图都要，已实现）**：点击高亮按「当前视图 edges」通用生效，逐层补齐数据源后 L1-L4 全覆盖：
+  * L1 根视图：单介绍卡，无邻居可高亮（天然无需处理）。
+  * L2 功能视图：跨功能边 `deriveCrossFeatureFlow`（唯一产出功能 → 消费功能）→ 根 `meta.crossEdges` → `featuresViewOf` 接 cross 边，点功能卡高亮上下游功能。
+  * L3 步骤视图：跨步边 `deriveStepFlow`（同数据身份 + 唯一产出者）→ stepgroup `meta.flowEdges` → `stepsViewOf` 接 flow 边。
+  * L4 文件视图（本轮新增）：逐文件针脚 `projectFileDataShape`（单文件单独投影「吃什么/吐什么」）挂 step `meta.filePins`；文件级边 `deriveFileFlow`（功能内全部文件跨步骤去重收集 → 唯一产出者「产出→消费」，方向不限）挂 stepgroup `meta.fileEdges`；`fileViewOf` 只保留两端都在本视图的边 → 点文件卡高亮同步骤内上下游文件。当前推导：**16 功能 · 跨步 13 条 · 跨功能 17 条 · 文件级 17 条**（缺口 413 条偏多是投影噪声，后续收敛）。
+  * 实测（probe_hl_views.py）：L2 点功能 1 in / 14 dim；L3 点 s2 1 out / 5 dim；L4 点 tiered.ts → 下游 trace.ts 染红，文件卡渲染出/入针脚，0 控制台错误。
+
+* **遗留**：跨步/文件级连线命中率仍保守（同数据身份 + 唯一产出者双重过滤）——若想让步骤/文件间真实连线更密，需提升针脚语义身份（如统一类型清洗规则 / 允许跨功能匹配 / 放宽唯一产出者到「功能内」而非「全局」）。文件级边的可见范围受限于「单步骤文件视图」——跨步骤的文件流（step2 文件 → step5 文件）不会在任一 L4 单步视图里亮起，如需全局文件依赖图需另建「全局文件图」视图。
 
