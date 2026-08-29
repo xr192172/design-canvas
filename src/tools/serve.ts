@@ -62,6 +62,17 @@ import {
   saveGeneratedNarrations,
   getExplainGenFile,
 } from './explain_gen.js';
+import {
+  listProvidersMasked,
+  upsertProvider,
+  deleteProvider,
+  getStats,
+  resetStats,
+  testProvider,
+  hasEnabledProvider,
+  handleOpenAICompatRequest,
+  type OpenAICompatRequest,
+} from './gateway.js';
 
 const PORT = parseInt(process.argv[2]) || 3000;
 const PUBLIC_DIR = path.join(process.cwd(), 'output');
@@ -2221,6 +2232,109 @@ function readBody(req: http.IncomingMessage, maxSize = MAX_BODY_SIZE): Promise<B
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// 小网关 HTTP 接口（/api/gateway/* 设置页 + /v1/chat/completions 上层纳管）
+// ─────────────────────────────────────────────────────────────
+
+async function handleApiGateway(req: http.IncomingMessage, res: http.ServerResponse, method: string, url: string): Promise<void> {
+  // GET /api/gateway/status —— 网关状态（前端悬浮窗首屏：是否有可用 LLM）
+  if (url === '/api/gateway/status' || url.startsWith('/api/gateway/status?')) {
+    if (method !== 'GET') { sendError(res, 405, '仅支持 GET'); return; }
+    const providers = listProvidersMasked();
+    sendJson(res, 200, { configured: providers.some((p) => p.enabled && p.key_count > 0), provider_count: providers.length, providers });
+    return;
+  }
+
+  // GET /api/gateway/providers —— 供应商列表（key 脱敏）
+  if (url === '/api/gateway/providers' || url.startsWith('/api/gateway/providers?')) {
+    if (method === 'GET') {
+      sendJson(res, 200, { providers: listProvidersMasked() });
+      return;
+    }
+    if (method === 'DELETE') {
+      const q = new URL(url, 'http://localhost');
+      const id = q.searchParams.get('id') ?? '';
+      const r = deleteProvider(id);
+      if (!r.ok) { sendError(res, 400, r.error ?? '删除失败'); return; }
+      sendJson(res, 200, { success: true, deleted: id, providers: listProvidersMasked() });
+      return;
+    }
+    // POST 落到下方 upsert 分支
+    if (method !== 'POST') { sendError(res, 405, '仅支持 GET/POST/DELETE'); return; }
+  }
+
+  // POST /api/gateway/providers —— upsert 供应商（注册/更新，keys 数组即 Key 池）
+  if (url === '/api/gateway/providers' && method === 'POST') {
+    let body: unknown;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf-8') || '{}');
+    } catch {
+      sendError(res, 400, 'JSON 解析失败');
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    const r = upsertProvider({
+      id: String(b.id ?? ''),
+      name: typeof b.name === 'string' ? b.name : undefined,
+      base_url: typeof b.base_url === 'string' ? b.base_url : undefined,
+      model: typeof b.model === 'string' ? b.model : undefined,
+      keys: Array.isArray(b.keys) ? b.keys.map(String) : undefined,
+      weight: typeof b.weight === 'number' ? b.weight : undefined,
+      price_prompt_per_1m: typeof b.price_prompt_per_1m === 'number' ? b.price_prompt_per_1m : undefined,
+      price_completion_per_1m: typeof b.price_completion_per_1m === 'number' ? b.price_completion_per_1m : undefined,
+      enabled: typeof b.enabled === 'boolean' ? b.enabled : undefined,
+    });
+    if (!r.ok) { sendError(res, 400, r.error ?? '保存失败'); return; }
+    sendJson(res, 200, { success: true, id: String(b.id), providers: listProvidersMasked() });
+    return;
+  }
+
+  // POST /api/gateway/providers/test —— 连通性测试（ping 一条消息，不计入用量）
+  if (url === '/api/gateway/providers/test' && method === 'POST') {
+    let body: unknown;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf-8') || '{}');
+    } catch {
+      sendError(res, 400, 'JSON 解析失败');
+      return;
+    }
+    const id = String((body as Record<string, unknown>).id ?? '');
+    if (!id) { sendError(res, 400, '缺少 id'); return; }
+    const r = await testProvider(id);
+    if (!r.ok) { sendJson(res, 200, r); return; }
+    sendJson(res, 200, r);
+    return;
+  }
+
+  // GET /api/gateway/stats —— 用量统计；POST /api/gateway/stats/reset —— 重置
+  if (url.startsWith('/api/gateway/stats')) {
+    if (url.includes('/reset')) {
+      if (method !== 'POST') { sendError(res, 405, '仅支持 POST'); return; }
+      resetStats();
+      sendJson(res, 200, { success: true, stats: getStats() });
+      return;
+    }
+    if (method !== 'GET') { sendError(res, 405, '仅支持 GET'); return; }
+    sendJson(res, 200, { stats: getStats(), providers: listProvidersMasked() });
+    return;
+  }
+
+  sendError(res, 404, `未知网关接口：${url}`);
+}
+
+/** POST /v1/chat/completions —— OpenAI 兼容端点，上层网关（如 AI base）可把我当 upstream 接入 */
+async function handleOpenAICompat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  let body: OpenAICompatRequest;
+  try {
+    body = JSON.parse((await readBody(req)).toString('utf-8') || '{}') as OpenAICompatRequest;
+  } catch {
+    sendJson(res, 400, { error: { message: 'JSON 解析失败', type: 'invalid_request_error' } });
+    return;
+  }
+  const r = await handleOpenAICompatRequest(body);
+  sendJson(res, r.status, r.body);
+}
+
 export async function startServer(port?: number): Promise<void> {
   const listenPort = port || PORT;
 
@@ -2282,7 +2396,7 @@ export async function startServer(port?: number): Promise<void> {
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
         url.startsWith('/api/mind-map') ||
         url.startsWith('/api/code/approve') || url.startsWith('/api/code/reject') ||
-        url.startsWith('/api/code/propose'));
+        url.startsWith('/api/code/propose') || url.startsWith('/api/gateway'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
@@ -2582,6 +2696,18 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/code/reject') && method === 'POST') {
       handleApiCodeReject(req, res);
+      return;
+    }
+
+    // 小网关：设置页接口（供应商/Key 池/用量）
+    if (url.startsWith('/api/gateway')) {
+      void handleApiGateway(req, res, method, url);
+      return;
+    }
+
+    // 小网关：OpenAI 兼容端点（上层网关 / OpenAI 客户端可把我当 upstream 纳管）
+    if (url.startsWith('/v1/chat/completions') && method === 'POST') {
+      void handleOpenAICompat(req, res);
       return;
     }
 

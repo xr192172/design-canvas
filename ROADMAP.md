@@ -244,3 +244,29 @@
 
 * **遗留**：跨步/文件级连线命中率仍保守（同数据身份 + 唯一产出者双重过滤）——若想让步骤/文件间真实连线更密，需提升针脚语义身份（如统一类型清洗规则 / 允许跨功能匹配 / 放宽唯一产出者到「功能内」而非「全局」）。文件级边的可见范围受限于「单步骤文件视图」——跨步骤的文件流（step2 文件 → step5 文件）不会在任一 L4 单步视图里亮起，如需全局文件依赖图需另建「全局文件图」视图。
 
+***
+
+## 8. LLM 小网关（2026-08-29 完成）
+
+> 用户定调：**有 LLM 就用 LLM，没有 LLM 功能直接停用**——mock 数据只会混淆视野，不再用作产品降级。小网关定位是**可被上层网关再次纳管的薄层**（我们另一个项目 AI base 已有类似网关，本项目将来可能接入它；本网关自曝 OpenAI 兼容端点，天然可作 upstream 被纳管）。
+
+### 8.1 设计原则
+
+* **无 LLM → 停用**：`llm_decider.ts` 移除 mock 与规则降级，`decideMode` 三态 `llm / mock / off`；`off` 时 LLM 决策功能直接停用（返回 note=未配置，不落状态、不伪造）。`LLM_DECIDER_MOCK=1` 仅作验收脚本显式开关（非产品路径）。
+* **薄层可纳管**：对外暴露 OpenAI 兼容端点 `POST /v1/chat/completions`，上层网关可把本项目当 upstream 接入；`/api/gateway/*` 提供供应商/用量管理接口。
+* **Key 池 = 同供应商多 Key**：同一家供应商的多个 API Key 算入同一个池，调用按权重轮询 + 失败自动切下一个 Key/供应商。
+
+### 8.2 实现（代码位置）
+
+* `src/tools/gateway.ts`（新增）：供应商 CRUD（OpenAI 兼容：base_url/model/keys/weight/单价/enabled）、`pickEndpoint` 加权轮询 + 失败转移、用量统计（调用/token/费用估算 USD/错误/延迟，按供应商+Key 维度，`gateway.json` 持久化）、`chatViaGateway`（maxAttempts 重试、jsonMode 强制 JSON 输出）、`testProvider` 连通性测试、OpenAI 兼容端点 handler。
+* `src/tools/llm_decider.ts`：接入网关走 Key 池（`chatViaGateway` + jsonMode），`hasEnabledProvider()` 判定 LLM 可用性，无配置直接 `off` 停用。
+* `src/tools/serve.ts`：`/api/gateway/status|providers|providers/test|stats|stats/reset` + `POST /v1/chat/completions`（OpenAI 兼容，供上层纳管）。
+* `src/server_registry.ts`：注册 `gateway_list_providers / gateway_upsert_provider / gateway_delete_provider / gateway_stats` MCP 工具，外部 agent 可管理供应商与查用量。
+* `src/tools/workbench_page.ts`：`/workbench` 右下「⚙ LLM 网关」悬浮窗——状态灯（可用/停用）、供应商卡片列表（启用/编辑/删除/脱敏 Key）、注册表单（引导填 base_url/model/Key 池/单价）、连通性测试、用量统计。
+
+### 8.3 验收（浏览器端到端，2026-08-29 已通过）
+
+* `tsc --noEmit` 通过；悬浮窗打开/状态/供应商列表/用量渲染正常；连通性测试对 agnes 真实端点 ✓（6.9s，模型 agnes-2.0-flash）。
+* 无配置时 `configured=false`，LLM 决策停用；`/v1/chat/completions` 可被 OpenAI 客户端纳管。
+* 遗留：真实 Key 池多 Key 轮询/失败转移的自动化回归用例未固化（手工验证过），后续可补 vitest。
+

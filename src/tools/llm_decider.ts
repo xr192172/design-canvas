@@ -26,6 +26,7 @@ import { loadLlmConfig, callChat, type LlmConfig, type ChatMessage } from './llm
 import { resolveCanvasNoteTargets, markCanvasNotesStatus, type ResolvedCanvasNote } from './derive_mind_map.js';
 import { proposeChange, type ChangeKind, type ChangeOp } from './code_workbench.js';
 import { listProjectDocs, buildDocsPromptBlock, type DocTargetSet } from './project_docs.js';
+import { hasEnabledProvider, chatViaGateway } from './gateway.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -190,35 +191,21 @@ function parseRawDecision(text: string): RawDecision | null {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 决策实现：LLM / mock / 规则降级
+// 决策实现：LLM / mock / off（无 LLM 直接停用）
 // ─────────────────────────────────────────────────────────────
 
-/** 模式判定：mock（显式开关）> LLM（有配置）> 规则降级 */
-function decideMode(cfg: LlmConfig | null): { mode: 'llm' | 'mock' | 'rule'; cfg: LlmConfig | null; note: string } {
+/** 模式判定：mock（显式验收开关）> LLM（网关有可用供应商，或 legacy env/config）> off（无 LLM 直接停用） */
+function decideMode(cfg: LlmConfig | null): { mode: 'llm' | 'mock' | 'off'; cfg: LlmConfig | null; note: string } {
   if (process.env.LLM_DECIDER_MOCK === '1') {
-    return { mode: 'mock', cfg: null, note: 'LLM_DECIDER_MOCK=1：确定性假决策（端到端接线验证，非真实 LLM）' };
+    return { mode: 'mock', cfg: null, note: 'LLM_DECIDER_MOCK=1：确定性假决策（本地接线验收用，非产品路径）' };
+  }
+  if (hasEnabledProvider()) {
+    return { mode: 'llm', cfg, note: 'LLM 决策（经小网关 Key 池调度）' };
   }
   if (cfg) {
-    return { mode: 'llm', cfg, note: `LLM 决策（model=${cfg.model}）` };
+    return { mode: 'llm', cfg, note: `LLM 决策（legacy 直连 model=${cfg.model}）` };
   }
-  return { mode: 'rule', cfg: null, note: '未配置 LLM（LLM_API_KEY 或 config.json），已用规则降级：信息性→done，动作性→reject' };
-}
-
-/** 规则降级：诚实分类，不伪造代码 */
-function ruleDecide(n: ResolvedCanvasNote): { action: DecideAction; reason: string } {
-  const text = (n.text ?? '').trim();
-  const t = n.target;
-  if (!t) return { action: 'reject', reason: '批注未绑定节点，无法定位改动点' };
-  if (!text) return { action: 'reject', reason: '批注无文字，无法判断处理方式' };
-  const infoWords = ['待评估', '评估', '待定', '待确认', '参考', '备注', '观察', '注意'];
-  const actionWords = ['缺失', '校验', '验证', '修复', '重构', '问题', 'bug', '报错', '溢出', '越界'];
-  if (actionWords.some((w) => text.includes(w))) {
-    return { action: 'reject', reason: `批注含动作性描述（${text}），需 LLM/人工产出具体改动方案（未配置 LLM）` };
-  }
-  if (infoWords.some((w) => text.includes(w))) {
-    return { action: 'done', reason: '信息性批注（评估/备注类），无需改码' };
-  }
-  return { action: 'done', reason: '批注不构成代码改动诉求' };
+  return { mode: 'off', cfg: null, note: '未配置 LLM（网关无可用供应商，也无 LLM_API_KEY/AGNES 配置）——LLM 决策功能停用，未做任何模拟决策' };
 }
 
 /** mock 决策：确定性产出（仅 LLM_DECIDER_MOCK=1 时启用）——有文件目标的"待评估"→ 提一个阈值上调提案 */
@@ -283,12 +270,18 @@ function buildNotePrompt(n: ResolvedCanvasNote, file: FileExcerpt | null, docsBl
   ];
 }
 
-/** LLM 决策单条（失败降级到规则） */
-async function llmDecide(cfg: LlmConfig, n: ResolvedCanvasNote, file: FileExcerpt | null, docsBlock: string): Promise<{ action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean }> {
+/** LLM 决策单条：优先经小网关 Key 池（统一供应商管理）；无网关 provider 才回退 legacy 直连；解析失败/调用失败 → reject（不伪造） */
+async function llmDecide(cfg: LlmConfig | null, n: ResolvedCanvasNote, file: FileExcerpt | null, docsBlock: string): Promise<{ action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean }> {
   try {
-    const raw = await callChat(cfg, buildNotePrompt(n, file, docsBlock), 0.2, 60_000);
-    const parsed = parseRawDecision(raw);
-    if (!parsed || !parsed.action) return { ...ruleDecide(n), llm: false };
+    const messages = buildNotePrompt(n, file, docsBlock);
+    const raw = hasEnabledProvider()
+      ? await chatViaGateway(messages, { temperature: 0.2, timeoutMs: 60_000, jsonMode: true })
+      : cfg
+        ? await callChat(cfg, messages, 0.2, 60_000)
+        : '';
+    const text = typeof raw === 'string' ? raw : raw.content;
+    const parsed = parseRawDecision(text);
+    if (!parsed || !parsed.action) return { action: 'reject', reason: 'LLM 返回无法解析的决策（未伪造代码），已驳回', llm: true };
     if (parsed.action === 'change') {
       const norm = normalizeChangeOp(parsed.change);
       if (!norm) return { action: 'reject', reason: `LLM 的 change 方案结构非法（${parsed.reason || 'op 缺失/行区间非法'}），已驳回`, llm: true };
@@ -299,7 +292,7 @@ async function llmDecide(cfg: LlmConfig, n: ResolvedCanvasNote, file: FileExcerp
     }
     return { action: 'done', reason: parsed.reason || 'LLM 判定无需改码', llm: true };
   } catch (e) {
-    return { ...ruleDecide(n), llm: false };
+    return { action: 'reject', reason: `LLM 调用失败：${(e as Error).message}（未伪造代码）`, llm: true };
   }
 }
 
@@ -327,6 +320,21 @@ export async function decideCanvasNotes(input: DecideCanvasNotesInput): Promise<
   const docsInjected = docsBlock ? docMan.docs.filter((d) => docsBlock.includes(d.id)).length : 0;
 
   const mode = decideMode(loadLlmConfig());
+  if (mode.mode === 'off') {
+    // 无 LLM：功能直接停用，不做任何模拟/规则决策，不落任何状态
+    return {
+      feature,
+      project_dir: projectDir,
+      llm: false,
+      note: mode.note,
+      open: open.length,
+      decisions: [],
+      applied_statuses: [],
+      proposed: 0,
+      docs: { dir: docMan.dir, total: docMan.docs.length, injected: docsInjected },
+    };
+  }
+
   const statusUpdates: Array<{ id: string; status: 'done' | 'rejected' }> = [];
   const decisions: NoteDecisionResult[] = [];
   let proposed = 0;
@@ -335,16 +343,14 @@ export async function decideCanvasNotes(input: DecideCanvasNotesInput): Promise<
     const fileRel = targetFileRel(n);
     const file = fileRel && projectDir ? readFileExcerpt(projectDir, fileRel, maxLines) : null;
 
-    // 1) 决策
+    // 1) 决策：LLM 优先走网关 Key 池（cfg=null 表示经网关）；mock 仅本地验收显式开关
     let raw: { action: DecideAction; reason: string; change?: { kind: ChangeKind; op: ChangeOp }; llm: boolean };
-    if (mode.mode === 'llm' && mode.cfg) {
-      raw = await llmDecide(mode.cfg, n, file, docsBlock);
-    } else if (mode.mode === 'mock') {
+    if (mode.mode === 'llm') {
+      const viaGateway = hasEnabledProvider();
+      raw = await llmDecide(viaGateway ? null : mode.cfg, n, file, docsBlock);
+    } else {
       const m = mockDecide(n, file);
       raw = { action: m.action, reason: m.reason, change: m.change, llm: false };
-    } else {
-      const r = ruleDecide(n);
-      raw = { action: r.action, reason: r.reason, llm: false };
     }
 
     // 2) 映射到审批流 / 状态

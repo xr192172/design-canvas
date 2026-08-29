@@ -67,6 +67,7 @@ import { getDSLByView, getLiveDir, getDSL, saveDSL } from './storage.js';
 import { resolveCanvasNoteTargets, renderCanvasNotesDigest, markCanvasNotesStatus } from './tools/derive_mind_map.js';
 import { decideCanvasNotes } from './tools/llm_decider.js';
 import { listProjectDocs, readProjectDoc, matchDocsForTargets, buildDocsPromptBlock, type DocTargetSet } from './tools/project_docs.js';
+import { listProvidersMasked, upsertProvider, deleteProvider, getStats, resetStats, testProvider } from './tools/gateway.js';
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryCameraLog } from './camera/log_query.js';
@@ -1662,7 +1663,9 @@ const TOOL_DEFS: ToolDef[] = [
       '三类结论：change（产出具体改动方案并映射到审批流 proposeChange，propose 只出干跑预览不写源文件，' +
       '返回 pending_change_id 供 approve/reject）、done（信息性批注，直接标已处理）、reject（无法自动化，标已驳回）。' +
       '适合外部 agent 作为"批注 → 改动提案"的自动转换步骤：先本工具出提案 → 审批流 approve → mark_canvas_notes_status 标 done。' +
-      '配置：LLM_API_KEY/LLM_MODEL/LLM_BASE_URL 或 config.json；未配置则规则降级（信息性→done，动作性→reject）。',
+      '配置：小网关（/api/gateway 设置页，供应商 + Key 池）或 legacy LLM_API_KEY/AGNES 环境变量；' +
+      '未配置则功能停用（返回 note=未配置，不做任何模拟/规则决策，不落状态）。' +
+      'LLM 决策经网关 Key 池调度（轮询+失败转移），每次调用记录用量（token/费用）。',
     inputSchema: {
       feature: z.string().describe('feature 名（如 design-canvas）'),
       project_dir: z.string().optional().describe('项目根目录（缺省用 dsl.source_root；目标文件相对此解析）'),
@@ -1685,6 +1688,81 @@ const TOOL_DEFS: ToolDef[] = [
       return {
         message: `${summary}\n（模式：${r.note}）`,
         data: r,
+      };
+    }),
+  },
+  {
+    name: 'gateway_list_providers',
+    title: 'List LLM gateway providers (masked keys)',
+    description:
+      '列出小网关已注册的 LLM 供应商（Key 池，key 脱敏只露尾 4 位）+ 用量汇总。' +
+      '外部 agent 可据此感知当前可用的 LLM 供应商与用量。配置/新增走 gateway_upsert_provider 或设置页。',
+    inputSchema: {},
+    handler: wrapData(async () => {
+      return { message: '小网关供应商清单（key 已脱敏）', data: { providers: listProvidersMasked(), stats: getStats().totals } };
+    }),
+  },
+  {
+    name: 'gateway_upsert_provider',
+    title: 'Upsert an LLM gateway provider (Key pool)',
+    description:
+      '注册/更新一个 LLM 供应商到小网关 Key 池。同供应商多个 API Key 放入 keys 数组即为一个池，' +
+      '调用时加权轮询 + 失败自动切下一个 key/供应商。OpenAI 兼容协议（base_url 形如 https://api.openai.com/v1）。' +
+      '已存在同 id 则按传入字段合并更新（不传字段保留原值）。',
+    inputSchema: {
+      id: z.string().describe('供应商唯一 id（字母数字-_，如 agnes / openai / my-ollama）'),
+      name: z.string().optional().describe('展示名'),
+      base_url: z.string().optional().describe('OpenAI 兼容 base url（不含 /chat/completions）'),
+      model: z.string().optional().describe('默认模型'),
+      keys: z.array(z.string()).optional().describe('API Key 池（多个 key 一个池）'),
+      weight: z.number().optional().describe('轮询权重（默认 1）'),
+      price_prompt_per_1m: z.number().optional().describe('每 1M 输入 token 价格 USD（用量费用估算）'),
+      price_completion_per_1m: z.number().optional().describe('每 1M 输出 token 价格 USD'),
+      enabled: z.boolean().optional().describe('是否启用'),
+    },
+    handler: wrapData(async (a) => {
+      const r = upsertProvider({
+        id: String(a.id ?? ''),
+        name: typeof a.name === 'string' ? a.name : undefined,
+        base_url: typeof a.base_url === 'string' ? a.base_url : undefined,
+        model: typeof a.model === 'string' ? a.model : undefined,
+        keys: Array.isArray(a.keys) ? a.keys.map(String) : undefined,
+        weight: typeof a.weight === 'number' ? a.weight : undefined,
+        price_prompt_per_1m: typeof a.price_prompt_per_1m === 'number' ? a.price_prompt_per_1m : undefined,
+        price_completion_per_1m: typeof a.price_completion_per_1m === 'number' ? a.price_completion_per_1m : undefined,
+        enabled: typeof a.enabled === 'boolean' ? a.enabled : undefined,
+      });
+      if (!r.ok) return { message: `保存失败：${r.error}`, isError: true };
+      return { message: `供应商 ${a.id} 已保存（Key 池 ${Array.isArray(a.keys) ? a.keys.length : 0} 个）`, data: { ok: true } };
+    }),
+  },
+  {
+    name: 'gateway_delete_provider',
+    title: 'Delete an LLM gateway provider',
+    description: '从网关删除一个供应商及其 Key 池。',
+    inputSchema: { id: z.string().describe('供应商 id') },
+    handler: wrapData(async (a) => {
+      const r = deleteProvider(String(a.id ?? ''));
+      if (!r.ok) return { message: `删除失败：${r.error}`, isError: true };
+      return { message: `供应商 ${a.id} 已删除`, data: { ok: true } };
+    }),
+  },
+  {
+    name: 'gateway_stats',
+    title: 'LLM gateway usage stats',
+    description:
+      '小网关用量监视：按 供应商+key 维度的调用数/token/费用(USD)/错误/延迟，及汇总。' +
+      'POST 参数 reset=true 可清零统计。',
+    inputSchema: { reset: z.boolean().optional().describe('true=清零统计') },
+    handler: wrapData(async (a) => {
+      if (a?.reset === true) {
+        resetStats();
+        return { message: '用量统计已清零', data: { per_key: [], totals: getStats().totals } };
+      }
+      const s = getStats();
+      return {
+        message: `用量汇总：${s.totals.calls} 次调用 / ${s.totals.prompt_tokens + s.totals.completion_tokens} tokens / $${s.totals.cost_usd.toFixed(4)} / 错误 ${s.totals.errors}`,
+        data: s,
       };
     }),
   },

@@ -114,6 +114,33 @@ export function renderWorkbenchPage(): string {
     .d.rm{background:rgba(248,113,113,.12);color:#fca5a5;}
     .d.add{background:rgba(74,222,128,.12);color:#86efac;}
     .empty{font-size:12px;opacity:.5;text-align:center;padding:14px;}
+
+    /* 小网关设置悬浮窗 */
+    .gw-panel{
+      position:fixed;right:20px;top:62px;width:470px;max-height:calc(100vh - 84px);
+      background:var(--panel);border:1px solid var(--line);border-radius:14px;
+      padding:16px;overflow-y:auto;z-index:40;display:flex;flex-direction:column;gap:12px;
+      box-shadow:0 18px 50px rgba(0,0,0,.5);
+    }
+    .gw-panel.hidden{display:none;}
+    .gw-head{display:flex;align-items:center;gap:8px;}
+    .gw-head h2{font-size:14px;color:#e8f1ff;flex:1;}
+    .gw-status{display:flex;align-items:center;gap:8px;font-size:12px;padding:8px 10px;border-radius:8px;background:rgba(2,6,19,.5);}
+    .gw-dot{width:8px;height:8px;border-radius:50%;background:var(--bad);}
+    .gw-dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok);}
+    .gw-prov{background:rgba(2,6,19,.5);border:1px solid var(--line);border-radius:10px;padding:10px 12px;}
+    .gw-prov-top{display:flex;align-items:center;gap:8px;}
+    .gw-prov-top b{font-size:13px;flex:1;}
+    .gw-prov .pmeta{font-size:11px;opacity:.6;font-family:ui-monospace,Consolas,monospace;word-break:break-all;margin:4px 0;}
+    .gw-keys{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0;}
+    .gw-key{font-size:10.5px;font-family:ui-monospace,Consolas,monospace;padding:2px 7px;border-radius:12px;background:rgba(125,211,252,.1);color:var(--sky);}
+    .gw-form label{font-size:11.5px;opacity:.75;display:block;margin:8px 0 3px;}
+    .gw-form input,.gw-form textarea{width:100%;}
+    .gw-form textarea{font-family:ui-monospace,Consolas,monospace;resize:vertical;}
+    .gw-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+    .gw-hint{font-size:11px;opacity:.55;line-height:1.7;}
+    .gw-hint code{background:rgba(125,211,252,.1);padding:1px 5px;border-radius:4px;color:var(--sky);}
+    .gw-stat-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 2px;border-bottom:1px solid rgba(255,255,255,.05);}
   </style>
 
   <div class="topbar">
@@ -151,6 +178,39 @@ export function renderWorkbenchPage(): string {
     </div>
   </div>
   <button id="toggleRail" class="rail-toggle" style="position:fixed;right:16px;bottom:16px;z-index:30;">收起审批</button>
+
+  <button id="gwToggle" class="ghost" style="position:fixed;right:16px;bottom:52px;z-index:30;">⚙ LLM 网关</button>
+  <div class="gw-panel hidden" id="gwPanel">
+    <div class="gw-head"><h2>LLM 网关</h2><button id="gwClose" class="ghost">✕</button></div>
+    <div class="gw-status"><span class="gw-dot" id="gwDot"></span><span id="gwStatusTxt">加载中…</span></div>
+    <div class="tc">供应商与 Key 池</div>
+    <div id="gwProviders">—</div>
+    <details id="gwFormWrap"><summary style="cursor:pointer;font-size:12px;color:var(--sky);">＋ 注册 / 编辑供应商</summary>
+      <div class="gw-form">
+        <label>id（字母数字-_，如 openai / agnes / my-ollama）</label><input id="g_id" type="text" placeholder="openai"/>
+        <label>展示名</label><input id="g_name" type="text" placeholder="OpenAI"/>
+        <label>base_url（OpenAI 兼容，不含 /chat/completions）</label><input id="g_base" type="text" placeholder="https://api.openai.com/v1"/>
+        <label>默认模型</label><input id="g_model" type="text" placeholder="gpt-4o-mini"/>
+        <label>API Key 池（每行一个 Key，同一家多个 Key 自动一个池轮询 + 失败切换）</label><textarea id="g_keys" rows="3" placeholder="sk-...&#10;sk-..."></textarea>
+        <div class="gw-grid">
+          <div><label>输入单价（$ / 1M token，可选）</label><input id="g_pin" type="number" value="0" step="0.01"/></div>
+          <div><label>输出单价（$ / 1M token，可选）</label><input id="g_pout" type="number" value="0" step="0.01"/></div>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label style="flex:1;font-size:12px;opacity:.75;width:auto;">启用</label><input id="g_enabled" type="checkbox" checked style="width:auto;"/>
+          <button id="gwTest" class="ghost">测试连通性</button>
+          <button id="gwSave">保存</button>
+        </div>
+        <div id="gwFormMsg" style="font-size:11px;margin-top:6px;white-space:pre-wrap;opacity:.8;"></div>
+      </div>
+    </details>
+    <div class="tc">用量统计</div>
+    <div id="gwStats">—</div>
+    <div class="gw-hint">
+      无任何可用供应商时，LLM 决策功能直接停用（不会用假数据代替）。
+      <br>把本项目当上游接入别的网关：<code>POST /v1/chat/completions</code>（OpenAI 兼容）。
+    </div>
+  </div>
   `;
 
   const script = `
@@ -362,6 +422,121 @@ export function renderWorkbenchPage(): string {
     railVisible = !railVisible;
     $('rail').classList.toggle('hidden', !railVisible);
     this.textContent = railVisible? '收起审批':'展开审批';
+  });
+
+  // ── 小网关设置悬浮窗 ──
+  function gwOpen(){ $('gwPanel').classList.remove('hidden'); gwRefresh(); }
+  function gwRefresh(){
+    fetch('/api/gateway/status').then(function(r){ return r.json(); }).then(function(j){
+      $('gwDot').classList.toggle('on', !!j.configured);
+      $('gwStatusTxt').textContent = j.configured
+        ? '已配置 '+j.provider_count+' 个供应商，LLM 功能可用'
+        : '未配置可用供应商，LLM 功能已停用（无 mock）';
+      gwRenderProviders(j.providers||[]);
+    }).catch(function(e){ $('gwStatusTxt').textContent='网关状态加载失败：'+e.message; });
+    fetch('/api/gateway/stats').then(function(r){ return r.json(); }).then(function(j){ gwRenderStats(j.stats); }).catch(function(){});
+  }
+  function gwRenderProviders(list){
+    var html = list.map(function(p){
+      var keys = (p.keys||[]).map(function(k){ return '<span class="gw-key">'+esc(k)+'</span>'; }).join('');
+      var sw = '<label style="font-size:11px;cursor:pointer;"><input type="checkbox" data-gwtoggle="'+esc(p.id)+'"'+(p.enabled?' checked':'')+' style="width:auto;"/> 启用</label>';
+      return '<div class="gw-prov">'
+        + '<div class="gw-prov-top"><b>'+esc(p.name||p.id)+'</b>'
+        + (p.enabled?'<span class="badge b-a">启用</span>':'<span class="badge b-r">停用</span>')
+        + '<button class="ghost" data-gwedit="'+esc(p.id)+'">编辑</button>'
+        + '<button class="no" data-gwdel="'+esc(p.id)+'">删</button></div>'
+        + '<div class="pmeta">'+esc(p.id)+' ｜ '+esc(p.model)+' ｜ '+esc(p.base_url)+'</div>'
+        + '<div class="gw-keys">'+keys+'</div>'
+        + '<div style="font-size:11px;opacity:.6;">'+sw+'</div>'
+        + '</div>';
+    }).join('');
+    $('gwProviders').innerHTML = list.length? html : '<div class="empty">尚未注册供应商。点下方「注册 / 编辑供应商」填 Key。</div>';
+  }
+  function gwRenderStats(st){
+    if(!st) return;
+    var t = st.totals || {};
+    $('gwStats').innerHTML =
+      '<div class="gw-stat-row"><span>调用</span><b>'+t.calls+'</b></div>'
+      + '<div class="gw-stat-row"><span>token（入/出）</span><b>'+t.prompt_tokens+' / '+t.completion_tokens+'</b></div>'
+      + '<div class="gw-stat-row"><span>费用</span><b>$'+Number(t.cost_usd||0).toFixed(4)+'</b></div>'
+      + '<div class="gw-stat-row"><span>错误</span><b style="color:'+(t.errors?'var(--bad)':'var(--ok)')+'">'+t.errors+'</b></div>'
+      + '<div style="margin-top:8px;font-size:11px;opacity:.55;">按供应商 + Key：</div>'
+      + (st.per_key||[]).map(function(s){
+          return '<div class="gw-stat-row"><span>'+esc(s.provider_id)+' · '+esc(s.key_fp)+'</span>'
+            + '<span>'+s.calls+' 次 · '+s.errors+' 错 · $'+Number(s.cost_usd||0).toFixed(4)+'</span></div>';
+        }).join('');
+  }
+  function gwFillForm(p){
+    $('g_id').value = p? p.id : '';
+    $('g_id').disabled = !!p;
+    $('g_name').value = p? (p.name||'') : '';
+    $('g_base').value = p? p.base_url : '';
+    $('g_model').value = p? p.model : '';
+    $('g_keys').value = '';
+    $('g_pin').value = p? p.price_prompt_per_1m : 0;
+    $('g_pout').value = p? p.price_completion_per_1m : 0;
+    $('g_enabled').checked = p? p.enabled : true;
+    $('gwFormMsg').textContent = '';
+    $('gwFormWrap').open = true;
+  }
+  function gwSave(){
+    var keys = $('g_keys').value.split(/\\r?\\n/).map(function(s){ return s.trim(); }).filter(Boolean);
+    if(!$('g_id').value.trim()){ $('gwFormMsg').textContent='id 必填'; return; }
+    if(!keys.length){ $('gwFormMsg').textContent='至少填一个 API Key（Key 池）'; return; }
+    var payload = {
+      id: $('g_id').value.trim(),
+      name: $('g_name').value.trim() || undefined,
+      base_url: $('g_base').value.trim(),
+      model: $('g_model').value.trim(),
+      keys: keys,
+      price_prompt_per_1m: parseFloat($('g_pin').value)||0,
+      price_completion_per_1m: parseFloat($('g_pout').value)||0,
+      enabled: $('g_enabled').checked
+    };
+    $('gwFormMsg').textContent='保存中…';
+    fetch('/api/gateway/providers', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j.error){ $('gwFormMsg').textContent='保存失败：'+j.error; return; }
+        $('gwFormMsg').textContent='已保存供应商 '+payload.id+'（Key 池 '+keys.length+' 个）';
+        $('gwFormWrap').open = false; gwRefresh();
+      })
+      .catch(function(e){ $('gwFormMsg').textContent='请求失败：'+e.message; });
+  }
+  function gwTest(){
+    var id = $('g_id').value.trim();
+    if(!id){ $('gwFormMsg').textContent='先填 id'; return; }
+    $('gwFormMsg').textContent='连通性测试中…';
+    fetch('/api/gateway/providers/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})})
+      .then(function(r){ return r.json(); })
+      .then(function(j){ $('gwFormMsg').textContent = j.ok? '✓ 连通正常（'+j.ms+'ms，模型 '+j.model+'）' : '✕ 失败：'+(j.error||''); })
+      .catch(function(e){ $('gwFormMsg').textContent='请求失败：'+e.message; });
+  }
+  $('gwToggle').addEventListener('click', gwOpen);
+  $('gwClose').addEventListener('click', function(){ $('gwPanel').classList.add('hidden'); });
+  $('gwSave').addEventListener('click', gwSave);
+  $('gwTest').addEventListener('click', gwTest);
+  $('gwProviders').addEventListener('click', function(e){
+    var del = e.target.closest && e.target.closest('[data-gwdel]');
+    if(del){
+      if(!confirm('删除供应商 '+del.getAttribute('data-gwdel')+'？')) return;
+      fetch('/api/gateway/providers?id='+encodeURIComponent(del.getAttribute('data-gwdel')), {method:'DELETE'})
+        .then(function(r){ return r.json(); }).then(function(){ gwRefresh(); });
+      return;
+    }
+    var ed = e.target.closest && e.target.closest('[data-gwedit]');
+    if(ed){
+      fetch('/api/gateway/providers').then(function(r){ return r.json(); }).then(function(j){
+        var p = (j.providers||[]).filter(function(x){ return x.id===ed.getAttribute('data-gwedit'); })[0];
+        if(p) gwFillForm(p);
+      });
+      return;
+    }
+    var tg = e.target.closest && e.target.closest('[data-gwtoggle]');
+    if(tg){
+      fetch('/api/gateway/providers', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:tg.getAttribute('data-gwtoggle'), enabled:tg.checked})})
+        .then(function(r){ return r.json(); }).then(function(){ gwRefresh(); });
+    }
   });
 
   var pref = '';
