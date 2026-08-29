@@ -721,8 +721,12 @@ const TOOL_DEFS: ToolDef[] = [
     description:
       '代码理解统一入口：通过 action 参数化执行各类分析。' +
       `action: ${EXPLORE_ACTIONS.join(' / ')}。` +
-      '语义搜索/影响分析/架构分层/导览/巨石分析/拆分/变形链/动画流/算法/注入回放/仿真/文件监听。' +
+      '语义搜索/读取/影响分析/架构分层/导览/巨石分析/拆分/变形链/动画流/算法/注入回放/仿真/文件监听。' +
       'args 为各 action 的具体参数。' +
+      'read 是 edit_code 的"先读后改"前置：按符号定位（symbol，+parent 消歧，+context 附带上下文）' +
+      '或行区间（start/end，1-based 含端点）读文件，返回带真实行号的内容；' +
+      '返回的 start/end/行号与 edit_code(op=range) 同基准（line_utils.splitKeepEnds 下标+1=行号），' +
+      '可直接把 read 的行号喂给 edit_code，杜绝行号漂移改错行。' +
       'search 三层路由：标识符查询（如 normalizeCode / Calc.reset）→ 精确符号索引（provider=exact，零向量开销）；' +
       '自然语言意图 → 语义向量相似度；无 embedding 配置/失败 → FTS trigram 降级。' +
       'search 必填 args.project_dir（目标项目根目录，缺省报错）+ args.query，可选 top_k；' +

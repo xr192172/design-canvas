@@ -469,7 +469,7 @@ export async function deriveFeatureTree(
     file_count: Object.keys(fileMap).length,
     unassigned_count: Math.max(0, total - Object.keys(fileMap).length),
     message:
-      `功能树生成：${features.length} 个功能 · ${mono.community_count} 个社区 · ` +
+      `功能树生成：${scoped.length} 个功能 · ${mono.community_count} 个社区 · ` +
       `${Object.keys(fileMap).length}/${total} 个文件完成归属` +
       (renameOnly ? '（LLM 重命名目录分组）' : usedLlm ? '（LLM 归并命名）' : '（规则目录归并）'),
   };

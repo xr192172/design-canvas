@@ -19,6 +19,7 @@ import path from 'node:path';
 import { parseFileFull, parseAstRoot, type ParsedSymbol } from './ts_kernel/index.js';
 import { syncFile } from '../db/symbols.js';
 import { getProjectCacheDb } from '../db/db.js';
+import { splitKeepEnds, detectEol, isBlankLine } from './line_utils.js';
 
 export type EditCodeOp = 'replace' | 'insert' | 'delete' | 'range';
 
@@ -52,18 +53,6 @@ interface LineOp {
   insert: string[]; // 插入行（含终止符）
 }
 
-/** 按行分割并保留每行的终止符 */
-function splitKeepEnds(content: string): string[] {
-  const lines = content.split(/(?<=\n)/);
-  // 末尾无换行时最后元素是残段；有换行时最后元素是 ''——去掉空尾
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  return lines;
-}
-
-function detectEol(content: string): string {
-  return content.includes('\r\n') ? '\r\n' : '\n';
-}
-
 /** 新代码规范化为文件行尾风格，每行带终止符 */
 /** 新代码规范化为文件行尾风格，每行带终止符（末尾空元素先丢弃——由调用方决定是否补空行） */
 function normalizeCode(code: string, eol: string): string[] {
@@ -71,10 +60,6 @@ function normalizeCode(code: string, eol: string): string[] {
   const parts = normalized.split('\n');
   while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
   return parts.map((l) => l + eol);
-}
-
-function isBlankLine(line: string): boolean {
-  return line.trim() === '' || line === '';
 }
 
 /**
@@ -87,8 +72,8 @@ async function hasSyntaxError(filePath: string, content: string): Promise<boolea
   return ast?.root.hasError === true;
 }
 
-/** 符号匹配：qualified_name 精确 > name 精确；parent 提供时必须相等 */
-function matchSymbols(symbols: ParsedSymbol[], symbol: string, parent?: string): {
+/** 符号匹配：qualified_name 精确 > name 精确；parent 提供时必须相等（explore_code read 共用，保证同名/消歧口径一致） */
+export function matchSymbols(symbols: ParsedSymbol[], symbol: string, parent?: string): {
   qnHits: ParsedSymbol[];
   nameHits: ParsedSymbol[];
 } {
@@ -101,7 +86,7 @@ function matchSymbols(symbols: ParsedSymbol[], symbol: string, parent?: string):
   return { qnHits, nameHits };
 }
 
-function describeSymbol(s: ParsedSymbol): string {
+export function describeSymbol(s: ParsedSymbol): string {
   return `${s.qualified_name} (${s.kind}, ${s.signature || s.name}, L${s.start_line}-${s.end_line}${s.parent ? `, parent=${s.parent}` : ''})`;
 }
 
