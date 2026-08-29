@@ -114,6 +114,9 @@ const DEEP_MARKER = 'camera:deep';
 /** 备份目录名（相对被插桩项目根，位于 .design-canvas 下，collectTsFiles 会跳过） */
 const BACKUP_DIR = '.design-canvas/camera-backup';
 
+/** 探针台账文件名（相对被插桩项目根，位于 .design-canvas 下） */
+const LEDGER_FILE = '.design-canvas/camera-ledger.json';
+
 /** 备份文件名：把原文件相对项目根（backupRoot）的路径映射为备份目录下的镜像路径 */
 function backupPathFor(backupRoot: string, file: string): string {
   const rel = path.relative(backupRoot, file).replaceAll('\\', '/');
@@ -168,6 +171,94 @@ export function restoreInstrumented(root: string): string[] {
     fs.rmSync(path.join(root, BACKUP_DIR), { recursive: true, force: true });
   }
   return restored;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 探针台账（ledger）：把「单文件插拔」记账成台账 + 统计，
+// 支撑 一键插所有文件 / 一键拔所有文件 / 查看统计 的联动。
+// 台账持久化在 <被插桩项目根>/.design-canvas/camera-ledger.json，
+// 与 camera-backup 备份目录同处，collectTsFiles 自动跳过。
+// ─────────────────────────────────────────────────────────────
+
+/** 探针台账：记录一次插桩的全部探针点 + 统计（供查看/统计/精确还原/一键全拔） */
+export interface ProbeLedger {
+  projectRoot: string;
+  instrumentedAt: string;
+  sites: InstrumentedSite[];
+  stats: {
+    /** 探针点总数 */
+    total: number;
+    /** 涉及文件数 */
+    files: number;
+    /** 按插桩类型统计（enter/exit/catch/io/deep） */
+    perKind: Record<string, number>;
+    /** 按事件级别统计（core/event/deep） */
+    perLevel: Record<string, number>;
+  };
+}
+
+/** 台账文件路径（相对被插桩项目根） */
+export function ledgerPath(root: string): string {
+  return path.join(root, LEDGER_FILE);
+}
+
+/** 从插桩结果构建台账 */
+export function buildProbeLedger(results: InstrumentFileResult[], projectRoot: string): ProbeLedger {
+  const sites: InstrumentedSite[] = [];
+  const files = new Set<string>();
+  for (const r of results) {
+    if (r.error || r.sites.length === 0) continue;
+    files.add(r.file);
+    sites.push(...r.sites);
+  }
+  const perKind: Record<string, number> = {};
+  const perLevel: Record<string, number> = {};
+  for (const s of sites) {
+    perKind[s.kind] = (perKind[s.kind] || 0) + 1;
+    perLevel[s.level] = (perLevel[s.level] || 0) + 1;
+  }
+  return {
+    projectRoot,
+    instrumentedAt: new Date().toISOString(),
+    sites,
+    stats: { total: sites.length, files: files.size, perKind, perLevel },
+  };
+}
+
+/** 保存台账到 <root>/.design-canvas/camera-ledger.json，返回台账文件路径 */
+export function saveProbeLedger(root: string, ledger: ProbeLedger): string {
+  const file = ledgerPath(root);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(ledger, null, 2), 'utf-8');
+  return file;
+}
+
+/** 加载台账；不存在或解析失败返回 null */
+export function loadProbeLedger(root: string): ProbeLedger | null {
+  const file = ledgerPath(root);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as ProbeLedger;
+  } catch {
+    return null;
+  }
+}
+
+/** 清理台账（--uninstrument 一键全拔时联动删除）；存在并删除返回 true */
+export function clearProbeLedger(root: string): boolean {
+  const file = ledgerPath(root);
+  if (fs.existsSync(file)) {
+    fs.rmSync(file, { force: true });
+    return true;
+  }
+  return false;
+}
+
+/** 台账统计单行摘要（供 CLI / MCP 展示）：如 `18 探针点 · 3 文件 · enter:6 exit:8 catch:2 io:2 · core:16 event:4` */
+export function ledgerSummary(ledger: ProbeLedger): string {
+  const kind = Object.entries(ledger.stats.perKind).map(([k, v]) => `${k}:${v}`).join(' ');
+  const level = Object.entries(ledger.stats.perLevel).map(([k, v]) => `${k}:${v}`).join(' ');
+  return `${ledger.stats.total} 探针点 · ${ledger.stats.files} 文件 · ${kind} · ${level}`;
 }
 
 /** 函数类节点类型 → 插桩函数出入口 */

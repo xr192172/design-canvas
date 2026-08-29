@@ -85,4 +85,48 @@ describe('Camera 全自动插桩 CLI', () => {
     const out = await capture(() => runInstrumentCLI([dir, '--uninstrument']))();
     expect(out).toContain('未找到备份');
   });
+
+  it('写盘插桩后自动生成探针台账并统计', async () => {
+    await capture(() => runInstrumentCLI([dir]))();
+    const ledgerFile = path.join(dir, '.design-canvas', 'camera-ledger.json');
+    expect(fs.existsSync(ledgerFile)).toBe(true);
+    const ledger = JSON.parse(fs.readFileSync(ledgerFile, 'utf-8'));
+    expect(ledger.projectRoot).toBe(dir);
+    expect(ledger.stats.total).toBeGreaterThan(0);
+    expect(ledger.stats.files).toBe(1);
+    // 统计包含 perKind / perLevel
+    expect(typeof ledger.stats.perKind).toBe('object');
+    expect(typeof ledger.stats.perLevel).toBe('object');
+    // 台账探针点与源码里的 captureProbe 数一致
+    expect(ledger.sites.length).toBe(ledger.stats.total);
+  });
+
+  it('--dry-run 不生成台账', async () => {
+    await capture(() => runInstrumentCLI([dir, '--dry-run']))();
+    expect(fs.existsSync(path.join(dir, '.design-canvas', 'camera-ledger.json'))).toBe(false);
+  });
+
+  it('--ledger 查看台账统计与明细', async () => {
+    await capture(() => runInstrumentCLI([dir]))();
+    const out = await capture(() => runInstrumentCLI([dir, '--ledger']))();
+    expect(out).toContain('探针台账');
+    expect(out).toContain('统计：');
+    expect(out).toContain('探针点');
+    expect(out).toContain('util.ts');
+    expect(out).toContain('enter');
+  });
+
+  it('--ledger 无台账时提示未找到', async () => {
+    const out = await capture(() => runInstrumentCLI([dir, '--ledger']))();
+    expect(out).toContain('未找到台账');
+  });
+
+  it('--uninstrument 一键全拔联动清理台账', async () => {
+    await capture(() => runInstrumentCLI([dir]))();
+    const ledgerFile = path.join(dir, '.design-canvas', 'camera-ledger.json');
+    expect(fs.existsSync(ledgerFile)).toBe(true);
+    const out = await capture(() => runInstrumentCLI([dir, '--uninstrument']))();
+    expect(out).toContain('已清理探针台账');
+    expect(fs.existsSync(ledgerFile)).toBe(false);
+  });
 });

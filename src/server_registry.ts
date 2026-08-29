@@ -80,6 +80,10 @@ import {
   instrumentProject,
   collectTsFiles,
   restoreInstrumented,
+  buildProbeLedger,
+  saveProbeLedger,
+  clearProbeLedger,
+  ledgerSummary,
 } from './camera/instrument.js';
 import path from 'node:path';
 import { statSync, readFileSync, writeFileSync } from 'node:fs';
@@ -431,12 +435,15 @@ const cameraInstrumentHandler = wrap(async (a) => {
 
   if (unintrument) {
     const restored = restoreInstrumented(target);
-    if (restored.length === 0) {
-      return { message: 'Camera 还原：未找到备份，无需还原（可能从未插桩，或备份已删）。', data: [] };
+    const cleared = clearProbeLedger(target);
+    if (restored.length === 0 && !cleared) {
+      return { message: 'Camera 一键全拔：未找到备份与台账，无需还原（可能从未插桩，或备份已删）。', data: [] };
     }
     return {
-      message: `Camera 还原：已还原 ${restored.length} 个文件并删除备份目录。\n${restored.map((f) => `  ↺ ${f}`).join('\n')}`,
-      data: restored,
+      message:
+        `Camera 一键全拔：已还原 ${restored.length} 个文件并删除备份目录${cleared ? '，已清理探针台账' : ''}。\n` +
+        restored.map((f) => `  ↺ ${f}`).join('\n'),
+      data: { restored, ledger_cleared: cleared },
     };
   }
 
@@ -462,7 +469,18 @@ const cameraInstrumentHandler = wrap(async (a) => {
   }
   lines.push(`  完成：${instrumented} 新插桩 / ${skipped} 已含探针跳过 / ${errors} 失败，共 ${totalSites} 探针点`);
   if (dryRun) lines.push('  DRY-RUN 未写盘。传 dry_run=false 实际改写源码（git 可兜底，幂等）。');
-  return { message: lines.join('\n'), data: results };
+
+  // 写盘插桩成功后记账：生成探针台账 + 统计，随 data 返回供上层查看/一键全拔联动
+  const data: Record<string, unknown> = { results };
+  if (!dryRun && totalSites > 0) {
+    const ledger = buildProbeLedger(results, target);
+    const ledgerFile = saveProbeLedger(target, ledger);
+    data.ledger = ledger;
+    data.ledger_file = ledgerFile;
+    lines.push(`  探针台账已记账 → ${ledgerFile}`);
+    lines.push(`  统计：${ledgerSummary(ledger)}`);
+  }
+  return { message: lines.join('\n'), data };
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1046,15 +1064,16 @@ const TOOL_DEFS: ToolDef[] = [
     title: 'Auto-instrument or restore a TS project',
     description:
       '对目标项目全自动 AST 插桩（函数出入口/return/catch/IO 写盘），幂等（已含探针文件跳过）。' +
-      'action=uninstrument|restore 一键还原（从自动备份拷回原文件并删备份目录）。' +
+      'action=uninstrument|restore 一键全拔（从自动备份拷回原文件、删备份目录、清理探针台账）。' +
       'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。' +
+      '写盘插桩成功后自动生成探针台账（data.ledger：全部探针点+统计，落盘 .design-canvas/camera-ledger.json）。' +
       '契约模式：contract_probes 传探针 id 数组（如 ["store.save.writefile"]）则只注入声明的探针点；' +
       '缺省/空数组则探索模式全量插桩（挖掘隐藏问题）。',
     inputSchema: {
       action: z
         .enum(['instrument', 'uninstrument', 'restore'])
         .optional()
-        .describe('instrument=插桩（默认）；uninstrument/restore=还原'),
+        .describe('instrument=插桩（默认）；uninstrument/restore=一键全拔（还原+清台账）'),
       target: z.string().describe('要插桩/还原的目标项目目录'),
       dry_run: z.boolean().optional().describe('true=只预览探针点不写盘（默认 false）'),
       contract_probes: z

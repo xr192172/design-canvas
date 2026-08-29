@@ -131,11 +131,13 @@
 
 ### 阶段 D · 清理死数据与 mock
 
-* [ ] 删/动态化 `index.html` L50 "最后扫描: 3分钟前"
+* [x] 删/动态化 `index.html` L50 "最后扫描: 3分钟前"（已改为动态 `#side-project-status`：已连接 feature / 离线）
 
-* [ ] 明确 mock 来源切换路径，或接入后端后默认隐藏
+* [x] 明确 mock 来源切换路径，或接入后端后默认隐藏（`sources.ts` 已清空内置 conveyor/mock，数据源全由后端实时供应）
 
-* [ ] `runProbeMock` 保持诚实标注，但考虑加"未接后端"全局提示
+* [x] `runProbeMock` 保持诚实标注，但考虑加"未接后端"全局提示（`runProbeMock` 只汇报 DSL 自带真实数据、无数据明确"无法观测"；本次新增画布顶部全局离线提示条 `#offline-banner`，仅后端不可达时显示"离线观测，不模拟不伪造"）
+
+* [x] 「提交你的看法」前端独立版真接通（`dsl-workbench/src/main.ts` `sendFeedback` 去掉 setTimeout 假处理）：后端可达 → `POST /api/canvas-notes` 保存真实批注（对齐 8.4 契约，发送体 `canvas_notes`）；无后端 → "未连接后端（serve），反馈通道停用"；无 LLM → "批注已保存；LLM 未配置，AI 决策停用"。绝不假装 AI 处理
 
 ### 阶段 E · 发布节奏
 
@@ -175,7 +177,7 @@
 
 * [ ] L1 摘要「intro」模板前缀清理（前端 adapter 拼接残留）
 
-* [ ] derive\_feature_tree 日志「17 个功能」off-by-one 修正（实际 16）
+* [ ] derive\_feature\_tree 日志「17 个功能」off-by-one 修正（实际 16）
 
 ***
 
@@ -187,38 +189,50 @@
 
 ### 7.1 审计发现（按严重度）
 
-| # | 问题 | 说明 |
-|---|------|------|
-| A | tools 大桶 | tools/ 159 文件常被关键词匹配吞进单个「查询」功能，需按能力域拆分 |
-| B | 真目录缺失 | dsl/db/daemon/storage 等纯定义/配置目录不生成功能，凭空消失 |
-| C | 噪音社区标签 | 聚类锚点把数据结构名（MinHeap/Trie…）当社区名，LLM 直译「最小堆」仍是噪音 |
-| D | 分镜降级无兜底 | LLM 失败即降级「1 文件 1 步」且无重试；camera 分镜需补全 |
-| E | 文件归属漂移 | 文件按社区归属被跨目录拉走（camera/diagnosis 被拉进 tools 功能） |
-| F | 查询解析准大桶 | ts\_kernel 内核、python\_refactor 子项目被误并，43 文件需瘦身 |
-| G | L3 involves 错位 | 未引用文件按轮转硬塞步骤，与步骤语义对不上 |
+| # | 问题             | 说明                                             |
+| - | -------------- | ---------------------------------------------- |
+| A | tools 大桶       | tools/ 159 文件常被关键词匹配吞进单个「查询」功能，需按能力域拆分         |
+| B | 真目录缺失          | dsl/db/daemon/storage 等纯定义/配置目录不生成功能，凭空消失      |
+| C | 噪音社区标签         | 聚类锚点把数据结构名（MinHeap/Trie…）当社区名，LLM 直译「最小堆」仍是噪音  |
+| D | 分镜降级无兜底        | LLM 失败即降级「1 文件 1 步」且无重试；camera 分镜需补全           |
+| E | 文件归属漂移         | 文件按社区归属被跨目录拉走（camera/diagnosis 被拉进 tools 功能）   |
+| F | 查询解析准大桶        | ts\_kernel 内核、python\_refactor 子项目被误并，43 文件需瘦身 |
+| G | L3 involves 错位 | 未引用文件按轮转硬塞步骤，与步骤语义对不上                          |
 
 ### 7.2 已修（代码位置）
 
 * **A 能力域拆分**：`derive_feature_tree.ts` `TOOL_DOMAINS`（9 域 design/query/refactor/observe/judge/edit/harvest/export/kernel），显式文件名清单优先 + 关键词兜底。
+
 * **B 目录补全**：`isInfraPath` + 零社区目录直挂补功能（dsl/db/daemon/storage/ts\_kernel）。
+
 * **C 标签清洗**：`NOISE_COMMUNITY_RE` 统一替换为「内部组件」。
+
 * **D 分镜重试 + 分镜缓存**：`derive_mind_map.ts` 3 并发 mapLimit + 失败 4s 重试；分镜缓存 key=功能名 + steps≥3 复用，desc\_cache/community\_zh 按稳定锚点复用。
+
 * **E 目录优先归属**：文件按自身目录/能力域归属，社区归属仅兜底。
+
 * **F 查询解析瘦身**：ts\_kernel→工具内核(6)、python\_refactor→重构、annotation\_tools→设计，43→34 文件。
+
 * **G involves 语义对齐**：`fileTokenSet`/`stepSimilarity` 词元相似度归属未引用文件，替代轮转分发。
 
 ### 7.3 重跑与验收（2026-08-28 已通过）
 
 * 重跑链：`deriveFeatureTree`（feature\_tree 落 DSL）→ `deriveMindMap teach`（LLM 分镜）。
-* 结果：DSL feature\_tree **16 个功能** · 200/200 文件完整归属（社区成员文件重叠，按语义层去重计）；每功能 3~8 步分镜。
+
+* 结果：DSL feature\_tree **16 个功能** · 200/200 文件完整归属（社区成员文件重叠，按语义层去重计）；每功能 3\~8 步分镜。
+
 * 浏览器实测四层导航（dsl-workbench :5174 连后端 :8123）：L1 软件介绍单节点（16 功能 · 200 文件）→ L2 16 功能 4×4 网格 + 拟人化描述 → L3 查询解析 6 步（入口扫描→推导功能树→思维导图→分类标注→术语字典→执行查询）→ L4 推导功能树 6 文件全带 `tools/` 前缀、语义贴合。
+
 * Git：`e0b28e3`（A+B 前半）/ `8faf73b`（B+C+D+E）/ `c9a4d26`（F+G）。
 
 ### 7.4 遗留与后续（挂起）
 
 * [ ] **分镜缓存 key 升级**（重要）：当前 key=功能名，若只改文件分组（名不变、文件集变）会复用**陈旧分镜**。升级为「功能名 + 该功能文件集哈希 / dsl\_rev」，分组变化自动失效重生成，分组不变则跳过 LLM。
+
 * [ ] **L1「intro」前缀清理**：后端 overview one\_liner 本身干净（`design-canvas：由 16 个功能…`），「intro」是前端 adapter 拼接的模板前缀，应清成一句人话。
-* [ ] **derive_feature_tree 日志 off-by-one**：message 报「17 个功能」而 DSL 实际 16，纠正日志计数。
+
+* [ ] **derive\_feature\_tree 日志 off-by-one**：message 报「17 个功能」而 DSL 实际 16，纠正日志计数。
+
 * [ ] **export 域落位抽查**：export/render\_mindmap/registry/capability\_matrix/overview 等已并回能力矩阵/设计工作台，抽查落位合理性（已验证 200/200 无丢失）。
 
 ### 7.5 出边/入边保留 + 两期落地 + 画线方案改版（2026-08-28 已定）
@@ -228,19 +242,28 @@
 * **一期（前端可见化，已完成）**：L3 步骤卡直接渲染 IN/OUT 针脚（`NavPin`：人话名 n + 来源类型简写 t；投影自涉及文件 API 签名，非编造），无针脚时面板给出「无法判断数据流向」的保守提示。
 
 * **二期（后端真推导 + 前端缺口检测，已完成）**：
+
   * 后端 `deriveStepFlow`（`design-canvas/src/tools/derive_mind_map.ts`）按「数据形态名」保守匹配跨步连线（`TeachFlowEdge`）与管线缺口（`TeachGap`）：
+
     * `in_missing` 无入边 / `out_missing` 无出边 / `in_no_source` 入边无产出者 / `out_no_consumer` 出边无消费方。
+
     * 当前 teach 数据推导结果：**16 功能 · 0 连线 · 66 缺口**——连线 0 条是保守策略（跨步同数据名几乎无命中），缺口 66 条即「疑漏一步」的线索。
+
   * 前端：步骤卡右上角「疑漏步」警示角标（`unlink` 图标，悬停看原因），点击进面板看缺口明细；`backfill_stepflow.mjs` 幂等回填 gaps/flowEdges 到 teach JSON（不重生成 LLM 描述）。
 
 * **画线方案改版（用户新思路，已实现）**：**不做连线，改做「上下游一度邻居高亮」**——点击某节点，不再画依赖线，而是把上游一度节点染蓝、下游一度节点染红，无关节点轻度虚化（`dslw-node-hl-in/out/dim`）；无连线时不高亮也不虚化。比画线干净、不铺满底图，与「埋点」哲学一致。
 
 * **全视图高亮打通（用户决策：所有视图都要，已实现）**：点击高亮按「当前视图 edges」通用生效，逐层补齐数据源后 L1-L4 全覆盖：
+
   * L1 根视图：单介绍卡，无邻居可高亮（天然无需处理）。
+
   * L2 功能视图：跨功能边 `deriveCrossFeatureFlow`（唯一产出功能 → 消费功能）→ 根 `meta.crossEdges` → `featuresViewOf` 接 cross 边，点功能卡高亮上下游功能。
+
   * L3 步骤视图：跨步边 `deriveStepFlow`（同数据身份 + 唯一产出者）→ stepgroup `meta.flowEdges` → `stepsViewOf` 接 flow 边。
+
   * L4 文件视图（本轮新增）：逐文件针脚 `projectFileDataShape`（单文件单独投影「吃什么/吐什么」）挂 step `meta.filePins`；文件级边 `deriveFileFlow`（功能内全部文件跨步骤去重收集 → 唯一产出者「产出→消费」，方向不限）挂 stepgroup `meta.fileEdges`；`fileViewOf` 只保留两端都在本视图的边 → 点文件卡高亮同步骤内上下游文件。当前推导：**16 功能 · 跨步 13 条 · 跨功能 17 条 · 文件级 17 条**（缺口 413 条偏多是投影噪声，后续收敛）。
-  * 实测（probe_hl_views.py）：L2 点功能 1 in / 14 dim；L3 点 s2 1 out / 5 dim；L4 点 tiered.ts → 下游 trace.ts 染红，文件卡渲染出/入针脚，0 控制台错误。
+
+  * 实测（probe\_hl\_views.py）：L2 点功能 1 in / 14 dim；L3 点 s2 1 out / 5 dim；L4 点 tiered.ts → 下游 trace.ts 染红，文件卡渲染出/入针脚，0 控制台错误。
 
 * **遗留**：跨步/文件级连线命中率仍保守（同数据身份 + 唯一产出者双重过滤）——若想让步骤/文件间真实连线更密，需提升针脚语义身份（如统一类型清洗规则 / 允许跨功能匹配 / 放宽唯一产出者到「功能内」而非「全局」）。文件级边的可见范围受限于「单步骤文件视图」——跨步骤的文件流（step2 文件 → step5 文件）不会在任一 L4 单步视图里亮起，如需全局文件依赖图需另建「全局文件图」视图。
 
@@ -253,21 +276,29 @@
 ### 8.1 设计原则
 
 * **无 LLM → 停用**：`llm_decider.ts` 移除 mock 与规则降级，`decideMode` 三态 `llm / mock / off`；`off` 时 LLM 决策功能直接停用（返回 note=未配置，不落状态、不伪造）。`LLM_DECIDER_MOCK=1` 仅作验收脚本显式开关（非产品路径）。
+
 * **薄层可纳管**：对外暴露 OpenAI 兼容端点 `POST /v1/chat/completions`，上层网关可把本项目当 upstream 接入；`/api/gateway/*` 提供供应商/用量管理接口。
+
 * **Key 池 = 同供应商多 Key**：同一家供应商的多个 API Key 算入同一个池，调用按权重轮询 + 失败自动切下一个 Key/供应商。
 
 ### 8.2 实现（代码位置）
 
-* `src/tools/gateway.ts`（新增）：供应商 CRUD（OpenAI 兼容：base_url/model/keys/weight/单价/enabled）、`pickEndpoint` 加权轮询 + 失败转移、用量统计（调用/token/费用估算 USD/错误/延迟，按供应商+Key 维度，`gateway.json` 持久化）、`chatViaGateway`（maxAttempts 重试、jsonMode 强制 JSON 输出）、`testProvider` 连通性测试、OpenAI 兼容端点 handler。
+* `src/tools/gateway.ts`（新增）：供应商 CRUD（OpenAI 兼容：base\_url/model/keys/weight/单价/enabled）、`pickEndpoint` 加权轮询 + 失败转移、用量统计（调用/token/费用估算 USD/错误/延迟，按供应商+Key 维度，`gateway.json` 持久化）、`chatViaGateway`（maxAttempts 重试、jsonMode 强制 JSON 输出）、`testProvider` 连通性测试、OpenAI 兼容端点 handler。
+
 * `src/tools/llm_decider.ts`：接入网关走 Key 池（`chatViaGateway` + jsonMode），`hasEnabledProvider()` 判定 LLM 可用性，无配置直接 `off` 停用。
+
 * `src/tools/serve.ts`：`/api/gateway/status|providers|providers/test|stats|stats/reset` + `POST /v1/chat/completions`（OpenAI 兼容，供上层纳管）。
+
 * `src/server_registry.ts`：注册 `gateway_list_providers / gateway_upsert_provider / gateway_delete_provider / gateway_stats` MCP 工具，外部 agent 可管理供应商与查用量。
-* `src/tools/workbench_page.ts`：`/workbench` 右下「⚙ LLM 网关」悬浮窗——状态灯（可用/停用）、供应商卡片列表（启用/编辑/删除/脱敏 Key）、注册表单（引导填 base_url/model/Key 池/单价）、连通性测试、用量统计。
+
+* `src/tools/workbench_page.ts`：`/workbench` 右下「⚙ LLM 网关」悬浮窗——状态灯（可用/停用）、供应商卡片列表（启用/编辑/删除/脱敏 Key）、注册表单（引导填 base\_url/model/Key 池/单价）、连通性测试、用量统计。
 
 ### 8.3 验收（浏览器端到端，2026-08-29 已通过）
 
 * `tsc --noEmit` 通过；悬浮窗打开/状态/供应商列表/用量渲染正常；连通性测试对 agnes 真实端点 ✓（6.9s，模型 agnes-2.0-flash）。
+
 * 无配置时 `configured=false`，LLM 决策停用；`/v1/chat/completions` 可被 OpenAI 客户端纳管。
+
 * 遗留：真实 Key 池多 Key 轮询/失败转移的自动化回归用例未固化（手工验证过），后续可补 vitest。
 
 ### 8.4 mock 清理 + 反馈通道真接通（2026-08-29 完成）
@@ -275,13 +306,36 @@
 > 用户定调：**mock 数据除了混淆视野没有任何作用**。前端所有"假数据/假状态/占位"一律改真或明确停用，绝不假装执行。
 
 * **「提交你的看法」面板真接通**（`src/tools/render_dsl_workbench.ts`）：点击发送 → 经 `/api/canvas-notes` 保存为真实批注（带锚点槽位）；无后端 → "未连接后端（serve），反馈通道停用"；无 LLM → "批注已保存；LLM 未配置，AI 决策停用"（仍保存但决策停用，不假装 AI 处理）。
+
 * **字段契约修复**：前端发送体由 `notes` 改为 `canvas_notes`，与 `POST /api/canvas-notes` 后端契约对齐（此前 toast 显示成功但实际存了空数组）。
-* **沙盘假时间戳清除**（`src/tools/render_sandbox.ts`）："最后扫描：刚完成" → 真实的"管线快照"（scanned_files/语言/积木数）。
+
+* **沙盘假时间戳清除**（`src/tools/render_sandbox.ts`）："最后扫描：刚完成" → 真实的"管线快照"（scanned\_files/语言/积木数）。
+
 * **静态推演如实标注**（`src/renderer/scripts.ts`）：无执行环境时 `fallbackMockTrace` 状态标 `unsupported` + "静态推演（未连接后端/请求失败，非真实执行）"，不再混充真实执行。
+
 * **workbench 单出口链路修复**：① `workbench_page.ts` 代码审批 rail 缺 `id="rail"`（既有 bug，`$('rail')` 抛 null 阻断整个 `activate()`，iframe 永不加载）→ 补 id；② iframe 传递 `?feature=` 让静态产物拿到项目上下文；③ `brickify_cli --dsl-workbench` 产物自注册到产物注册表（`type: feature_workbench`），`/workbench` 的 feature-meta 据此发现画布产物。
-* **`/api/canvas-notes` 纳入 CSRF 写保护**（`src/tools/serve.ts`）。
+
+* **`/api/canvas-notes`** **纳入 CSRF 写保护**（`src/tools/serve.ts`）。
+
 * **保留（非混淆性）**：`workbench_data.ts` 的 `MOCK_PATHS` 是画布视觉连线几何（照抄 mock 保形，非业务假数据）；`dsl/animation.ts`/`anim_core.ts` 的 L3 mock 数据源是动画引擎零风险推演的设计特性。
 
 **验收（浏览器端到端，death-source-fixture）**：网关已配置时提交 → toast「已提交批注，AI 将决策处理」，`GET /api/canvas-notes` 返回真实批注（anchor=compute）；禁用供应商后 → 状态 `configured=false`，toast「批注已保存；LLM 未配置，AI 决策停用」；全程无 console 报错；配置操作后已还原。
 
+## 9. 探针台账 + 一键插拔联动（2026-08-29 完成）
 
+> 用户定调：把"单文件插拔"做成**台账 + 统计**，并支持**一键插所有文件 / 一键拔所有文件**，几个功能联动。`--dry-run` 只预览不记账；写盘成功才记账，全拔时联动清理。
+
+* **台账数据结构**（`src/camera/instrument.ts` `ProbeLedger`）：projectRoot / instrumentedAt / sites（全部探针点：文件、行号、kind、level、注入源码）/ stats（总数 total、文件数 files、按类型 perKind enter/exit/catch/io/deep、按级别 perLevel core/event/deep）。
+
+* **四个核心函数**：`buildProbeLedger`（从插桩结果构建台账）、`saveProbeLedger`（落盘 `<项目根>/.design-canvas/camera-ledger.json`）、`loadProbeLedger`（加载）、`clearProbeLedger`（清理）。
+
+* **CLI 三态联动**（`src/camera/instrument_cli.js`）：
+  * 默认（一键插所有文件）：写盘成功后自动记账 + 打印统计（`4 探针点 · 1 文件 · exit:1 catch:1 io:1 enter:1 · core:2 event:2`）。
+  * `--ledger`：查看台账——插桩时间 + 统计 + 每个探针点明细。
+  * `--uninstrument`（一键拔所有文件）：从 camera-backup 还原全部原文件 + 删除备份目录 + **联动清理台账**。
+
+* **MCP `camera_instrument` 联动**（`src/server_registry.ts`）：写盘插桩后 `data.ledger` 返回台账 + 统计 + `ledger_file`；`action=uninstrument|restore` 时 `data.ledger_cleared` 标记台账清理。
+
+* **测试**：`tests/camera/instrument_cli.test.ts` 新增 6 条——写盘后自动生成台账并统计、`--dry-run` 不生成台账、`--ledger` 查看统计与明细、无台账提示、全拔联动清理台账。
+
+* **验收**：临时项目跑通全链路（一键插 → 台账生成 → `--ledger` 查看 → 一键全拔 → 台账清理）；相机相关 16 条 vitest 全过；`tsc --noEmit` 通过。

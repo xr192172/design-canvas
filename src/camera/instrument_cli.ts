@@ -8,22 +8,34 @@
  * 用法（项目根，先构建）：
  *   node dist/src/camera/instrument_cli.js <project> [--dry-run] [--project-root <根>]
  *   node dist/src/camera/instrument_cli.js <project> --uninstrument
+ *   node dist/src/camera/instrument_cli.js <project> --ledger
  *
  *   <project>       要插桩的目标项目目录（默认当前目录）
  *   --dry-run       只报告会注入的探针点，不写盘
- *   --uninstrument  一键还原：从 .design-canvas/camera-backup 拷回所有原文件
- *                   并删除备份目录（插桩时已自动备份原文件）
+ *   --uninstrument  一键全拔：从 .design-canvas/camera-backup 拷回所有原文件，
+ *                   删除备份目录，并清理探针台账（插桩时已自动备份原文件+记账）
+ *   --ledger        查看探针台账：一次插桩的全部探针点 + 统计（JSON 打印）
  *   --project-root  design-canvas 根（探针实现 src/camera/probe.js 所在仓库根），
  *                   用于计算被插桩文件 → probe.js 的相对 import 路径。默认自动推断。
  *
  * 输出：每个文件注入的探针点数 + 汇总；idempotent——重跑时已插桩文件标记为跳过。
- * 回退：插桩写盘前会在 .design-canvas/camera-backup 自动备份原文件；--uninstrument 一键还原。
+ * 台账：写盘插桩成功后自动生成 .design-canvas/camera-ledger.json（一键全拔时联动清理）。
+ * 回退：插桩写盘前会在 .design-canvas/camera-backup 自动备份原文件；--uninstrument 一键全拔。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { instrumentProject, collectTsFiles, restoreInstrumented } from './instrument.js';
+import {
+  instrumentProject,
+  collectTsFiles,
+  restoreInstrumented,
+  buildProbeLedger,
+  saveProbeLedger,
+  loadProbeLedger,
+  clearProbeLedger,
+  ledgerSummary,
+} from './instrument.js';
 
 const isMain = import.meta.url === pathToFileURL(path.resolve(process.argv[1] ?? '')).href;
 
@@ -43,11 +55,13 @@ export async function runInstrumentCLI(argv: string[]): Promise<void> {
   let target = process.cwd();
   let dryRun = false;
   let unintrument = false;
+  let viewLedger = false;
   let projectRoot: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dry-run') { dryRun = true; continue; }
     if (argv[i] === '--uninstrument') { unintrument = true; continue; }
+    if (argv[i] === '--ledger') { viewLedger = true; continue; }
     if (argv[i] === '--project-root' && i + 1 < argv.length) { projectRoot = argv[i + 1]; i++; continue; }
     if (argv[i].startsWith('--project-root=')) { projectRoot = argv[i].slice('--project-root='.length); continue; }
     if (argv[i].startsWith('-')) continue;
@@ -60,19 +74,41 @@ export async function runInstrumentCLI(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // ── 一键还原：从 .design-canvas/camera-backup 拷回所有原文件 ──
-  if (unintrument) {
-    const restored = restoreInstrumented(root);
-    if (restored.length === 0) {
-      console.log(`=== Camera 还原 [${root}] ===`);
-      console.log('未找到备份，无需还原（可能从未插桩，或备份已删）。');
+  // ── 查看探针台账：一次插桩的全部探针点 + 统计 ──
+  if (viewLedger) {
+    const ledger = loadProbeLedger(root);
+    if (!ledger) {
+      console.log(`=== Camera 探针台账 [${root}] ===`);
+      console.log('未找到台账（可能从未插桩，或已一键全拔清理）。');
       return;
     }
-    console.log(`=== Camera 还原 [${root}] ===`);
+    console.log(`=== Camera 探针台账 [${root}] ===`);
+    console.log(`插桩时间：${ledger.instrumentedAt}`);
+    console.log(`统计：${ledgerSummary(ledger)}`);
+    console.log('── 明细（探针点）──');
+    for (const s of ledger.sites) {
+      console.log(`  ${path.relative(root, s.file) || s.file} L${s.line} [${s.kind}/${s.level}] ${s.injected.trim().split('\n')[0]}`);
+    }
+    return;
+  }
+
+  // ── 一键全拔：从 .design-canvas/camera-backup 拷回所有原文件，清理台账 ──
+  if (unintrument) {
+    const restored = restoreInstrumented(root);
+    const cleared = clearProbeLedger(root);
+    if (restored.length === 0 && !cleared) {
+      console.log(`=== Camera 一键全拔 [${root}] ===`);
+      console.log('未找到备份与台账，无需还原（可能从未插桩，或备份已删）。');
+      return;
+    }
+    console.log(`=== Camera 一键全拔 [${root}] ===`);
     for (const f of restored) {
       console.log(`  ↺ ${path.relative(root, f) || f}`);
     }
-    console.log(`\n已还原 ${restored.length} 个文件，删除备份目录。`);
+    const lines = [`\n已还原 ${restored.length} 个文件，删除备份目录。`];
+    if (cleared) lines.push('已清理探针台账。');
+    else lines.push('（无台账可清理）');
+    console.log(lines.join(''));
     return;
   }
 
@@ -111,6 +147,16 @@ export async function runInstrumentCLI(argv: string[]): Promise<void> {
   }
 
   console.log(`\n完成：${instrumented} 文件新插桩 / ${skipped} 文件已含探针跳过 / ${errors} 文件失败，共 ${totalSites} 探针点`);
+
+  // 写盘插桩成功后记账：生成探针台账 + 统计（供 --ledger 查看、一键全拔联动清理）
+  if (!dryRun && totalSites > 0) {
+    const ledger = buildProbeLedger(results, root);
+    const ledgerFile = saveProbeLedger(root, ledger);
+    console.log(`\n探针台账已记账 → ${ledgerFile}`);
+    console.log(`统计：${ledgerSummary(ledger)}`);
+    console.log('提示：--ledger 查看明细，--uninstrument 一键全拔并清理台账。');
+  }
+
   if (dryRun) {
     console.log('DRY-RUN 未写盘。去掉 --dry-run 实际改写源码（git 可兜底，幂等）。');
   }

@@ -112,7 +112,7 @@ node scripts/install_mcp.mjs --target claude  # 只写指定平台
 | `assemble_bricks` | 积木库 | 用箱装积木拼装新项目 |
 | `slim_brick` | 积木库 | 把 Go 积木瘦身为 -slim 派生积木（编译器式死码剪枝） |
 | `narrate_step` | 积木库 | 把流水线步骤叙述为受治理的叙述积木 |
-| `camera_instrument` | 摄像头 | 自动插桩 / 还原 TS 项目（instrument/uninstrument/restore） |
+| `camera_instrument` | 摄像头 | 自动插桩 / 还原 TS 项目（instrument/uninstrument/restore）；写盘后自动生成探针台账+统计（`.design-canvas/camera-ledger.json`），全拔联动清台账 |
 | `camera_log` | 摄像头 | 按文件查询 Camera 运行时日志 |
 | `camera_judge` | 摄像头 | 批量裁决 Camera 事件 |
 | `chain_recon` | 摄像头 | 把宿主链与其真实运行事件对账（meso 层） |
