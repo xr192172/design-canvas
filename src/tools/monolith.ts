@@ -26,7 +26,7 @@ import type { ParsedSymbol } from './ts_kernel/index.js';
 // 类型
 // ─────────────────────────────────────────────────────────────
 
-export type MonolithStatus = 'ok' | 'warning' | 'critical';
+export type MonolithStatus = 'ok' | 'warning' | 'critical' | 'cohesive';
 
 export interface CommunityInfo {
   /** 建议新文件名（不含目录） */
@@ -64,10 +64,12 @@ export interface CheckMonolithInput {
   base_dir?: string;
   /** 模式3：显式文件路径列表（绝对或相对 cwd） */
   files?: string[];
-  /** warning 阈值（默认 300 行） */
+  /** warning 阈值（默认 500 行） */
   warn_lines?: number;
-  /** critical 阈值（默认 600 行） */
+  /** critical 阈值（默认 1000 行） */
   crit_lines?: number;
+  /** 内聚守卫：体积大但引用高度内聚（≤1 社区）的文件是否降级不标红（默认 true；false 时按体积严格标红） */
+  flag_cohesive?: boolean;
   /** 扫描模式最多文件数（默认 200） */
   max_files?: number;
   /** 是否生成预览 DSL 并保存为 feature（默认 false） */
@@ -98,7 +100,7 @@ export function countLines(content: string): number {
   return content.endsWith('\n') ? n - 1 : n;
 }
 
-export function assessLines(lines: number, warn = 300, crit = 600): MonolithStatus {
+export function assessLines(lines: number, warn = 500, crit = 1000): MonolithStatus {
   if (lines >= crit) return 'critical';
   if (lines >= warn) return 'warning';
   return 'ok';
@@ -431,8 +433,9 @@ export function suggestFileName(declNames: string[], ext: string, taken: Set<str
 export async function analyzeFileContent(
   relPath: string,
   content: string,
-  warn = 300,
-  crit = 600,
+  warn = 500,
+  crit = 1000,
+  flagCohesive = true,
 ): Promise<FileMonolithReport> {
   const lineCount = countLines(content);
   const status = assessLines(lineCount, warn, crit);
@@ -517,8 +520,14 @@ export async function analyzeFileContent(
   });
 
   if (base.communities.length <= 1) {
-    base.suggestion = `${status === 'critical' ? '严重' : '警告'}：${lineCount} 行 / ${units.length} 个顶层声明，` +
-      `但引用关系高度内聚（仅 1 个社区），强行拆分反而割裂。可考虑按"接口/实现"或"类型/函数"分层拆分。`;
+    // 内聚守卫：引用高度内聚（≤1 社区）时，体积大不是拆分候选 → 降级为 cohesive（默认不标红）
+    if (flagCohesive && base.status !== 'ok') base.status = 'cohesive';
+    if (base.status === 'cohesive') {
+      base.suggestion = `体积提示：${lineCount} 行 / ${units.length} 个顶层声明，引用关系高度内聚（仅 1 个社区），不构成拆分候选。可考虑按"接口/实现"或"类型/函数"分层拆解。`;
+    } else {
+      base.suggestion = `${base.status === 'critical' ? '严重' : '警告'}：${lineCount} 行 / ${units.length} 个顶层声明，` +
+        `但引用关系高度内聚（仅 1 个社区），强行拆分反而割裂。可考虑按"接口/实现"或"类型/函数"分层拆分。`;
+    }
   } else {
     const names = base.communities.map((c) => c.suggested_name).join(', ');
     base.suggestion = `${status === 'critical' ? '严重' : '警告'}：${lineCount} 行 / ${units.length} 个顶层声明，` +
@@ -675,8 +684,9 @@ function walkSourceFiles(root: string, max: number): string[] {
 }
 
 export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMonolithResult> {
-  const warn = input.warn_lines ?? 300;
-  const crit = input.crit_lines ?? 600;
+  const warn = input.warn_lines ?? 500;
+  const crit = input.crit_lines ?? 1000;
+  const flagCohesive = input.flag_cohesive ?? true;
   const maxFiles = input.max_files ?? 200;
 
   // 收集目标文件 [{abs, rel}]
@@ -720,24 +730,26 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
       readFailed.push(t.rel);
       continue;
     }
-    reports.push(await analyzeFileContent(t.rel, content, warn, crit));
+    reports.push(await analyzeFileContent(t.rel, content, warn, crit, flagCohesive));
   }
 
-  const oversized = reports.filter((r) => r.status !== 'ok');
+  // oversized = 真拆分候选（warning/critical）；cohesive 大而内聚不标红
+  const oversized = reports.filter((r) => r.status === 'warning' || r.status === 'critical');
+  const cohesive = reports.filter((r) => r.status === 'cohesive');
   // 报告排序：critical 在前，按行数降序
   oversized.sort((a, b) => b.lines - a.lines);
 
-  // 预览 DSL
+  // 预览 DSL（仅真拆分候选；cohesive 大而内聚不入预览容器）
   let previewFeature: string | undefined;
   if (input.save_preview && oversized.length > 0) {
     previewFeature = input.preview_feature ?? `${input.feature ?? 'monolith'}_split_preview`;
-    const previewDsl = buildSplitPreviewDsl(previewFeature, reports, warn, crit);
+    const previewDsl = buildSplitPreviewDsl(previewFeature, oversized, warn, crit);
     saveDSL(previewDsl);
   }
 
   // 文本报告
   const linesOut: string[] = [
-    `check_monolith：扫描 ${reports.length} 个文件，${oversized.length} 个超阈值（warning≥${warn} / critical≥${crit} 行）`,
+    `check_monolith：扫描 ${reports.length} 个文件，${oversized.length} 个超阈值（warning≥${warn} / critical≥${crit} 行）${cohesive.length ? `，另 ${cohesive.length} 个「大而内聚」未标红` : ''}`,
   ];
   if (readFailed.length) linesOut.push(`读取失败 ${readFailed.length} 个: ${readFailed.slice(0, 5).join(', ')}`);
   for (const r of oversized) {
@@ -747,11 +759,17 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
       linesOut.push(`    → ${c.suggested_name}（~${c.est_lines} 行，内聚引用 ${c.internal_refs}）: ${c.decls.join(', ')}`);
     }
   }
+  if (cohesive.length) {
+    linesOut.push('', `大而内聚（体积超阈值但引用内聚，不构成拆分候选）:`);
+    for (const r of cohesive) linesOut.push(`  · ${r.path}（${r.lines} 行）`);
+  }
   if (previewFeature) {
     linesOut.push('', `预览 DSL 已保存为 feature "${previewFeature}"，用 render_dsl 渲染查看拆分后视图。`);
   }
-  if (oversized.length === 0) {
+  if (oversized.length === 0 && cohesive.length === 0) {
     linesOut.push('所有文件行数健康，无单文件化风险。');
+  } else if (oversized.length === 0) {
+    linesOut.push('无拆分候选。大而内聚文件仅为体积提示，可自行决定是否分层拆解。');
   }
 
   return {

@@ -41,11 +41,11 @@ describe('countLines - 行数统计', () => {
 });
 
 describe('assessLines - 阈值分档', () => {
-  it('默认 warn=300 crit=600', () => {
-    expect(assessLines(299)).toBe('ok');
-    expect(assessLines(300)).toBe('warning');
-    expect(assessLines(599)).toBe('warning');
-    expect(assessLines(600)).toBe('critical');
+  it('默认 warn=500 crit=1000', () => {
+    expect(assessLines(499)).toBe('ok');
+    expect(assessLines(500)).toBe('warning');
+    expect(assessLines(999)).toBe('warning');
+    expect(assessLines(1000)).toBe('critical');
   });
 
   it('自定义阈值', () => {
@@ -273,7 +273,7 @@ describe('analyzeFileContent - 单文件端到端', () => {
     expect(r.suggestion).toContain('2 个功能社区');
   });
 
-  it('单簇内聚文件 → 1 社区，不建议强拆', async () => {
+  it('单簇内聚文件 → 1 社区，默认降级为 cohesive（不标红）', async () => {
     const pad = Array.from({ length: 30 }, (_, i) => `    # 填充 ${i}`).join('\n');
     // 注意：声明名必须 ≥3 字符（短名在引用匹配中被跳过，防误匹配）；
     // 星形强连接（alpha 为中心双向互调）——对称环拆分/合并模块度相同会退化，星形必然单簇。
@@ -285,7 +285,22 @@ describe('analyzeFileContent - 单文件端到端', () => {
     ].join('\n');
     const r = await analyzeFileContent('cycle.py', content, 100, 600);
     expect(r.communities.length).toBe(1);
+    expect(r.status).toBe('cohesive'); // 内聚守卫：大而不拆，不标红
     expect(r.suggestion).toContain('内聚');
+    expect(r.suggestion).toContain('不构成拆分候选');
+  });
+
+  it('flagCohesive=false → 内聚大文件仍按体积标红（严格档）', async () => {
+    const pad = Array.from({ length: 30 }, (_, i) => `    # 填充 ${i}`).join('\n');
+    const content = [
+      `def fn_alpha():\n${pad}\n    return fn_beta() + fn_gamma()\n`,
+      `def fn_beta():\n${pad}\n    return fn_alpha()\n`,
+      `def fn_gamma():\n${pad}\n    return fn_alpha()\n`,
+      `def fn_delta():\n${pad}\n    return fn_alpha()\n`,
+    ].join('\n');
+    const r = await analyzeFileContent('cycle.py', content, 100, 600, false);
+    expect(r.communities.length).toBe(1);
+    expect(r.status).toBe('warning'); // 严格档：体积即标红
   });
 });
 
@@ -368,6 +383,31 @@ describe('checkMonolith - 主入口', () => {
       const r = await checkMonolith({ files: [f] });
       expect(r.oversized).toBe(0);
       expect(r.message).toContain('无单文件化风险');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('大而内聚文件：默认不进 oversized，flag_cohesive=false 时进', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monolith-'));
+    const f = path.join(dir, 'cohesive.py');
+    const pad = Array.from({ length: 40 }, (_, i) => `    # 填充 ${i}`).join('\n');
+    const content = [
+      `def fn_alpha():\n${pad}\n    return fn_beta() + fn_gamma()\n`,
+      `def fn_beta():\n${pad}\n    return fn_alpha()\n`,
+      `def fn_gamma():\n${pad}\n    return fn_alpha()\n`,
+      `def fn_delta():\n${pad}\n    return fn_alpha()\n`,
+    ].join('\n');
+    fs.writeFileSync(f, content, 'utf-8');
+    try {
+      // 默认：cohesive 降级，不进 oversized
+      const relaxed = await checkMonolith({ files: [f], warn_lines: 100, crit_lines: 600 });
+      expect(relaxed.oversized).toBe(0);
+      expect(relaxed.message).toContain('大而内聚');
+      // 严格档：flag_cohesive=false，体积即标红
+      const strict = await checkMonolith({ files: [f], warn_lines: 100, crit_lines: 600, flag_cohesive: false });
+      expect(strict.oversized).toBe(1);
+      expect(strict.reports[0].status).toBe('warning');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

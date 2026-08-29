@@ -330,12 +330,16 @@
 * **四个核心函数**：`buildProbeLedger`（从插桩结果构建台账）、`saveProbeLedger`（落盘 `<项目根>/.design-canvas/camera-ledger.json`）、`loadProbeLedger`（加载）、`clearProbeLedger`（清理）。
 
 * **CLI 三态联动**（`src/camera/instrument_cli.js`）：
+
   * 默认（一键插所有文件）：写盘成功后自动记账 + 打印统计（`4 探针点 · 1 文件 · exit:1 catch:1 io:1 enter:1 · core:2 event:2`）。
+
   * `--ledger`：查看台账——插桩时间 + 统计 + 每个探针点明细。
+
   * `--uninstrument`（一键拔所有文件）：从 camera-backup 还原全部原文件 + 删除备份目录 + **联动清理台账**。
 
-* **MCP `camera_instrument` 联动**（`src/server_registry.ts`）：写盘插桩后 `data.ledger` 返回台账 + 统计 + `ledger_file`；`action=uninstrument|restore` 时 `data.ledger_cleared` 标记台账清理。
+* **MCP** **`camera_instrument`** **联动**（`src/server_registry.ts`）：写盘插桩后 `data.ledger` 返回台账 + 统计 + `ledger_file`；`action=uninstrument|restore` 时 `data.ledger_cleared` 标记台账清理。
 
 * **测试**：`tests/camera/instrument_cli.test.ts` 新增 6 条——写盘后自动生成台账并统计、`--dry-run` 不生成台账、`--ledger` 查看统计与明细、无台账提示、全拔联动清理台账。
 
 * **验收**：临时项目跑通全链路（一键插 → 台账生成 → `--ledger` 查看 → 一键全拔 → 台账清理）；相机相关 16 条 vitest 全过；`tsc --noEmit` 通过。
+
