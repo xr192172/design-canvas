@@ -36,6 +36,8 @@ export interface CanvasNote {
   strokeWidth?: number;
   /** 创建时间 */
   created?: string;
+  /** 批注处理状态（阶段 C · 语义工单闭环）：open=待处理（默认）/ done=已处理 / rejected=已驳回 */
+  status?: 'open' | 'done' | 'rejected';
   /** 兼容未知扩展字段（不阻断解析） */
   [key: string]: unknown;
 }

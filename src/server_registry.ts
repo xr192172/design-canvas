@@ -63,7 +63,8 @@ import type { ReasonEvidenceRef } from './tools/reason_validator.js';
 import { loadTraceRecords, buildTraceResolver } from './tools/trace_evidence.js';
 import { runDiagnosis, formatDiagnoseText } from './diagnosis/diagnose.js';
 import type { DiagnoseInput } from './diagnosis/contract.js';
-import { getDSLByView, getLiveDir } from './storage.js';
+import { getDSLByView, getLiveDir, getDSL, saveDSL } from './storage.js';
+import { resolveCanvasNoteTargets, renderCanvasNotesDigest, markCanvasNotesStatus } from './tools/derive_mind_map.js';
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryCameraLog } from './camera/log_query.js';
@@ -1580,6 +1581,75 @@ const TOOL_DEFS: ToolDef[] = [
       const input = a as unknown as DiagnoseInput;
       const out = await runDiagnosis(input);
       return { message: formatDiagnoseText(out), data: out };
+    }),
+  },
+  {
+    name: 'read_canvas_notes',
+    title: 'Read canvas notes as work orders',
+    description:
+      '读取某 feature 的画布批注，解析成外部 agent 可读的语义工单文档（Markdown + 结构化 JSON）。' +
+      '每条批注捆绑 L1 功能 / L2 步骤 / L3 文件 / L4 契约上下文（针脚、API、职责、分层），' +
+      '按状态分组（待处理 open / 已处理 done / 已驳回 rejected）。' +
+      '适合 agent 周期性订阅批注、定位待办：先读本工具拿工单 → 修改代码 → mark_canvas_notes_status 标记闭环。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（如 design-canvas）'),
+      format: z.enum(['markdown', 'json']).default('markdown').describe('返回格式：markdown=工单文档（默认）/ json=结构化 JSON'),
+    },
+    handler: wrapData(async (a) => {
+      const feature = typeof a.feature === 'string' ? a.feature : '';
+      if (!feature) return { message: '缺少 feature', isError: true };
+      const resolved = resolveCanvasNoteTargets(feature);
+      const digest = renderCanvasNotesDigest(feature, resolved);
+      const format = a.format === 'json' ? 'json' : 'markdown';
+      return {
+        message:
+          format === 'json'
+            ? digest.json
+            : `${digest.markdown}\n\n（结构 JSON 见 data.notes / 可传 format=json 直接取 JSON）`,
+        data: {
+          feature: digest.feature,
+          generated_at: digest.generated_at,
+          total: digest.total,
+          open: digest.open,
+          done: digest.done,
+          rejected: digest.rejected,
+          notes: JSON.parse(digest.json).items,
+        },
+      };
+    }),
+  },
+  {
+    name: 'mark_canvas_notes_status',
+    title: 'Update canvas note status',
+    description:
+      '批量更新某 feature 画布批注的处理状态，闭环"批注工单 → 处理 → 标记"。' +
+      'updates 传 [{id, status}]，id 为批注图元 id 或批注套 groupId；status ∈ open|done|rejected。' +
+      '处理后画布同步显示状态徽标（done=已处理 / rejected=已驳回）。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（如 design-canvas）'),
+      updates: z
+        .array(
+          z.object({
+            id: z.string().describe('批注图元 id 或批注套 groupId'),
+            status: z.enum(['open', 'done', 'rejected']).describe('目标状态'),
+          }),
+        )
+        .describe('待更新状态列表'),
+    },
+    handler: wrapData(async (a) => {
+      const feature = typeof a.feature === 'string' ? a.feature : '';
+      const updates = Array.isArray(a.updates) ? (a.updates as Array<{ id: string; status: 'open' | 'done' | 'rejected' }>) : [];
+      if (!feature) return { message: '缺少 feature', isError: true };
+      if (updates.length === 0) return { message: '缺少 updates', isError: true };
+      const dsl = getDSL(feature);
+      if (!dsl) return { message: `feature "${feature}" 不存在`, isError: true };
+      const before = (dsl.canvas_notes ?? []).length;
+      dsl.canvas_notes = markCanvasNotesStatus(dsl, updates);
+      saveDSL(dsl, 'status');
+      return {
+        message: `已更新 ${updates.length} 条批注状态（feature=${feature}，批注数 ${before}）`,
+        data: { feature, updated: updates.length, notes: before },
+      };
     }),
   },
 ];

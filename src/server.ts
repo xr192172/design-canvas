@@ -12,11 +12,13 @@
  */
 
 import path from 'node:path';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerAllTools } from './server_registry.js';
 import { importProject } from './tools/import_project.js';
 import { watchProjectTool } from './tools/watch_project_tool.js';
+import { listFeatures } from './storage.js';
+import { resolveCanvasNoteTargets, renderCanvasNotesDigest } from './tools/derive_mind_map.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -24,7 +26,7 @@ const SERVER_VERSION = '0.1.3';
 const server = new McpServer(
   { name: SERVER_NAME, version: SERVER_VERSION },
   {
-    capabilities: { tools: {} },
+    capabilities: { tools: {}, resources: {} },
     instructions:
       'design-canvas：人机共享的可视化协议层。支持两种工作流：' +
       '\n\n1. 完整 DSL 模式：render_dsl 渲染并保存 → get_dsl 读取（query:"dsl"/"features" 等）' +
@@ -61,6 +63,39 @@ const server = new McpServer(
 
 // 统一注册主工具
 registerAllTools(server);
+
+// ─────────────────────────────────────────────────────────────
+// Resource：批注语义工单（订阅式返回给外部 agent）
+// 模板 design-canvas://{feature}/notes —— 读时实时解析几何批注 → Markdown 工单。
+// 与 read_canvas_notes 工具（显式调用）互为双通道。
+// ─────────────────────────────────────────────────────────────
+server.resource(
+  'canvas-notes',
+  new ResourceTemplate('design-canvas://{feature}/notes', {
+    list: async () => {
+      const resources = listFeatures()
+        .filter((d) => (d.canvas_notes ?? []).length > 0)
+        .map((d) => ({
+          uri: `design-canvas://${d.feature}/notes`,
+          name: `批注工单 · ${d.feature}`,
+          mimeType: 'text/markdown',
+          description: `${d.feature} 的画布批注语义工单（${(d.canvas_notes ?? []).length} 条图元）`,
+        }));
+      return { resources };
+    },
+  }),
+  async (_uri, variables) => {
+    const feature = String(variables.feature ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!feature) {
+      return { contents: [{ uri: 'design-canvas:///notes', mimeType: 'text/markdown', text: '缺少 feature 参数。' }] };
+    }
+    const resolved = resolveCanvasNoteTargets(feature);
+    const digest = renderCanvasNotesDigest(feature, resolved);
+    return {
+      contents: [{ uri: `design-canvas://${feature}/notes`, mimeType: 'text/markdown', text: digest.markdown }],
+    };
+  },
+);
 
 // ─────────────────────────────────────────────────────────────
 // 启动钩子（常驻模式）：DC_AUTO_WATCH=1 时，启动即导入并监听工作空间

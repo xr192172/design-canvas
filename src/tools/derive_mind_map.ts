@@ -29,7 +29,7 @@ import { loadAgentConfig, callChat } from './llm_focus.js';
 import type { ChatMessage } from './llm_focus.js';
 import { openDb } from '../db/db.js';
 import type { Database } from '../db/db.js';
-import type { DesignDSL, FeatureNode, FeatureTree, SemanticFile } from '../dsl/types.js';
+import type { DesignDSL, FeatureNode, FeatureTree, SemanticFile, CanvasNote, Node } from '../dsl/types.js';
 import type { MindMap, MindMapNode, TeachStep, TeachPin, TeachFlowEdge, TeachGap, ProposalFeature } from '../dsl/mindmap.js';
 import { buildScenes } from '../dsl/narration.js';
 
@@ -2426,5 +2426,509 @@ export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMi
   ].filter(Boolean).join('\n');
 
   return { feature, mode, mind_map: mindMap, jsonFile, message };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 阶段 C · 批注语义化解析（resolveCanvasNoteTargets）
+// 把画布几何批注（canvas_notes）解析成外部 agent 可读的语义工单：
+// 每条批注（或批注套）→ 目标节点 → L1 功能 / L2 步骤 / L3 文件 / L4 细节（标题+针脚+契约）。
+// 纯函数、不写盘：消费双通道（MCP Resource 订阅 + MCP Tool 显式调用），内置 LLM 仅作工具。
+// ─────────────────────────────────────────────────────────────
+
+/** 解析后的批注目标（L1-L4 上下文捆绑） */
+export interface ResolvedNoteTarget {
+  /** 目标节点 id（file_xxx / f{i}:{j} / f{i} / 画布节点 id） */
+  nodeId: string;
+  /** 节点类型 */
+  kind: 'file' | 'step' | 'feature' | 'other';
+  /** 解析依据：anchor=锚定节点 / hit=坐标命中 / nearest=最近邻 */
+  via: 'anchor' | 'hit' | 'nearest';
+  /** L1 功能（中文名） */
+  feature?: string;
+  /** L2 步骤 */
+  step?: { seq: number; title: string; detail?: string };
+  /** L3 文件 */
+  file?: { id: string; path: string; name: string };
+  /** L4 细节：标题 + 职责 + 针脚 + 契约签名 */
+  detail?: {
+    title: string;
+    responsibility?: string;
+    layer?: string;
+    status?: string;
+    inputs?: string[];
+    outputs?: string[];
+    apis?: string[];
+  };
+}
+
+/** 单条批注（一个批注套 = 一条语义工单） */
+export interface ResolvedCanvasNote {
+  /** 批注套 id（无套时 = 图元 id） */
+  id: string;
+  type: string;
+  text?: string;
+  color?: string;
+  status: 'open' | 'done' | 'rejected';
+  created?: string;
+  /** 覆盖图元数 */
+  primitives: number;
+  /** 目标（null = 空白处批注，未绑定节点） */
+  target: ResolvedNoteTarget | null;
+}
+
+/** teach 导图步骤索引条目 */
+interface TeachStepIdx {
+  featureId: string;
+  featureLabel: string;
+  seq: number;
+  title: string;
+  detail?: string;
+  involves: string[];
+  inputs?: TeachPin[];
+  outputs?: TeachPin[];
+}
+
+/** teach 导图索引：功能/步骤/文件归属 */
+interface TeachIndex {
+  /** featureId（f{i}）→ 步骤列表 */
+  stepsByFeature: Map<string, TeachStepIdx[]>;
+  /** 文件路径 → 涉及它的步骤（一个文件可能被多步涉及） */
+  filesToSteps: Map<string, TeachStepIdx[]>;
+  /** 功能清单 */
+  features: Array<{ id: string; label: string; kind: string }>;
+}
+
+/** 解析上下文（单次 resolve 内共享的索引） */
+interface NoteCtx {
+  fileIndex: FileIndex;
+  fileById: Map<string, FileInfo>;
+  nodeById: Map<string, Node>;
+  geoNodes: Node[];
+  teach: TeachIndex;
+  featureNames: Map<string, string>;
+}
+
+/** 批注语义化解析主入口：dsl.canvas_notes → 语义工单列表（纯函数，不写盘）
+ *  实际生产路径：feature 名 → getDSL → 纯解析。 */
+export function resolveCanvasNoteTargets(feature: string): ResolvedCanvasNote[] {
+  const dsl = getDSL(feature);
+  if (!dsl) return [];
+  return resolveCanvasNotesFromDSL(dsl, feature);
+}
+
+/** 纯解析（与 I/O 解耦，便于 probe/单测直接喂 DSL）：canvas_notes → 语义工单列表 */
+export function resolveCanvasNotesFromDSL(dsl: DesignDSL, feature: string): ResolvedCanvasNote[] {
+  const notes = dsl.canvas_notes ?? [];
+  if (notes.length === 0) return [];
+
+  const fileIndex = buildFileIndex(dsl);
+  const fileById = new Map<string, FileInfo>();
+  for (const info of fileIndex.exact.values()) if (info.id) fileById.set(info.id, info);
+
+  const ctx: NoteCtx = {
+    fileIndex,
+    fileById,
+    nodeById: new Map((dsl.geometry?.nodes ?? []).map((n) => [n.id, n] as const)),
+    geoNodes: dsl.geometry?.nodes ?? [],
+    teach: loadTeachIndex(feature),
+    featureNames: new Map((dsl.feature_tree?.features ?? []).map((f) => [f.id, f.name])),
+  };
+
+  return groupNotesBySet(notes).map((g) => resolveNoteGroup(g, ctx));
+}
+
+/** 按批注套分组：一个批注套 = 一条语义工单（无套的历史数据按单元素处理） */
+function groupNotesBySet(notes: CanvasNote[]): CanvasNote[][] {
+  const map = new Map<string, CanvasNote[]>();
+  for (const n of notes) {
+    const key = n.groupId || n.id;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(n);
+  }
+  return [...map.values()];
+}
+
+/** 解析一个批注套：套级状态/文字 + 首图元目标 */
+function resolveNoteGroup(group: CanvasNote[], ctx: NoteCtx): ResolvedCanvasNote {
+  const primary = group[0];
+  const statusNote = group.find((n) => n.status) ?? primary;
+  const textNote = group.find((n) => n.text) ?? primary;
+  return {
+    id: primary.groupId || primary.id,
+    type: primary.type,
+    text: textNote.text,
+    color: primary.color,
+    status: statusNote.status ?? 'open',
+    created: primary.created,
+    primitives: group.length,
+    target: resolveTarget(primary, ctx),
+  };
+}
+
+/** 目标解析：锚定节点 → 坐标命中 → 最近邻（逐级回退） */
+function resolveTarget(note: CanvasNote, ctx: NoteCtx): ResolvedNoteTarget | null {
+  if (note.anchor?.nodeId) {
+    const t = resolveNodeId(note.anchor.nodeId, ctx);
+    if (t) return { ...t, via: 'anchor' };
+  }
+  const pt = anchorPointOf(note);
+  if (pt) {
+    const hit = hitTestNode(pt[0], pt[1], ctx.geoNodes);
+    if (hit) {
+      const t = resolveNodeId(hit, ctx);
+      if (t) return { ...t, via: 'hit' };
+    }
+    const near = nearestNode(pt[0], pt[1], ctx.geoNodes);
+    if (near) {
+      const t = resolveNodeId(near, ctx);
+      if (t) return { ...t, via: 'nearest' };
+    }
+  }
+  return null; // 空白处批注
+}
+
+/** 取批注的基准命中点：arrow 用箭头端（指向目标），其余用首点/锚点 */
+function anchorPointOf(note: CanvasNote): [number, number] | undefined {
+  if (note.type === 'arrow' && note.points?.length) {
+    return note.points[note.points.length - 1] as [number, number];
+  }
+  if ((note.type === 'highlight' || note.type === 'oval') && note.points?.length) {
+    return note.points[0] as [number, number];
+  }
+  if (note.x != null && note.y != null) return [note.x, note.y];
+  return undefined;
+}
+
+/** 有明确坐标的几何节点（供坐标命中/最近邻） */
+function positionedNodes(nodes: Node[]): Array<{ id: string; x: number; y: number; w: number; h: number }> {
+  const out: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+  for (const n of nodes) {
+    if (n.x == null || n.y == null) continue;
+    out.push({ id: n.id, x: n.x, y: n.y, w: n.width ?? 240, h: n.height ?? 80 });
+  }
+  return out;
+}
+
+/** 坐标命中：落在哪个节点矩形内 */
+function hitTestNode(wx: number, wy: number, nodes: Node[]): string | undefined {
+  for (const n of positionedNodes(nodes)) {
+    if (wx >= n.x && wx <= n.x + n.w && wy >= n.y && wy <= n.y + n.h) return n.id;
+  }
+  return undefined;
+}
+
+/** 最近邻：距批注点最近的节点 */
+function nearestNode(wx: number, wy: number, nodes: Node[]): string | undefined {
+  let best: { id: string; d: number } | undefined;
+  for (const n of positionedNodes(nodes)) {
+    const cx = n.x + n.w / 2;
+    const cy = n.y + n.h / 2;
+    const d = (cx - wx) ** 2 + (cy - wy) ** 2;
+    if (!best || d < best.d) best = { id: n.id, d };
+  }
+  return best?.id;
+}
+
+/** 节点 id → L1-L4 上下文（兼容 DSL 节点 id 与前端 nav IR id 两套） */
+function resolveNodeId(id: string, ctx: NoteCtx): ResolvedNoteTarget | null {
+  if (id.startsWith('nav:')) return resolveNavId(id, ctx);
+  // 步骤节点：f{i}:{j}
+  const stepMatch = id.match(/^f(\d+):(\d+)$/);
+  if (stepMatch) {
+    const fid = `f${stepMatch[1]}`;
+    const seq = Number(stepMatch[2]);
+    const st = (ctx.teach.stepsByFeature.get(fid) ?? [])[seq];
+    if (st) return stepTarget(fid, st, ctx);
+    return featureTarget(fid, ctx);
+  }
+  // 功能节点：f{i}
+  if (/^f\d+$/.test(id)) return featureTarget(id, ctx);
+  return nodeTarget(id, ctx);
+}
+
+/** 前端 nav IR 节点 id → L1-L4 上下文（L3 步骤 nav:t{i}_{fid}:s{seq} / L4 文件 nav:...:f{j}:{path} / L2 功能 nav:feat:{i}:{fid}） */
+function resolveNavId(id: string, ctx: NoteCtx): ResolvedNoteTarget | null {
+  // 步骤节点：nav:t{i}_{fid}:s{seq}
+  const s = id.match(/^nav:t\d+_([^:]+):s(\d+)$/);
+  if (s) {
+    const [, fid, seqStr] = s;
+    const seq = Number(seqStr);
+    const st = (ctx.teach.stepsByFeature.get(fid) ?? [])[seq];
+    if (st) return stepTarget(fid, st, ctx);
+    return featureTarget(fid, ctx);
+  }
+  // 文件节点：nav:t{i}_{fid}[:s{seq}]:f{j}:{path}
+  const f = id.match(/^nav:t\d+_[^:]+(?::s\d+)?:f\d+:(.+)$/);
+  if (f) {
+    const t = fileTarget(f[1], ctx);
+    if (t) return t;
+  }
+  // 功能节点：nav:feat:{i}:{fid}
+  const fe = id.match(/^nav:feat:\d+:(.+)$/);
+  if (fe) {
+    const t = featureTarget(fe[1], ctx);
+    if (t) return t;
+  }
+  // 社区/子节点：nav:{host}:c{i}:{childId} → 递归解 childId
+  const c = id.match(/^nav:[^:]+:c\d+:(.+)$/);
+  if (c) return resolveNodeId(c[1], ctx);
+  return nodeTarget(id, ctx);
+}
+
+/** 文件上下文：L3 文件 + 归属步骤 + L4 契约 */
+function fileTarget(path: string, ctx: NoteCtx): ResolvedNoteTarget | null {
+  const info = lookupSemanticFile(ctx.fileIndex, path);
+  if (!info) return null;
+  const steps = ctx.teach.filesToSteps.get(path) ?? ctx.teach.filesToSteps.get(info.path) ?? [];
+  const first = steps[0];
+  return {
+    nodeId: info.id,
+    kind: 'file',
+    via: 'anchor',
+    file: { id: info.id, path: info.path, name: basename(info.path) },
+    feature: first?.featureLabel,
+    step: first ? { seq: first.seq, title: first.title, detail: first.detail } : undefined,
+    detail: {
+      title: info.responsibility || basename(info.path),
+      responsibility: info.responsibility,
+      layer: info.layer,
+      status: info.status,
+      apis: info.apis,
+    },
+  };
+}
+
+/** 步骤上下文：L2 步骤 + 归属功能 + L4 针脚 */
+function stepTarget(fid: string, st: TeachStepIdx, _ctx: NoteCtx): ResolvedNoteTarget {
+  return {
+    nodeId: `${fid}:${st.seq}`,
+    kind: 'step',
+    via: 'anchor',
+    feature: st.featureLabel,
+    step: { seq: st.seq, title: st.title, detail: st.detail },
+    detail: {
+      title: st.title,
+      inputs: (st.inputs ?? []).map((p) => p.n),
+      outputs: (st.outputs ?? []).map((p) => p.n),
+    },
+  };
+}
+
+/** 功能上下文：L1 功能 */
+function featureTarget(fid: string, ctx: NoteCtx): ResolvedNoteTarget {
+  const feat = ctx.teach.features.find((f) => f.id === fid);
+  const name = feat?.label || ctx.featureNames.get(fid) || fid;
+  return { nodeId: fid, kind: 'feature', via: 'anchor', feature: name, detail: { title: name } };
+}
+
+/** 通用节点：file_xxx / 画布几何节点（含功能归属） */
+function nodeTarget(id: string, ctx: NoteCtx): ResolvedNoteTarget | null {
+  const fileInfo = ctx.fileById.get(id);
+  if (fileInfo) {
+    const t = fileTarget(fileInfo.path, ctx);
+    if (t) return t;
+    return {
+      nodeId: id,
+      kind: 'file',
+      via: 'anchor',
+      file: { id, path: fileInfo.path, name: basename(fileInfo.path) },
+      detail: {
+        title: fileInfo.responsibility || basename(fileInfo.path),
+        responsibility: fileInfo.responsibility,
+        layer: fileInfo.layer,
+        status: fileInfo.status,
+        apis: fileInfo.apis,
+      },
+    };
+  }
+  const g = ctx.nodeById.get(id);
+  if (g) {
+    const title = g.title || g.label || id;
+    return {
+      nodeId: id,
+      kind: 'other',
+      via: 'anchor',
+      detail: { title, ...(g.description ? { responsibility: g.description } : {}) },
+    };
+  }
+  return null;
+}
+
+/** 文件路径 → FileInfo：精确命中优先，后缀（≥2 段）兜底（路径前缀可能不一致） */
+function lookupSemanticFile(idx: FileIndex, rel: string): FileInfo | undefined {
+  const exact = idx.exact.get(rel);
+  if (exact) return exact;
+  const seg = rel.split(/[\\/]/);
+  for (let n = Math.min(seg.length, 4); n >= 2; n--) {
+    const hit = idx.bySuffix.get(seg.slice(-n).join('/'));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** 加载 teach 导图索引（无导图 = 仅文件/功能级解析，不抛错） */
+function loadTeachIndex(feature: string): TeachIndex {
+  const out: TeachIndex = { stepsByFeature: new Map(), filesToSteps: new Map(), features: [] };
+  let mm: MindMap;
+  try {
+    const file = getMindMapFile(feature, 'teach');
+    if (!fs.existsSync(file)) return out;
+    mm = JSON.parse(fs.readFileSync(file, 'utf-8')) as MindMap;
+  } catch {
+    return out;
+  }
+  const walk = (n: MindMapNode | undefined): void => {
+    if (!n) return;
+    if (n.kind === 'feature' || n.kind === 'capability') {
+      out.features.push({ id: n.id, label: n.label, kind: n.kind });
+      // 优先 stepgroup 下的 step 节点（meta 携带契约投影针脚），否则 feature.steps
+      const sg = n.children?.find((c) => c.kind === 'stepgroup');
+      const steps: TeachStep[] = [];
+      if (sg) {
+        for (const c of sg.children ?? []) {
+          if (c.kind !== 'step') continue;
+          steps.push({
+            title: c.label,
+            detail: c.description || '',
+            involves: c.meta?.involves,
+            inputs: c.meta?.inputs,
+            outputs: c.meta?.outputs,
+          });
+        }
+      }
+      if (steps.length === 0 && n.steps?.length) steps.push(...n.steps);
+      const list: TeachStepIdx[] = steps.map((s, seq) => ({
+        featureId: n.id,
+        featureLabel: n.label,
+        seq,
+        title: s.title,
+        detail: s.detail,
+        involves: s.involves ?? [],
+        inputs: s.inputs,
+        outputs: s.outputs,
+      }));
+      out.stepsByFeature.set(n.id, list);
+      for (const s of list) {
+        for (const p of s.involves) {
+          if (!out.filesToSteps.has(p)) out.filesToSteps.set(p, []);
+          out.filesToSteps.get(p)!.push(s);
+        }
+      }
+    }
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(mm.root);
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 阶段 C · 批注语义文档 digest（供外部 agent 消费）
+// 把 ResolvedCanvasNote[] 渲染成 Markdown 工单 + 机器可读 JSON，
+// 走 MCP Resource（订阅式）/ Tool（显式调用）双通道返回给 LLM。
+// ─────────────────────────────────────────────────────────────
+
+/** digest 产出：Markdown 工单 + JSON + 摘要 */
+export interface CanvasNotesDigest {
+  feature: string;
+  generated_at: string;
+  total: number;
+  open: number;
+  done: number;
+  rejected: number;
+  /** Markdown 工单文档（按状态分组，可直接喂 LLM） */
+  markdown: string;
+  /** 机器可读 JSON（items 为完整语义工单） */
+  json: string;
+}
+
+const NOTE_STATUS_LABEL: Record<string, string> = { open: '待处理', done: '已处理', rejected: '已驳回' };
+
+/** 渲染单条工单的 Markdown 块 */
+function renderNoteWorkItem(n: ResolvedCanvasNote, index: number): string {
+  const t = n.target;
+  const ctx: string[] = [];
+  if (t?.feature) ctx.push(`功能「${t.feature}」`);
+  if (t?.step) ctx.push(`步骤 ${t.step.seq}「${t.step.title}」`);
+  if (t?.file) ctx.push(`文件 ${t.file.path}`);
+  const head = t
+    ? ctx.length > 0
+      ? ctx.join(' → ')
+      : (t.detail?.title ?? t.nodeId)
+    : '（空白处批注，未绑定节点）';
+
+  const lines: string[] = [
+    `### 工单 ${index} · ${head}`,
+    `- 状态: ${NOTE_STATUS_LABEL[n.status] ?? n.status}（${n.status}）`,
+    `- 类型: ${n.type} · 覆盖图元: ${n.primitives}`,
+  ];
+  if (t?.via) lines.push(`- 解析依据: ${t.via}（anchor=锚定 / hit=坐标命中 / nearest=最近邻）`);
+  if (t?.nodeId) lines.push(`- 目标节点: ${t.nodeId}`);
+  if (t?.detail) {
+    if (t.detail.responsibility) lines.push(`- 职责: ${t.detail.responsibility}`);
+    if (t.detail.layer) lines.push(`- 分层: ${t.detail.layer}`);
+    if (t.detail.status) lines.push(`- 文件状态: ${t.detail.status}`);
+    if (t.detail.inputs?.length) lines.push(`- 输入针脚: ${t.detail.inputs.join('、')}`);
+    if (t.detail.outputs?.length) lines.push(`- 输出针脚: ${t.detail.outputs.join('、')}`);
+    if (t.detail.apis?.length) lines.push(`- 契约 API: ${t.detail.apis.join('、')}`);
+  }
+  if (n.text) lines.push(`- 批注文字: ${n.text}`);
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** 渲染批注语义文档：notes → Markdown 工单 + JSON（纯函数，不写盘）
+ *  feature：feature 名（仅用于文档头标识）；notes：resolveCanvasNotesFromDSL 的产出。 */
+export function renderCanvasNotesDigest(feature: string, notes: ResolvedCanvasNote[]): CanvasNotesDigest {
+  const open = notes.filter((n) => n.status === 'open');
+  const done = notes.filter((n) => n.status === 'done');
+  const rejected = notes.filter((n) => n.status === 'rejected');
+  const generated_at = new Date().toISOString();
+
+  const md: string[] = [
+    `# 批注工单 · ${feature}`,
+    '',
+    `生成时间: ${generated_at}`,
+    `统计: 共 ${notes.length} 条（待处理 ${open.length} / 已处理 ${done.length} / 已驳回 ${rejected.length}）`,
+    '',
+  ];
+  const pushGroup = (label: string, list: ResolvedCanvasNote[]): void => {
+    if (list.length === 0) return;
+    md.push(`## ${label}`, '');
+    list.forEach((n, i) => md.push(renderNoteWorkItem(n, i + 1)));
+  };
+  pushGroup('待处理', open);
+  pushGroup('已处理', done);
+  pushGroup('已驳回', rejected);
+
+  const json = JSON.stringify(
+    { feature, generated_at, total: notes.length, open: open.length, done: done.length, rejected: rejected.length, items: notes },
+    null,
+    2,
+  );
+
+  return {
+    feature,
+    generated_at,
+    total: notes.length,
+    open: open.length,
+    done: done.length,
+    rejected: rejected.length,
+    markdown: md.join('\n'),
+    json,
+  };
+}
+
+/** 批量更新批注状态（纯函数）：按 id/groupId 更新 status，返回更新后的 notes 数组（由调用方持久化） */
+export function markCanvasNotesStatus(dsl: DesignDSL, updates: Array<{ id: string; status: 'open' | 'done' | 'rejected' }>): CanvasNote[] {
+  const notes = dsl.canvas_notes ?? [];
+  if (updates.length === 0) return notes;
+  const byId = new Map<string, 'open' | 'done' | 'rejected'>();
+  for (const u of updates) byId.set(u.id, u.status);
+  return notes.map((n) => {
+    // 命中图元 id 或所在批注套 id
+    const key = n.groupId || n.id;
+    const status = byId.get(n.id) ?? byId.get(key);
+    return status ? { ...n, status } : n;
+  });
 }
 

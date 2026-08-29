@@ -345,7 +345,8 @@
         "text": { "type": "string", "description": "便签/文本内容" },
         "color": { "type": "string", "description": "颜色（CSS 色值）" },
         "strokeWidth": { "type": "number", "description": "笔迹/箭头线宽（世界 px）" },
-        "created": { "type": "string", "format": "date-time", "description": "创建时间" }
+        "created": { "type": "string", "format": "date-time", "description": "创建时间" },
+        "status": { "type": "string", "enum": ["open", "done", "rejected"], "description": "批注处理状态：open=待处理（默认）/ done=已处理 / rejected=已驳回" }
       },
       "additionalProperties": true
     },

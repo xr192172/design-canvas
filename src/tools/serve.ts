@@ -47,6 +47,7 @@ import { deriveMindMap } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
 import { getMindMapFile } from './derive_mind_map.js';
+import { resolveCanvasNoteTargets, renderCanvasNotesDigest, markCanvasNotesStatus } from './derive_mind_map.js';
 import type { MindMap } from '../dsl/mindmap.js';
 import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
@@ -1220,6 +1221,72 @@ async function handleApiCanvasNotesSave(req: http.IncomingMessage, res: http.Ser
       success: true,
       feature,
       count: notes.length,
+      saved_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/canvas-notes/digest?feature=<name>：批注语义文档（Markdown 工单 + JSON），外部 agent 消费 */
+function handleApiCanvasNotesDigest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url!, 'http://localhost');
+    const feature = url.searchParams.get('feature') || '';
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const resolved = resolveCanvasNoteTargets(feature);
+    const digest = renderCanvasNotesDigest(feature, resolved);
+    sendJson(res, 200, {
+      feature: digest.feature,
+      generated_at: digest.generated_at,
+      total: digest.total,
+      open: digest.open,
+      done: digest.done,
+      rejected: digest.rejected,
+      markdown: digest.markdown,
+      notes: JSON.parse(digest.json).items,
+    });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/canvas-notes/status：批量更新批注状态（body: { feature, updates:[{id,status}] }） */
+async function handleApiCanvasNotesStatus(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8'));
+    const feature = params.feature || '';
+    const updates = Array.isArray(params.updates) ? params.updates : [];
+    if (!feature) {
+      sendError(res, 400, '缺少 feature');
+      return;
+    }
+    const valid = updates.filter(
+      (u: unknown): u is { id: string; status: 'open' | 'done' | 'rejected' } =>
+        !!u && typeof (u as { id?: unknown }).id === 'string' &&
+        ['open', 'done', 'rejected'].includes((u as { status?: unknown }).status as string),
+    );
+    if (valid.length === 0) {
+      sendError(res, 400, 'updates 需为 [{id,status}]，status ∈ open|done|rejected');
+      return;
+    }
+    const dsl = getDSL(feature);
+    if (!dsl) {
+      sendError(res, 404, `feature "${feature}" 不存在`);
+      return;
+    }
+    const before = (dsl.canvas_notes ?? []).length;
+    dsl.canvas_notes = markCanvasNotesStatus(dsl, valid);
+    saveDSL(dsl, 'status');
+    sendJson(res, 200, {
+      success: true,
+      feature,
+      updated: valid.length,
+      notes: before,
       saved_at: new Date().toISOString(),
     });
   } catch (e) {
@@ -2470,6 +2537,16 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/feature-dsl') && method === 'GET') {
       handleApiFeatureDsl(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/canvas-notes/digest') && method === 'GET') {
+      handleApiCanvasNotesDigest(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/canvas-notes/status') && method === 'POST') {
+      void handleApiCanvasNotesStatus(req, res);
       return;
     }
 

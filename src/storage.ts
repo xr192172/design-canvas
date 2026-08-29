@@ -230,7 +230,10 @@ export function listFeatures(): DesignDSL[] {
   for (const f of files) {
     try {
       const content = fs.readFileSync(path.join(dir, f), 'utf-8');
-      dsls.push(JSON.parse(content) as DesignDSL);
+      const dsl = JSON.parse(content) as DesignDSL;
+      // 防御：损坏/遗留存档可能缺 feature 名（排序 localeCompare 会崩），丢弃
+      if (!dsl || typeof dsl.feature !== 'string' || dsl.feature.length === 0) continue;
+      dsls.push(dsl);
     } catch {
       // 跳过无法解析的文件
     }
