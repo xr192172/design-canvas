@@ -35,6 +35,7 @@
     "examples/*.json",
     "assets/*.png",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "bin": {
@@ -59,7 +60,8 @@
     "diagnose-loop": "node dist/src/tools/diagnose_loop_cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "hub": "node scripts/hub.mjs"
+    "hub": "node scripts/hub.mjs",
+    "demo": "node scripts/demo.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
