@@ -65,6 +65,7 @@ import { runDiagnosis, formatDiagnoseText } from './diagnosis/diagnose.js';
 import type { DiagnoseInput } from './diagnosis/contract.js';
 import { getDSLByView, getLiveDir, getDSL, saveDSL } from './storage.js';
 import { resolveCanvasNoteTargets, renderCanvasNotesDigest, markCanvasNotesStatus } from './tools/derive_mind_map.js';
+import { decideCanvasNotes } from './tools/llm_decider.js';
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryCameraLog } from './camera/log_query.js';
@@ -1649,6 +1650,40 @@ const TOOL_DEFS: ToolDef[] = [
       return {
         message: `已更新 ${updates.length} 条批注状态（feature=${feature}，批注数 ${before}）`,
         data: { feature, updated: updates.length, notes: before },
+      };
+    }),
+  },
+  {
+    name: 'decide_canvas_notes',
+    title: 'Decide canvas notes via LLM and propose changes',
+    description:
+      '内置 LLM 决策器：读某 feature 的 open 批注工单 → 逐单决策 → 闭环。' +
+      '三类结论：change（产出具体改动方案并映射到审批流 proposeChange，propose 只出干跑预览不写源文件，' +
+      '返回 pending_change_id 供 approve/reject）、done（信息性批注，直接标已处理）、reject（无法自动化，标已驳回）。' +
+      '适合外部 agent 作为"批注 → 改动提案"的自动转换步骤：先本工具出提案 → 审批流 approve → mark_canvas_notes_status 标 done。' +
+      '配置：LLM_API_KEY/LLM_MODEL/LLM_BASE_URL 或 config.json；未配置则规则降级（信息性→done，动作性→reject）。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（如 design-canvas）'),
+      project_dir: z.string().optional().describe('项目根目录（缺省用 dsl.source_root；目标文件相对此解析）'),
+      max_file_lines: z.number().optional().describe('喂给 LLM 的目标文件最大行数（默认 300）'),
+      dry_run: z.boolean().optional().describe('true=只出决策与提案，不落批注状态'),
+    },
+    handler: wrapData(async (a) => {
+      const feature = typeof a.feature === 'string' ? a.feature : '';
+      if (!feature) return { message: '缺少 feature', isError: true };
+      const r = await decideCanvasNotes({
+        feature,
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        max_file_lines: typeof a.max_file_lines === 'number' ? a.max_file_lines : undefined,
+        dry_run: a.dry_run === true,
+      });
+      const summary =
+        `open 工单 ${r.open} 条 → 决策完成：` +
+        r.decisions.map((d) => `${d.note_id}=${d.action}${d.pending_change_id ? `(提案 ${d.pending_change_id})` : ''}`).join('、') +
+        `；已提提案 ${r.proposed} 条，落状态 ${r.applied_statuses.length} 条。`;
+      return {
+        message: `${summary}\n（模式：${r.note}）`,
+        data: r,
       };
     }),
   },
