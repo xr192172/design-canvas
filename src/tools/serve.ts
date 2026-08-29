@@ -725,7 +725,7 @@ async function handleApiLayout(req: http.IncomingMessage, res: http.ServerRespon
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
-    const feature = params.feature || 'conveyor';
+    const feature = params.feature || 'design-canvas';
 
     let result: Record<string, unknown> = {};
     switch (layoutType) {
@@ -778,7 +778,7 @@ async function handleApiScaffold(req: http.IncomingMessage, res: http.ServerResp
       safeOutputDir = validateProjectRoot(params.output_dir, '/api/scaffold output_dir');
     }
     const result = scaffold({
-      feature: params.feature || 'conveyor',
+      feature: params.feature || 'design-canvas',
       output_dir: safeOutputDir,
       overwrite: params.overwrite,
       ui_framework: params.ui_framework,
@@ -799,7 +799,7 @@ async function handleApiConsistency(req: http.IncomingMessage, res: http.ServerR
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
     const result = await checkConsistency({
-      feature: params.feature || 'conveyor',
+      feature: params.feature || 'design-canvas',
       code_dir: params.code_dir,
     });
     sendJson(res, 200, {
@@ -817,7 +817,7 @@ async function handleApiDiffImpact(req: http.IncomingMessage, res: http.ServerRe
     const params = JSON.parse(body.toString('utf-8'));
     const safeDir = validateProjectRoot(params.project_dir || process.cwd(), '/api/diff-impact project_dir');
     const result = diffImpact({
-      feature: params.feature || 'conveyor',
+      feature: params.feature || 'design-canvas',
       project_dir: safeDir,
       changed: Array.isArray(params.changed) ? params.changed : [],
       direction: params.direction,
@@ -1394,7 +1394,7 @@ async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerRes
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
     const result = archLayer({
-      feature: params.feature || 'conveyor',
+      feature: params.feature || 'design-canvas',
       persist: params.persist,
     });
     sendJson(res, 200, { success: true, ...result });
@@ -1427,7 +1427,7 @@ async function handleApiGuidedTour(req: http.IncomingMessage, res: http.ServerRe
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8'));
     const result = guidedTour({
-      feature: params.feature || 'conveyor',
+      feature: params.feature || 'design-canvas',
       include_deep: params.include_deep,
       include_containers: params.include_containers,
       max_steps: params.max_steps,
@@ -2063,7 +2063,7 @@ function handleExplainPage(res: http.ServerResponse): void {
   var loading = document.getElementById('loading');
   var cTitle = document.getElementById('c-title');
   var cBody = document.getElementById('c-body');
-  var STAR = new URLSearchParams(location.search).get('map') || document.body.getAttribute('data-map') || 'conveyor.html';
+  var STAR = new URLSearchParams(location.search).get('map') || document.body.getAttribute('data-map') || 'design-canvas.html';
   function go(k){
     if(!steps.length) return;
     i = Math.max(0, Math.min(steps.length-1, k));
@@ -2172,7 +2172,7 @@ function handleStaticFile(req: http.IncomingMessage, res: http.ServerResponse): 
   if (qIdx !== -1) filePath = filePath.substring(0, qIdx);
   if (filePath === '/') {
     // 兜底：/ 路由已在主路由渲染 Hub 主页；走到这里说明非 GET，回退示例画布
-    filePath = '/conveyor.html';
+    filePath = '/design-canvas.html';
   }
 
   // 活态 DSL 别名：浏览器设计视图 fetch 相对路径 design-canvas.json，

@@ -170,7 +170,7 @@ npm run doctor        # 环境体检 + 能力缺口
 
 ## 示例
 
-一个「分层上下文流水线传送带」DSL 示例：[examples/conveyor.json](./examples/conveyor.json)（含 33 节点 / 33 边、分层、标注，也用作渲染器回归测试的中坚 fixture）。构建后可用 `render_dsl`/`serve` 渲染为 HTML 浏览器预览。
+design-canvas 自身即示例：`design-canvas.json`（大功能套小功能，含子图下钻）。构建后可用 `render_dsl`/`serve` 渲染为 HTML 浏览器预览（默认 feature = `design-canvas`）。
 
 ## 技术栈
 
