@@ -321,6 +321,12 @@ export function resetStats(): void {
 const keyCursor: Record<string, number> = {};
 let providerCursor = 0;
 
+/** 测试用：重置池调度游标（生产无调用；让用例可确定性验证轮询/故障转移） */
+export function _resetGatewayCursors(): void {
+  for (const k of Object.keys(keyCursor)) delete keyCursor[k];
+  providerCursor = 0;
+}
+
 /** 选择下一个可用供应商 + 池内 key（加权轮询 + 池内轮询） */
 function pickEndpoint(): { provider: GatewayProvider; key: string } {
   const cfg = loadGatewayConfig();
