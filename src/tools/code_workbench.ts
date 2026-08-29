@@ -28,7 +28,7 @@ import type { DesignDSL } from '../dsl/types.js';
 // 类型
 // ─────────────────────────────────────────────────────────────
 
-export type ChangeKind = 'rename_file' | 'edit_code' | 'dsl_rename';
+export type ChangeKind = 'rename_file' | 'edit_code' | 'dsl_rename' | 'split_plan';
 
 export interface ChangeOp {
   /** rename_file */
@@ -45,6 +45,9 @@ export interface ChangeOp {
   oldName?: string;
   newName?: string;
   producer?: string;
+  /** split_plan：体检建议拆出的模块名 + 预估行数（落成文件顶部拆分标记注释） */
+  suggested_name?: string;
+  est_lines?: number;
 }
 
 export type ChangeStatus = 'pending' | 'approved' | 'rejected' | 'executed';
@@ -154,7 +157,8 @@ function absPath(project_dir: string, p: string): string {
 function buildLabel(kind: ChangeKind, op: ChangeOp): string {
   if (kind === 'rename_file') return `移动/重命名文件 ${op.from ?? ''} → ${op.to ?? ''}`;
   if (kind === 'dsl_rename') return `数据名重命名 ${op.oldName ?? ''} → ${op.newName ?? ''}`;
-  return `行区间编辑 ${op.file ?? ''} L${op.start}-${op.end}`;
+  if (kind === 'split_plan') return `拆分提案 ${op.file ?? ''} → 拆出「${op.suggested_name ?? ''}」`;
+  return `行区间编辑 ${op.file ?? ''} L${op.start}-L${op.end}`;
 }
 
 /** edit_code range：读当前文件，计算 before/after 块 + 调 edit_code dry_run 取官方预览与语法门结论 */
@@ -196,6 +200,37 @@ async function previewEditRange(project_dir: string, op: ChangeOp): Promise<{ di
   const { editCode: ec } = await import('./edit_code.js');
   const dry = await ec(
     Object.assign({ project_dir, file, op: 'range', start, end, code: op.code, dry_run: true } as EditCodeArgs),
+  );
+  return { diffs, preview: dry.message };
+}
+
+/** split_plan：体检建议拆出 → 在文件顶部插入拆分标记注释（保留原首行），走同一语法门 */
+function splitPlanMarker(op: ChangeOp): string {
+  return `// SPLIT-PLAN: 建议拆出「${op.suggested_name ?? ''}」（~${op.est_lines ?? 0} 行）· 待人工执行拆分`;
+}
+async function previewSplitPlan(project_dir: string, op: ChangeOp): Promise<{ diffs: ChangeDiff[]; preview: string }> {
+  const file = op.file;
+  if (!file || !op.suggested_name) throw new Error('split_plan 变更缺 file/suggested_name');
+  const abs = absPath(project_dir, file);
+  if (!fs.existsSync(abs)) throw new Error(`文件不存在: ${abs}`);
+  const content = fs.readFileSync(abs, 'utf8');
+  const eol = detectEol(content);
+  const lines = splitKeepEnds(content);
+  if (!lines.length) throw new Error('空文件无法插入拆分标记');
+  const head = lines[0].replace(/\r?\n$/, ''); // 保留原首行内容（去掉行尾，交给 normalizeLines 统一补）
+  const code = splitPlanMarker(op) + eol + head;
+  const start = 1, end = 1;
+  const removed = lines.slice(0, 1);
+  const added = normalizeLines(code, eol);
+  const before = [...removed, ...lines.slice(1, 2)];
+  const after = [...added, ...lines.slice(1, 2)];
+  const diffs: ChangeDiff[] = [
+    { file, kind: 'replace', before, after, note: `1 行 → ${added.length} 行（顶部插入拆分标记）` },
+  ];
+  // 官方 dry-run（验证语法门 + 区间穿透告警）
+  const { editCode: ec } = await import('./edit_code.js');
+  const dry = await ec(
+    Object.assign({ project_dir, file, op: 'range', start, end, code, dry_run: true } as EditCodeArgs),
   );
   return { diffs, preview: dry.message };
 }
@@ -344,7 +379,7 @@ async function executeDslRename(project_dir: string, op: ChangeOp): Promise<stri
 // 提案 / 列表 / 审批 / 驳回
 // ─────────────────────────────────────────────────────────────
 
-export async function proposeChange(input: ProposeInput): Promise<{ change: PendingChange; ok: boolean; error?: string }> {
+export async function proposeChange(input: ProposeInput): Promise<{ change: PendingChange; ok: boolean; error?: string; duplicate?: boolean }> {
   const project_dir = path.resolve(input.project_dir);
   const op = input.op ?? {};
   try {
@@ -367,6 +402,16 @@ export async function proposeChange(input: ProposeInput): Promise<{ change: Pend
       diffs = p.diffs;
       const edgeN = diffs[0]?.note ?? '';
       summary = [`数据名重命名 ${op.oldName} → ${op.newName}`, edgeN, '干跑预览（未写盘）'];
+    } else if (input.kind === 'split_plan') {
+      // 去重：同一文件 + 同一拆出名 + 仍 pending 的提案已存在 → 直接返回已有（批量生成时避免刷屏/重复）
+      const dup = loadChanges(project_dir).find((c) =>
+        c.kind === 'split_plan' && c.status === 'pending'
+        && c.op.file === op.file && c.op.suggested_name === op.suggested_name);
+      if (dup) return { change: dup, ok: true, duplicate: true };
+      const p = await previewSplitPlan(project_dir, op);
+      preview = p.preview;
+      diffs = p.diffs;
+      summary = [`拆分提案 ${op.file}：建议拆出「${op.suggested_name ?? ''}」（~${op.est_lines ?? 0} 行）`, '语法门通过（干跑预览）'];
     } else {
       throw new Error(`未知变更类型: ${input.kind}`);
     }
@@ -453,6 +498,32 @@ export async function approveChange(project_dir: string, id: string): Promise<Ap
         x.decided_at = nowIso();
       });
       return { ok: true, status: 'executed', result };
+    }
+
+    // split_plan：approve 时在文件顶部插入拆分标记（保留原首行）
+    if (c.kind === 'split_plan') {
+      const file = c.op.file!;
+      const abs = absPath(c.project_dir, file);
+      const content = fs.readFileSync(abs, 'utf8');
+      const eol = detectEol(content);
+      const lines = splitKeepEnds(content);
+      const head = lines[0]?.replace(/\r?\n$/, '') ?? '';
+      const code = splitPlanMarker(c.op) + eol + head;
+      const res = await editCode({
+        project_dir: c.project_dir,
+        file,
+        op: 'range',
+        start: 1,
+        end: 1,
+        code,
+      } as EditCodeArgs);
+      findAndUpdate(project_dir, id, (x) => {
+        x.result = res.message;
+        x.lastError = undefined;
+        x.status = 'executed';
+        x.decided_at = nowIso();
+      });
+      return { ok: true, status: 'executed', result: res.message };
     }
 
     // edit_code range

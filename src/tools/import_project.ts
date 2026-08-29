@@ -20,6 +20,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import ignore from 'ignore';
+import type { Ignore } from 'ignore';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi, Symbol } from '../dsl/types.js';
 import type { BrickManifest } from '../dsl/contract.js';
 import { saveDSL, saveLiveFeature } from '../storage.js';
@@ -163,8 +165,26 @@ const BRICK_STYLE = { bg: '#3e2a63', color: '#d1c4e9' };
 // 文件扫描
 // ─────────────────────────────────────────────────────────────
 
-export function walkFiles(root: string, includeTests: boolean, includeArchive = false): string[] {
-  const out: string[] = [];
+/** gitignore 作用域：base = .gitignore 所在目录（绝对路径），ig = 该文件的规则匹配器 */
+interface GiMatcher {
+  base: string;
+  ig: Ignore;
+}
+
+/**
+ * 项目 .gitignore 匹配器集合：绝对目录 → 该目录下 .gitignore 的 ignore 实例。
+ * 规则相对各自目录解释（与 git 语义一致：根 .gitignore 管整棵树，
+ * 嵌套 .gitignore 只管其所在目录以下）。
+ * 无任何 .gitignore 时返回 null（调用方沿用原有硬编码过滤）。
+ */
+export type GitignoreMatchers = Map<string, Ignore>;
+
+/**
+ * 收集项目根及全部嵌套 .gitignore（不进 SKIP_DIRS 跳过的目录——node_modules
+ * 里的 .gitignore 不该管项目主体）。仅读取，不改动任何文件。
+ */
+export function collectGitignore(root: string): GitignoreMatchers | null {
+  const matchers: GitignoreMatchers = new Map();
   const stack: string[] = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -178,11 +198,66 @@ export function walkFiles(root: string, includeTests: boolean, includeArchive = 
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        stack.push(full);
+      } else if (e.isFile() && e.name === '.gitignore') {
+        try {
+          const ig = ignore();
+          ig.add(fs.readFileSync(full, 'utf-8').split(/\r?\n/));
+          matchers.set(dir, ig);
+        } catch {
+          /* 单个 .gitignore 读失败不影响整体 */
+        }
+      }
+    }
+  }
+  return matchers.size > 0 ? matchers : null;
+}
+
+/** 命中任一作用域规则即视为被 gitignore（目录带尾斜杠才能匹配 build/ 这类目录规则） */
+function isGitignored(chain: GiMatcher[], full: string, isDir: boolean): boolean {
+  for (const { base, ig } of chain) {
+    const rel = toPosix(path.relative(base, full));
+    if (rel === '' || rel.startsWith('..')) continue;
+    if (ig.ignores(isDir ? rel + '/' : rel)) return true;
+  }
+  return false;
+}
+
+export function walkFiles(
+  root: string,
+  includeTests: boolean,
+  includeArchive = false,
+  gitignore: GitignoreMatchers | null = null,
+): string[] {
+  const out: string[] = [];
+  interface Frame {
+    dir: string;
+    /** 治理本目录内条目的 gitignore 链（含祖先 + 本目录自己的 .gitignore） */
+    chain: GiMatcher[];
+  }
+  const rootChain: GiMatcher[] = gitignore?.get(root) ? [{ base: root, ig: gitignore.get(root)! }] : [];
+  const stack: Frame[] = [{ dir: root, chain: rootChain }];
+  while (stack.length > 0) {
+    const { dir, chain } = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    // 子目录继承的链 = 当前链 + 本目录自己的 .gitignore（它治理其下所有条目）
+    const childChain: GiMatcher[] = gitignore?.get(dir) ? [...chain, { base: dir, ig: gitignore.get(dir)! }] : chain;
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
         // 归档目录默认跳过（不索引）；include_archive=true 才深入
         if (!includeArchive && ARCHIVE_DIRS.has(e.name)) continue;
-        stack.push(full);
+        if (isGitignored(chain, full, true)) continue;
+        stack.push({ dir: full, chain: childChain });
       } else if (e.isFile()) {
         if (!includeTests && SKIP_FILE_RE.test(e.name)) continue;
+        if (isGitignored(chain, full, false)) continue;
         if (isSupported(path.extname(e.name))) out.push(full);
       }
     }
@@ -1015,8 +1090,9 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     return brickByPrefix.get(rel.slice(0, slash + 1)) ?? null;
   };
 
-  // 1. 扫描文件
-  let absFiles = walkFiles(root, include_tests, input.include_archive ?? false);
+  // 1. 扫描文件（被 gitignore 的一律不扫——references/_archive/缓存等参考堆不进来）
+  const gitignore = collectGitignore(root);
+  let absFiles = walkFiles(root, include_tests, input.include_archive ?? false, gitignore);
   const skipped: string[] = [];
   // 拼装区：积木内部文件排序靠后——黑盒无需优先解析符号，
   // max_files 截断时优先保 glue/外部文件（黑盒边界边不因截断而断）

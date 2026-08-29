@@ -15,6 +15,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn, exec } from 'node:child_process';
 import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '../storage.js';
 import { enableCameraFromEnv } from '../camera/run_sentinel.js';
 import { judgeEvent } from '../camera/judge.js';
@@ -189,7 +190,8 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
       sendJson(res, 200, { features: [] });
       return;
     }
-    const files = fs.readdirSync(featuresDir).filter((f) => f.endsWith('.json'));
+    const files = fs.readdirSync(featuresDir)
+      .filter((f) => f.endsWith('.json') && !f.endsWith('.overlay.json')); // overlay 是设计意图层，不是独立 feature
     const features = files.flatMap((f) => {
       try {
         const fp = path.join(featuresDir, f);
@@ -333,21 +335,52 @@ const IMPORT_BODY_LIMIT = 200 * 1024 * 1024; // 目录上传远超通用 5MB 上
 async function handleApiImport(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req, IMPORT_BODY_LIMIT);
-    let parsed: { files?: { path: string; content: string }[]; feature?: string };
+    let parsed: { files?: { path: string; content: string }[]; feature?: string; source_dir?: string };
     try {
       parsed = JSON.parse(body.toString('utf-8') || '{}');
     } catch {
-      sendError(res, 400, '请求体需为合法 JSON：{ "files": [{ "path", "content" }] }');
+      sendError(res, 400, '请求体需为合法 JSON：{ "files": [...], "feature": "…" } 或 { "source_dir": "本地路径" }');
       return;
     }
+    // feature 名：显式指定 > source_dir 目录名 > 首文件顶层目录名 > 首文件名
+    const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/^_+|_+$/g, '') || 'project';
+    let feature = parsed.feature ? sanitize(parsed.feature) : '';
+
+    // —— 模式 A：本地路径导入（大项目免上传，source_root=真实路径，文件定位直接开真实文件）——
+    const sourceDir = typeof parsed.source_dir === 'string' ? parsed.source_dir.trim() : '';
+    if (sourceDir) {
+      const abs = path.resolve(sourceDir);
+      if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+        sendError(res, 400, `本地路径不存在或不是目录：${abs}`);
+        return;
+      }
+      if (!feature) feature = sanitize(path.basename(abs));
+      const cacheDb = openDb(path.join(process.cwd(), '.design-canvas', `import_cache_${feature}.db`));
+      let imp;
+      try {
+        imp = await importProject({
+          project_dir: abs,
+          feature,
+          cache_db: cacheDb,
+          gen_roles: true,
+          source_root: abs,
+        });
+      } finally {
+        cacheDb.close();
+      }
+      const dsl = getDSL(feature);
+      const rendered = renderDsl({ dsl_json: JSON.stringify(dsl) });
+      broadcastSSE('project-imported', { feature, at: new Date().toISOString() });
+      sendJson(res, 200, { success: true, feature, html: path.basename(rendered.htmlFile), message: imp.message, local: true });
+      return;
+    }
+
+    // —— 模式 B：目录上传导入（浏览器 webkitdirectory 选文件夹）——
     const files = (parsed.files || []).filter((f) => f && typeof f.path === 'string' && typeof f.content === 'string');
     if (!files.length) {
       sendError(res, 400, '没有可导入的文件');
       return;
     }
-    // feature 名：显式指定 > 首文件顶层目录名 > 首文件名
-    const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/^_+|_+$/g, '') || 'project';
-    let feature = parsed.feature ? sanitize(parsed.feature) : '';
     if (!feature) {
       const segs = files[0].path.split('/').filter(Boolean);
       feature = sanitize(segs.length > 1 ? segs[0] : (segs[0] || 'project').replace(/\.[^.]+$/, ''));
@@ -521,6 +554,7 @@ async function handleApiMonolith(req: http.IncomingMessage, res: http.ServerResp
       crit_lines: typeof params.crit_lines === 'number' ? params.crit_lines : undefined,
       max_files: typeof params.max_files === 'number' ? params.max_files : undefined,
       flag_cohesive: typeof params.flag_cohesive === 'boolean' ? params.flag_cohesive : undefined,
+      no_cache: params.no_cache === true,
     };
     if (params.feature) {
       const dsl = getDSL(String(params.feature));
@@ -549,6 +583,54 @@ async function handleApiMonolith(req: http.IncomingMessage, res: http.ServerResp
       reports: result.reports,
     });
   } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** POST /api/reveal-file：在系统文件管理器中定位目标文件（只读侧效果，不改任何内容）
+ * body: { source_root, path } —— path 为相对 source_root 的路径（体检报告里的 rel path）
+ * 跨平台：win32 → explorer /select,<abs>；darwin → open -R <abs>；linux → xdg-open 打开所在目录。
+ */
+async function handleApiRevealFile(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    const sourceRoot = validateProjectRoot(String(params.source_root || ''), '/api/reveal-file source_root');
+    const rel = String(params.path || '');
+    if (!rel) {
+      sendError(res, 400, '缺少 path');
+      return;
+    }
+    const abs = path.resolve(sourceRoot, rel);
+    // 防目录穿越：解析后必须仍在 source_root 内
+    const relCheck = path.relative(sourceRoot, abs);
+    if (relCheck.startsWith('..') || path.isAbsolute(relCheck)) {
+      sendError(res, 403, `path 越界：${rel} 不在 source_root 内`);
+      return;
+    }
+    if (!fs.existsSync(abs)) {
+      sendError(res, 404, `文件不存在: ${abs}`);
+      return;
+    }
+    const platform = process.platform;
+    if (platform === 'win32') {
+      // 关键：explorer 对含空格路径的 /select 参数很挑剔。spawn 会为含空格参数整体加引号，
+      // explorer 把引号当路径一部分 → 找不到文件 → 只打开「此电脑」。改走 exec 让 cmd 先剥引号，
+      // explorer 收到干净的 `/select,C:\...\Microsoft Edge\file` 才能正确选中定位。
+      await new Promise<void>((resolve) => {
+        const child = exec(`explorer /select,"${abs}"`, { windowsHide: true }, () => resolve());
+        child.unref?.();
+      });
+    } else if (platform === 'darwin') {
+      const child = spawn('open', ['-R', abs], { detached: true, stdio: 'ignore' });
+      child.unref();
+    } else {
+      const child = spawn('xdg-open', [path.dirname(abs)], { detached: true, stdio: 'ignore' });
+      child.unref();
+    }
+    sendJson(res, 200, { success: true, revealed: abs, platform });
+  } catch (e) {
+    console.error('[reveal-file] 失败:', (e as Error).message);
     sendError(res, 500, (e as Error).message);
   }
 }
@@ -1409,6 +1491,7 @@ async function handleApiArchLayer(req: http.IncomingMessage, res: http.ServerRes
       persist: params.persist,
       layers: params.layers,
       check_violations: params.check_violations,
+      no_cache: params.no_cache === true,
     });
     sendJson(res, 200, { success: true, ...result });
   } catch (e) {
@@ -2409,7 +2492,8 @@ export async function startServer(port?: number): Promise<void> {
         url.startsWith('/api/layout') || url.startsWith('/api/scaffold') ||
         url.startsWith('/api/mind-map') || url.startsWith('/api/canvas-notes') ||
         url.startsWith('/api/code/approve') || url.startsWith('/api/code/reject') ||
-        url.startsWith('/api/code/propose') || url.startsWith('/api/gateway'));
+        url.startsWith('/api/code/propose') || url.startsWith('/api/gateway') ||
+        url.startsWith('/api/reveal-file'));
     if (isWriteApi && !isSafeOrigin(origin)) {
       sendError(res, 403, '跨域写入被拒绝：仅允许本机 localhost 来源调用写入 API');
       return;
@@ -2477,6 +2561,11 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/monolith') && method === 'POST') {
       void handleApiMonolith(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/reveal-file') && method === 'POST') {
+      void handleApiRevealFile(req, res);
       return;
     }
 

@@ -17,6 +17,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { getDSL, saveDSL } from '../storage.js';
 import {
   detectArchLayers,
@@ -26,7 +27,8 @@ import {
   type ImportEdge,
   type LayerViolation,
 } from './layer_detect.js';
-import type { ArchLayer } from '../dsl/types.js';
+import type { ArchLayer, DesignDSL } from '../dsl/types.js';
+import { fileFingerprint, healthKey, readHealthCache, writeHealthCache } from './health_cache.js';
 
 export interface ArchLayerInput {
   /** feature 名 */
@@ -37,6 +39,8 @@ export interface ArchLayerInput {
   layers?: LayerDef[];
   /** 是否做层间违规检测（默认 true；从 source_root 读代码扫 import 边） */
   check_violations?: boolean;
+  /** 是否跳过缓存强制重算（默认 false，命中缓存直接返回） */
+  no_cache?: boolean;
 }
 
 export interface ArchLayerFileAssign {
@@ -132,11 +136,60 @@ function buildLayerMatrix(edges: ImportEdge[], fileLayers: Record<string, string
     });
 }
 
+/** DSL 稳定内容指纹：只取与分层相关的字段（排除 _rev/_sync 等易变字段，避免每次保存都失效） */
+function dslFingerprint(dsl: DesignDSL): string {
+  const h = crypto.createHash('sha1');
+  const nodes = (dsl.geometry?.nodes ?? []).map((n) => [
+    n.id,
+    n.label ?? '',
+    n.type ?? '',
+    n.description ?? '',
+    n.arch_layer ?? '',
+  ]);
+  const edges = (dsl.geometry?.edges ?? []).map((e) => [e.id, e.from, e.to, e.label ?? '']);
+  const files = (dsl.semantic?.files ?? []).map((f) => [f.id, f.path]);
+  h.update(JSON.stringify({ nodes, edges, files }));
+  return h.digest('hex').slice(0, 20);
+}
+
+/** 从 DSL 直接推导参与违规扫描的源码相对路径（与 assignments 推导逻辑一致，供缓存指纹用） */
+function dslSourceRels(dsl: DesignDSL): string[] {
+  const rels = new Set<string>();
+  for (const f of dsl.semantic?.files ?? []) if (f.path) rels.add(f.path);
+  for (const n of dsl.geometry?.nodes ?? []) {
+    if (n.type === 'file' && n.description) rels.add(n.description);
+  }
+  return [...rels];
+}
+
 export async function archLayer(input: ArchLayerInput): Promise<ArchLayerResult> {
-  const { feature, persist = false, layers, check_violations = true } = input;
+  const { feature, persist = false, layers, check_violations = true, no_cache = false } = input;
   const dsl = getDSL(feature);
   if (!dsl) {
     throw new Error(`feature "${feature}" 不存在`);
+  }
+
+  // ── 缓存：DSL 内容 + 参与违规扫描的源码文件都没变 → 分层/违规结果不变，命中即返回 ──
+  let cacheKey: string | null = null;
+  if (!no_cache) {
+    const layersFp = layers
+      ? crypto.createHash('sha1').update(JSON.stringify(layers)).digest('hex').slice(0, 12)
+      : 'default';
+    const rels = check_violations && dsl.source_root ? dslSourceRels(dsl) : [];
+    const srcFp =
+      rels.length && dsl.source_root
+        ? fileFingerprint(rels.map((r) => ({ abs: path.join(dsl.source_root as string, r), rel: r })))
+        : 'noscan';
+    cacheKey = healthKey('arch_layer', [
+      feature,
+      layersFp,
+      check_violations,
+      persist,
+      dslFingerprint(dsl),
+      srcFp,
+    ]);
+    const cached = readHealthCache<ArchLayerResult>(cacheKey);
+    if (cached) return cached;
   }
 
   const layered = detectArchLayers(dsl, layers);
@@ -194,7 +247,7 @@ export async function archLayer(input: ArchLayerInput): Promise<ArchLayerResult>
     `未归类 ${fileNodes.length - classified} 个归入核心层）${violSummary}。` +
     (persist ? '已写回 feature，渲染时将显示 🎨 图层着色与图例。' : '未落盘（persist=false）。');
 
-  return {
+  const result: ArchLayerResult = {
     feature,
     total_files: fileNodes.length,
     classified,
@@ -206,4 +259,6 @@ export async function archLayer(input: ArchLayerInput): Promise<ArchLayerResult>
     persisted,
     message,
   };
+  if (cacheKey) writeHealthCache(cacheKey, result);
+  return result;
 }

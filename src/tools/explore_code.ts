@@ -112,6 +112,7 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
         persist: bool(args, 'persist'),
         layers: args['layers'] as LayerDef[] | undefined,
         check_violations: bool(args, 'check_violations'),
+        no_cache: bool(args, 'no_cache'),
       });
       return toResult(r, true);
     }

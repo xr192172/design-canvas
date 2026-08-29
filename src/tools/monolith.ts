@@ -21,6 +21,7 @@ import type { DesignDSL, Node, Edge } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 import { parseFileFull } from './ts_kernel/index.js';
 import type { ParsedSymbol } from './ts_kernel/index.js';
+import { fileFingerprint, healthKey, readHealthCache, writeHealthCache } from './health_cache.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -72,6 +73,8 @@ export interface CheckMonolithInput {
   flag_cohesive?: boolean;
   /** 扫描模式最多文件数（默认 200） */
   max_files?: number;
+  /** 跳过体检缓存，强制重新体检（默认 false；缓存基于源文件快照指纹，文件没变则直接复用上次报告） */
+  no_cache?: boolean;
   /** 是否生成预览 DSL 并保存为 feature（默认 false） */
   save_preview?: boolean;
   /** 预览 DSL 的 feature 名（默认 <feature|monolith>_split_preview） */
@@ -719,6 +722,23 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
     throw new Error('必须提供 project_dir / feature / files 之一');
   }
 
+  // ── 体检缓存：源文件快照指纹 → 文件没变则复用上次报告，跳过重扫 ──
+  // key 含 feature + 阈值参数：阈值变了即使文件没变也要重算（报告本就会变）
+  let cacheKey: string | null = null;
+  if (!input.no_cache) {
+    const fp = fileFingerprint(targets);
+    cacheKey = healthKey('monolith', [
+      input.feature ?? input.project_dir ?? 'files',
+      warn,
+      crit,
+      flagCohesive,
+      maxFiles,
+      fp,
+    ]);
+    const cached = readHealthCache<CheckMonolithResult>(cacheKey);
+    if (cached) return cached;
+  }
+
   // 逐文件分析
   const reports: FileMonolithReport[] = [];
   const readFailed: string[] = [];
@@ -772,11 +792,13 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
     linesOut.push('无拆分候选。大而内聚文件仅为体积提示，可自行决定是否分层拆解。');
   }
 
-  return {
+  const result: CheckMonolithResult = {
     message: linesOut.join('\n'),
     total_files: reports.length,
     oversized: oversized.length,
     reports: oversized,
     preview_feature: previewFeature,
   };
+  if (cacheKey) writeHealthCache(cacheKey, result);
+  return result;
 }
