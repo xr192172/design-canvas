@@ -13,7 +13,14 @@
  */
 
 import type { DesignDSL } from '../dsl/types.js';
-import { getDSL, saveDSL, saveArchiveEntry, getArchiveEntryByPath, type ArchiveEntry } from '../storage.js';
+import {
+  getDSL,
+  saveDSL,
+  saveArchiveEntry,
+  getArchiveEntryByPath,
+  listArchiveEntries,
+  type ArchiveEntry,
+} from '../storage.js';
 
 export interface ArchiveNodeInput {
   /** feature 名 */
@@ -119,4 +126,31 @@ export function archiveNode(input: ArchiveNodeInput): ArchiveNodeResult {
     archived_decision: archivedDecision,
     removed_from_dsl: true,
   };
+}
+
+export interface ListArchiveInput {
+  /** feature 名 */
+  feature: string;
+  /** archive 的 baseDir（可选，默认 dataHome） */
+  live_dir?: string;
+}
+
+export interface ListArchiveResult {
+  message: string;
+  feature: string;
+  entries: ArchiveEntry[];
+}
+
+/** 列出某 feature 的下线库归档条目（历史研究材料） */
+export function listArchive(input: ListArchiveInput): ListArchiveResult {
+  const entries = listArchiveEntries(input.feature, input.live_dir);
+  const lines = [`下线库 [${input.feature}] 共 ${entries.length} 条归档`];
+  if (entries.length === 0) lines.push('  （无归档条目——尚无节点下线）');
+  for (const e of entries) {
+    const merged = e.merged_into ? ` → 合并到 ${e.merged_into}` : '';
+    const at = e.archived_at?.slice(0, 10) ?? '';
+    lines.push(`  - ${e.file_path}${merged} (${at})`);
+    lines.push(`      原因: ${e.retire_reason}`);
+  }
+  return { message: lines.join('\n'), feature: input.feature, entries };
 }

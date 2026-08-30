@@ -30,8 +30,7 @@ import { importProject } from './tools/import_project.js';
 import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
-import { archiveNode } from './tools/archive_node.js';
-import { listArchiveEntries } from './storage.js';
+import { archiveNode, listArchive } from './tools/archive_node.js';
 import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { extractContracts } from './tools/extract_contracts.js';
@@ -348,18 +347,8 @@ const archiveNodeHandler = wrap(async (a) => {
 
 /** list_archive：列出某 feature 的下线库归档条目 */
 const listArchiveHandler = wrap(async (a) => {
-  const entries = listArchiveEntries(a.feature as string, a.live_dir as string | undefined);
-  const lines = [
-    `下线库 [${(a.feature as string)}] 共 ${entries.length} 条归档`,
-    ...(entries.length === 0 ? ['  （无归档条目——尚无节点下线）'] : []),
-  ];
-  for (const e of entries) {
-    const merged = e.merged_into ? ` → 合并到 ${e.merged_into}` : '';
-    const at = e.archived_at?.slice(0, 10) ?? '';
-    lines.push(`  - ${e.file_path}${merged} (${at})`);
-    lines.push(`      原因: ${e.retire_reason}`);
-  }
-  return { message: lines.join('\n'), data: { feature: a.feature, entries } };
+  const r = listArchive({ feature: a.feature as string, live_dir: a.live_dir as string | undefined });
+  return { message: r.message, data: r };
 });
 
 // ─────────────────────────────────────────────────────────────
