@@ -24,7 +24,7 @@ import ignore from 'ignore';
 import type { Ignore } from 'ignore';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi, Symbol } from '../dsl/types.js';
 import type { BrickManifest } from '../dsl/contract.js';
-import { saveDSL, saveLiveFeature, ensureBaseline } from '../storage.js';
+import { saveDSL, saveLiveFeature, ensureBaseline, getDSL } from '../storage.js';
 import { mergeDesignLayer } from '../storage_overlay.js';
 import { detectArchLayers } from './layer_detect.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
@@ -131,6 +131,9 @@ const ARCHIVE_DIRS = new Set([
 
 /** 跳过的文件模式（测试/生成物 / 编辑器临时存取，非架构） */
 const SKIP_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.min\.js$|\.d\.ts$|\.gen\.[tj]sx?$|test_.*\.py$|.*_test\.py$|\.tmp$|\.temp$|\.crswap$|\.crdownload$|\.swp$|\.swo$|\.swx$|\.bak$|\.orig$|\.rej$|~$|^~)/;
+
+/** 测试文件判定（仅测试类，不含 .min/.d.ts 等其它 SKIP 项）——live 快照刷新跟随设计 DSL 时用 */
+const TEST_FILE_RE = /(_test\.go$|\.test\.[tj]sx?$|\.spec\.[tj]sx?$|test_.*\.py$|.*_test\.py$)/;
 
 /** 布局常量（与渲染器父节点约定一致：padding 20 + title 30） */
 const FILE_W = 240;
@@ -1074,6 +1077,18 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     throw new Error(`project_dir 不存在或不是目录: ${root}`);
   }
 
+  // 摩擦 H 修复：live 快照刷新跟随设计 DSL 的测试包含情况——live_only 且未显式
+  // 指定 include_tests 时，若已有设计视图含测试文件，则默认也含测试，避免与设计
+  // 视图 diff 时误报"测试文件被删除"（此前 live_only 默认 false 覆盖了含测试的 live）。
+  // 注意：仅 input.include_tests === undefined 才跟随；显式传 true/false 都尊重显式设置。
+  let effectiveIncludeTests = include_tests;
+  if (input.live_only && input.include_tests === undefined) {
+    const existing = getDSL(feature);
+    if (existing?.semantic?.files?.some((f) => TEST_FILE_RE.test(f.path ?? ''))) {
+      effectiveIncludeTests = true;
+    }
+  }
+
   // ── 积木折叠（拼装区黑盒化）──
   // 拼装区根的 assembly.json（assemble_bricks 出生证明）记录每个积木的
   // dest_root 与契约投影（description/aggregate）。据此把积木折叠成 DSL
@@ -1092,7 +1107,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
 
   // 1. 扫描文件（被 gitignore 的一律不扫——references/_archive/缓存等参考堆不进来）
   const gitignore = collectGitignore(root);
-  let absFiles = walkFiles(root, include_tests, input.include_archive ?? false, gitignore);
+  let absFiles = walkFiles(root, effectiveIncludeTests, input.include_archive ?? false, gitignore);
   const skipped: string[] = [];
   // 拼装区：积木内部文件排序靠后——黑盒无需优先解析符号，
   // max_files 截断时优先保 glue/外部文件（黑盒边界边不因截断而断）
@@ -1351,7 +1366,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       feature,
       version: '1.0.0',
       title: input.title || feature,
-      source_root: input.source_root,
+      source_root: input.source_root ?? input.project_dir,
       status: 'done',
       geometry: {
         layout: 'free',

@@ -253,9 +253,14 @@ export async function checkConsistency(input: ConsistencyInput): Promise<Consist
     throw new Error(`feature "${feature}" 没有 semantic.files，无法检查一致性`);
   }
 
+  // 摩擦 G 修复：未显式传 code_dir 时，自动用 DSL 记录的 source_root（import_project
+  // 已把 project_dir 写入 source_root）作为代码根，外部项目无需每次手传 code_dir；
+  // 仍无 source_root（手工建的 DSL）才回退到默认 scaffold/<feature>。
   const codeDir = code_dir
     ? path.resolve(code_dir)
-    : path.join(process.cwd(), 'scaffold', feature);
+    : dsl.source_root
+      ? path.resolve(dsl.source_root)
+      : path.join(process.cwd(), 'scaffold', feature);
 
   const fileResults: FileConsistency[] = [];
   let matchedCount = 0;
