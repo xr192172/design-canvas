@@ -121,6 +121,64 @@ export function getLiveFeature(feature: string, baseDir?: string): DesignDSL | n
   }
 }
 
+/**
+ * 基线（baseline）快照存储：契约创立时刻的参考基准。
+ *
+ * Git 语义：首次为一个 feature 生成 live 快照时，顺带把同一份 DSL 写入 baseline/，
+ * 作为「共同祖先」。之后 live 随代码演进持续更新、设计 DSL 随意图演进修改，
+ * 两者都相对 baseline 各自前进。diff_views 的三方对比据此裁决：
+ *   - baseline → design = 意图增量
+ *   - baseline → live   = 实现增量
+ *   - 两侧都改动且不一致 = 冲突（交 LLM 裁决）
+ *
+ * baseline 只在首次 fork 时写入，绝不随 live/design 更新而移动（除非显式重建），
+ * 与 baseDir 归位规则和 live 一致（watch_project 监听任意项目时传 project_dir）。
+ */
+export function getBaselineDir(baseDir?: string): string {
+  return path.join(baseDir ?? getDataHome(), '.design-canvas', 'baseline');
+}
+
+/** 基线 DSL 文件路径：<dataHome>/.design-canvas/baseline/<feature>.dsl.json */
+export function getBaselineFeatureFile(feature: string, baseDir?: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(feature)) {
+    throw new Error(`非法 feature 名: "${feature}"，必须匹配 ^[a-zA-Z0-9_-]+$`);
+  }
+  return path.join(getBaselineDir(baseDir), `${feature}.dsl.json`);
+}
+
+/** 保存基线 DSL（带 _sync 标记；不触发 dslChangeCallback，避免打扰设计视图刷新） */
+export function saveBaselineFeature(dsl: DesignDSL, baseDir?: string): string {
+  const dir = getBaselineDir(baseDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = getBaselineFeatureFile(dsl.feature, baseDir);
+  const data = {
+    ...dsl,
+    _sync: { saved_at: new Date().toISOString(), source: 'baseline', feature: dsl.feature },
+  };
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+  return file;
+}
+
+/** 读取基线 DSL，不存在返回 null */
+export function getBaselineFeature(feature: string, baseDir?: string): DesignDSL | null {
+  const file = getBaselineFeatureFile(feature, baseDir);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as DesignDSL;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * fork 基线：仅在基线尚不存在时写入（契约创立时刻的一次性快照）。
+ * 已在 live 更新（import/watch）时调用，保证基线锚定首次导入，不随代码演进漂移。
+ */
+export function ensureBaseline(dsl: DesignDSL, baseDir?: string): void {
+  if (getBaselineFeature(dsl.feature, baseDir)) return;
+  saveBaselineFeature(dsl, baseDir);
+}
+
 /** 确保 features 目录存在 */
 function ensureFeaturesDir(): void {
   fs.mkdirSync(getFeaturesDir(), { recursive: true });
@@ -263,6 +321,10 @@ export function deleteFeature(feature: string): void {
 
   const liveFile = getLiveFeatureFile(feature);
   if (fs.existsSync(liveFile)) fs.unlinkSync(liveFile);
+
+  // 连带删除基线快照（契约创立时刻的 fork）
+  const baselineFile = getBaselineFeatureFile(feature);
+  if (fs.existsSync(baselineFile)) fs.unlinkSync(baselineFile);
 
   const liveDsl = getLiveDslFile();
   if (fs.existsSync(liveDsl)) {

@@ -24,7 +24,7 @@ import ignore from 'ignore';
 import type { Ignore } from 'ignore';
 import type { DesignDSL, Node, Edge, SemanticFile, ExpectedApi, Symbol } from '../dsl/types.js';
 import type { BrickManifest } from '../dsl/contract.js';
-import { saveDSL, saveLiveFeature } from '../storage.js';
+import { saveDSL, saveLiveFeature, ensureBaseline } from '../storage.js';
 import { mergeDesignLayer } from '../storage_overlay.js';
 import { detectArchLayers } from './layer_detect.js';
 import { parseFileFull, isSupported } from './ts_kernel/index.js';
@@ -1428,6 +1428,10 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       // 与 getLiveFeature 默认读取路径一致。）
       saveLiveFeature(layered, input.live_dir);
     }
+    // fork 基线：首次导入（无论 live_only 与否）即锚定契约创立时刻的参考基准，
+    // 之后 live 随代码演进更新、设计 DSL 随意图演进，二者都相对 baseline 各自前进，
+    // diff_views 三方对比据此裁决冲突。ensureBaseline 只在基线缺失时写入，绝不漂移。
+    ensureBaseline(layered, input.live_dir);
 
     const dirCount = nodes.filter((n) => n.type === 'module').length;
     const oversized = files

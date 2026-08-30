@@ -197,4 +197,27 @@ def build_user():
     const saved = getDSL('backfill_missing')!;
     expect(saved.semantic!.files[0].actual_apis).toEqual([]);
   });
+
+  it('backfill 只回填 actual_apis，不覆盖设计侧 expected_apis（预期只由设计产生）', async () => {
+    const dsl = makeDSL('backfill_contract');
+    renderDsl({ dsl_json: JSON.stringify(dsl) });
+    const expectedBefore = JSON.stringify(dsl.semantic!.files.map((f) => f.expected_apis));
+
+    // 实现代码与 expected 完全不一致（预期全部缺失 + 全新实现）
+    fs.writeFileSync(
+      path.join(tmpDir, 'service.go'),
+      'package service\n\nfunc SomethingElse() error { return nil }\n',
+    );
+
+    const result = await backfillScaffold({ feature: 'backfill_contract', scaffold_dir: tmpDir });
+
+    const saved = getDSL('backfill_contract')!;
+    // expected_apis 保持设计侧原样（不被 backfill 覆盖）
+    expect(JSON.stringify(saved.semantic!.files.map((f) => f.expected_apis))).toBe(expectedBefore);
+    // actual_apis 反映实现事实
+    expect(saved.semantic!.files[0].actual_apis!.some((a) => a.signature.includes('SomethingElse'))).toBe(true);
+    // 报告区分「预期缺失」（red）vs「实现新增」（blue）
+    expect(result.updates[0].missing).toEqual(['Login', 'HealthCheck']);
+    expect(result.updates[0].extra).toContain('SomethingElse');
+  });
 });

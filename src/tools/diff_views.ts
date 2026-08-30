@@ -1,18 +1,28 @@
 /**
- * diff_views：设计视图 vs 实际代码快照（live）的双栏对比
+ * diff_views：设计视图 vs 实际代码快照（live）的双栏对比 + 三方对比
  *
- * 加载同一 feature 的 design 和 live 两个 DSL，逐层比对：
+ * 加载同一 feature 的 baseline / design / live 三个 DSL：
+ * - baseline：契约创立时刻的 fork 快照（import_project 首次写 live 时锚定），即 Git 共同祖先
+ * - design：设计视图（意图）
+ * - live：实际代码快照（实现）
+ *
+ * 逐层比对（baseline 存在时升级为三方对比）：
  * - 文件级：新增/删除/修改/不变
  * - 符号级：新增/删除/修改
  * - API 级：新增/删除/修改
  * - 依赖级：新增/删除
  * - 行数变化
  *
+ * 三方对比语义（Git 三路 merge 的 DSL 版）：
+ * - baseline → design = 意图增量（intent delta）
+ * - baseline → live   = 实现增量（implement delta）
+ * - 两侧都改动且结果不一致 = 冲突，交 LLM 读 diff 裁决
+ *
  * 输出结构化数据供 LLM 分析 + 可读摘要。
  */
 
 import type { DesignDSL, SemanticFile, Symbol, ExpectedApi, Edge } from '../dsl/types.js';
-import { getDSL, getLiveFeature } from '../storage.js';
+import { getDSL, getLiveFeature, getBaselineFeature } from '../storage.js';
 
 // ──────── 输出类型 ────────
 
@@ -78,6 +88,65 @@ export interface EdgeDiff {
   change: 'added' | 'removed';
 }
 
+/**
+ * 三方对比中单个文件的状态（Git 三路 merge 语义的 DSL 版）
+ * - added：仅设计新增，尚未实现（baseline 无 / design 有 / live 无）
+ * - implemented：设计新增且已实现（两侧一致）
+ * - removed：设计删除、代码仍在（设计撤销）
+ * - deleted_from_live：实现删除、设计仍在（结构塌方）
+ * - design_only：仅设计改动（意图增量，待同步到实现）
+ * - live_only：仅实现改动（实现增量/fix，待回填设计）；含「实现新增未登记」
+ * - conflict：两侧都改动且结果不一致 → 需 LLM 读 diff 裁决
+ * - converged：两侧都改动但结果一致（已收敛，可直接采用）
+ * - unchanged：相对基线无变化
+ */
+export type ThreeWayState =
+  | 'added'
+  | 'implemented'
+  | 'removed'
+  | 'deleted_from_live'
+  | 'design_only'
+  | 'live_only'
+  | 'conflict'
+  | 'converged'
+  | 'unchanged';
+
+/** 三方对比中单个文件的详情 */
+export interface ThreeWayFile {
+  path: string;
+  state: ThreeWayState;
+  baseline_lines?: number;
+  design_lines?: number;
+  live_lines?: number;
+  /** 意图增量（baseline→design）的符号/API 变更 */
+  intent_symbols: SymbolDiff[];
+  intent_apis: ApiDiff[];
+  /** 实现增量（baseline→live）的符号/API 变更 */
+  implement_symbols: SymbolDiff[];
+  implement_apis: ApiDiff[];
+}
+
+/** 三方对比统计 */
+export interface ThreeWaySummary {
+  unchanged: number;
+  /** 仅设计新增，尚未实现 */
+  added: number;
+  /** 设计新增且已实现 */
+  implemented: number;
+  /** 设计删除、代码仍在 */
+  removed: number;
+  /** 实现删除、设计仍在（结构塌方） */
+  deleted_from_live: number;
+  /** 仅设计改动（意图增量） */
+  design_only: number;
+  /** 仅实现改动（实现增量/fix） */
+  live_only: number;
+  /** 两侧都改动且不一致 → 需裁决 */
+  conflict: number;
+  /** 两侧都改动但结果一致 */
+  converged: number;
+}
+
 /** 对比结果 */
 export interface DiffViewsResult {
   /** 可读摘要 */
@@ -89,6 +158,8 @@ export interface DiffViewsResult {
     design_exists: boolean;
     /** live 视图是否存在 */
     live_exists: boolean;
+    /** 基线视图（契约创立时刻的 fork）是否存在 */
+    baseline_exists: boolean;
     /** 总体统计 */
     summary: {
       /** 设计视图文件数 */
@@ -120,24 +191,33 @@ export interface DiffViewsResult {
     files: FileDiff[];
     /** 依赖边级对比（两视图共有的文件节点之间的依赖变化） */
     edges: EdgeDiff[];
+    /** 三方对比（baseline 存在时）详情 */
+    three_way?: {
+      /** 基线视图文件数 */
+      baseline_files: number;
+      summary: ThreeWaySummary;
+      files: ThreeWayFile[];
+    };
   };
 }
 
 // ──────── 核心逻辑 ────────
 
 /**
- * 执行双视图对比
+ * 执行双视图对比（baseline 存在时升级为三方对比）
  */
 export function diffViews(input: DiffViewsInput): DiffViewsResult {
   const { feature, live_dir } = input;
 
-  // 1. 加载两个视图
+  // 1. 加载三个视图（baseline 与 live 同目录归位：baseDir = live_dir）
   const design = getDSL(feature);
   const live = getLiveFeature(feature, live_dir);
+  const baseline = getBaselineFeature(feature, live_dir);
 
   // 构建结果
   const designFiles = design?.semantic?.files ?? [];
   const liveFiles = live?.semantic?.files ?? [];
+  const baselineFiles = baseline?.semantic?.files ?? [];
 
   // 按文件路径建立索引（live 可能用新路径，两边都用 path 匹配）
   const designByPath = new Map<string, SemanticFile>();
@@ -146,10 +226,14 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
   const liveByPath = new Map<string, SemanticFile>();
   for (const f of liveFiles) liveByPath.set(f.path, f);
 
+  const baselineByPath = new Map<string, SemanticFile>();
+  for (const f of baselineFiles) baselineByPath.set(f.path, f);
+
   // 所有出现的路径（去重并保持 design 顺序优先）
   const allPaths = new Set<string>();
   for (const f of designFiles) allPaths.add(f.path);
   for (const f of liveFiles) allPaths.add(f.path);
+  for (const f of baselineFiles) allPaths.add(f.path);
 
   // 统计计数
   let added = 0, removed = 0, modified = 0, unchanged = 0;
@@ -249,7 +333,83 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     }
   }
 
-  // 2. 边级 diff（结构塌方可视化）：仅比较两视图共有的文件节点之间的依赖边，
+  // 2. 三方对比（baseline 存在时）：Git 三路 merge 语义 ——
+  //    baseline→design=意图增量，baseline→live=实现增量，两侧都动且不一致=冲突
+  const threeWay: ThreeWayFile[] = [];
+  const twSummary: ThreeWaySummary = {
+    unchanged: 0, added: 0, implemented: 0, removed: 0,
+    deleted_from_live: 0, design_only: 0, live_only: 0, conflict: 0, converged: 0,
+  };
+  if (baseline) {
+    // 视图整体缺失时的退化语义：
+    // - 无设计视图（"没有设计 DSL 的项目"）：退化为「基线→实现」的实现增量
+    // - 无实现视图（纯设计 DSL）：退化为「基线→设计」的意图增量
+    const designAbsent = !design;
+    const liveAbsent = !live;
+    for (const path of allPaths) {
+      const base = baselineByPath.get(path);
+      const des = designByPath.get(path);
+      const liv = liveByPath.get(path);
+
+      const desChanged = fileChanged(base, des);
+      const livChanged = fileChanged(base, liv);
+      const desEqLiv = !fileChanged(des, liv);
+
+      let state: ThreeWayState;
+      if (designAbsent) {
+        if (!base && !liv) state = 'unchanged'; // 仅基线有
+        else if (!base && liv) state = 'live_only'; // 实现新增未登记
+        else if (base && !liv) state = 'deleted_from_live'; // 实现删除（结构塌方）
+        else state = livChanged ? 'live_only' : 'unchanged';
+      } else if (liveAbsent) {
+        if (!base && !des) state = 'unchanged'; // 仅基线有
+        else if (!base && des) state = 'added'; // 设计新增未实现
+        else if (base && !des) state = 'removed'; // 设计删除
+        else state = desChanged ? 'design_only' : 'unchanged';
+      } else if (base && des && liv) {
+        // 三方都有 → 按「谁动了」分类
+        if (!desChanged && !livChanged) state = 'unchanged';
+        else if (desChanged && !livChanged) state = 'design_only';
+        else if (!desChanged && livChanged) state = 'live_only';
+        else if (desEqLiv) state = 'converged';
+        else state = 'conflict';
+      } else if (!base && des && !liv) {
+        state = 'added';
+      } else if (!base && des && liv) {
+        state = desEqLiv ? 'implemented' : 'conflict';
+      } else if (!base && !des && liv) {
+        state = 'live_only'; // 实现新增未登记
+      } else if (base && !des && liv) {
+        state = 'removed'; // 设计删除、代码仍在
+      } else if (base && des && !liv) {
+        state = 'deleted_from_live'; // 结构塌方
+      } else {
+        state = 'unchanged'; // 仅基线有 / 全无
+      }
+      twSummary[state]++;
+
+      const tw: ThreeWayFile = {
+        path,
+        state,
+        baseline_lines: base?.lines,
+        design_lines: des?.lines,
+        live_lines: liv?.lines,
+        intent_symbols: diffSymbols(base?.symbols ?? [], des?.symbols ?? []),
+        intent_apis: diffApis(
+          [...(base?.expected_apis ?? []), ...(base?.actual_apis ?? [])],
+          [...(des?.expected_apis ?? []), ...(des?.actual_apis ?? [])],
+        ),
+        implement_symbols: diffSymbols(base?.symbols ?? [], liv?.symbols ?? []),
+        implement_apis: diffApis(
+          [...(base?.expected_apis ?? []), ...(base?.actual_apis ?? [])],
+          [...(liv?.expected_apis ?? []), ...(liv?.actual_apis ?? [])],
+        ),
+      };
+      threeWay.push(tw);
+    }
+  }
+
+  // 3. 边级 diff（结构塌方可视化）：仅比较两视图共有的文件节点之间的依赖边，
   //    避免「功能聚合视图 vs 文件视图」或「容器边」等 id 空间不一致造成的噪音。
   const designFileIds = new Set(designFiles.map((f) => f.id));
   const liveFileIds = new Set(liveFiles.map((f) => f.id));
@@ -265,13 +425,14 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     else removedEdges++;
   }
 
-  // 3. 构建摘要
+  // 4. 构建摘要
   const lines: string[] = [
-    `══ feature "${feature}" 双视图对比 ══`,
+    `══ feature "${feature}" 视图对比 ══`,
     '',
     `  ─ 概览 ─`,
     `  设计视图: ${design ? `${designFiles.length} 文件` : '不存在'}`,
     `  实际视图: ${live ? `${liveFiles.length} 文件` : '不存在'}`,
+    `  基线视图: ${baseline ? `${baselineFiles.length} 文件（契约创立时刻 fork）` : '不存在（首次导入后自动锚定）'}`,
     '',
     `  ─ 文件变更 ─`,
     `  新增: ${added} 文件`,
@@ -291,6 +452,19 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     `  新增: ${addedEdges} 边`,
     `  删除: ${removedEdges} 边（结构塌方）`,
   ];
+
+  // 三方对比摘要（baseline 存在时）
+  if (baseline) {
+    const tw = twSummary;
+    lines.push(
+      '',
+      `  ─ 三方对比（基线 → 意图 / 实现）─`,
+      `  意图增量（基线→设计）: ${tw.design_only} 文件设计改动 + ${tw.added} 新增未实现`,
+      `  实现增量（基线→实现）: ${tw.live_only} 文件实现改动 + ${tw.implemented} 新增已实现`,
+      `  冲突待裁决: ${tw.conflict} 文件（两侧都动且不一致）`,
+      `  已收敛: ${tw.converged} 文件 · 一致未动: ${tw.unchanged} 文件 · 设计撤销 ${tw.removed} · 实现塌方 ${tw.deleted_from_live}`,
+    );
+  }
 
   // 有变更时列出详情
   const changedFiles = fileDiffs.filter((f) => f.change !== 'unchanged');
@@ -328,7 +502,7 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
   }
 
   // 无变更
-  if (changedFiles.length === 0 && edgeDiffs.length === 0 && design && live) {
+  if (changedFiles.length === 0 && edgeDiffs.length === 0 && design && live && twSummary.conflict === 0) {
     lines.push('', '  ✓ 设计视图与实际代码快照完全一致');
   }
 
@@ -338,6 +512,31 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
     for (const d of edgeDiffs) {
       const icon = d.change === 'added' ? '+' : '-';
       lines.push(`    ${icon} ${d.from} → ${d.to}${d.change === 'removed' ? '（结构塌方）' : ''}`);
+    }
+  }
+
+  // 三方冲突详情（交 LLM 读 diff 裁决：设计侧 vs 实现侧各自相对基线的增量）
+  if (baseline) {
+    const conflicts = threeWay.filter((f) => f.state === 'conflict');
+    if (conflicts.length > 0) {
+      lines.push('', `  ─ 冲突待裁决（两侧都相对基线改动且不一致）─`);
+      for (const f of conflicts) {
+        const ln = `(基线 ${f.baseline_lines ?? '—'} 行 → 设计 ${f.design_lines ?? '—'} / 实现 ${f.live_lines ?? '—'} 行)`;
+        lines.push(`    ~ ${f.path} ${ln}`);
+        const emit = (tag: string, syms: SymbolDiff[], apis: ApiDiff[]) => {
+          for (const s of syms) {
+            const icon = s.change === 'added' ? '+' : s.change === 'removed' ? '-' : '~';
+            const sig = s.design_signature || s.live_signature ? ` — ${s.design_signature ?? s.live_signature}` : '';
+            lines.push(`        ${tag} ${icon} ${s.kind}: ${s.name}${sig}`);
+          }
+          for (const a of apis) {
+            const icon = a.change === 'added' ? '+' : a.change === 'removed' ? '-' : '~';
+            lines.push(`        ${tag} ${icon} ${a.signature}`);
+          }
+        };
+        emit('[设计]', f.intent_symbols, f.intent_apis);
+        emit('[实现]', f.implement_symbols, f.implement_apis);
+      }
     }
   }
 
@@ -357,6 +556,7 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
       feature,
       design_exists: !!design,
       live_exists: !!live,
+      baseline_exists: !!baseline,
       summary: {
         design_files: designFiles.length,
         live_files: liveFiles.length,
@@ -373,11 +573,38 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
       },
       files: fileDiffs,
       edges: edgeDiffs,
+      three_way: baseline
+        ? {
+            baseline_files: baselineFiles.length,
+            summary: twSummary,
+            files: threeWay,
+          }
+        : undefined,
     },
   };
 }
 
 // ──────── 辅助函数 ────────
+
+/**
+ * 判断两个文件内容是否不同（相对比较用，非严格全等）。
+ * 只比较语义相关字段：行数、层级标签、符号、API。两方都不存在视为相同。
+ */
+function fileChanged(a: SemanticFile | undefined, b: SemanticFile | undefined): boolean {
+  if (a === b) return false;
+  if (!a || !b) return true;
+  if (a.lines !== b.lines || a.layer !== b.layer) return true;
+  if (diffSymbols(a.symbols ?? [], b.symbols ?? []).length > 0) return true;
+  if (
+    diffApis(
+      [...(a.expected_apis ?? []), ...(a.actual_apis ?? [])],
+      [...(b.expected_apis ?? []), ...(b.actual_apis ?? [])],
+    ).length > 0
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /** 比较两个符号列表，返回变更列表 */
 function diffSymbols(design: Symbol[], live: Symbol[]): SymbolDiff[] {

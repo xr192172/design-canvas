@@ -17,6 +17,12 @@
  * 与 backfill_scaffold 的区别：
  *   - backfill_scaffold：从代码提取 actual_apis 回写到 DSL
  *   - consistency：只读检查，生成报告，不修改 DSL
+ *
+ * 职责归属（对账语义，与三方对比/基线一致）：
+ *   - expected_apis 只由设计侧产生（import 设计模式 / scaffold / edit_dsl 决策），
+ *     本工具只读不写
+ *   - actual 以实际代码为事实源；报告把「预期缺失」（red）与「实现新增」（blue）
+ *     分开，LLM 据此裁决：预期缺失 → 补实现；实现新增 → 回填设计或登记决策卡
  */
 
 import fs from 'node:fs';

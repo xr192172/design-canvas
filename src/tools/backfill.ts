@@ -4,6 +4,13 @@
  * 代码回填 scaffold：LLM 写完代码后，自动解析实现文件中的 API 签名，
  * 更新到 DSL semantic.files[].actual_apis。
  *
+ * 职责归属（对账语义，不跨界）：
+ * - expected_apis：设计侧契约，只由设计流产生（import 设计模式 / scaffold /
+ *   edit_dsl 决策 / 决策卡），backfill 一律不写、不覆盖
+ * - actual_apis：实现侧事实，由 backfill / import 实际代码解析回填
+ * - 报告区分「预期缺失」（expected 有 / actual 无）vs「实现新增」（actual 有 /
+ *   expected 无），与 consistency 的 red/blue 语义一致
+ *
  * 工作流：
  *   scaffold 生成骨架 → LLM 填充实现 → backfill_scaffold 解析实际代码 → DSL 更新
  *   → check_status 推断状态 → render_dsl 可视化差异
