@@ -2,7 +2,7 @@
  * 语义层类型：文件/API/模板/scaffold 配置
  */
 
-import type { DiagramStatus } from './geometry.js';
+import type { DiagramStatus, NodeDecision, DecisionHistoryEntry } from './geometry.js';
 import type { BrickContract } from './contract.js';
 
 /** 预期 API */
@@ -32,6 +32,31 @@ export interface Symbol {
   end_line?: number;
   /** 签名（声明文本），如 "interface UserService"、"MAX_RETRIES = 3" */
   signature?: string;
+  /**
+   * 决策卡·符号级（挂载在函数/API 上，而非文件/功能上——diff 的最小单位是符号，
+   * 决策卡挂这里才能与三方对比逐符号对齐；没卡时向上继承所在文件的 Node.decision）。
+   */
+  decision?: NodeDecision;
+  /** 决策卡·版本栈（语义同 Node.decision_history） */
+  decision_history?: DecisionHistoryEntry[];
+  /** 生命周期元数据：下线/合并/拆分时的演进追踪，供 diff 裁决与归档引用 */
+  lifecycle?: SymbolLifecycle;
+}
+
+/** 符号生命周期（节点下线/合并/拆分的演进状态） */
+export interface SymbolLifecycle {
+  /** active=存活；deprecated=弃用待删；superseded=已被取代；split=已拆分；merged=已并入他处 */
+  status: 'active' | 'deprecated' | 'superseded' | 'split' | 'merged';
+  /** 取代者符号（"符号名"或"文件路径#符号名"） */
+  superseded_by?: string;
+  /** 拆分产物符号列表 */
+  split_into?: string[];
+  /** 合并来源符号列表 */
+  merged_from?: string[];
+  /** 下线/变更原因（孤立归档时必填，作为历史研究材料） */
+  retire_reason?: string;
+  /** 状态变更时间（ISO 8601） */
+  changed_at?: string;
 }
 
 /** 语义层文件 */
@@ -61,6 +86,24 @@ export interface SemanticFile {
   layer?: string;
   /** 积木契约（Phase 2 契约提取填充；缺省 = 契约未提取） */
   contract?: BrickContract;
+  /** 文件生命周期：合并（两文件合一）/孤立（下线归档）时的演进追踪 */
+  lifecycle?: FileLifecycle;
+}
+
+/** 文件生命周期（"下线=两个文件合并"或"孤立=真弃用归档"时的演进状态） */
+export interface FileLifecycle {
+  /** active=存活；deprecated=弃用待删；merged=已并入他处；archived=已归档下线库 */
+  status: 'active' | 'deprecated' | 'merged' | 'archived';
+  /** 合并目标文件路径（merged 时） */
+  merged_into?: string;
+  /** 合并来源文件路径列表 */
+  merged_from?: string[];
+  /** 下线/归档原因（archived 时必填，作为历史研究材料） */
+  retire_reason?: string;
+  /** 归档条目 id（archived 时指向 archive 库） */
+  archive_id?: string;
+  /** 状态变更时间（ISO 8601） */
+  changed_at?: string;
 }
 
 /** 代码模板配置 */

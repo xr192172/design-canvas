@@ -40,6 +40,8 @@ export type {
   ScaffoldConfig,
   Semantic,
   Symbol,
+  SymbolLifecycle,
+  FileLifecycle,
 } from './semantic.js';
 
 export type {

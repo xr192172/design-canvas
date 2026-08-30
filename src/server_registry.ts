@@ -30,6 +30,8 @@ import { importProject } from './tools/import_project.js';
 import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
+import { archiveNode } from './tools/archive_node.js';
+import { listArchiveEntries } from './storage.js';
 import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { extractContracts } from './tools/extract_contracts.js';
@@ -331,6 +333,33 @@ const diffViewsHandler = wrap(async (a) => {
     live_dir: a.live_dir as string | undefined,
   });
   return { message: r.message, data: r.data };
+});
+
+/** archive_node：把下线的文件/节点孤立到下线库（历史研究材料） */
+const archiveNodeHandler = wrap(async (a) => {
+  const r = archiveNode({
+    feature: a.feature as string,
+    file_path: a.file_path as string,
+    retire_reason: a.retire_reason as string,
+    merged_into: a.merged_into as string | undefined,
+  });
+  return { message: r.message, data: r };
+});
+
+/** list_archive：列出某 feature 的下线库归档条目 */
+const listArchiveHandler = wrap(async (a) => {
+  const entries = listArchiveEntries(a.feature as string, a.live_dir as string | undefined);
+  const lines = [
+    `下线库 [${(a.feature as string)}] 共 ${entries.length} 条归档`,
+    ...(entries.length === 0 ? ['  （无归档条目——尚无节点下线）'] : []),
+  ];
+  for (const e of entries) {
+    const merged = e.merged_into ? ` → 合并到 ${e.merged_into}` : '';
+    const at = e.archived_at?.slice(0, 10) ?? '';
+    lines.push(`  - ${e.file_path}${merged} (${at})`);
+    lines.push(`      原因: ${e.retire_reason}`);
+  }
+  return { message: lines.join('\n'), data: { feature: a.feature, entries } };
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -757,6 +786,35 @@ const TOOL_DEFS: ToolDef[] = [
       live_dir: z.string().optional().describe('live 视图的 baseDir（可选，默认 dataHome），与 import_project 的 live_dir 一致'),
     },
     handler: diffViewsHandler,
+  },
+  {
+    name: 'archive_node',
+    title: 'Archive a retiring node to the offline library',
+    description:
+      '节点下线：把要下线的文件/节点孤立到下线库（archive），存档完整 DSL 快照（含决策卡）+ 为什么下线，' +
+      '作为历史研究材料，并从设计 DSL 移除（不再参与周边联系）。' +
+      '"下线=两个文件合并"时传 merged_into 指向合并目标，目标文件 lifecycle.merged_from 记录来源，' +
+      'diff 时 LLM 可据归档卡 + diff 增量做决策合并（不做自动合并，决策是语义的）。' +
+      '适用：删掉废弃模块、合并重复文件、结构重构后的清理。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      file_path: z.string().describe('要下线的文件相对路径'),
+      retire_reason: z.string().describe('为什么下线（必填，作为历史研究材料）'),
+      merged_into: z.string().optional().describe('若下线是合并（两文件合一），填合并目标文件路径'),
+    },
+    handler: archiveNodeHandler,
+  },
+  {
+    name: 'list_archive',
+    title: 'List archived (retired) nodes',
+    description:
+      '列出某 feature 的下线库归档条目（历史研究材料）：每个条目含被下线文件、下线原因、合并去向、归档时间。' +
+      'LLM 在做结构重构/删除决策前，可先查历史归档了解"以前为什么这么设计、为什么下线"。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      live_dir: z.string().optional().describe('live/base 视图的 baseDir（可选，默认 dataHome）'),
+    },
+    handler: listArchiveHandler,
   },
   {
     name: 'harvest_closure',

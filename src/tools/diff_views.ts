@@ -21,8 +21,8 @@
  * 输出结构化数据供 LLM 分析 + 可读摘要。
  */
 
-import type { DesignDSL, SemanticFile, Symbol, ExpectedApi, Edge } from '../dsl/types.js';
-import { getDSL, getLiveFeature, getBaselineFeature } from '../storage.js';
+import type { DesignDSL, SemanticFile, Symbol, ExpectedApi, Edge, NodeDecision, DecisionHistoryEntry } from '../dsl/types.js';
+import { getDSL, getLiveFeature, getBaselineFeature, getArchiveEntryByPath } from '../storage.js';
 
 // ──────── 输出类型 ────────
 
@@ -111,6 +111,22 @@ export type ThreeWayState =
   | 'converged'
   | 'unchanged';
 
+/** 决策卡上下文（供 LLM 裁决 diff 时的一手资料） */
+export interface DecisionCardRef {
+  /** 结论 */
+  summary: string;
+  /** 理由 */
+  rationale?: string;
+  /** 生效状态 */
+  status?: string;
+  /** 功能线 */
+  thread?: string;
+  /** 自由标签 */
+  tags?: string[];
+  /** 版本栈（旧决策） */
+  history?: DecisionHistoryEntry[];
+}
+
 /** 三方对比中单个文件的详情 */
 export interface ThreeWayFile {
   path: string;
@@ -124,6 +140,13 @@ export interface ThreeWayFile {
   /** 实现增量（baseline→live）的符号/API 变更 */
   implement_symbols: SymbolDiff[];
   implement_apis: ApiDiff[];
+  /** 决策卡上下文：基线侧=当初为什么这么定；设计侧=现在为什么改（文件级 Node.decision） */
+  baseline_decision?: DecisionCardRef;
+  design_decision?: DecisionCardRef;
+  /** 符号级决策卡（有卡的符号名 → 卡），挂函数/API 上，逐符号对齐 diff */
+  symbol_decisions?: Record<string, DecisionCardRef>;
+  /** 归档关联（下线库历史研究材料：以前弃用过没 / 合并去向） */
+  archive?: { retire_reason?: string; merged_into?: string; archived_at?: string };
 }
 
 /** 三方对比统计 */
@@ -351,9 +374,15 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
       const des = designByPath.get(path);
       const liv = liveByPath.get(path);
 
-      const desChanged = fileChanged(base, des);
-      const livChanged = fileChanged(base, liv);
-      const desEqLiv = !fileChanged(des, liv);
+      const desChanged =
+        fileChanged(base, des) ||
+        fileDecisionChanged(baseline, design, path, base?.id, des?.id) ||
+        symbolsDecisionChanged(base, des);
+      const livChanged =
+        fileChanged(base, liv) ||
+        fileDecisionChanged(baseline, live, path, base?.id, liv?.id) ||
+        symbolsDecisionChanged(base, liv);
+      const desEqLiv = !fileChanged(des, liv) && !symbolsDecisionChanged(des, liv);
 
       let state: ThreeWayState;
       if (designAbsent) {
@@ -404,6 +433,17 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
           [...(base?.expected_apis ?? []), ...(base?.actual_apis ?? [])],
           [...(liv?.expected_apis ?? []), ...(liv?.actual_apis ?? [])],
         ),
+        // 决策卡上下文（LLM 裁决的一手资料）：
+        // - 基线卡=当初为什么这么定；设计卡=现在为什么改
+        // - 符号卡=挂函数/API 上的决策（基线+设计合并，设计覆盖同名）
+        baseline_decision: fileDecisionRef(baseline, path, base?.id),
+        design_decision: fileDecisionRef(design, path, des?.id),
+        symbol_decisions: (() => {
+          const merged = { ...symbolDecisionRefs(baseline, path), ...symbolDecisionRefs(design, path) };
+          return Object.keys(merged).length > 0 ? merged : undefined;
+        })(),
+        // 归档关联：删除类状态时查下线库（以前弃用过没 / 合并去向）
+        archive: getArchiveRef(feature, path, state, live_dir),
       };
       threeWay.push(tw);
     }
@@ -536,6 +576,34 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
         };
         emit('[设计]', f.intent_symbols, f.intent_apis);
         emit('[实现]', f.implement_symbols, f.implement_apis);
+      }
+    }
+  }
+
+  // 决策卡依据（LLM 裁决的一手资料）：列出三方对比中有决策卡的文件的决策上下文
+  if (baseline) {
+    const withDecisions = threeWay.filter(
+      (f) => f.baseline_decision || f.design_decision || (f.symbol_decisions && Object.keys(f.symbol_decisions).length > 0) || f.archive,
+    );
+    if (withDecisions.length > 0) {
+      lines.push('', `  ─ 决策卡依据（裁决的一手资料：基线卡=当初为何这么定 / 设计卡=现在为何改 / 归档=历史弃用）─`);
+      for (const f of withDecisions) {
+        lines.push(`    ${f.state} ${f.path}`);
+        if (f.baseline_decision) {
+          const st = f.baseline_decision.status ? ` (${f.baseline_decision.status})` : '';
+          lines.push(`        [基线卡] ${f.baseline_decision.summary}${st} — 当初为何这么定`);
+        }
+        if (f.design_decision) {
+          lines.push(`        [设计卡] ${f.design_decision.summary} — 现在为何改`);
+        }
+        for (const [sym, card] of Object.entries(f.symbol_decisions ?? {})) {
+          lines.push(`        [符号卡] ${sym}: ${card.summary}`);
+        }
+        if (f.archive) {
+          const merged = f.archive.merged_into ? ` → 合并到 ${f.archive.merged_into}` : '';
+          const at = f.archive.archived_at ? ` (${f.archive.archived_at.slice(0, 10)})` : '';
+          lines.push(`        [归档] 弃用原因: ${f.archive.retire_reason ?? '—'}${merged}${at}`);
+        }
       }
     }
   }
@@ -706,4 +774,82 @@ function diffEdges(
     }
   }
   return result;
+}
+
+// ──────── 决策卡上下文辅助 ────────
+
+/** 比较两侧 DSL 某文件的文件级决策卡（node.decision + history）是否变化——决策卡变了就是设计变了 */
+function fileDecisionChanged(a: DesignDSL | null, b: DesignDSL | null, path: string, aId?: string, bId?: string): boolean {
+  const fa = a?.semantic?.files.find((f) => f.path === path) ?? a?.semantic?.files.find((f) => f.id === aId);
+  const fb = b?.semantic?.files.find((f) => f.path === path) ?? b?.semantic?.files.find((f) => f.id === bId);
+  if (!fa || !fb) return false; // 存在性由 fileChanged 处理
+  const na = a?.geometry?.nodes?.find((n) => n.id === fa.id);
+  const nb = b?.geometry?.nodes?.find((n) => n.id === fb.id);
+  return (
+    JSON.stringify(na?.decision ?? null) !== JSON.stringify(nb?.decision ?? null) ||
+    JSON.stringify(na?.decision_history ?? null) !== JSON.stringify(nb?.decision_history ?? null)
+  );
+}
+
+/** 比较两侧文件符号级决策卡是否变化（挂函数/API 上的卡） */
+function symbolsDecisionChanged(fa: SemanticFile | undefined, fb: SemanticFile | undefined): boolean {
+  if (!fa || !fb) return false;
+  const key = (s: Symbol) => `${s.name}|${JSON.stringify(s.decision ?? null)}`;
+  const sa = new Set((fa.symbols ?? []).map(key));
+  const sb = new Set((fb.symbols ?? []).map(key));
+  if (sa.size !== sb.size) return true;
+  for (const k of sa) if (!sb.has(k)) return true;
+  return false;
+}
+
+/** 取 DSL 中某文件的文件级决策卡（几何层 Node.decision + history，LLM 当初为什么这么定） */
+function fileDecisionRef(dsl: DesignDSL | null, filePath: string, fileId?: string): DecisionCardRef | undefined {
+  const d = dsl?.semantic?.files.find((f) => f.path === filePath) ?? dsl?.semantic?.files.find((f) => f.id === fileId);
+  if (!d) return undefined;
+  const node = dsl?.geometry?.nodes?.find((n) => n.id === d.id);
+  const dec = node?.decision;
+  if (!dec) return undefined;
+  return {
+    summary: dec.summary,
+    rationale: dec.rationale,
+    status: dec.status,
+    thread: dec.thread,
+    tags: dec.tags,
+    history: node?.decision_history,
+  };
+}
+
+/** 收集 DSL 中某文件的符号级决策卡（挂函数/API 上的卡，symbol → 卡） */
+function symbolDecisionRefs(dsl: DesignDSL | null, filePath: string): Record<string, DecisionCardRef> {
+  const out: Record<string, DecisionCardRef> = {};
+  const f = dsl?.semantic?.files.find((x) => x.path === filePath);
+  for (const s of f?.symbols ?? []) {
+    if (!s.decision) continue;
+    out[s.name] = {
+      summary: s.decision.summary,
+      rationale: s.decision.rationale,
+      status: s.decision.status,
+      thread: s.decision.thread,
+      tags: s.decision.tags,
+      history: s.decision_history,
+    };
+  }
+  return out;
+}
+
+/** 删除类状态时查下线库归档关联（历史研究材料），无则 undefined */
+function getArchiveRef(
+  feature: string,
+  filePath: string,
+  state: ThreeWayState,
+  live_dir?: string,
+): { retire_reason?: string; merged_into?: string; archived_at?: string } | undefined {
+  if (state !== 'removed' && state !== 'deleted_from_live') return undefined;
+  const entry = getArchiveEntryByPath(feature, filePath, live_dir);
+  if (!entry) return undefined;
+  return {
+    retire_reason: entry.retire_reason,
+    merged_into: entry.merged_into,
+    archived_at: entry.archived_at,
+  };
 }

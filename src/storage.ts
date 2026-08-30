@@ -179,6 +179,103 @@ export function ensureBaseline(dsl: DesignDSL, baseDir?: string): void {
   saveBaselineFeature(dsl, baseDir);
 }
 
+// ─────────────────────────────────────────────
+// 下线库（archive）：孤立节点的历史研究材料
+//
+// Git 语义：基线是"共同祖先"，archive 是"reflog/存档分支"。
+// 文件/符号真弃用（非合并、非被取代）时归档到这里——挂既往决策卡 + 为什么下线，
+// 之后不再参与周边联系（diff 主体忽略它），但 diff 到 removed/deleted_from_live
+// 时可按需查询：LLM 裁决"这个删除是否合理"时能读到"当初为什么这么设计"。
+// 每个条目 = 归档时刻的完整 DSL 快照 + 元数据（retire_reason / merged_into）。
+// ─────────────────────────────────────────────
+
+/** 下线库归档条目 */
+export interface ArchiveEntry {
+  /** 条目 id（默认 `${feature}__${sanitize(file_path)}`，feature 级归档用 `${feature}__feature`） */
+  id?: string;
+  /** 所属 feature */
+  feature: string;
+  /** 归档的文件相对路径（"" = 整个 feature 级归档） */
+  file_path: string;
+  /** 归档时刻的 DSL 快照（含该文件/符号的决策卡，作为历史研究材料） */
+  dsl: DesignDSL;
+  /** 为什么下线（孤立原因，必填） */
+  retire_reason: string;
+  /** 若下线是合并（两文件合一），记录合并目标文件路径 */
+  merged_into?: string;
+  /** 归档时间（ISO 8601） */
+  archived_at: string;
+}
+
+/** 下线库目录：<baseDir>/.design-canvas/archive/<feature>/ */
+export function getArchiveDir(feature: string, baseDir?: string): string {
+  return path.join(baseDir ?? getDataHome(), '.design-canvas', 'archive', feature);
+}
+
+/** 归档条目文件路径 */
+export function getArchiveEntryFile(feature: string, entryId: string, baseDir?: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(feature)) {
+    throw new Error(`非法 feature 名: "${feature}"，必须匹配 ^[a-zA-Z0-9_-]+$`);
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(entryId)) {
+    throw new Error(`非法归档条目 id: "${entryId}"，必须匹配 ^[a-zA-Z0-9_-]+$`);
+  }
+  return path.join(getArchiveDir(feature, baseDir), `${entryId}.json`);
+}
+
+/** 路径 → 安全条目 id（非 [a-zA-Z0-9_-] 一律转 _） */
+function sanitizeEntryId(p: string): string {
+  const s = p.replace(/[^a-zA-Z0-9_-]+/g, '_');
+  return s.length > 0 ? s : 'feature';
+}
+
+/** 保存归档条目（id 缺省自动生成），返回条目 id */
+export function saveArchiveEntry(entry: ArchiveEntry, baseDir?: string): string {
+  const id = entry.id ?? `${entry.feature}__${sanitizeEntryId(entry.file_path || 'feature')}`;
+  const file = getArchiveEntryFile(entry.feature, id, baseDir);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ...entry, id, archived_at: entry.archived_at ?? new Date().toISOString() }, null, 2), 'utf-8');
+  return id;
+}
+
+/** 读取单个归档条目，不存在返回 null */
+export function getArchiveEntry(feature: string, entryId: string, baseDir?: string): ArchiveEntry | null {
+  const file = getArchiveEntryFile(feature, entryId, baseDir);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as ArchiveEntry;
+  } catch {
+    return null;
+  }
+}
+
+/** 列出某 feature 的全部归档条目（无则空数组） */
+export function listArchiveEntries(feature: string, baseDir?: string): ArchiveEntry[] {
+  const dir = getArchiveDir(feature, baseDir);
+  if (!fs.existsSync(dir)) return [];
+  const entries: ArchiveEntry[] = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      entries.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')) as ArchiveEntry);
+    } catch {
+      /* 跳过损坏条目 */
+    }
+  }
+  return entries.sort((a, b) => (a.archived_at ?? '').localeCompare(b.archived_at ?? ''));
+}
+
+/** 读取某 feature 归档中某文件的条目（按 file_path 匹配，无则 null） */
+export function getArchiveEntryByPath(feature: string, filePath: string, baseDir?: string): ArchiveEntry | null {
+  return listArchiveEntries(feature, baseDir).find((e) => e.file_path === filePath) ?? null;
+}
+
+/** 删除某 feature 的全部归档（manage_feature 删除时连带清理） */
+export function clearArchiveEntries(feature: string, baseDir?: string): void {
+  const dir = getArchiveDir(feature, baseDir);
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
 /** 确保 features 目录存在 */
 function ensureFeaturesDir(): void {
   fs.mkdirSync(getFeaturesDir(), { recursive: true });
@@ -325,6 +422,9 @@ export function deleteFeature(feature: string): void {
   // 连带删除基线快照（契约创立时刻的 fork）
   const baselineFile = getBaselineFeatureFile(feature);
   if (fs.existsSync(baselineFile)) fs.unlinkSync(baselineFile);
+
+  // 连带删除下线库归档（孤立节点的历史研究材料）
+  clearArchiveEntries(feature);
 
   const liveDsl = getLiveDslFile();
   if (fs.existsSync(liveDsl)) {
