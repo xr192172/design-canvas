@@ -31,6 +31,7 @@ import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
 import { archiveNode, listArchive } from './tools/archive_node.js';
+import { harvestDecisions } from './tools/harvest_decisions.js';
 import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { extractContracts } from './tools/extract_contracts.js';
@@ -348,6 +349,18 @@ const archiveNodeHandler = wrap(async (a) => {
 /** list_archive：列出某 feature 的下线库归档条目 */
 const listArchiveHandler = wrap(async (a) => {
   const r = listArchive({ feature: a.feature as string, live_dir: a.live_dir as string | undefined });
+  return { message: r.message, data: r };
+});
+
+/** harvest_decisions：从文档/git日志/注释提取决策卡候选（draft，供 review 补录） */
+const harvestDecisionsHandler = wrap(async (a) => {
+  const r = harvestDecisions({
+    feature: a.feature as string,
+    doc_dir: a.doc_dir as string | undefined,
+    git_root: a.git_root as string | undefined,
+    limit: a.limit as number | undefined,
+    comment_files: a.comment_files as string[] | undefined,
+  });
   return { message: r.message, data: r };
 });
 
@@ -804,6 +817,23 @@ const TOOL_DEFS: ToolDef[] = [
       live_dir: z.string().optional().describe('live/base 视图的 baseDir（可选，默认 dataHome）'),
     },
     handler: listArchiveHandler,
+  },
+  {
+    name: 'harvest_decisions',
+    title: 'Harvest decision-card candidates from docs / git log / comments',
+    description:
+      '决策卡补录：从项目文档（docs/*.md）、git 日志、源码注释粗提取设计意图线索，生成 draft 决策卡候选（含出处 ref + 原文 evidence + 一句话总结）。' +
+      '不直接写 DSL——LLM review 核对出处后，定稿（status: active）再通过决策卡工具写入 DSL，防编造。' +
+      '候选带 lifecycle_hint（下线/合并/取代/拆分），供 diff 与下线库（archive_node）参考。' +
+      '适用：为没有决策卡历史的现有项目/外来代码补录活文档。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（候选挂载目标）'),
+      doc_dir: z.string().optional().describe('文档目录（扫描 *.md），默认 <cwd>/docs'),
+      git_root: z.string().optional().describe('git 仓库根（读 git log），默认 <cwd>'),
+      limit: z.number().optional().describe('git 日志条数上限，默认 30'),
+      comment_files: z.array(z.string()).optional().describe('要提取注释的源码文件（绝对路径）'),
+    },
+    handler: harvestDecisionsHandler,
   },
   {
     name: 'harvest_closure',
