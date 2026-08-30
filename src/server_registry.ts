@@ -32,6 +32,7 @@ import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
 import { archiveNode, listArchive } from './tools/archive_node.js';
 import { harvestDecisions } from './tools/harvest_decisions.js';
+import { syncContracts } from './tools/sync_contracts.js';
 import { harvestClosure } from './tools/harvest_closure.js';
 import type { HarvestClosureInput } from './tools/harvest_closure.js';
 import { extractContracts } from './tools/extract_contracts.js';
@@ -343,6 +344,12 @@ const archiveNodeHandler = wrap(async (a) => {
     retire_reason: a.retire_reason as string,
     merged_into: a.merged_into as string | undefined,
   });
+  return { message: r.message, data: r };
+});
+
+/** sync_contracts：以 server_registry zod schema 为唯一源，回填 DSL expected_apis */
+const syncContractsHandler = wrap((a) => {
+  const r = syncContracts({ feature: a.feature as string, include_all: a.include_all as boolean | undefined });
   return { message: r.message, data: r };
 });
 
@@ -834,6 +841,20 @@ const TOOL_DEFS: ToolDef[] = [
       comment_files: z.array(z.string()).optional().describe('要提取注释的源码文件（绝对路径）'),
     },
     handler: harvestDecisionsHandler,
+  },
+  {
+    name: 'sync_contracts',
+    title: 'Sync tool contracts from registry schema into DSL expected_apis',
+    description:
+      '契约回填（修复契约漂移）：以 server_registry 的 zod schema 为唯一事实源，把每个已注册工具的输入契约生成签名回填到 DSL semantic.files 的 expected_apis。' +
+      '改了工具 schema 后跑一次，DSL 契约自动跟上。' +
+      '默认只更新 DSL 中已存在且 path=src/tools/{name}.ts 的文件；include_all=true 时为缺失的工具文件补全契约节点。' +
+      '只回填签名（notes 带机器生成标记），设计侧意图由 LLM 维护。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（已存在的 DSL feature）'),
+      include_all: z.boolean().optional().describe('为 DSL 中缺失的工具文件补全契约节点（默认 false）'),
+    },
+    handler: syncContractsHandler,
   },
   {
     name: 'harvest_closure',
