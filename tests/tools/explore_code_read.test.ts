@@ -32,6 +32,15 @@ interface ReadData {
     start_line: number;
     end_line: number;
   };
+  symbols?: {
+    name: string;
+    qualified_name: string;
+    kind: string;
+    signature?: string;
+    parent?: string;
+    start_line: number;
+    end_line: number;
+  }[];
   lines: string[];
 }
 
@@ -176,5 +185,103 @@ describe('explore_code read → edit_code(op=range) 行号闭环', () => {
     const after = fs.readFileSync(fileAbs, 'utf8');
     expect(after).not.toContain('bye');
     expect(after).toContain('greet');
+  });
+});
+
+describe('explore_code read - 符号索引预览（data.symbols + message 符号表）', () => {
+  it('默认附整文件符号索引（name/kind/行号/签名），message 带可读符号表', async () => {
+    const r = await exploreCode({ action: 'read', args: { file: fileAbs } });
+    const d = r.data as ReadData;
+    expect(Array.isArray(d.symbols)).toBe(true);
+    expect(d.symbols!.length).toBe(4); // alpha/beta/greet/bye
+    const names = d.symbols!.map((s) => s.name);
+    expect(names).toEqual(expect.arrayContaining(['alpha', 'beta', 'greet', 'bye']));
+
+    const greet = d.symbols!.find((s) => s.name === 'greet');
+    expect(greet).toMatchObject({ kind: 'function', start_line: 4, end_line: 7, qualified_name: 'greet' });
+    const alpha = d.symbols!.find((s) => s.name === 'alpha');
+    expect(alpha).toMatchObject({ kind: 'const', start_line: 1, end_line: 1 });
+    expect(alpha?.signature).toContain('const alpha = 1');
+
+    // message 末尾附可读符号表
+    expect(r.message).toContain('文件符号索引（共 4）');
+    expect(r.message).toContain('greet');
+    expect(r.message).toContain('L4-7');
+  });
+
+  it('symbols:false 关闭符号索引（data.symbols 空，message 无符号表）', async () => {
+    const r = await exploreCode({ action: 'read', args: { file: fileAbs, symbols: false } });
+    const d = r.data as ReadData;
+    expect(d.symbols).toEqual([]);
+    expect(r.message).not.toContain('文件符号索引');
+  });
+
+  it('符号模式与符号索引并存：定位目标符号同时给出整文件符号表', async () => {
+    const r = await exploreCode({ action: 'read', args: { file: fileAbs, symbol: 'bye' } });
+    const d = r.data as ReadData;
+    expect(d.symbol?.name).toBe('bye');
+    expect(d.symbols!.length).toBe(4);
+    expect(r.message).toContain('文件符号索引');
+  });
+
+  it('符号表超上限截断（>30 个符号只列前 30，注明截断）', async () => {
+    const many = Array.from({ length: 34 }, (_, i) => `export function fn${i}() { return ${i}; }`).join('\n');
+    const bigFile = path.join(root, 'many.ts');
+    fs.writeFileSync(bigFile, many, 'utf8');
+
+    const r = await exploreCode({ action: 'read', args: { file: bigFile } });
+    const d = r.data as ReadData;
+    expect(d.symbols!.length).toBe(30);
+    expect(r.message).toContain('前 30/34，超出截断');
+    // 符号表区域（"文件符号索引…:" 到代码块 ``` 之间）只列前 30
+    const tablePart = r.message.split('文件符号索引')[1].split('```')[0];
+    expect(tablePart).toContain('fn0');
+    expect(tablePart).not.toContain('fn33');
+  });
+
+  it('symbols_limit 调小上限：只列前 limit，注明截断', async () => {
+    const many = Array.from({ length: 34 }, (_, i) => `export function fn${i}() { return ${i}; }`).join('\n');
+    const bigFile = path.join(root, 'many.ts');
+    fs.writeFileSync(bigFile, many, 'utf8');
+
+    const r = await exploreCode({ action: 'read', args: { file: bigFile, symbols_limit: 5 } });
+    const d = r.data as ReadData;
+    expect(d.symbols!.length).toBe(5);
+    expect(r.message).toContain('前 5/34，超出截断');
+    const tablePart = r.message.split('文件符号索引')[1].split('```')[0];
+    expect(tablePart).toContain('fn0');
+    expect(tablePart).not.toContain('fn5');
+  });
+
+  it('symbols_limit 超过符号总数：不截断，列全量', async () => {
+    const many = Array.from({ length: 8 }, (_, i) => `export function fn${i}() { return ${i}; }`).join('\n');
+    const bigFile = path.join(root, 'many8.ts');
+    fs.writeFileSync(bigFile, many, 'utf8');
+
+    const r = await exploreCode({ action: 'read', args: { file: bigFile, symbols_limit: 500 } });
+    const d = r.data as ReadData;
+    expect(d.symbols!.length).toBe(8);
+    expect(r.message).toContain('共 8');
+    expect(r.message).not.toContain('超出截断');
+  });
+
+  it('symbols_limit 缺省/越界处理（0→缺省30，负数→1，501→500）', async () => {
+    const many = Array.from({ length: 6 }, (_, i) => `export function fn${i}() { return ${i}; }`).join('\n');
+    const bigFile = path.join(root, 'many6.ts');
+    fs.writeFileSync(bigFile, many, 'utf8');
+
+    // 0 视为未传 → 缺省 30（未超总数，列全量共 6）
+    const zero = await exploreCode({ action: 'read', args: { file: bigFile, symbols_limit: 0 } });
+    expect((zero.data as ReadData).symbols!.length).toBe(6);
+    expect(zero.message).toContain('共 6');
+
+    // 负数 → 钳到 1
+    const neg = await exploreCode({ action: 'read', args: { file: bigFile, symbols_limit: -5 } });
+    expect((neg.data as ReadData).symbols!.length).toBe(1);
+
+    // 501 → 钳到 500（未超总数，列全量共 6）
+    const high = await exploreCode({ action: 'read', args: { file: bigFile, symbols_limit: 501 } });
+    expect((high.data as ReadData).symbols!.length).toBe(6);
+    expect(high.message).toContain('共 6');
   });
 });

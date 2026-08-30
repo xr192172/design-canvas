@@ -727,6 +727,8 @@ const TOOL_DEFS: ToolDef[] = [
       '或行区间（start/end，1-based 含端点）读文件，返回带真实行号的内容；' +
       '返回的 start/end/行号与 edit_code(op=range) 同基准（line_utils.splitKeepEnds 下标+1=行号），' +
       '可直接把 read 的行号喂给 edit_code，杜绝行号漂移改错行。' +
+      'read 默认在 data.symbols 附整文件符号索引（name/kind/行号/签名，message 末尾附可读符号表，上限30截断），' +
+      '一次 read 同时拿到正文+文件地图，symbols:false 可关。' +
       'search 三层路由：标识符查询（如 normalizeCode / Calc.reset）→ 精确符号索引（provider=exact，零向量开销）；' +
       '自然语言意图 → 语义向量相似度；无 embedding 配置/失败 → FTS trigram 降级。' +
       'search 必填 args.project_dir（目标项目根目录，缺省报错）+ args.query，可选 top_k；' +

@@ -94,6 +94,34 @@ function normalizeSignature(sig: string): string {
   return sig.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/**
+ * 按顶层逗号切分参数列表（跳过 ()[]{}<> 嵌套）。
+ * 避免把对象字面量 {file, symbol?, ...} 或泛型 Record<string, ...> 里的逗号误当成参数分隔符。
+ */
+function splitTopLevelArgs(argsStr: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of argsStr) {
+    if ('([{<'.includes(ch)) depth++;
+    else if (')]}>'.includes(ch)) depth--;
+    if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/** 参数名：从 'name: type' / 'name = default' / '?name' / 裸 'name' 中提取标识符 */
+function argName(arg: string): string {
+  const m = arg.trim().match(/^[?]?\s*([\w$]+)/);
+  return m ? m[1] : arg.trim();
+}
+
 function compareSignatures(expected: string, actual: string): { score: number; reason?: string } {
   const expectedName = extractFuncName(expected);
   const actualName = extractFuncName(actual);
@@ -111,17 +139,42 @@ function compareSignatures(expected: string, actual: string): { score: number; r
 
   const expectedArgs = expected.match(/\(([^)]*)\)/)?.[1] || '';
   const actualArgs = actual.match(/\(([^)]*)\)/)?.[1] || '';
-  const expectedArgCount = expectedArgs.split(',').filter(a => a.trim()).length;
-  const actualArgCount = actualArgs.split(',').filter(a => a.trim()).length;
+  const expectedArgList = splitTopLevelArgs(expectedArgs);
+  const actualArgList = splitTopLevelArgs(actualArgs);
 
-  if (expectedArgCount !== actualArgCount) {
-    return { score: 70, reason: `参数数量不匹配：期望 ${expectedArgCount} 个，实际 ${actualArgCount} 个` };
+  if (expectedArgList.length !== actualArgList.length) {
+    return { score: 70, reason: `参数数量不匹配：期望 ${expectedArgList.length} 个，实际 ${actualArgList.length} 个` };
   }
 
-  const expectedRet = expected.split(')')[1]?.trim() || '';
-  const actualRet = actual.split(')')[1]?.trim() || '';
-  if (expectedRet && actualRet && !expectedRet.toLowerCase().includes(actualRet.toLowerCase()) && !actualRet.toLowerCase().includes(expectedRet.toLowerCase())) {
-    return { score: 80, reason: `返回类型不匹配：期望 ${expectedRet}，实际 ${actualRet}` };
+  // 参数名对齐：语义契约的形参名应与实现一致（如都叫 args）
+  const expNames = expectedArgList.map(argName);
+  const actNames = actualArgList.map(argName);
+  const nameAligned = expNames.every((n, i) => n === actNames[i]);
+
+  if (nameAligned) {
+    // 对象形参契约：期望为对象字面量时，实现应为对象/Record/任意，而非标量
+    const expHasObj = /:\s*\{/.test(expectedArgs);
+    const actIsObj = /:\s*(\{\s*\}|\{\s*\[|Record\s*<|object)/i.test(actualArgs);
+    if (expHasObj && !actIsObj) {
+      return { score: 80, reason: `形参类型不匹配：期望对象形参，实际 ${actualArgs}` };
+    }
+
+    // 返回类型：仅当两侧都是具体类型（不含语义省略号 ...）时才严格比对
+    const expectedRet = expected.split(')')[1]?.trim() || '';
+    const actualRet = actual.split(')')[1]?.trim() || '';
+    const expConcrete = !!expectedRet && !expectedRet.includes('...');
+    const actConcrete = !!actualRet && !actualRet.includes('...');
+    const retCompatible =
+      !expConcrete ||
+      !actConcrete ||
+      expectedRet.toLowerCase().includes(actualRet.toLowerCase()) ||
+      actualRet.toLowerCase().includes(expectedRet.toLowerCase());
+    if (!retCompatible) {
+      return { score: 80, reason: `返回类型不匹配：期望 ${expectedRet}，实际 ${actualRet}` };
+    }
+
+    // 参数名一致且返回兼容 → 契约满足（即使类型措辞不同）
+    return { score: 100 };
   }
 
   return { score: 90, reason: '签名不完全一致' };

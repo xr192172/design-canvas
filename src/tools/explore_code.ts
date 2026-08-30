@@ -218,8 +218,25 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
 // - 符号模式：symbol（+parent 消歧 / context 附带上下文行）→ AST 定位符号边界读取
 // - 行区间模式：start/end（1-based 含端点）→ 原样读取该区间
 // 都不给 → 读整个文件。
+//
+// 符号索引（默认开启，symbols:false 关闭）：返回时在 data.symbols 附整文件符号索引
+// （name/qualified_name/kind/signature/parent/行号），message 末尾附可读符号表
+// （上限缺省 30，symbols_limit 可调，超出截断）。用途：一次 read 同时拿到正文 + 文件地图，
+// LLM 无需再搜一次即可了解文件结构、按行号直达符号。解析失败仅降级跳过，不阻塞读取。
 
 const READ_PREVIEW_CAP = 500;
+const SYMBOL_TABLE_CAP = 30;
+
+/** read 附带的文件符号索引条目（轻量快照，不引 AST 内部结构） */
+type SymbolIndexItem = {
+  name: string;
+  qualified_name: string;
+  kind: string;
+  signature?: string;
+  parent?: string;
+  start_line: number;
+  end_line: number;
+};
 
 async function readCode(args: Record<string, unknown>): Promise<{ message: string; data: unknown }> {
   const file = requireStr(args, 'file');
@@ -229,7 +246,11 @@ async function readCode(args: Record<string, unknown>): Promise<{ message: strin
   const end = num(args, 'end');
   const context = num(args, 'context');
   const projectDirRaw = str(args, 'project_dir');
+  // 符号索引默认开启；symbols:false 可关（读超大文件/纯看正文时可省一次 AST）
+  const wantSymbols = bool(args, 'symbols') !== false;
 
+  // 符号表上限：缺省 30，传参可调（钳制 1-500）
+  const symbolsLimit = Math.min(Math.max(num(args, 'symbols_limit') || SYMBOL_TABLE_CAP, 1), 500);
   const projectRoot = projectDirRaw ? path.resolve(projectDirRaw) : undefined;
   const absPath = path.isAbsolute(file) ? file : projectRoot ? path.resolve(projectRoot, file) : path.resolve(file);
 
@@ -244,6 +265,14 @@ async function readCode(args: Record<string, unknown>): Promise<{ message: strin
   const total = lines.length;
   const relPath = projectRoot ? path.relative(projectRoot, absPath).split(path.sep).join('/') : absPath;
 
+  // ── 解析一次：符号定位 + 符号索引共用（避免重复 AST）──
+  const needParse = Boolean(symbol) || wantSymbols;
+  let parsed: Awaited<ReturnType<typeof parseFileFull>> | undefined;
+  if (needParse) {
+    parsed = await parseFileFull(absPath, original);
+    if (parsed.error && symbol) throw new Error(`文件解析失败: ${parsed.error}`);
+  }
+
   // ── 确定读取区间 ──
   let rangeStart: number;
   let rangeEnd: number;
@@ -251,14 +280,13 @@ async function readCode(args: Record<string, unknown>): Promise<{ message: strin
 
   if (symbol) {
     // 符号模式：AST 定位（与 edit_code replace/delete 同一 matchSymbols 口径）
-    const parsed = await parseFileFull(absPath, original);
-    if (parsed.error) throw new Error(`文件解析失败: ${parsed.error}`);
-    const { qnHits, nameHits } = matchSymbols(parsed.symbols, symbol, parent);
+    const syms = parsed?.error ? [] : parsed!.symbols;
+    const { qnHits, nameHits } = matchSymbols(syms, symbol, parent);
     const hits = qnHits.length > 0 ? qnHits : nameHits;
     if (hits.length === 0) {
       throw new Error(
         `符号未找到: ${symbol}${parent ? `（parent=${parent}）` : ''}。文件符号:\n` +
-          parsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n'),
+          syms.map((s) => `  ${describeSymbol(s)}`).join('\n'),
       );
     }
     if (hits.length > 1) {
@@ -303,10 +331,41 @@ async function readCode(args: Record<string, unknown>): Promise<{ message: strin
       `${symbolInfo.parent ? `, parent=${symbolInfo.parent}` : ''}，本体 L${symbolInfo.start_line}-${symbolInfo.end_line}）`
     : '';
 
+  // ── 符号索引：默认附整文件符号表（上限截断），symbols:false 关闭 ──
+  let symbolIndex: SymbolIndexItem[] = [];
+  let symbolTableNote = '';
+  if (wantSymbols) {
+    if (!parsed || parsed.error) {
+      symbolTableNote = '\n符号索引：文件解析失败，已跳过';
+    } else {
+      const syms = parsed.symbols;
+      const symShown = Math.min(syms.length, symbolsLimit);
+      const symTruncated = syms.length > symbolsLimit;
+      symbolIndex = syms.slice(0, symShown).map((s) => ({
+        name: s.name,
+        qualified_name: s.qualified_name,
+        kind: s.kind,
+        signature: s.signature,
+        parent: s.parent,
+        start_line: s.start_line,
+        end_line: s.end_line,
+      }));
+      symbolTableNote =
+        '\n文件符号索引（' +
+        (symTruncated ? `前 ${symbolsLimit}/${syms.length}，超出截断` : `共 ${syms.length}`) +
+        '）:\n' +
+        syms
+          .slice(0, symShown)
+          .map((s) => `  ${describeSymbol(s)}`)
+          .join('\n');
+    }
+  }
+
   const message = [
     `${relPath} 共 ${total} 行，显示 L${rangeStart}-L${rangeEnd}` +
       (truncated ? `（预览截断，前 ${READ_PREVIEW_CAP} 行）` : '') +
-      (symbolNote ? `\n${symbolNote}` : ''),
+      (symbolNote ? `\n${symbolNote}` : '') +
+      symbolTableNote,
     '```',
     ...linesOut,
     '```',
@@ -332,6 +391,7 @@ async function readCode(args: Record<string, unknown>): Promise<{ message: strin
             end_line: symbolInfo.end_line,
           }
         : undefined,
+      symbols: symbolIndex,
       lines: linesOut,
     },
   };
