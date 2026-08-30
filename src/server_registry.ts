@@ -102,7 +102,8 @@ import { fileURLToPath } from 'node:url';
  *
  * 机制：进程加载时记录本文件（dist/server_registry.js）的 mtime；
  * 每次工具调用轻量 stat 比对，dist 更新后在所有返回（含错误）尾部追加
- * 重启警告。开销 = 每调用一次 stat，可忽略。
+ * 重启警告。警告由 registerAllTools 统一注入（唯一出口，覆盖全部工具；
+ * wrap/wrapData 不再各自追加）。开销 = 每调用一次 stat，可忽略。
  */
 const SELF_PATH = (() => {
   try {
@@ -121,17 +122,24 @@ function safeMtimeMs(p: string): number | null {
   }
 }
 
-/** dist 已更新（进程仍在跑旧代码）时返回重启警告，否则空串。 */
-function staleBuildWarning(): string {
-  if (SELF_MTIME_MS === null || SELF_PATH === null) return '';
-  const cur = safeMtimeMs(SELF_PATH);
-  if (cur !== null && cur > SELF_MTIME_MS) {
+/**
+ * 陈旧构建判定（纯函数，可单测）：加载时的 mtime 早于当前 mtime → 进程仍跑旧代码。
+ * 任何一侧未知（非编译产物环境）→ 返回空串，静默禁用。
+ */
+export function staleBuildWarningFor(loadedMtimeMs: number | null, curMtimeMs: number | null): string {
+  if (loadedMtimeMs === null || curMtimeMs === null) return '';
+  if (curMtimeMs > loadedMtimeMs) {
     return (
       '\n⚠️ STALE BUILD：dist 已在本进程启动后重建，当前响应来自旧代码——' +
       '新增工具/字段/参数可能缺失或报"未知"错误。请重启 design-canvas MCP server 后再执行写操作。'
     );
   }
   return '';
+}
+
+/** dist 已更新（进程仍在跑旧代码）时返回重启警告，否则空串。 */
+function staleBuildWarning(): string {
+  return staleBuildWarningFor(SELF_MTIME_MS, SELF_PATH ? safeMtimeMs(SELF_PATH) : null);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -151,16 +159,16 @@ function textOut(text: string, isError = false) {
   return { content: [{ type: 'text' as const, text }], isError };
 }
 
-/** 包装一个同步/异步纯函数调用为 handler（统一 try/catch + 陈旧构建警告） */
+/** 包装一个同步/异步纯函数调用为 handler（统一 try/catch；陈旧构建警告由 registerAllTools 统一注入，避免重复） */
 function wrap(
   fn: (args: Record<string, unknown>) => { message: string; data?: unknown } | Promise<{ message: string; data?: unknown }>,
 ): ToolDef['handler'] {
   return async (args) => {
     try {
       const r = await fn(args);
-      return { text: r.message + staleBuildWarning() };
+      return { text: r.message };
     } catch (e) {
-      return { text: (e as Error).message + staleBuildWarning(), isError: true };
+      return { text: (e as Error).message, isError: true };
     }
   };
 }
@@ -178,11 +186,9 @@ function wrapData(
         parts.push('---DATA---');
         parts.push(JSON.stringify(r.data));
       }
-      const warn = staleBuildWarning();
-      if (warn) parts.push(warn);
       return { text: parts.join('\n') };
     } catch (e) {
-      return { text: (e as Error).message + staleBuildWarning(), isError: true };
+      return { text: (e as Error).message, isError: true };
     }
   };
 }
@@ -1968,9 +1974,10 @@ export function registerAllTools(server: McpServer): void {
         ms: Date.now() - t0,
         err: r.isError ? (r.text ?? '').slice(0, 200) : undefined,
       });
-      // 响应注入：watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）。
-      // 方向 E：本地 inbox（降级路径）+ daemon 游标拉取（权威路径）合并注入
-      return textOut(r.text + await collectPendingAlertText(def.name), r.isError);
+      // 响应注入：① 陈旧构建警告（dist 重建后进程仍跑旧代码 → 明确提示重启，防误信旧结果）
+      //          ② watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）。
+      //            方向 E：本地 inbox（降级路径）+ daemon 游标拉取（权威路径）合并注入
+      return textOut(r.text + staleBuildWarning() + await collectPendingAlertText(def.name), r.isError);
     });
   }
 }
