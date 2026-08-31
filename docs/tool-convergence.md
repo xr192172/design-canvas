@@ -26,16 +26,16 @@
 
 产品功能面，8 域基本保留（可微调），只登记 **MCP 工具**。
 
-| 能力域               | 含义               | 代表 MCP 工具                                                                                                                                    |
-| ----------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                              |
-| **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                          |
-| **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code`     |
-| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                      |
-| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `mark_canvas_notes_status` `decide_canvas_notes`                                                                            |
-| **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `sync_contracts` `search_bricks` `assemble_bricks` `slim_brick` |
-| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `read_canvas_notes`                                                                             |
-| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_list_providers` `gateway_upsert_provider` `gateway_delete_provider` `gateway_stats`                                                 |
+| 能力域               | 含义               | 代表 MCP 工具                                                                                                                                |
+| ----------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                          |
+| **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
+| **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
+| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
+| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `mark_canvas_notes_status` `decide_canvas_notes`                                                                        |
+| **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `search_bricks` `assemble_bricks` `slim_brick`              |
+| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `read_canvas_notes`                                                                         |
+| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_list_providers` `gateway_upsert_provider` `gateway_delete_provider` `gateway_stats`                                             |
 
 > 说明：上表为初版归属，纯数据可再微调，不阻塞收敛。
 
@@ -62,9 +62,7 @@
 
 - **构建/生成**：`rebuild_feature.mjs` `gen_anim_core_bundle.mjs` `gen_teach.cjs` `rebuild_teach.cjs`
 
-- **演示**：`demo.mjs`
-
-- **探针/验证/一次性诊断**（内部质量基建，多为 dev 自检）：`probe_*.mjs`（`probe_notes` `probe_mcp_smoke` `probe_stepflow` `probe_stepflow_detail` `probe_pins_v2` `probe_e2e_notes`）`sim_gap.mjs` `sim_l4.mjs` `agent_notes_loop.mjs` `backfill_stepflow.mjs` `dogfood/*.mjs`（`build_cache` `check_cache` `verify_space_bug` `verify_spec_form`）`_api_verify.mjs` `_regen_verify.mjs`
+- **探针/验证/一次性诊断**（内部质量基建，多为 dev 自检）：`probe_*.mjs` `sim_gap.mjs` `sim_l4.mjs` `agent_notes_loop.mjs` `backfill_stepflow.mjs` `dogfood/*.mjs` `_api_verify.mjs` `_regen_verify.mjs`
 
 ***
 
@@ -97,7 +95,23 @@
 
 ***
 
-## 4. 分阶段推进（每阶段有可验收产物）
+## 4. 合并前核验（硬性纪律，每次合并强制走完）
+
+> **规矩**：任何一次合并**动手改代码前**，先逐项核验待合并的工具是否和设想一致。**核验不过不动手。**
+
+每一步核验对应的问题：
+
+1. **读源实现** —— 合并双方 handler 源码是否职责真实重叠？还是只是名字像、做的其实是两回事？
+2. **对契约** —— 两个工具 inputSchema 是否有公共可抽象参数；对外工具名/参数一变，MCP 会话里的调用方契约就断，破坏面多大？
+3. **找调用方** —— `grep` 哪些地方引用了这俩工具/模块（其他工具 import、测试、CLI 对偶、README / skill 文档 / `docs/tool-convergence.md` 自身）？避免漏改。
+4. **查测试** —— 现有回归测试覆盖了两个工具的哪些行为？合并后哪些测试要跟着改？
+5. **跑回归 + 插桩验收** —— 合并后跑全量回归；关键路径留可观测产物（插桩/日志），确认真实行为对得上。**验收通过才提交，否则回滚。**
+
+> 核验结论记入本文件"合并记录"（第 7 节），每个候选一条：核验到哪一步、发现什么、怎么处理。
+
+***
+
+## 5. 分阶段推进（每阶段有可验收产物）
 
 - **Phase 0 · 定性登记**（本文即产物）：三层框架落地，全部 MCP+CLI 归入三层 → 验收文档。
 
@@ -111,7 +125,7 @@
 
 ***
 
-## 5. 待办 / 开放问题
+## 6. 待办 / 开放问题
 
 - [ ] 确认 B 组三处疑似重复的审计结论
 
@@ -120,4 +134,20 @@
 - [ ] 决定 `docs/` 入库范围（本文+tool-convergence 之外的 dev 稿是否也入库）
 
 - [ ] CLI 命令命名规范（能力域前缀）是否与现有命名完全对齐
+
+***
+
+## 7. 合并记录
+
+> 每次合并按「4. 合并前核验」走完五步后，在此记录一条：候选组、核验到哪一步、发现什么、怎么处理、验收结果。
+>
+> 格式示例：
+>
+> ```
+> - [x] 候选组：`foo` / `bar`
+>   - 核验：读源实现 ✓ / 对契约 ✓ / 找调用方 ✓ / 查测试 ✓ / 回归+插桩 ✓
+>   - 发现：……
+>   - 处理：……
+>   - 结果：合并提交 `<hash>`，回归 `n` 无回归
+> ```
 
