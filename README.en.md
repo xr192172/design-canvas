@@ -184,10 +184,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 
 | Tool | Purpose |
 |------|------|
-| `gateway_list_providers` | List configured LLM providers (masked) |
-| `gateway_upsert_provider` | Add / update a provider (key pool with round-robin + failover) |
-| `gateway_delete_provider` | Delete a provider |
-| `gateway_stats` | Usage statistics (calls / tokens / cost / errors) |
+| `gateway_provider` | Unified LLM gateway entry (list / upsert / delete / stats) |
 
 **Project docs**
 

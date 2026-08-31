@@ -1821,69 +1821,54 @@ const TOOL_DEFS: ToolDef[] = [
     }),
   },
   {
-    name: 'gateway_list_providers',
-    title: 'List LLM gateway providers (masked keys)',
+    name: 'gateway_provider',
+    title: 'Manage LLM gateway providers & usage (single entry)',
     description:
-      '列出小网关已注册的 LLM 供应商（Key 池，key 脱敏只露尾 4 位）+ 用量汇总。' +
-      '外部 agent 可据此感知当前可用的 LLM 供应商与用量。配置/新增走 gateway_upsert_provider 或设置页。',
-    inputSchema: {},
-    handler: wrapData(async () => {
-      return { message: '小网关供应商清单（key 已脱敏）', data: { providers: listProvidersMasked(), stats: getStats().totals } };
-    }),
-  },
-  {
-    name: 'gateway_upsert_provider',
-    title: 'Upsert an LLM gateway provider (Key pool)',
-    description:
-      '注册/更新一个 LLM 供应商到小网关 Key 池。同供应商多个 API Key 放入 keys 数组即为一个池，' +
-      '调用时加权轮询 + 失败自动切下一个 key/供应商。OpenAI 兼容协议（base_url 形如 https://api.openai.com/v1）。' +
-      '已存在同 id 则按传入字段合并更新（不传字段保留原值）。',
+      '小网关供应商 + 用量统一入口（收敛原 gateway_* 4 工具为 1 入口，action 分派）：' +
+      'action=list 列出已注册供应商（key 脱敏只露尾 4 位）+ 用量汇总；' +
+      'action=upsert 注册/更新一个供应商到 Key 池（同供应商多 key 入一个池，调用时加权轮询 + 失败自动切下一个 key/供应商；' +
+      'OpenAI 兼容协议 base_url 形如 https://api.openai.com/v1；已存在同 id 则按传入字段合并更新）；' +
+      'action=delete 删除一个供应商及其 Key 池；' +
+      'action=stats 用量监视（按 供应商+key 维度的调用数/token/费用(USD)/错误/延迟及汇总；reset=true 可清零统计）。',
     inputSchema: {
-      id: z.string().describe('供应商唯一 id（字母数字-_，如 agnes / openai / my-ollama）'),
-      name: z.string().optional().describe('展示名'),
-      base_url: z.string().optional().describe('OpenAI 兼容 base url（不含 /chat/completions）'),
-      model: z.string().optional().describe('默认模型'),
-      keys: z.array(z.string()).optional().describe('API Key 池（多个 key 一个池）'),
-      weight: z.number().optional().describe('轮询权重（默认 1）'),
-      price_prompt_per_1m: z.number().optional().describe('每 1M 输入 token 价格 USD（用量费用估算）'),
-      price_completion_per_1m: z.number().optional().describe('每 1M 输出 token 价格 USD'),
-      enabled: z.boolean().optional().describe('是否启用'),
+      action: z.enum(['list', 'upsert', 'delete', 'stats']).describe('list=列出供应商/用量 | upsert=注册或更新供应商 | delete=删除供应商 | stats=用量统计'),
+      id: z.string().optional().describe('供应商唯一 id（upsert/delete 用：字母数字-_，如 agnes / openai / my-ollama）'),
+      name: z.string().optional().describe('展示名（upsert）'),
+      base_url: z.string().optional().describe('OpenAI 兼容 base url，不含 /chat/completions（upsert）'),
+      model: z.string().optional().describe('默认模型（upsert）'),
+      keys: z.array(z.string()).optional().describe('API Key 池，多个 key 一个池（upsert）'),
+      weight: z.number().optional().describe('轮询权重，默认 1（upsert）'),
+      price_prompt_per_1m: z.number().optional().describe('每 1M 输入 token 价格 USD（upsert）'),
+      price_completion_per_1m: z.number().optional().describe('每 1M 输出 token 价格 USD（upsert）'),
+      enabled: z.boolean().optional().describe('是否启用（upsert）'),
+      reset: z.boolean().optional().describe('true=清零用量统计（stats）'),
     },
     handler: wrapData(async (a) => {
-      const r = upsertProvider({
-        id: String(a.id ?? ''),
-        name: typeof a.name === 'string' ? a.name : undefined,
-        base_url: typeof a.base_url === 'string' ? a.base_url : undefined,
-        model: typeof a.model === 'string' ? a.model : undefined,
-        keys: Array.isArray(a.keys) ? a.keys.map(String) : undefined,
-        weight: typeof a.weight === 'number' ? a.weight : undefined,
-        price_prompt_per_1m: typeof a.price_prompt_per_1m === 'number' ? a.price_prompt_per_1m : undefined,
-        price_completion_per_1m: typeof a.price_completion_per_1m === 'number' ? a.price_completion_per_1m : undefined,
-        enabled: typeof a.enabled === 'boolean' ? a.enabled : undefined,
-      });
-      if (!r.ok) return { message: `保存失败：${r.error}`, isError: true };
-      return { message: `供应商 ${a.id} 已保存（Key 池 ${Array.isArray(a.keys) ? a.keys.length : 0} 个）`, data: { ok: true } };
-    }),
-  },
-  {
-    name: 'gateway_delete_provider',
-    title: 'Delete an LLM gateway provider',
-    description: '从网关删除一个供应商及其 Key 池。',
-    inputSchema: { id: z.string().describe('供应商 id') },
-    handler: wrapData(async (a) => {
-      const r = deleteProvider(String(a.id ?? ''));
-      if (!r.ok) return { message: `删除失败：${r.error}`, isError: true };
-      return { message: `供应商 ${a.id} 已删除`, data: { ok: true } };
-    }),
-  },
-  {
-    name: 'gateway_stats',
-    title: 'LLM gateway usage stats',
-    description:
-      '小网关用量监视：按 供应商+key 维度的调用数/token/费用(USD)/错误/延迟，及汇总。' +
-      'POST 参数 reset=true 可清零统计。',
-    inputSchema: { reset: z.boolean().optional().describe('true=清零统计') },
-    handler: wrapData(async (a) => {
+      const action = a.action as 'list' | 'upsert' | 'delete' | 'stats';
+      if (action === 'list') {
+        return { message: '小网关供应商清单（key 已脱敏）', data: { providers: listProvidersMasked(), stats: getStats().totals } };
+      }
+      if (action === 'upsert') {
+        const r = upsertProvider({
+          id: String(a.id ?? ''),
+          name: typeof a.name === 'string' ? a.name : undefined,
+          base_url: typeof a.base_url === 'string' ? a.base_url : undefined,
+          model: typeof a.model === 'string' ? a.model : undefined,
+          keys: Array.isArray(a.keys) ? a.keys.map(String) : undefined,
+          weight: typeof a.weight === 'number' ? a.weight : undefined,
+          price_prompt_per_1m: typeof a.price_prompt_per_1m === 'number' ? a.price_prompt_per_1m : undefined,
+          price_completion_per_1m: typeof a.price_completion_per_1m === 'number' ? a.price_completion_per_1m : undefined,
+          enabled: typeof a.enabled === 'boolean' ? a.enabled : undefined,
+        });
+        if (!r.ok) return { message: `保存失败：${r.error}`, isError: true };
+        return { message: `供应商 ${a.id} 已保存（Key 池 ${Array.isArray(a.keys) ? a.keys.length : 0} 个）`, data: { ok: true } };
+      }
+      if (action === 'delete') {
+        const r = deleteProvider(String(a.id ?? ''));
+        if (!r.ok) return { message: `删除失败：${r.error}`, isError: true };
+        return { message: `供应商 ${a.id} 已删除`, data: { ok: true } };
+      }
+      // stats
       if (a?.reset === true) {
         resetStats();
         return { message: '用量统计已清零', data: { per_key: [], totals: getStats().totals } };

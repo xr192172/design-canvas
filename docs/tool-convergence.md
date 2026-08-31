@@ -82,13 +82,13 @@
 
 > 从 A 组的教训看：**"名称相似"不等于"职责重叠"，收敛必须以源实现核验为准。**
 
-### B. 疑似重复，需审计后取舍
+### B. 疑似重复 → Phase 1 已逐项核验（详见第 7 节）
 
-| 候选组                                        | 现状     | 待确认                 |
-| ------------------------------------------ | ------ | ------------------- |
-| `render_dsl` vs `render_sandbox`           | 双渲染    | 是否职责重叠？能否参数化合一      |
-| `read_canvas_notes` vs `harvest_decisions` | 都读决策材料 | 语料范围是否一致            |
-| `gateway_*`(4个)                            | 网关配置   | 是否值得收敛为 1 个入口 + 子操作 |
+| 候选组                                        | 核验结论                                                                                               |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `render_dsl` vs `render_sandbox`           | **不合并**。render\_dsl=读 DSL 渲染设计稿(mindmap/html/svg/md)；render\_sandbox=扫描工程生成依赖驱动积木工作台(不读 DSL)。职能正交。 |
+| `read_canvas_notes` vs `harvest_decisions` | **不合并**。画布批注工单 vs 仓库材料挖决策卡。数据源/产物都不同。                                                              |
+| `gateway_*(4个)`                            | **✅ 已合并** → 收敛为单入口 `gateway_provider`（action=list/upsert/delete/stats）。唯一真实可合并项。                   |
 
 ### C. CLI 形态收敛
 
@@ -187,4 +187,35 @@
   - 结果：不改代码。
 
 > **Phase 1 结论：A 组无有效合并项。收敛价值转回 B/C 组（待下轮核验）。**
+
+#### Phase 1 · B 组核验记录（2026-08）
+
+- [x] 候选组：`render_dsl` / `render_sandbox`
+  - 核验：读源实现 ✓
+
+  - 发现：render\_dsl 读 DSL 渲染设计稿(mindmap/html/svg/markdown，用 feature 从存储读)；render\_sandbox 扫描工程生成依赖驱动积木化工作台(brickify，不读 DSL 读依赖图)。输入(feature vs project\_dir)、产物、handler 完全独立。
+
+  - 处理：判**不合并**。
+
+  - 结果：不改代码。
+
+- [x] 候选组：`read_canvas_notes` / `harvest_decisions`
+  - 核验：读源实现 ✓
+
+  - 发现：read\_canvas\_notes 读**画布批注**(DSL.canvas\_notes)翻译成 agent 工单，配合 mark/decide 闭环；harvest\_decisions 从**项目文档/git log/注释**挖 draft 决策卡。数据源(docs vs 批注)、产物(工单 vs 决策卡)都不同。
+
+  - 处理：判**不合并**。
+
+  - 结果：不改代码。
+
+- [x] 候选组：`gateway_list_providers` / `gateway_upsert_provider` / `gateway_delete_provider` / `gateway_stats`
+  - 核验：读源实现 ✓ / 对契约 ✓ / 找调用方 ✓ / 查测试 ✓ / 回归+插桩 ✓
+
+  - 发现：4 工具是同一实体(LLM 供应商 Key 池)的标准 CRUD+stats，底层纯函数(upsertProvider/listProvidersMasked/deleteProvider/getStats)已分离清晰。无业务调用方(仅 README×2 + 文档引用)；gateway.test.ts 只测底层纯函数不测外壳。
+
+  - 处理：**合并**为单入口 `gateway_provider`（action=list/upsert/delete/stats 分派），对齐 `manage_feature` 的 CRUD action 先例。
+
+  - 结果：tsc 通过；gateway 专项 28 测试全绿；**全量回归 1340/1340 无回归**；临时 DESIGN\_CANVAS\_HOME 隔离验收脚本实测 4 分支全通过(upsert→list→delete→stats)。提交 `<待填>`。
+
+> **Phase 1 小结：A 组 0 合并（全核验证伪）、B 组 1 合并（gateway 4→1）。**
 

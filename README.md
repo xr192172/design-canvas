@@ -184,10 +184,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 | 工具                        | 用途                          |
 | ------------------------- | --------------------------- |
-| `gateway_list_providers`  | 列出已配置的 LLM 供应商（脱敏）          |
-| `gateway_upsert_provider` | 新增 / 更新供应商（Key 池，轮询 + 失败转移） |
-| `gateway_delete_provider` | 删除供应商                       |
-| `gateway_stats`           | 用量统计（调用数 / token / 费用 / 错误） |
+| `gateway_provider` | LLM 供应商/用量统一入口（list / upsert / delete / stats 四 action） |
 
 **项目文档**
 
