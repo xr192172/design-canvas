@@ -21,12 +21,13 @@
  *     class/enum 值类型双栖，identifier 与 type_identifier 都改。
  *   - 原子性：任一阻断（新名撞名、星号转发、目标不是模块级符号）→ 全部不落盘，返回理由。
  */
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
 import { renameFile } from './rename_file.js';
+import { resolveProjectRoot, expandClosure } from './project_root.js';
 
 // ─────────────────────────────────────────────
 // 最小 tree-sitter 节点面（同 Kernel）
@@ -431,28 +432,8 @@ function kindNodeTypes(kind: string): Set<NodeType> {
 }
 
 // ─────────────────────────────────────────────
-// 项目文件收集 + 相对 import 解析
+// 相对 import 解析（项目内文件集合来自 project_root.expandClosure）
 // ─────────────────────────────────────────────
-function walkProjectFiles(dir: string, out: string[]): void {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const e of entries) {
-    if (!e) continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      if (e.name === 'node_modules' || e.name === 'dist' || e.name === 'build' || e.name === '.git' || e.name.startsWith('.')) continue;
-      walkProjectFiles(p, out);
-    } else if (e.isFile() && TS_EXTS.has(path.extname(e.name))) {
-      out.push(p);
-    }
-  }
-}
-
-/** 相对 import 源 → 项目内绝对文件（byNoExt 表 + 扩展名/索引回退） */
 function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, string>): string | null {
   if (!source.startsWith('.')) return null; // 包导入 / 外部 → 不是项目内相对引用
   const impRelDir = path.posix.dirname(importerAbs.replace(/\\/g, '/')).replace(/\/$/, '');
@@ -506,8 +487,8 @@ function applyEdits(src: string, edits: Edit[]): string {
 // 跨文件符号改名执行器
 // ─────────────────────────────────────────────
 export interface RenameSymbolInput {
-  /** 目标项目根目录（解析 file 为绝对路径） */
-  project_dir: string;
+  /** 目标项目根目录（解析 file 为绝对路径）；缺省时自动定位（git 根→manifest→file 目录） */
+  project_dir?: string;
   /** 定义符号的文件（相对 project_dir 或绝对路径） */
   file: string;
   /** 旧符号名（模块级声明名/被 import 的远程名） */
@@ -542,7 +523,7 @@ export interface RenameSymbolResult {
 }
 
 export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymbolResult> {
-  const { project_dir, file, symbol, to } = input;
+  const { file, symbol, to } = input;
   const renameFileIfMatching = !!input.rename_file_if_matching;
   const blocked: string[] = [];
 
@@ -550,7 +531,17 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   if (!/^[A-Za-z_$][\w$]*$/.test(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名非法：' + to] };
   if (symbol === to) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名与旧名相同：' + symbol] };
 
-  const defAbs = path.isAbsolute(file) ? path.resolve(file) : path.resolve(String(project_dir), String(file));
+  const effectiveRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
+  // file 解析：绝对路径直接用；相对路径优先相对项目根（若显式给），否则相对 cwd
+  const fileAbs = path.isAbsolute(file)
+    ? path.resolve(file)
+    : effectiveRoot
+      ? path.resolve(effectiveRoot, String(file))
+      : path.resolve(process.cwd(), String(file));
+  const defAbs = fileAbs;
+  // 项目根：显式传则用；否则自动定位（git 根→manifest→file 目录），消除"必须先知 project_dir"的摩擦
+  const resolvedRoot = effectiveRoot ?? resolveProjectRoot(fileAbs);
+
   const defExt = path.extname(defAbs);
   if (!TS_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS 系（${defExt}），跨文件改名暂只支持 TS/JS 模块级符号`] };
 
@@ -573,9 +564,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   for (const r of def.exportRefs) if (r.name === symbol) defEditSet.add(r.offset);
   const defEdits: Edit[] = [...defEditSet].map((pos) => ({ pos, len: symbol.length, text: to }));
 
-  // 收集项目源文件，构建相对解析表
-  const files: string[] = [];
-  walkProjectFiles(path.resolve(project_dir), files);
+  // 收集自包含闭包源文件（项目根内全部 + 沿 import 边扩展边界外本地文件），构建相对解析表
+  const files = await expandClosure(defAbs, resolvedRoot);
   const byNoExt = buildNoExt(files);
 
   // 解析 importer 文件
@@ -657,7 +647,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
       writeFileSync(f, out, 'utf-8');
       filesWritten++;
     }
-    importers.push({ file: path.relative(project_dir, f) || f, edits: edits.filter((e) => e.len > 0).length, note });
+    importers.push({ file: path.relative(resolvedRoot, f) || f, edits: edits.filter((e) => e.len > 0).length, note });
   }
 
   // 联动改名文件：当符号是文件主导出（文件名=符号名）且开启 rename_file_if_matching 时，
@@ -669,9 +659,9 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     const defBase = path.basename(defAbs, defExt);
     if (defBase === symbol) {
       const newPath = path.join(path.dirname(defAbs), to + defExt);
-      const fr = await renameFile({ project_dir: path.resolve(String(project_dir)), from: defAbs, to: newPath, dry_run: false });
+      const fr = await renameFile({ project_dir: resolvedRoot, from: defAbs, to: newPath, dry_run: false });
       if (fr.ok && fr.moved) {
-        fileRenamed = (path.relative(project_dir, newPath) || newPath).replace(/\\/g, '/');
+        fileRenamed = (path.relative(resolvedRoot, newPath) || newPath).replace(/\\/g, '/');
       } else {
         fileRenameBlocked = fr.blocked?.length ? fr.blocked : ['文件联动未执行（rename_file 返回未移动）'];
       }
@@ -682,7 +672,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     ok: true,
     symbol,
     to,
-    definition: { file: path.relative(project_dir, defAbs) || defAbs, edits: defEdits.length, note: '定义+同文件引用' },
+    definition: { file: path.relative(resolvedRoot, defAbs) || defAbs, edits: defEdits.length, note: '定义+同文件引用' },
     importers,
     filesWritten,
     ...(fileRenamed !== undefined ? { fileRenamed } : {}),

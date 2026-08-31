@@ -294,3 +294,55 @@ describe('renameSymbol - 文件联动改名（rename_file_if_matching）', () =>
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - 自动定位项目根（project_dir 省略，依赖 project_root.expandClosure）', () => {
+  it('不传 project_dir，只传绝对 file → 自动定位 manifest 根并改名，importer 一并改写', async () => {
+    const dir = mkProj({
+      'package.json': '{ "name": "proj" }\n',
+      'src/def.ts': [
+        'export function compute(a: number): number { return a * 2; }',
+      ].join('\n'),
+      'src/app.ts': [
+        "import { compute } from './def';",
+        'export function run() { return compute(3); }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ file: path.join(dir, 'src/def.ts'), symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件 + 同根 importer 都改了
+    expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function tally');
+    expect(readFileSync(path.join(dir, 'src/app.ts'), 'utf-8')).toContain("import { tally } from './def';");
+    expect(readFileSync(path.join(dir, 'src/app.ts'), 'utf-8')).toContain('return tally(3);');
+    rmForce(dir);
+  });
+
+  it('跨根引用：def 依赖项目根外 shared.ts → 闭包沿 import 边扩入，shared 对 def 的回引一并改写', async () => {
+    const dir = mkProj({
+      // 项目 A：package.json 标志 manifest 根
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': [
+        "import { sharedHelper } from '../../shared';",
+        'export function compute(a: number): number { return a + sharedHelper(a); }',
+      ].join('\n'),
+      // shared.ts 在 A 根外（同一上层目录）——def.ts 相对引用它，形成跨根 import 边
+      'shared.ts': [
+        "import { compute } from './A/src/def';",
+        'export function sharedHelper(x: number): number { return x; }',
+        'export function use() { return compute(1); }',
+      ].join('\n'),
+    });
+
+    // 从 A 内文件发起改名，project_dir 省略 → 自动定位 A 根 + 闭包沿 import 边扩到根外 shared.ts
+    const r = await renameSymbol({ file: path.join(dir, 'A/src/def.ts'), symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件改名
+    expect(readFileSync(path.join(dir, 'A/src/def.ts'), 'utf-8')).toContain('export function tally');
+    // 跨根 shared.ts 被闭包纳入：import 远程名 + 使用点都改
+    expect(readFileSync(path.join(dir, 'shared.ts'), 'utf-8')).toContain("import { tally } from './A/src/def';");
+    expect(readFileSync(path.join(dir, 'shared.ts'), 'utf-8')).toContain('return tally(1);');
+    rmForce(dir);
+  });
+});

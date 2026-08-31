@@ -1269,18 +1269,19 @@ const TOOL_DEFS: ToolDef[] = [
       '支持 function/const/class/interface/type/enum 模块级符号；class/enum 值+类型双栖都改，interface/type 只改类型引用。' +
       '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。' +
       'rename_file_if_matching=true（可选，默认 false）：当符号是文件主导出（文件名=符号名，如 UserService.ts 的 UserService 类）时，' +
-      '符号改名成功后自动联动把文件也改名（含全仓 import 引用改写）。不改默认行为，纯增量。',
+      '符号改名成功后自动联动把文件也改名（含全仓 import 引用改写）。不改默认行为，纯增量。' +
+      'project_dir 可省略：缺省时自动定位项目根（git 根→manifest→文件目录），并按依赖闭包扩展边界（含跨 git 根引用）。',
     inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
-      file: z.string().describe('定义符号的文件（相对 project_dir 或绝对路径；必须是该符号的声明文件，而非 import 它的文件）'),
+      project_dir: z.string().optional().describe('目标项目根目录（可选；缺省自动定位：git 根→manifest→file 目录）'),
+      file: z.string().describe('定义符号的文件（绝对路径；或相对 cwd 路径）'),
       symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
       to: z.string().describe('新符号名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
       rename_file_if_matching: z.boolean().optional().describe('true=符号是文件主导出（文件名=符号名）时，联动把文件改名（默认 false）'),
     },
     handler: wrap(async (a) => {
-      const { project_dir, file, symbol, to } = a;
+      const { file, symbol, to } = a;
       const r = await renameSymbol({
-        project_dir: String(project_dir),
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         file: String(file),
         symbol: String(symbol),
         to: String(to),

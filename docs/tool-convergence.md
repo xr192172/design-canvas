@@ -197,50 +197,48 @@
 
 **但存在真实体验缺口**：当用户确实想"改主符号 + 同步文件名 + 改所有 import"（如 `UserService.ts` 的类改名 `MemberService`），需**手动两步**（先 rename\_symbol 再 rename\_file），且无工具判断"该文件是否应跟着符号改名"。
 
-**增强建议（已实现 2026-08，commit 0b7e202）**：`rename_symbol` 已加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file` 改文件路径 + 全仓 import 改写。**不改默认行为（缺省 false），纯增量**。专项 12 测试 + 全量 1343 绿。
+**增强建议（待立项）**：给 `rename_symbol` 加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file`。**不改默认行为，纯增量。**
 
-***
+> ✅ **已实施（2026-08）**：`rename_symbol` 已支持 `rename_file_if_matching`（联动改名，失败不阻断，仅记录理由），配套测试覆盖"文件主导出改名/非主导出不改/缺省不改"三态。
 
 ## 5.6 工具被主动使用的障碍（真实开发自省，2026-08）
 
-> 用户在真实开发中的自省："做开发时会不会想起来用这些 MCP 工具？" **诚实结论：大部分时候不会**。本会话两次大改名（camera→observe、render\_sandbox→render\_brickwork）最终都用脚本+grep+git mv 完成，MCP 工具仅用于 dry\_run 验证。
+> 用户在真实开发中的自省："做开发时会不会想起来用这些 MCP 工具？" **诚实结论：大部分时候不会**。本会话两次大改名（camera→observe、render_sandbox→render_brickwork）最终都用脚本+grep+git mv 完成，MCP 工具仅用于 dry_run 验证。
 
 ### 障碍清单（按根因）
 
-| # | 障碍            | 说明                                                                    |
-| - | ------------- | --------------------------------------------------------------------- |
-| 1 | **任务语言不对齐**   | 思考是"改这个函数名"，工具名是 `rename_symbol`——无机制让 LLM 想起它们存在                     |
-| 2 | **前置状态成本高**   | 大量工具要先 `import_project` 建 DSL/缓存、要 feature、要插桩才有意义。改个符号前要花好几步准备，成本>收益 |
+| # | 障碍 | 说明 |
+|---|------|------|
+| 1 | **任务语言不对齐** | 思考是"改这个函数名"，工具名是 `rename_symbol`——无机制让 LLM 想起它们存在 |
+| 2 | **前置状态成本高** | 大量工具要先 `import_project` 建 DSL/缓存、要 feature、要插桩才有意义。改个符号前要花好几步准备，成本>收益 |
 | 3 | **粒度太细 + 黑盒** | `rename_file` 一次只改一个文件（70 文件改名=70 次调用）；返回仅文本，看不到结构化 diff → 不透明→不信任→不用 |
-| 4 | **输出形态错位**    | 大量产出 HTML 路径/JSON/Markdown 报告；LLM 要的是"直接改好代码"，报告是负担                   |
-| 5 | **运行状态依赖**    | STALE BUILD——改源码不重启 server 则跑旧代码，真实开发随时咬人                             |
+| 4 | **输出形态错位** | 大量产出 HTML 路径/JSON/Markdown 报告；LLM 要的是"直接改好代码"，报告是负担 |
+| 5 | **运行状态依赖** | STALE BUILD——改源码不重启 server 则跑旧代码，真实开发随时咬人 |
 
 ### 会主动用的场景（诚实）
 
 - **纯查询**：`get_dsl` / `explore_code` / `consistency_check`（低前置、只读、即时答案）
-
 - **单点确定性操作**：`rename_symbol`（带联动改名后实用度↑）
+- **差异化场景**：活文档同步、契约回填、运行时观测（observe）——写代码时不主动想，但项目健康需要
 
-- **差异化场景**：活文档同步、契约回填、运行时观测（Camera）——写代码时不主动想，但项目健康需要
+### 改进方向（1 已实施，其余待讨论）
 
-### 改进方向（待讨论，未实施）
+1. **消除前置状态** —— ✅ **已实施（2026-08）**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界（根内全量 + 沿 import 边扩入根外本地文件，自包含）。改一个符号从"先备好几步"降为"给个文件路径即可"。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`），配套测试覆盖嵌套 git 根解析、跨根 import 闭包、扩展名/索引解析。
+2. **输出可直接消费**（待讨论）：工具返回结构化 diff（改了什么/几处/哪些文件）而非纯文本，让 LLM 能验证
+3. **触发点埋进日常流程**（待讨论）：commit 前自动跑一致性检查、改名后自动回填契约——工具主动接入而非等 LLM 想起
+4. **批量操作**（待讨论）：rename/操作支持多文件一次调用（对标脚本效率）
 
-1. **消除前置状态**：工具自动建 DSL/缓存（如 rename\_symbol 无需先 import\_project），把"准备"做成工具内部行为
-2. **输出可直接消费**：工具返回结构化 diff（改了什么/几处/哪些文件）而非纯文本，让 LLM 能验证
-3. **触发点埋进日常流程**：commit 前自动跑一致性检查、改名后自动回填契约——工具主动接入而非等 LLM 想起
-4. **批量操作**：rename/操作支持多文件一次调用（对标脚本效率）
+> ⚠ **已知边界**：闭包沿「import 边」向外扩展（seed 依赖的根外文件会被纳入）；根外文件若只"引用 seed"（importer 方向）则不在闭包内——那属于调用方扫描，需另行立项。
 
 ***
 
 ## 6. 待办 / 开放问题
 
-- [x] `render_sandbox` → `render_brickwork` 改名 → 已实现（commit b719037）
+- [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
 
-- [x] `harvest_*` vs `extract_*` 语义边界 → 文档已明确
+- [ ] 决定 `harvest_*` vs `extract_*` 语义边界是否明确
 
-- [x] `rename_symbol` 增加 `rename_file_if_matching` 联动改名 → 已实现（commit 0b7e202）
-
-- [ ] 讨论"工具被主动使用障碍"的改进方向（5.6 节，4 条）
+- [ ] 评估 `rename_symbol` 增加 `rename_file_if_matching` 联动改名的可行性
 
 - [ ] 确认 B 组三处疑似重复的审计结论
 
