@@ -41,7 +41,7 @@
 | **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                          |
 | **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
 | **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
-| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `observe_log` `observe_judge` `observe_instrument` `reconcile_chain` `consistency_check` `reconcile_brick` `reconcile_effects`           |
+| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
 | **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `canvas_notes`(decide/mark)                                                                                             |
 | **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `search_bricks` `assemble_bricks` `slim_brick`              |
 | **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `canvas_notes`(read)                                                                        |
@@ -62,7 +62,7 @@
 | `signal_review_cli`                  | judge              | 信号审批终端形态  |
 | `split_stage_cli`                    | refactor           | 拆分阶段终端形态  |
 | `deprecate_offline_cli`              | refactor           | 下线遗留终端形态  |
-| `observe / instrument_cli`           | observe            | 插桩终终端形态   |
+| `camera / instrument_cli`            | observe            | 插桩终终端形态   |
 
 ### 第三层 · 工程基建（不属于产品能力）
 
@@ -88,7 +88,7 @@
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `rename_symbol` / `rename_file` / `rename_many` | **不合并**。三种底层机制：单文件作用域折叠(ast\_rename) vs 跨文件符号引用图(rename\_symbol) vs 文件系统迁移+全仓 import 改写(rename\_file)。抽公共内核纯属糅合。 |
 | `suggest_renames` / `find_similar_names`        | **不合并**。两种互补视角：无意义短名 vs 易混淆孪生名。两者都输出可喂 `rename_many` 的数据，是上下游配合。                                                 |
-| `observe_log` / `reconcile_chain`               | **不合并**。纯事件查询 vs 中观对账编排聚合。前缀统一是命名风格而非代码合并，收益有限。                                                                  |
+| `camera_log` / `chain_recon`                    | **不合并**。纯事件查询 vs 中观对账编排聚合。前缀统一是命名风格而非代码合并，收益有限。                                                                  |
 
 > 从 A 组的教训看：**"名称相似"不等于"职责重叠"，收敛必须以源实现核验为准。**
 
@@ -141,7 +141,7 @@
 
 - **Phase 0 · 定性登记**（本文即产物）：三层框架落地，全部 MCP+CLI 归入三层 → 验收文档。
 
-- **Phase 1 · 高确定合并**：A 组无风险合并（rename 内核、observe 前缀统一）→ 验收 diff + 回归全绿。
+- **Phase 1 · 高确定合并**：A 组无风险合并（rename 内核、camera 前缀统一）→ 验收 diff + 回归全绿。
 
 - **Phase 2 · 审计后取舍**：B 组逐项审计 → 每项一个小验收说明。
 
@@ -153,7 +153,12 @@
 
 ## 5.5 命名审计（起名 vs 实际功能）
 
-> 逐个核验工具名与真实职能是否匹配。**结论：大部分隐喻自洽；observe 存在真实命名摩擦。**
+> 逐个核验工具名与真实职能是否匹配。**结论：大部分隐喻自洽；camera 已全量子系统改名完成；render/harvest 存在新的命名摩擦（待定）。**
+
+### ✅ 已完成的改名（2026-08，commit d7e4953）
+
+- **camera → observe**：全量子系统改名（目录 src/camera→observe、工具 camera_*→observe_*、事件路径 .agent/camera→.agent/observe、go-camera→go-observe、env CAMERA_*→OBSERVE_*）。消除了 camera/probe/instrument/observe 命名通胀。
+- **chain_recon → reconcile_chain**：拼写统一（recon→reconcile）。
 
 ### 起名贴切（隐喻自洽 + 直白）
 
@@ -168,29 +173,38 @@
 
 ### 起名有摩擦（待决定是否改）
 
-| 工具                     | 实际功能            | 摩擦点                                                 | 评级       |
-| ---------------------- | --------------- | --------------------------------------------------- | -------- |
-| **`camera_*`**         | 插桩→记录→判定（运行时观测） | "摄像头"隐喻对外不直白；与 probe/instrument/observe 概念重叠        | ⚠️ 中等    |
-| `reconcile_*`（对账）      | 用运行时观测校准契约      | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微    |
-| `reconcile_chain`（链对账） | 声明链 vs 实测链对账    | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 拼写不一致 |
+| 工具                 | 实际功能            | 摩擦点                                                 | 评级       |
+| ------------------ | --------------- | --------------------------------------------------- | -------- |
+| `reconcile_*`（对账）  | 用运行时观测校准契约      | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微    |
+| `chain_recon`（链对账） | 声明链 vs 实测链对账    | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 已改名 reconcile_chain |
 
-### 关键发现：observe / probe / instrument / observe 命名通胀
+### 新发现命名摩擦（待定，2026-08）
 
-同一套「运行时观测」机制，代码里混用了 4 个词：
+| 名称 | 实际功能 | 摩擦点 | 评级 |
+|---|---|---|---|
+| **`render_dsl` vs `render_sandbox`** | render_dsl=渲染 DSL 设计稿(mindmap/svg/md)；render_sandbox=渲染工程依赖积木工作台(brickify) | **render 一词承担两种不相关职责**（设计稿渲染 vs 代码分析可视化），与 camera 命名通胀同型 | ⚠️ 中等 |
+| **`harvest_*` vs `extract_*`** | harvest=收割积木入盒；extract=抽取契约 | harvest 与 extract 语义重叠（"采集/抽取"），边界不清 | ⚠️ 轻微 |
+| `explore_code` | 代码理解大入口（action 参数化） | 名符其实但过于宽泛 | ℹ️ 观察 |
 
-- **observe** —— 观测系统总称（隐喻"摄像头"）
+> 候选方向（如决定处理）：`render_sandbox` → `render_brickwork`（按对象改名）；`extract_contracts` 明确为"契约抽取"语义与 harvest 区分。**均需评估后单独立项。**
 
-- **probe** —— 探针（插桩点）
+### 待评估增强：符号-文件联动改名
 
-- **instrument** —— 插桩动作（`observe_instrument`）
+> 用户提问："重构工具不联动文件名，是不是设计缺陷？"
 
-- **observe** —— 能力域名
+**结论：不是缺陷，是刻意的职责分离**（rename_symbol 改符号、rename_file 改路径，"宁漏不误"）。改符号 ≠ 必须改文件名（`utils.ts` 导出 `foo`、`index.ts` 聚合是合法场景）。
 
-> 同一个机制 4 个词，新人理解成本高。若统一，候选方向：`runtime_observe`（直白）或 `probe_*`（复用已有 probe 词）。**改名是破坏性变更（断 MCP 契约），需评估后单独立项，本文件仅记录审计结论。**
+**但存在真实体验缺口**：当用户确实想"改主符号 + 同步文件名 + 改所有 import"（如 `UserService.ts` 的类改名 `MemberService`），需**手动两步**（先 rename_symbol 再 rename_file），且无工具判断"该文件是否应跟着符号改名"。
+
+**增强建议（待立项）**：给 `rename_symbol` 加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file`。**不改默认行为，纯增量。**
 
 ***
 
 ## 6. 待办 / 开放问题
+
+- [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
+- [ ] 决定 `harvest_*` vs `extract_*` 语义边界是否明确
+- [ ] 评估 `rename_symbol` 增加 `rename_file_if_matching` 联动改名的可行性
 
 - [ ] 确认 B 组三处疑似重复的审计结论
 
@@ -238,10 +252,10 @@
 
   - 结果：不改代码。
 
-- [x] 候选组：`observe_log` / `reconcile_chain`
+- [x] 候选组：`camera_log` / `chain_recon`
   - 核验：读源实现 ✓
 
-  - 发现：`observe_log`=纯事件查询（按文件过滤读 events.jsonl）；`reconcile_chain`=中观对账编排（派生链→过滤事件→判定偏差→链路契约匹配）。后者内部用到前者的读取能力，是编排聚合。
+  - 发现：`camera_log`=纯事件查询（按文件过滤读 events.jsonl）；`chain_recon`=中观对账编排（派生链→过滤事件→判定偏差→链路契约匹配）。后者内部用到前者的读取能力，是编排聚合。
 
   - 处理：判**不合并**。`camera_*` 前缀统一属命名风格，非代码合并，收益有限。
 
