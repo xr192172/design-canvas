@@ -98,7 +98,9 @@ go-trace/
 camera-conformance/
 scaffold/
 # 内部文档（dev 过程稿：plans/progress/验收纪要/报告/preview html）
-docs/
+docs/*
+# 例外：产品规划文档（工具收敛清单等）随仓库追溯，需入库
+!docs/tool-convergence.md
 # 内部交接/狗食试产产物
 HANDOVER_DOGFOOD.md
 # 内部后续开发路径规划（含竞品/许可/变现/缺陷审计等内部结论，不入发布仓库）
