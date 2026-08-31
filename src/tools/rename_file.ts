@@ -20,7 +20,7 @@ import path from 'node:path';
 import { readdirSync } from 'node:fs';
 import { parseAstRoot, type SyntaxNodeLike } from './ts_kernel/kernel.js';
 import { resolveImportTarget, syncFile, removeFile } from '../db/symbols.js';
-import { getProjectCacheDb } from '../db/db.js';
+import { getProjectCacheDb, closeProjectCacheDb } from '../db/db.js';
 
 const SOURCE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
 
@@ -285,6 +285,9 @@ export async function renameFile(input: RenameFileInput): Promise<RenameFileResu
     if (!copySucceeded && fs.existsSync(toAbs)) {
       try { fs.unlinkSync(toAbs); } catch { /* noop */ }
     }
+    // 释放本项目缓存连接（Windows 上文件句柄不释放会导致后续删目录 EBUSY；
+    // close 幂等，后续需要会重新 openDb）——成功/失败路径都释放
+    closeProjectCacheDb(projectRoot);
   }
 
   return { ok: true, dryRun, fromRel, toRel, moved: true, references, editCount, pending };

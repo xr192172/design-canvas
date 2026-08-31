@@ -47,7 +47,7 @@ import { assembleBricks } from './tools/assemble_bricks.js';
 import { narrateStep } from './tools/narrate_step.js';
 import type { NarrateStepInput } from './tools/narrate_step.js';
 import type { AssembleBricksInput } from './tools/assemble_bricks.js';
-import { buildBrickifyPreview } from './tools/render_sandbox.js';
+import { buildBrickifyPreview } from './tools/render_brickwork.js';
 import { harvestFromUrl } from './tools/harvest_from_url.js';
 import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { slimBrick } from './tools/slim_brick.js';
@@ -656,7 +656,7 @@ const TOOL_DEFS: ToolDef[] = [
     handler: renderDslHandler,
   },
   {
-    name: 'render_sandbox',
+    name: 'render_brickwork',
     title: 'Render the dependency-driven community workbench (brickify)',
     description:
       '可视化协作平台的**依赖驱动积木化工作台**渲染（后端数据线路的交付出口）：' +

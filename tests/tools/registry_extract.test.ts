@@ -17,7 +17,7 @@ import type { BrickifyResult } from '../../src/tools/brickify';
 
 const FIXTURE_SRC = `import fs from 'node:fs';
 import { buildBrickify } from './tools/brickify_cli.js';
-import { renderSandbox } from './tools/render_sandbox.js';
+import { renderBrickwork } from './tools/render_brickwork.js';
 import { type Foo } from './types.js';
 
 const getDslHandler = wrap(async (a) => {
@@ -35,12 +35,12 @@ const TOOL_DEFS: ToolDef[] = [
     handler: getDslHandler,
   },
   {
-    name: 'render_sandbox',
+    name: 'render_brickwork',
     title: 'Sandbox render',
     description: '渲染社区工作台 HTML。',
     inputSchema: {},
     handler: wrap(async (a) => {
-      const html = renderSandbox(a as never);
+      const html = renderBrickwork(a as never);
       return html;
     }),
   },
@@ -48,7 +48,7 @@ const TOOL_DEFS: ToolDef[] = [
 `;
 
 function brickifyFixture(): BrickifyResult {
-  const files = ['tools/brickify_cli.ts', 'tools/render_sandbox.ts'];
+  const files = ['tools/brickify_cli.ts', 'tools/render_brickwork.ts'];
   return {
     bricks: [
       {
@@ -109,8 +109,8 @@ describe('extractRegistryTools（确定性提取）', () => {
     const r = extractRegistryTools(FIXTURE_SRC);
     // get_dsl 的 handler 是命名引用（getDslHandler），定义体里调用 buildBrickify
     expect(r.tools[0].implModules).toContain('tools/brickify_cli');
-    // render_sandbox 内联调用 renderSandbox
-    expect(r.tools[1].implModules).toContain('tools/render_sandbox');
+    // render_brickwork 内联调用 renderBrickwork
+    expect(r.tools[1].implModules).toContain('tools/render_brickwork');
     // type-only import 不参与（Foo 未被调用）
     expect(r.tools.flatMap((t) => t.implModules)).not.toContain('types');
   });
@@ -148,13 +148,13 @@ describe('classifyTools（四维标注 + 确定性簇映射）', () => {
 
   it('模块匹配不上簇时如实上报 unmatched（不硬塞）', async () => {
     const src = FIXTURE_SRC.replace("import { type Foo } from './types.js';", "import { ghost } from './ghost.js';").replace(
-      'const html = renderSandbox(a as never);',
-      'const html = renderSandbox(a as never); ghost();',
+      'const html = renderBrickwork(a as never);',
+      'const html = renderBrickwork(a as never); ghost();',
     );
     const r = extractRegistryTools(src);
     const entries = collectFunctions(r.tools, []).entries;
     const map = await classifyTools(entries, brickifyFixture());
-    const render = map.tools.find((t) => t.name === 'render_sandbox')!;
+    const render = map.tools.find((t) => t.name === 'render_brickwork')!;
     expect(render.unmatchedModules).toContain('ghost');
     expect(map.limitations.some((l) => l.includes('未匹配'))).toBe(true);
   });
@@ -165,11 +165,11 @@ describe('collectFunctions（统一功能注册面：MCP + CLI 合并）', () =>
     const r = extractRegistryTools(FIXTURE_SRC);
     const cli = [
       {
-        name: 'render_sandbox',
+        name: 'render_brickwork',
         file: 'render_sandbox_cli.ts',
         desc: '渲染社区工作台的独立阶段 CLI',
         usage: '--project <dir>',
-        implModules: ['tools/render_sandbox'],
+        implModules: ['tools/render_brickwork'],
       },
       {
         name: 'signal_review',
@@ -180,10 +180,10 @@ describe('collectFunctions（统一功能注册面：MCP + CLI 合并）', () =>
       },
     ];
     const reg = collectFunctions(r.tools, cli);
-    // 三个功能：get_dsl(MCP) + render_sandbox(both) + signal_review(CLI)
+    // 三个功能：get_dsl(MCP) + render_brickwork(both) + signal_review(CLI)
     expect(reg.entries).toHaveLength(3);
     expect(reg.meta).toEqual({ mcp: 2, cli: 2, both: 1, mcp_only: 1, cli_only: 1 });
-    const both = reg.entries.find((e) => e.name === 'render_sandbox')!;
+    const both = reg.entries.find((e) => e.name === 'render_brickwork')!;
     expect(both.kind).toBe('both');
     expect(both.mcp?.title).toBe('Sandbox render');
     expect(both.cli?.file).toBe('render_sandbox_cli.ts');

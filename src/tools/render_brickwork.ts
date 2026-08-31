@@ -1,5 +1,5 @@
 /**
- * render_sandbox —— 沙盘视图渲染（后端数据线路的渲染段）
+ * render_brickwork —— 沙盘视图渲染（后端数据线路的渲染段）
  *
  * 消费 BrickBag（assemble_bricks 的产物）→ 生成自包含 HTML 沙盘：
  *    - 每块积木 = 一张卡片（按 total 定宽；顶条按主导侧配色）
@@ -95,7 +95,7 @@ function brickCard(b: Brick, index: number): string {
   </div>`;
 }
 
-export function renderSandboxHtml(bag: BrickBag): string {
+export function renderBrickworkHtml(bag: BrickBag): string {
   const edges = toRenderEdges(bag);
   const m = bag.meta;
   const cardHtml = bag.bricks.map(brickCard).join('\n');
@@ -251,7 +251,7 @@ document.querySelector('#detail .close').addEventListener('click',()=>{detail.st
 export function buildSandboxPreview(opts: { project_dir: string; source_root?: string; out_file?: string }): string {
   const featureMap = buildFeatureMap({ project_dir: opts.project_dir, source_root: opts.source_root });
   const bag = assembleBrickBagWithCall(featureMap);
-  const html = renderSandboxHtml(bag);
+  const html = renderBrickworkHtml(bag);
   const srcRoot = path.resolve(opts.source_root ?? path.resolve(opts.project_dir));
   const out = path.resolve(opts.out_file ?? path.join(path.dirname(srcRoot), '..', 'docs', 'sandbox_preview.html'));
   fs.mkdirSync(path.dirname(out), { recursive: true });

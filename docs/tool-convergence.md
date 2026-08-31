@@ -197,17 +197,25 @@
 
 **但存在真实体验缺口**：当用户确实想"改主符号 + 同步文件名 + 改所有 import"（如 `UserService.ts` 的类改名 `MemberService`），需**手动两步**（先 rename\_symbol 再 rename\_file），且无工具判断"该文件是否应跟着符号改名"。
 
-**增强建议（已实现 2026-08）**：`rename_symbol` 已加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file` 改文件路径 + 全仓 import 改写。**不改默认行为（缺省 false），纯增量**。专项测试 12/12 绿。
+**增强建议（已实现 2026-08，commit 0b7e202）**：`rename_symbol` 已加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file` 改文件路径 + 全仓 import 改写。**不改默认行为（缺省 false），纯增量**。专项 12 测试 + 全量 1343 绿。
+
+### 新发现命名摩擦处理记录（2026-08）
+
+| 名称                                           | 处理结论                                                                                                                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`render_dsl`** **vs** **`render_sandbox`** | ✅ **已改名**：`render_sandbox` → `render_brickwork`（MCP 工具名 + 实现文件 + 测试 + 文档全改）。消除 render 一词承担"设计稿渲染 vs 工程分析可视化"两种职责的混淆。`render_sandbox_canvas`（画布沙盘）为独立文件，保留。 |
+| **`harvest_*`** **vs** **`extract_*`**       | 📋 **不改名，明确边界**：`harvest`=从项目采集积木入盒；`extract_contracts`=从源码抽取契约（是 harvest 流程的内部步骤，产物=契约）。语义有层次非冲突，文档明确即可。                                                  |
+| `explore_code`                               | ℹ️ 观察（名符其实，过于宽泛但不改）                                                                                                                                        |
 
 ***
 
 ## 6. 待办 / 开放问题
 
-- [x] 评估 `rename_symbol` 增加 `rename_file_if_matching` 联动改名的可行性 → 已实现
+- [x] `render_sandbox` → `render_brickwork` 改名 → 已实现
 
-- [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
+- [x] `harvest_*` vs `extract_*` 语义边界 → 文档已明确
 
-- [ ] 决定 `harvest_*` vs `extract_*` 语义边界是否明确
+- [x] `rename_symbol` 增加 `rename_file_if_matching` 联动改名 → 已实现
 
 - [ ] 确认 B 组三处疑似重复的审计结论
 

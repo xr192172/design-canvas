@@ -127,7 +127,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 |------|------|
 | `import_project` | Import a code project into DSL (local absolute path or browser upload; honors `.gitignore`) |
 | `diff_views` | Diff the design view against the live code snapshot |
-| `render_sandbox` | Render a dependency-driven feature-community workbench (brickified preview) |
+| `render_brickwork` | Render a dependency-driven feature-community workbench (brickified preview) |
 
 **Brick system**
 
