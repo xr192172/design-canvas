@@ -52,13 +52,17 @@ DSL 双层结构是两者的共同根基：
 ## 快速开始
 
 ```bash
-# 安装依赖
+# 1. 将代码克隆到本地（首次）
+git clone https://github.com/xr192172/design-canvas.git
+cd design-canvas
+
+# 2. 安装依赖
 npm install
 
-# 构建
+# 3. 构建
 npm run build
 
-# 启动 MCP server（stdio 模式）
+# 4. 启动 MCP server（stdio 模式）
 npm start
 ```
 

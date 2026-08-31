@@ -52,13 +52,17 @@ One thread runs through everything: **any code → bricks (production) → trust
 ## Quick Start
 
 ```bash
-# Install dependencies
+# 1. Clone the repository to your machine (first time)
+git clone https://github.com/xr192172/design-canvas.git
+cd design-canvas
+
+# 2. Install dependencies
 npm install
 
-# Build
+# 3. Build
 npm run build
 
-# Start the MCP server (stdio mode)
+# 4. Start the MCP server (stdio mode)
 npm start
 ```
 
