@@ -1270,6 +1270,7 @@ const TOOL_DEFS: ToolDef[] = [
       '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。' +
       'rename_file_if_matching=true（可选，默认 false）：当符号是文件主导出（文件名=符号名，如 UserService.ts 的 UserService 类）时，' +
       '符号改名成功后自动联动把文件也改名（含全仓 import 引用改写）。不改默认行为，纯增量。' +
+      'dry_run=true（可选，默认 false）：只算结构化 diff（每个文件每处 old→new 编辑）不落盘，供预览验证。' +
       'project_dir 可省略：缺省时自动定位项目根（git 根→manifest→文件目录），并按依赖闭包扩展边界（含跨 git 根引用）。',
     inputSchema: {
       project_dir: z.string().optional().describe('目标项目根目录（可选；缺省自动定位：git 根→manifest→file 目录）'),
@@ -1277,6 +1278,7 @@ const TOOL_DEFS: ToolDef[] = [
       symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
       to: z.string().describe('新符号名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
       rename_file_if_matching: z.boolean().optional().describe('true=符号是文件主导出（文件名=符号名）时，联动把文件改名（默认 false）'),
+      dry_run: z.boolean().optional().describe('true=只算结构化 diff 不落盘（dry-run 预览，默认 false）'),
     },
     handler: wrap(async (a) => {
       const { file, symbol, to } = a;
@@ -1286,17 +1288,23 @@ const TOOL_DEFS: ToolDef[] = [
         symbol: String(symbol),
         to: String(to),
         rename_file_if_matching: a.rename_file_if_matching === true,
+        dry_run: a.dry_run === true,
       });
       if (!r.ok) {
         return { message: `跨文件改名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
       }
-      const parts = [`跨文件改名完成：${r.symbol} → ${r.to}`];
-      if (r.fileRenamed) parts.push(`\t文件联动改名：${r.fileRenamed}`);
+      const fmtFile = (f: { file: string; edits: number; note: string; ops?: { old: string; new: string }[] }): string => {
+        const base = `  - ${f.file}（${f.edits} 处，${f.note}）`;
+        const pairs = f.ops && f.ops.length ? [...new Map(f.ops.map((o) => [`${o.old} → ${o.new}`, true])).keys()] : [];
+        return pairs.length ? `${base}：${pairs.join('，')}` : base;
+      };
+      const parts = [r.dryRun ? `[dry-run 预览·未落盘] 跨文件改名：${r.symbol} → ${r.to}` : `跨文件改名完成：${r.symbol} → ${r.to}`];
+      if (r.fileRenamed) parts.push(`\t${r.dryRun ? '计划联动' : '文件联动'}改名：${r.fileRenamed}`);
       if (r.fileRenameBlocked) parts.push(`\t⚠ 文件联动未执行：${r.fileRenameBlocked.join('；')}`);
-      if (r.definition) parts.push(`\t定义文件 ${r.definition.file}（${r.definition.edits} 处编辑，${r.definition.note}）`);
+      if (r.definition) parts.push(fmtFile(r.definition));
       if (r.importers && r.importers.length > 0) {
         parts.push(`\t影响 ${r.importers.length} 个导入文件：`);
-        for (const i of r.importers) parts.push(`\t  - ${i.file}（${i.edits} 处编辑，${i.note}）`);
+        for (const i of r.importers) parts.push(fmtFile(i));
       } else {
         parts.push('\t无其它文件引用该符号');
       }

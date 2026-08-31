@@ -483,6 +483,22 @@ function applyEdits(src: string, edits: Edit[]): string {
   return out;
 }
 
+/** 结构化编辑操作：一次"旧 → 新"替换（供 LLM 直接验证，不只给计数） */
+export interface RenameEditOp {
+  /** 字节偏移（在源文件中） */
+  pos: number;
+  /** 被替换的字节数 */
+  len: number;
+  /** 被替换的旧文本 */
+  old: string;
+  /** 替换成的新文本 */
+  new: string;
+}
+
+function toOps(src: string, edits: Edit[]): RenameEditOp[] {
+  return edits.map((e) => ({ pos: e.pos, len: e.len, old: src.slice(e.pos, e.pos + e.len), new: e.text }));
+}
+
 // ─────────────────────────────────────────────
 // 跨文件符号改名执行器
 // ─────────────────────────────────────────────
@@ -497,12 +513,16 @@ export interface RenameSymbolInput {
   to: string;
   /** true=当符号是文件主导出（文件名=符号名）时，联动把文件也改名为 to（增量，默认 false 不改） */
   rename_file_if_matching?: boolean;
+  /** true=只算结构化 diff 不落盘（dry-run 预览）；默认 false 直接改写文件 */
+  dry_run?: boolean;
 }
 
 export interface RenameSymbolFileInfo {
   file: string;
   /** 实际替换的字节数 */
   edits: number;
+  /** 结构化编辑操作（old→new，供 LLM 验证；dry_run 或成功后均返回） */
+  ops?: RenameEditOp[];
   /** 说明（'定义+同文件引用' / 'import+引用' / 'import 子句（别名）' / 're-export'） */
   note: string;
 }
@@ -514,6 +534,8 @@ export interface RenameSymbolResult {
   definition?: RenameSymbolFileInfo;
   importers?: RenameSymbolFileInfo[];
   filesWritten: number;
+  /** 是否 dry-run（true=未落盘，只出 diff 预览） */
+  dryRun?: boolean;
   /** 联动文件名（rename_file_if_matching 且文件名=符号名时，被同步改名的新路径） */
   fileRenamed?: string;
   /** 文件联动阻断理由（符号已改名成功，仅文件联动失败时给出） */
@@ -525,6 +547,7 @@ export interface RenameSymbolResult {
 export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymbolResult> {
   const { file, symbol, to } = input;
   const renameFileIfMatching = !!input.rename_file_if_matching;
+  const dryRun = input.dry_run === true;
   const blocked: string[] = [];
 
   // 基础校验
@@ -569,16 +592,19 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   const byNoExt = buildNoExt(files);
 
   // 解析 importer 文件
-  const importerEdits: Map<string, { edits: Edit[]; note: string }> = new Map();
+  const importerEdits: Map<string, { edits: Edit[]; note: string; src: string }> = new Map();
   for (const f of files) {
     if (path.resolve(f) === defAbs) continue;
     const ext = path.extname(f);
     if (!TS_EXTS.has(ext)) continue;
     let fmod: ModuleAnalysis | null;
+    let src: string;
     try {
-      fmod = await analyzeModuleSource(readFileSync(f, 'utf-8'), f);
+      src = readFileSync(f, 'utf-8');
+      fmod = await analyzeModuleSource(src, f);
     } catch {
       fmod = null;
+      src = '';
     }
     if (!fmod) continue;
 
@@ -624,30 +650,29 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
       }
     }
 
-    if (touched) importerEdits.set(f, { edits: fileEdits, note: note || 'import' });
+    if (touched) importerEdits.set(f, { edits: fileEdits, note: note || 'import', src });
   }
 
   // 原子性：任一阻断 → 全部不落盘
   if (blocked.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked };
 
-  // 落盘
+  // 落盘（dry_run=true 时只算 diff 不写文件；filesWritten 始终=实际落盘数）
   let filesWritten = 0;
   const importers: RenameSymbolFileInfo[] = [];
   if (defEdits.length > 0) {
     const out = applyEdits(defSrc, defEdits);
-    if (out !== defSrc) {
+    if (out !== defSrc && !dryRun) {
       writeFileSync(defAbs, out, 'utf-8');
       filesWritten++;
     }
   }
-  for (const [f, { edits, note }] of importerEdits) {
-    const src = readFileSync(f, 'utf-8');
+  for (const [f, { edits, note, src }] of importerEdits) {
     const out = applyEdits(src, edits);
-    if (out !== src) {
+    if (out !== src && !dryRun) {
       writeFileSync(f, out, 'utf-8');
       filesWritten++;
     }
-    importers.push({ file: path.relative(resolvedRoot, f) || f, edits: edits.filter((e) => e.len > 0).length, note });
+    importers.push({ file: (path.relative(resolvedRoot, f) || f).replace(/\\/g, '/'), edits: edits.filter((e) => e.len > 0).length, note, ops: toOps(src, edits) });
   }
 
   // 联动改名文件：当符号是文件主导出（文件名=符号名）且开启 rename_file_if_matching 时，
@@ -659,11 +684,17 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     const defBase = path.basename(defAbs, defExt);
     if (defBase === symbol) {
       const newPath = path.join(path.dirname(defAbs), to + defExt);
-      const fr = await renameFile({ project_dir: resolvedRoot, from: defAbs, to: newPath, dry_run: false });
-      if (fr.ok && fr.moved) {
-        fileRenamed = (path.relative(resolvedRoot, newPath) || newPath).replace(/\\/g, '/');
+      const relNew = (path.relative(resolvedRoot, newPath) || newPath).replace(/\\/g, '/');
+      if (dryRun) {
+        // dry-run：只出计划中的文件名，不做真实迁移
+        fileRenamed = relNew;
       } else {
-        fileRenameBlocked = fr.blocked?.length ? fr.blocked : ['文件联动未执行（rename_file 返回未移动）'];
+        const fr = await renameFile({ project_dir: resolvedRoot, from: defAbs, to: newPath, dry_run: false });
+        if (fr.ok && fr.moved) {
+          fileRenamed = relNew;
+        } else {
+          fileRenameBlocked = fr.blocked?.length ? fr.blocked : ['文件联动未执行（rename_file 返回未移动）'];
+        }
       }
     }
   }
@@ -672,7 +703,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     ok: true,
     symbol,
     to,
-    definition: { file: path.relative(resolvedRoot, defAbs) || defAbs, edits: defEdits.length, note: '定义+同文件引用' },
+    dryRun: dryRun || undefined,
+    definition: { file: (path.relative(resolvedRoot, defAbs) || defAbs).replace(/\\/g, '/'), edits: defEdits.length, note: '定义+同文件引用', ops: toOps(defSrc, defEdits) },
     importers,
     filesWritten,
     ...(fileRenamed !== undefined ? { fileRenamed } : {}),

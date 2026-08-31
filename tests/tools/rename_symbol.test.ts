@@ -346,3 +346,64 @@ describe('renameSymbol - 自动定位项目根（project_dir 省略，依赖 pro
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - dry_run 结构化 diff 预览', () => {
+  it('dry_run=true → 不落盘，返回 dryRun + 每处 old→new 编辑', async () => {
+    const dir = mkProj({
+      'src/def.ts': [
+        'export function compute(a: number): number { return a * 2; }',
+        'export { compute };',
+      ].join('\n'),
+      'src/a.ts': [
+        "import { compute } from './def';",
+        'export function run() { return compute(3); }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally', dry_run: true });
+    expect(r.ok).toBe(true);
+    expect(r.dryRun).toBe(true);
+    expect(r.filesWritten).toBe(0); // 未落盘
+
+    // 定义文件 + importer 都未被物理改动
+    expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function compute');
+    expect(readFileSync(path.join(dir, 'src/a.ts'), 'utf-8')).toContain("import { compute }");
+
+    // 结构化 diff：定义文件含声明处 compute→tally
+    expect(r.definition).toBeDefined();
+    expect(r.definition!.ops!.some((o) => o.old === 'compute' && o.new === 'tally')).toBe(true);
+    // importer：import 远程名 + 使用点，2 处都是 compute→tally
+    const imp = r.importers!.find((i) => i.file === 'src/a.ts')!;
+    expect(imp.ops!.length).toBe(2);
+    expect(imp.ops!.every((o) => o.old === 'compute' && o.new === 'tally')).toBe(true);
+    // ops 的字节区间落在源文件合法范围内（可被 LLM 据此重放验证）
+    const srcA = readFileSync(path.join(dir, 'src/a.ts'), 'utf-8');
+    for (const o of imp.ops!) {
+      expect(o.pos).toBeGreaterThanOrEqual(0);
+      expect(o.pos + o.len).toBeLessThanOrEqual(srcA.length);
+    }
+    rmForce(dir);
+  });
+
+  it('dry_run=true + rename_file_if_matching → 只报计划联动名，文件物理未动', async () => {
+    const dir = mkProj({
+      'src/UserService.ts': 'export class UserService {}\n',
+      'src/app.ts': "import { UserService } from './UserService';\nexport function make() { return new UserService(); }\n",
+    });
+    const r = await renameSymbol({
+      project_dir: dir,
+      file: 'src/UserService.ts',
+      symbol: 'UserService',
+      to: 'MemberService',
+      rename_file_if_matching: true,
+      dry_run: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.dryRun).toBe(true);
+    expect(r.fileRenamed).toBe('src/MemberService.ts'); // 计划联动名
+    // 物理未动
+    expect(readFileSync(path.join(dir, 'src/UserService.ts'), 'utf-8')).toContain('export class UserService');
+    expect(() => readFileSync(path.join(dir, 'src/MemberService.ts'), 'utf-8')).toThrow();
+    rmForce(dir);
+  });
+});
