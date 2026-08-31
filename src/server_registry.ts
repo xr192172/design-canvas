@@ -1267,20 +1267,31 @@ const TOOL_DEFS: ToolDef[] = [
       '在定义文件上发起（file 必须是该符号的声明文件），改：定义名 + 同文件内对该符号的所有引用（含 export 列表）' +
       '+ 所有 import 该符号的文件里的 import 子句远程名与无别名使用点。' +
       '支持 function/const/class/interface/type/enum 模块级符号；class/enum 值+类型双栖都改，interface/type 只改类型引用。' +
-      '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。',
+      '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。' +
+      'rename_file_if_matching=true（可选，默认 false）：当符号是文件主导出（文件名=符号名，如 UserService.ts 的 UserService 类）时，' +
+      '符号改名成功后自动联动把文件也改名（含全仓 import 引用改写）。不改默认行为，纯增量。',
     inputSchema: {
       project_dir: z.string().describe('目标项目根目录（用于解析 file 为绝对路径）'),
       file: z.string().describe('定义符号的文件（相对 project_dir 或绝对路径；必须是该符号的声明文件，而非 import 它的文件）'),
       symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
       to: z.string().describe('新符号名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
+      rename_file_if_matching: z.boolean().optional().describe('true=符号是文件主导出（文件名=符号名）时，联动把文件改名（默认 false）'),
     },
     handler: wrap(async (a) => {
       const { project_dir, file, symbol, to } = a;
-      const r = await renameSymbol({ project_dir: String(project_dir), file: String(file), symbol: String(symbol), to: String(to) });
+      const r = await renameSymbol({
+        project_dir: String(project_dir),
+        file: String(file),
+        symbol: String(symbol),
+        to: String(to),
+        rename_file_if_matching: a.rename_file_if_matching === true,
+      });
       if (!r.ok) {
         return { message: `跨文件改名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
       }
       const parts = [`跨文件改名完成：${r.symbol} → ${r.to}`];
+      if (r.fileRenamed) parts.push(`\t文件联动改名：${r.fileRenamed}`);
+      if (r.fileRenameBlocked) parts.push(`\t⚠ 文件联动未执行：${r.fileRenameBlocked.join('；')}`);
       if (r.definition) parts.push(`\t定义文件 ${r.definition.file}（${r.definition.edits} 处编辑，${r.definition.note}）`);
       if (r.importers && r.importers.length > 0) {
         parts.push(`\t影响 ${r.importers.length} 个导入文件：`);

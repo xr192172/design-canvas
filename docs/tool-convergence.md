@@ -157,8 +157,9 @@
 
 ### ✅ 已完成的改名（2026-08，commit d7e4953）
 
-- **camera → observe**：全量子系统改名（目录 src/camera→observe、工具 camera_*→observe_*、事件路径 .agent/camera→.agent/observe、go-camera→go-observe、env CAMERA_*→OBSERVE_*）。消除了 camera/probe/instrument/observe 命名通胀。
-- **chain_recon → reconcile_chain**：拼写统一（recon→reconcile）。
+- **camera → observe**：全量子系统改名（目录 src/camera→observe、工具 camera\_*→observe\_*、事件路径 .agent/camera→.agent/observe、go-camera→go-observe、env CAMERA\_*→OBSERVE\_*）。消除了 camera/probe/instrument/observe 命名通胀。
+
+- **chain\_recon → reconcile\_chain**：拼写统一（recon→reconcile）。
 
 ### 起名贴切（隐喻自洽 + 直白）
 
@@ -173,18 +174,18 @@
 
 ### 起名有摩擦（待决定是否改）
 
-| 工具                 | 实际功能            | 摩擦点                                                 | 评级       |
-| ------------------ | --------------- | --------------------------------------------------- | -------- |
-| `reconcile_*`（对账）  | 用运行时观测校准契约      | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微    |
-| `chain_recon`（链对账） | 声明链 vs 实测链对账    | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 已改名 reconcile_chain |
+| 工具                 | 实际功能         | 摩擦点                                                 | 评级                      |
+| ------------------ | ------------ | --------------------------------------------------- | ----------------------- |
+| `reconcile_*`（对账）  | 用运行时观测校准契约   | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微                   |
+| `chain_recon`（链对账） | 声明链 vs 实测链对账 | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 已改名 reconcile\_chain |
 
 ### 新发现命名摩擦（待定，2026-08）
 
-| 名称 | 实际功能 | 摩擦点 | 评级 |
-|---|---|---|---|
-| **`render_dsl` vs `render_sandbox`** | render_dsl=渲染 DSL 设计稿(mindmap/svg/md)；render_sandbox=渲染工程依赖积木工作台(brickify) | **render 一词承担两种不相关职责**（设计稿渲染 vs 代码分析可视化），与 camera 命名通胀同型 | ⚠️ 中等 |
-| **`harvest_*` vs `extract_*`** | harvest=收割积木入盒；extract=抽取契约 | harvest 与 extract 语义重叠（"采集/抽取"），边界不清 | ⚠️ 轻微 |
-| `explore_code` | 代码理解大入口（action 参数化） | 名符其实但过于宽泛 | ℹ️ 观察 |
+| 名称                                           | 实际功能                                                                         | 摩擦点                                                      | 评级    |
+| -------------------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- | ----- |
+| **`render_dsl`** **vs** **`render_sandbox`** | render\_dsl=渲染 DSL 设计稿(mindmap/svg/md)；render\_sandbox=渲染工程依赖积木工作台(brickify) | **render 一词承担两种不相关职责**（设计稿渲染 vs 代码分析可视化），与 camera 命名通胀同型 | ⚠️ 中等 |
+| **`harvest_*`** **vs** **`extract_*`**       | harvest=收割积木入盒；extract=抽取契约                                                  | harvest 与 extract 语义重叠（"采集/抽取"），边界不清                     | ⚠️ 轻微 |
+| `explore_code`                               | 代码理解大入口（action 参数化）                                                          | 名符其实但过于宽泛                                                | ℹ️ 观察 |
 
 > 候选方向（如决定处理）：`render_sandbox` → `render_brickwork`（按对象改名）；`extract_contracts` 明确为"契约抽取"语义与 harvest 区分。**均需评估后单独立项。**
 
@@ -192,19 +193,21 @@
 
 > 用户提问："重构工具不联动文件名，是不是设计缺陷？"
 
-**结论：不是缺陷，是刻意的职责分离**（rename_symbol 改符号、rename_file 改路径，"宁漏不误"）。改符号 ≠ 必须改文件名（`utils.ts` 导出 `foo`、`index.ts` 聚合是合法场景）。
+**结论：不是缺陷，是刻意的职责分离**（rename\_symbol 改符号、rename\_file 改路径，"宁漏不误"）。改符号 ≠ 必须改文件名（`utils.ts` 导出 `foo`、`index.ts` 聚合是合法场景）。
 
-**但存在真实体验缺口**：当用户确实想"改主符号 + 同步文件名 + 改所有 import"（如 `UserService.ts` 的类改名 `MemberService`），需**手动两步**（先 rename_symbol 再 rename_file），且无工具判断"该文件是否应跟着符号改名"。
+**但存在真实体验缺口**：当用户确实想"改主符号 + 同步文件名 + 改所有 import"（如 `UserService.ts` 的类改名 `MemberService`），需**手动两步**（先 rename\_symbol 再 rename\_file），且无工具判断"该文件是否应跟着符号改名"。
 
-**增强建议（待立项）**：给 `rename_symbol` 加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file`。**不改默认行为，纯增量。**
+**增强建议（已实现 2026-08）**：`rename_symbol` 已加 `rename_file_if_matching=true` 参数——当符号是文件主导出（文件名=符号名）时，自动联动 `rename_file` 改文件路径 + 全仓 import 改写。**不改默认行为（缺省 false），纯增量**。专项测试 12/12 绿。
 
 ***
 
 ## 6. 待办 / 开放问题
 
+- [x] 评估 `rename_symbol` 增加 `rename_file_if_matching` 联动改名的可行性 → 已实现
+
 - [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
+
 - [ ] 决定 `harvest_*` vs `extract_*` 语义边界是否明确
-- [ ] 评估 `rename_symbol` 增加 `rename_file_if_matching` 联动改名的可行性
 
 - [ ] 确认 B 组三处疑似重复的审计结论
 

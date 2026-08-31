@@ -26,6 +26,7 @@ import path from 'node:path';
 import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
+import { renameFile } from './rename_file.js';
 
 // ─────────────────────────────────────────────
 // 最小 tree-sitter 节点面（同 Kernel）
@@ -513,6 +514,8 @@ export interface RenameSymbolInput {
   symbol: string;
   /** 新符号名（必须为合法标识符） */
   to: string;
+  /** true=当符号是文件主导出（文件名=符号名）时，联动把文件也改名为 to（增量，默认 false 不改） */
+  rename_file_if_matching?: boolean;
 }
 
 export interface RenameSymbolFileInfo {
@@ -530,12 +533,17 @@ export interface RenameSymbolResult {
   definition?: RenameSymbolFileInfo;
   importers?: RenameSymbolFileInfo[];
   filesWritten: number;
+  /** 联动文件名（rename_file_if_matching 且文件名=符号名时，被同步改名的新路径） */
+  fileRenamed?: string;
+  /** 文件联动阻断理由（符号已改名成功，仅文件联动失败时给出） */
+  fileRenameBlocked?: string[];
   /** 阻断理由（ok=false 时给出全部） */
   blocked?: string[];
 }
 
 export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymbolResult> {
   const { project_dir, file, symbol, to } = input;
+  const renameFileIfMatching = !!input.rename_file_if_matching;
   const blocked: string[] = [];
 
   // 基础校验
@@ -652,6 +660,24 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     importers.push({ file: path.relative(project_dir, f) || f, edits: edits.filter((e) => e.len > 0).length, note });
   }
 
+  // 联动改名文件：当符号是文件主导出（文件名=符号名）且开启 rename_file_if_matching 时，
+  // 符号已改名成功，把文件路径也同步为 to（保持"文件名=主导出"约定）。
+  // 文件联动是增量增强：失败不阻断符号改名，仅记录理由。
+  let fileRenamed: string | undefined;
+  let fileRenameBlocked: string[] | undefined;
+  if (renameFileIfMatching) {
+    const defBase = path.basename(defAbs, defExt);
+    if (defBase === symbol) {
+      const newPath = path.join(path.dirname(defAbs), to + defExt);
+      const fr = await renameFile({ project_dir: path.resolve(String(project_dir)), from: defAbs, to: newPath, dry_run: false });
+      if (fr.ok && fr.moved) {
+        fileRenamed = (path.relative(project_dir, newPath) || newPath).replace(/\\/g, '/');
+      } else {
+        fileRenameBlocked = fr.blocked?.length ? fr.blocked : ['文件联动未执行（rename_file 返回未移动）'];
+      }
+    }
+  }
+
   return {
     ok: true,
     symbol,
@@ -659,5 +685,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     definition: { file: path.relative(project_dir, defAbs) || defAbs, edits: defEdits.length, note: '定义+同文件引用' },
     importers,
     filesWritten,
+    ...(fileRenamed !== undefined ? { fileRenamed } : {}),
+    ...(fileRenameBlocked !== undefined ? { fileRenameBlocked } : {}),
   };
 }

@@ -26,6 +26,24 @@ function mkProj(files: Record<string, string>): string {
   return dir;
 }
 
+// 联动改名会经 rename_file 打开项目 sqlite 索引（进程内未立即释放），
+// Windows 上立刻 rmSync 可能 EBUSY——重试删除，避免测试清理时序误报。
+function rmForce(dir: string): void {
+  for (let i = 0; i < 5; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      // 句柄尚未释放，稍候重试
+    }
+  }
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* 忽略最终失败（临时目录，OS 会回收） */
+  }
+}
+
 describe('analyzeModuleSource - 模块级作用域解析', () => {
   it('根作用域收集声明 + import 绑定，值引用解析到根', async () => {
     const src = [
@@ -222,5 +240,57 @@ describe('renameSymbol - 原子阻断（全部不落盘）', () => {
     expect(r.blocked!.some((b) => b.includes('export *'))).toBe(true);
     expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function compute');
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('renameSymbol - 文件联动改名（rename_file_if_matching）', () => {
+  it('符号=文件名（UserService 类在 UserService.ts）→ 联动把文件也改名', async () => {
+    const dir = mkProj({
+      'src/UserService.ts': [
+        'export class UserService {',
+        '  greet(): string { return "hi"; }',
+        '}',
+      ].join('\n'),
+      'src/app.ts': [
+        "import { UserService } from './UserService';",
+        'export function make() { return new UserService(); }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'src/UserService.ts', symbol: 'UserService', to: 'MemberService', rename_file_if_matching: true });
+    expect(r.ok).toBe(true);
+    expect(r.fileRenamed).toBe('src/MemberService.ts');
+
+    // 文件已物理改名
+    expect(readFileSync(path.join(dir, 'src/MemberService.ts'), 'utf-8')).toContain('export class MemberService');
+    expect(() => readFileSync(path.join(dir, 'src/UserService.ts'), 'utf-8')).toThrow();
+    // import 引用已改写
+    const app = readFileSync(path.join(dir, 'src/app.ts'), 'utf-8');
+    expect(app).toContain("import { MemberService } from './MemberService';");
+    expect(app).toContain('new MemberService()');
+    rmForce(dir);
+  });
+
+  it('符号≠文件名（def.ts 导出 compute）→ 不联动文件', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export function compute(a: number) { return a; }\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally', rename_file_if_matching: true });
+    expect(r.ok).toBe(true);
+    expect(r.fileRenamed).toBeUndefined();
+    // 文件未改名，符号已改
+    expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function tally');
+    rmForce(dir);
+  });
+
+  it('rename_file_if_matching 缺省（false）→ 不改文件', async () => {
+    const dir = mkProj({
+      'src/UserService.ts': 'export class UserService {}\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/UserService.ts', symbol: 'UserService', to: 'MemberService' });
+    expect(r.ok).toBe(true);
+    expect(r.fileRenamed).toBeUndefined();
+    expect(readFileSync(path.join(dir, 'src/UserService.ts'), 'utf-8')).toContain('export class MemberService');
+    rmForce(dir);
   });
 });
