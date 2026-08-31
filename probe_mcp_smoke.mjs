@@ -37,8 +37,7 @@ await send('notifications/initialized', {});
 const tools = await send('tools/list', {});
 const toolNames = tools.result.tools.map((t) => t.name);
 console.log('工具总数:', toolNames.length);
-console.log('read_canvas_notes:', toolNames.includes('read_canvas_notes') ? '✅' : '❌');
-console.log('mark_canvas_notes_status:', toolNames.includes('mark_canvas_notes_status') ? '✅' : '❌');
+console.log('canvas_notes:', toolNames.includes('canvas_notes') ? '✅' : '❌');
 
 const resources = await send('resources/list', {});
 console.log('resources/list 响应:', JSON.stringify(resources, null, 1));

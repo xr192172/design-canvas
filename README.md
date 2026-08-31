@@ -22,6 +22,7 @@
 DSL 双层结构是两者的共同根基：
 
 * **`geometry`（几何层）**：节点位置与连线，描述"长什么样"；
+
 * **`semantic`（语义层）**：节点含义、契约与决策，描述"为什么这么做"。
 
 人机协作是这套机制的载体而非全部：LLM 与人类共享同一份 DSL JSON，前端将其渲染为可交互图形，供审阅、标注与修改。
@@ -45,7 +46,7 @@ DSL 双层结构是两者的共同根基：
 | **代码积木体系**        | 从任意来源（URL / 本地工程）收割代码为带契约的积木，支持切块、抽契约、瘦身、搜索与拼装 | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
 | **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `camera_instrument` / `camera_judge` / `chain_recon` / `reconcile_brick` / `reconcile_effects`                    |
 | **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架，解析实现回填契约，输出一致性报告                  | `scaffold` / `backfill_scaffold` / `consistency_check`                                                            |
-| **确定性改造（防返工）** | 符号级代码编辑（绝不匹配错）、批量/跨文件重命名、死代码清理、改前 diff 审批、失败回滚 | `edit_code` / `rename_*` / `refactor_pipeline` |
+| **确定性改造（防返工）**    | 符号级代码编辑（绝不匹配错）、批量/跨文件重命名、死代码清理、改前 diff 审批、失败回滚 | `edit_code` / `rename_*` / `refactor_pipeline`                                                                    |
 | **诊断闭环**          | 症状 → 根因 → 修复 → 验证 → 提交（或回退）的完整链路               | `diagnose` / `refactor_judge` / `diagnose-loop`(CLI)                                                              |
 | **多语言 AST 根基**    | 基于 tree-sitter 的符号 / import / 调用边 / 类型引用统一产出   | `ts_kernel` / `package_migration`                                                                                 |
 
@@ -174,16 +175,14 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **画布批注**
 
-| 工具                         | 用途                      |
-| -------------------------- | ----------------------- |
-| `read_canvas_notes`        | 读取画布几何批注，转为语义工单         |
-| `mark_canvas_notes_status` | 更新批注状态（处理 / 关闭）         |
-| `decide_canvas_notes`      | 由 LLM 裁决批注与 DSL 目标的对应关系 |
+| 工具             | 用途                                                |
+| -------------- | ------------------------------------------------- |
+| `canvas_notes` | 画布批注统一入口（read=读成语义工单 / mark=更新状态 / decide=LLM 决策） |
 
 **LLM 网关**
 
-| 工具                        | 用途                          |
-| ------------------------- | --------------------------- |
+| 工具                 | 用途                                                      |
+| ------------------ | ------------------------------------------------------- |
 | `gateway_provider` | LLM 供应商/用量统一入口（list / upsert / delete / stats 四 action） |
 
 **项目文档**

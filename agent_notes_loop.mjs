@@ -87,14 +87,14 @@ console.log('[0] 预置 2 条 open 批注（锚定真实文件节点），决策
 await send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'external-agent-probe', version: '1.0' } });
 await send('notifications/initialized', {});
 const tools = (await send('tools/list', {})).result.tools.map((t) => t.name);
-check('工具已注册 read_canvas_notes', tools.includes('read_canvas_notes'));
-check('工具已注册 mark_canvas_notes_status', tools.includes('mark_canvas_notes_status'));
-check('工具已注册 decide_canvas_notes（内置 LLM 决策器）', tools.includes('decide_canvas_notes'));
+check('工具已注册 canvas_notes', tools.includes('canvas_notes'));
+check('工具已注册 canvas_notes(含mark)', tools.includes('canvas_notes'));
+check('工具已注册 canvas_notes(含decide)', tools.includes('canvas_notes'));
 
 /* ---------- 2. agent 读批注工单（JSON 结构化，捆绑 L1-L4 上下文） ---------- */
 const read = parseToolResult(await send('tools/call', {
-  name: 'read_canvas_notes',
-  arguments: { feature: FEATURE, format: 'json' },
+  name: 'canvas_notes',
+  arguments: { action: 'read', feature: FEATURE, format: 'json' },
 }));
 const data = read.data;
 check('read_canvas_notes 返回 2 条', data.total === 2, `total=${data.total} open=${data.open}`);
@@ -111,8 +111,8 @@ check('工单携带 L1-L4 上下文', !!first.target && !!(first.target.feature 
 /* ---------- 3. LLM 决策器（decide_canvas_notes）替换手写决策段 ---------- */
 console.log('[3] LLM 决策器读工单 → 决策 → 映射审批流');
 const decide = parseToolResult(await send('tools/call', {
-  name: 'decide_canvas_notes',
-  arguments: { feature: FEATURE },
+  name: 'canvas_notes',
+  arguments: { action: 'decide', feature: FEATURE },
 }));
 const dd = decide.data;
 console.log('  决策模式: ' + dd.note);
@@ -151,15 +151,15 @@ if (changeDecisions.length > 0) {
 // 模拟"human 已处理"→ 标 done（画布显示已处理）
 const stillOpen = [d1, d2].filter((d) => d && d.action === 'change');
 const mark = parseToolResult(await send('tools/call', {
-  name: 'mark_canvas_notes_status',
-  arguments: { feature: FEATURE, updates: stillOpen.map((d) => ({ id: d.note_id, status: 'done' })) },
+  name: 'canvas_notes',
+  arguments: { action: 'mark', feature: FEATURE, updates: stillOpen.map((d) => ({ id: d.note_id, status: 'done' })) },
 }));
 check('剩余 change 工单已标 done（画布已处理）', !mark.message.startsWith('Error'), (mark.message || '').slice(0, 50));
 
 /* ---------- 5. 回读验证：状态归组 + digest 已处理段 ---------- */
 const read2 = parseToolResult(await send('tools/call', {
-  name: 'read_canvas_notes',
-  arguments: { feature: FEATURE, format: 'json' },
+  name: 'canvas_notes',
+  arguments: { action: 'read', feature: FEATURE, format: 'json' },
 }));
 const d2r = read2.data;
 check('回读 open=0（全部落终态）', d2r.open === 0 && d2r.done + d2r.rejected === 2, `open=${d2r.open} done=${d2r.done} rejected=${d2r.rejected}`);

@@ -22,6 +22,14 @@
 
 ## 2. 三层分层框架
 
+### 0. 渐进式披露（MCP 工具对外组织原则，路径 B）
+
+> **原则**：MCP 协议 `listTools` 是扁平数组，无原生分层。渐进披露靠「**入口聚合 + action 分派**」模拟层级——先暴露入口（"我能对什么操作"），进入后才面对子操作。
+>
+> 判定口径：**按「操作对象」聚合，不按「实现机制」**。同一操作对象、动作互补的一组工具 → 收敛为 1 个入口 + action 枚举。
+> - 已落地样板：`gateway_provider`（list/upsert/delete/stats）、`canvas_notes`（read/mark/decide）、`manage_feature`（create/clone/template/list/delete）。
+> - 反面教训：`camera_*`（instrument/judge/log/chain_recon）**不聚合**——看似同对象，实为不同抽象层（基础动作/判定/查询/编排），且被 `mcp_tools.test` 显式锚定，强行合并违背契约。
+
 ### 第一层 · LLM 能力域（给 MCP 工具）
 
 产品功能面，8 域基本保留（可微调），只登记 **MCP 工具**。
@@ -32,10 +40,10 @@
 | **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
 | **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
 | **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
-| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `mark_canvas_notes_status` `decide_canvas_notes`                                                                        |
+| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `canvas_notes`(decide/mark)                                                                        |
 | **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `search_bricks` `assemble_bricks` `slim_brick`              |
-| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `read_canvas_notes`                                                                         |
-| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_list_providers` `gateway_upsert_provider` `gateway_delete_provider` `gateway_stats`                                             |
+| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `canvas_notes`(read)                                                                         |
+| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_provider`(list/upsert/delete/stats)                                             |
 
 > 说明：上表为初版归属，纯数据可再微调，不阻塞收敛。
 
@@ -89,6 +97,18 @@
 | `render_dsl` vs `render_sandbox`           | **不合并**。render\_dsl=读 DSL 渲染设计稿(mindmap/html/svg/md)；render\_sandbox=扫描工程生成依赖驱动积木工作台(不读 DSL)。职能正交。 |
 | `read_canvas_notes` vs `harvest_decisions` | **不合并**。画布批注工单 vs 仓库材料挖决策卡。数据源/产物都不同。                                                              |
 | `gateway_*(4个)`                            | **✅ 已合并** → 收敛为单入口 `gateway_provider`（action=list/upsert/delete/stats）。唯一真实可合并项。                   |
+
+### B2. 渐进披露（路径 B）入口聚合 — 画布批注 3→1
+
+> 依据「2.0 渐进式披露」原则：按**操作对象**聚合。画布批注（read/mark/decide）是同一对象、动作互补，收敛为 `canvas_notes` 单入口。
+
+| 旧工具 | 新入口 | action |
+|---|---|---|
+| `read_canvas_notes` | `canvas_notes` | `read` |
+| `mark_canvas_notes_status` | `canvas_notes` | `mark` |
+| `decide_canvas_notes` | `canvas_notes` | `decide` |
+
+> 核验要点（详见第 7 节）：无测试锚定旧名；底层函数(derive_mind_map/llm_decider)仍被 server/serve 复用 → 只动 MCP 外壳；同步更新了探针(agent_notes_loop/probe_mcp_smoke) + README×2 + 文档。
 
 ### C. CLI 形态收敛
 
@@ -215,7 +235,17 @@
 
   - 处理：**合并**为单入口 `gateway_provider`（action=list/upsert/delete/stats 分派），对齐 `manage_feature` 的 CRUD action 先例。
 
-  - 结果：tsc 通过；gateway 专项 28 测试全绿；**全量回归 1340/1340 无回归**；临时 DESIGN\_CANVAS\_HOME 隔离验收脚本实测 4 分支全通过(upsert→list→delete→stats)。提交 `<待填>`。
+  - 结果：tsc 通过；gateway 专项 28 测试全绿；**全量回归 1340/1340 无回归**；临时 DESIGN\_CANVAS\_HOME 隔离验收脚本实测 4 分支全通过(upsert→list→delete→stats)。提交 `e332888`。
 
 > **Phase 1 小结：A 组 0 合并（全核验证伪）、B 组 1 合并（gateway 4→1）。**
+
+#### 渐进披露 · 画布批注入口聚合（2026-08，路径 B 首个按对象聚合）
+
+- [x] 候选组：`read_canvas_notes` / `mark_canvas_notes_status` / `decide_canvas_notes`
+  - 核验：读源实现 ✓ / 对契约 ✓ / 找调用方 ✓ / 查测试 ✓ / 回归+插桩 ✓
+  - 发现：三工具是**同一操作对象（画布批注/DSL.canvas_notes）、动作互补（读/改状态/LLM 决策）**；无测试锚定旧名（grep tests 无引用）；底层纯函数(renderCanvasNotesDigest/markCanvasNotesStatus/decideCanvasNotes)仍被 server.ts/serve.ts HTTP 侧复用 → 只改 MCP 外壳安全。
+  - 处理：**合并**为 `canvas_notes` 单入口（action=read|mark|decide），对齐渐进披露路径 B。
+  - 结果：tsc 通过；**全量回归 1340/1340 无回归**；隔离验收脚本验证注册 + schema(action 字段) + read 分支可调不崩。并同步更新引用方：`agent_notes_loop.mjs`（4 处 tools/call + 3 处注册检查）、`probe_mcp_smoke.mjs`（1 处）、README×2、`docs/tool-convergence.md` 能力域表。
+
+> **渐进披露小结：已落地 2 个入口样板 —— `gateway_provider`(4→1)、`canvas_notes`(3→1)、`manage_feature`(既有 CRUD action 先例)。**
 

@@ -176,9 +176,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 
 | Tool | Purpose |
 |------|------|
-| `read_canvas_notes` | Read canvas geometric annotations into semantic work orders |
-| `mark_canvas_notes_status` | Update annotation status (processing / closed) |
-| `decide_canvas_notes` | Have the LLM decide the mapping between annotations and DSL targets |
+| `canvas_notes` | Unified canvas-notes entry (read=work orders / mark=status / decide=LLM) |
 
 **LLM gateway**
 

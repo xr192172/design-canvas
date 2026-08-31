@@ -1716,49 +1716,17 @@ const TOOL_DEFS: ToolDef[] = [
     }),
   },
   {
-    name: 'read_canvas_notes',
-    title: 'Read canvas notes as work orders',
+    name: 'canvas_notes',
+    title: 'Manage canvas notes: read as work orders / update status / LLM decide',
     description:
-      '读取某 feature 的画布批注，解析成外部 agent 可读的语义工单文档（Markdown + 结构化 JSON）。' +
-      '每条批注捆绑 L1 功能 / L2 步骤 / L3 文件 / L4 契约上下文（针脚、API、职责、分层），' +
-      '按状态分组（待处理 open / 已处理 done / 已驳回 rejected）。' +
-      '适合 agent 周期性订阅批注、定位待办：先读本工具拿工单 → 修改代码 → mark_canvas_notes_status 标记闭环。',
+      '画布批注统一入口（收敛 read/mark/decide_canvas_notes 三工具为 1 入口，action 分派）。' +
+      'action=read 读某 feature 的画布批注，解析成 agent 工单（Markdown/JSON，按 open/done/rejected 分组）——定位待办；' +
+      'action=mark 批量更新批注处理状态（updates=[{id,status}]，status ∈ open|done|rejected）——闭环"工单→处理→标记"；' +
+      'action=decide 内置 LLM 决策器：读 open 批注逐单决策（change/done/reject），将"批注→改动提案"自动化（LLM 经网关 Key 池调度，未配置则停用）。',
     inputSchema: {
+      action: z.enum(['read', 'mark', 'decide']).describe('read=读批注成工单 | mark=更新批注状态 | decide=LLM 决策批注并出提案'),
       feature: z.string().describe('feature 名（如 design-canvas）'),
-      format: z.enum(['markdown', 'json']).default('markdown').describe('返回格式：markdown=工单文档（默认）/ json=结构化 JSON'),
-    },
-    handler: wrapData(async (a) => {
-      const feature = typeof a.feature === 'string' ? a.feature : '';
-      if (!feature) return { message: '缺少 feature', isError: true };
-      const resolved = resolveCanvasNoteTargets(feature);
-      const digest = renderCanvasNotesDigest(feature, resolved);
-      const format = a.format === 'json' ? 'json' : 'markdown';
-      return {
-        message:
-          format === 'json'
-            ? digest.json
-            : `${digest.markdown}\n\n（结构 JSON 见 data.notes / 可传 format=json 直接取 JSON）`,
-        data: {
-          feature: digest.feature,
-          generated_at: digest.generated_at,
-          total: digest.total,
-          open: digest.open,
-          done: digest.done,
-          rejected: digest.rejected,
-          notes: JSON.parse(digest.json).items,
-        },
-      };
-    }),
-  },
-  {
-    name: 'mark_canvas_notes_status',
-    title: 'Update canvas note status',
-    description:
-      '批量更新某 feature 画布批注的处理状态，闭环"批注工单 → 处理 → 标记"。' +
-      'updates 传 [{id, status}]，id 为批注图元 id 或批注套 groupId；status ∈ open|done|rejected。' +
-      '处理后画布同步显示状态徽标（done=已处理 / rejected=已驳回）。',
-    inputSchema: {
-      feature: z.string().describe('feature 名（如 design-canvas）'),
+      format: z.enum(['markdown', 'json']).default('markdown').optional().describe('read 用：markdown=工单文档（默认）/ json=结构化 JSON'),
       updates: z
         .array(
           z.object({
@@ -1766,44 +1734,53 @@ const TOOL_DEFS: ToolDef[] = [
             status: z.enum(['open', 'done', 'rejected']).describe('目标状态'),
           }),
         )
-        .describe('待更新状态列表'),
+        .optional()
+        .describe('mark 用：待更新状态列表'),
+      project_dir: z.string().optional().describe('decide 用：项目根目录（缺省用 dsl.source_root；目标文件相对此解析）'),
+      max_file_lines: z.number().optional().describe('decide 用：喂给 LLM 的目标文件最大行数（默认 300）'),
+      dry_run: z.boolean().optional().describe('decide 用：true=只出决策与提案，不落批注状态'),
     },
     handler: wrapData(async (a) => {
-      const feature = typeof a.feature === 'string' ? a.feature : '';
-      const updates = Array.isArray(a.updates) ? (a.updates as Array<{ id: string; status: 'open' | 'done' | 'rejected' }>) : [];
-      if (!feature) return { message: '缺少 feature', isError: true };
-      if (updates.length === 0) return { message: '缺少 updates', isError: true };
-      const dsl = getDSL(feature);
-      if (!dsl) return { message: `feature "${feature}" 不存在`, isError: true };
-      const before = (dsl.canvas_notes ?? []).length;
-      dsl.canvas_notes = markCanvasNotesStatus(dsl, updates);
-      saveDSL(dsl, 'status');
-      return {
-        message: `已更新 ${updates.length} 条批注状态（feature=${feature}，批注数 ${before}）`,
-        data: { feature, updated: updates.length, notes: before },
-      };
-    }),
-  },
-  {
-    name: 'decide_canvas_notes',
-    title: 'Decide canvas notes via LLM and propose changes',
-    description:
-      '内置 LLM 决策器：读某 feature 的 open 批注工单 → 逐单决策 → 闭环。' +
-      '三类结论：change（产出具体改动方案并映射到审批流 proposeChange，propose 只出干跑预览不写源文件，' +
-      '返回 pending_change_id 供 approve/reject）、done（信息性批注，直接标已处理）、reject（无法自动化，标已驳回）。' +
-      '适合外部 agent 作为"批注 → 改动提案"的自动转换步骤：先本工具出提案 → 审批流 approve → mark_canvas_notes_status 标 done。' +
-      '配置：小网关（/api/gateway 设置页，供应商 + Key 池）或 legacy LLM_API_KEY/AGNES 环境变量；' +
-      '未配置则功能停用（返回 note=未配置，不做任何模拟/规则决策，不落状态）。' +
-      'LLM 决策经网关 Key 池调度（轮询+失败转移），每次调用记录用量（token/费用）。',
-    inputSchema: {
-      feature: z.string().describe('feature 名（如 design-canvas）'),
-      project_dir: z.string().optional().describe('项目根目录（缺省用 dsl.source_root；目标文件相对此解析）'),
-      max_file_lines: z.number().optional().describe('喂给 LLM 的目标文件最大行数（默认 300）'),
-      dry_run: z.boolean().optional().describe('true=只出决策与提案，不落批注状态'),
-    },
-    handler: wrapData(async (a) => {
+      const action = a.action as 'read' | 'mark' | 'decide';
       const feature = typeof a.feature === 'string' ? a.feature : '';
       if (!feature) return { message: '缺少 feature', isError: true };
+
+      if (action === 'read') {
+        const resolved = resolveCanvasNoteTargets(feature);
+        const digest = renderCanvasNotesDigest(feature, resolved);
+        const format = a.format === 'json' ? 'json' : 'markdown';
+        return {
+          message:
+            format === 'json'
+              ? digest.json
+              : `${digest.markdown}\n\n（结构 JSON 见 data.notes / 传 format=json 直接取 JSON）`,
+          data: {
+            feature: digest.feature,
+            generated_at: digest.generated_at,
+            total: digest.total,
+            open: digest.open,
+            done: digest.done,
+            rejected: digest.rejected,
+            notes: JSON.parse(digest.json).items,
+          },
+        };
+      }
+
+      if (action === 'mark') {
+        const updates = Array.isArray(a.updates) ? (a.updates as Array<{ id: string; status: 'open' | 'done' | 'rejected' }>) : [];
+        if (updates.length === 0) return { message: '缺少 updates', isError: true };
+        const dsl = getDSL(feature);
+        if (!dsl) return { message: `feature "${feature}" 不存在`, isError: true };
+        const before = (dsl.canvas_notes ?? []).length;
+        dsl.canvas_notes = markCanvasNotesStatus(dsl, updates);
+        saveDSL(dsl, 'status');
+        return {
+          message: `已更新 ${updates.length} 条批注状态（feature=${feature}，批注数 ${before}）`,
+          data: { feature, updated: updates.length, notes: before },
+        };
+      }
+
+      // decide
       const r = await decideCanvasNotes({
         feature,
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
@@ -1886,9 +1863,9 @@ const TOOL_DEFS: ToolDef[] = [
     description:
       '读取某 feature 的项目文档夹（<project_dir>/docs/，或受管目录 .design-canvas/docs/<feature>/）。' +
       '三种用法：不带 name= 返回清单（含 frontmatter 关联标签与预览，供 agent 挑）；带 name= 返回单篇全文；' +
-      '带 targets 返回命中该目标集（功能/步骤/文件）的文档正文（与 decide_canvas_notes 的按批关联注入同一套匹配）。' +
+      '带 targets 返回命中该目标集（功能/步骤/文件）的文档正文（与 canvas_notes action=decide 的按批关联注入同一套匹配）。' +
       '项目文档可丢进项目仓库 docs/ 作为 LLM 决策背景（需求/设计约定/约定规范），' +
-      'decide_canvas_notes 会自动按批把命中文档注入决策上下文（TOC 全量 + 命中正文封顶）。',
+      'canvas_notes action=decide 会自动按批把命中文档注入决策上下文（TOC 全量 + 命中正文封顶）。',
     inputSchema: {
       feature: z.string().describe('feature 名（如 design-canvas）'),
       project_dir: z.string().optional().describe('项目根目录（缺省用 dsl.source_root）'),
@@ -1968,3 +1945,4 @@ export function registerAllTools(server: McpServer): void {
 }
 
 export { TOOL_DEFS };
+
