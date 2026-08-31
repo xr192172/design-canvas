@@ -135,7 +135,7 @@ export interface Node {
   shapes?: NodeShapes;
   /**
    * 决策卡·参数表（2026-08-18）：类型化 key-value，承载设计参数（如 budget_mb: 64）。
-   * 与 description 纯文本的区别：参数是字段，机器可对拍（未来 camera 参数级对拍的地基）。
+   * 与 description 纯文本的区别：参数是字段，机器可对拍（未来 observe 参数级对拍的地基）。
    */
   attributes?: Record<string, string | number | boolean>;
   /**

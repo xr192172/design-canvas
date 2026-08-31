@@ -103,7 +103,7 @@ export type FileIndex = { exact: Map<string, FileInfo>; bySuffix: Map<string, Fi
 
 /** 从语义层构建 文件路径 → FileInfo 索引，并保留 id（= geometry node id）。
  *  另建后缀索引（≥2 段）：功能树社区的 files 相对 cache.db 项目根，
- *  DSL 路径相对导入快照根，前缀可能不一致（如 camera/internal/… vs internal/…）。 */
+ *  DSL 路径相对导入快照根，前缀可能不一致（如 observe/internal/… vs internal/…）。 */
 export function buildFileIndex(dsl: DesignDSL): FileIndex {
   const exact = new Map<string, FileInfo>();
   const bySuffix = new Map<string, FileInfo>();

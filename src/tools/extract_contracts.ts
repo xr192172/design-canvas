@@ -16,10 +16,10 @@
  *      writes：包级/模块级变量赋值与自增、文件写/删调用——"写外部状态"候选
  *      holds：listen/文件句柄/worker/timer/subprocess（Go 另有 goroutine/db-pool）
  *      emits：chan send（Go）/ emit·publish·postMessage（TS）
- *      候选 ≠ 事实：camera 观测窗口内命中 → 转正 origin='runtime'；候选外
+ *      候选 ≠ 事实：observe 观测窗口内命中 → 转正 origin='runtime'；候选外
  *      观测到新 target → 契约不完整告警（动静结合的动静对账）
  *
- * 提取来源纪律：结构化字段只接受 AST（此处）与 camera（后续）；LLM 不产生事实。
+ * 提取来源纪律：结构化字段只接受 AST（此处）与 observe（后续）；LLM 不产生事实。
  * runtime 字段本阶段不填——静态判定的 confidence 自然受 schema 语义封顶 0.7（由调用方执行）。
  */
 
@@ -58,7 +58,7 @@ export interface FileContractReport {
   fan_out: number;
   shape_count: number;
   reads_config: string[];
-  /** effects 候选计数（origin='ast'，待 camera 观测转正）；详情在 DSL 契约 */
+  /** effects 候选计数（origin='ast'，待 observe 观测转正）；详情在 DSL 契约 */
   effects: {
     writes: number;
     holds: number;
@@ -287,10 +287,10 @@ function scanConfigKeys(source: string, language: string): string[] {
   return [...keys].sort();
 }
 
-// ── effects 候选点静态扫描（Phase 2b 第一步：AST 定位，camera 确认）──
+// ── effects 候选点静态扫描（Phase 2b 第一步：AST 定位，observe 确认）──
 //
 // 动静结合的"静"半边：只标候选（origin='ast'），不产生事实——
-// 候选 = "这里疑似写外部状态/占资源/发事件"，camera 观测后转正或证伪。
+// 候选 = "这里疑似写外部状态/占资源/发事件"，observe 观测后转正或证伪。
 
 /** 收集包级（Go）/模块级（TS）变量名——赋值目标只有它们才算"写外部状态" */
 function collectModuleVars(source: string, language: string): Set<string> {
@@ -595,7 +595,7 @@ export function extractContracts(input: ExtractContractsInput): ExtractContracts
     `低置信（<0.7，LLM 兜底候选）${lowConf} 个；` +
     `effects 候选（origin=ast）：写 ${writesCount} / 占用 ${holdsCount} / 事件 ${emitsCount}` +
     (feature ? (written ? `，已写回 DSL "${feature}"` : `，DSL "${feature}" 无匹配文件未写回`) : '') +
-    `。候选待 camera 运行观测转正（origin=runtime）。`;
+    `。候选待 observe 运行观测转正（origin=runtime）。`;
 
   return {
     project_dir: root,

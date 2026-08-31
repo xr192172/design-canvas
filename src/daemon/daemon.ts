@@ -10,7 +10,7 @@
  *   2. serve 与 MCP 各自跑 watch 实例互不知情（重复同步）；daemon 单实例权威
  *   3. alert 单订阅互抢（takeAlerts 一次清空）；daemon 游标制多客户端各取所需
  *
- * 方向 D 闭环自动化：ledger-violated 事件 → 防抖 10s → spawn camera-dsl loop
+ * 方向 D 闭环自动化：ledger-violated 事件 → 防抖 10s → spawn observe-dsl loop
  * （读 events.jsonl + ledger.json，产出 known-spread/未声明探针提案）→
  * 新提案 pushAlert + SSE 广播。deviation 回流 DSL 从"外部手动触发"变事件驱动。
  *
@@ -161,23 +161,23 @@ function removePidfile(port: number): void {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Phase 3：ledger-violated → camera-dsl loop 自动回流
+// Phase 3：ledger-violated → observe-dsl loop 自动回流
 // ─────────────────────────────────────────────────────────────
 
 /** loop 触发防抖（每项目冷却窗口）：编辑风暴里连续 violated 只触发一次 */
 const LOOP_COOLDOWN_MS = 10_000;
-/** camera-dsl 执行超时（Go 二进制冷启动 + loop 单次迭代足够） */
+/** observe-dsl 执行超时（Go 二进制冷启动 + loop 单次迭代足够） */
 const LOOP_TIMEOUT_MS = 60_000;
 const loopCooldown = new Map<string, number>();
 let loopRunning = false;
 
-/** camera-dsl 二进制定位：env 显式指定 → 仓库内 build 产物 → PATH */
-function findCameraDslBin(): string {
-  if (process.env.DC_CAMERA_DSL_BIN) return process.env.DC_CAMERA_DSL_BIN;
-  const exe = process.platform === 'win32' ? 'camera-dsl.exe' : 'camera-dsl';
-  // dist/src/daemon/daemon.js → 上溯 3 级到仓库根 → go-camera/build/
+/** observe-dsl 二进制定位：env 显式指定 → 仓库内 build 产物 → PATH */
+function findObserveDslBin(): string {
+  if (process.env.DC_OBSERVE_DSL_BIN) return process.env.DC_OBSERVE_DSL_BIN;
+  const exe = process.platform === 'win32' ? 'observe-dsl.exe' : 'observe-dsl';
+  // dist/src/daemon/daemon.js → 上溯 3 级到仓库根 → go-observe/build/
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-  const candidate = path.join(repoRoot, 'go-camera', 'build', exe);
+  const candidate = path.join(repoRoot, 'go-observe', 'build', exe);
   if (fs.existsSync(candidate)) return candidate;
   return exe; // 交给 PATH
 }
@@ -191,12 +191,12 @@ function scheduleLoopTrigger(projectDir: string, broadcast: (event: string, data
   loopCooldown.set(projectDir, now);
   loopRunning = true;
 
-  const dataDir = path.join(projectDir, '.agent', 'camera');
+  const dataDir = path.join(projectDir, '.agent', 'observe');
   const proposalsDir = path.join(dataDir, 'proposals');
   const before = new Set(fs.existsSync(proposalsDir) ? fs.readdirSync(proposalsDir) : []);
-  const eventsPath = path.join(projectDir, '.design-canvas', 'camera', 'events.jsonl');
+  const eventsPath = path.join(projectDir, '.design-canvas', 'observe', 'events.jsonl');
   const ledgerPath = path.join(projectDir, '.design-canvas', 'impact', 'ledger.json');
-  const bin = findCameraDslBin();
+  const bin = findObserveDslBin();
   const args = [
     '--project-root', projectDir,
     'loop', eventsPath,
@@ -212,9 +212,9 @@ function scheduleLoopTrigger(projectDir: string, broadcast: (event: string, data
       loopRunning = false;
       try {
         if (err) {
-          // 常见：events.jsonl 尚不存在（项目还没产生 camera 事件）——不算错，静默跳过
+          // 常见：events.jsonl 尚不存在（项目还没产生 observe 事件）——不算错，静默跳过
           const notReady = !fs.existsSync(eventsPath);
-          const reason = notReady ? '尚无 camera 事件流（events.jsonl 不存在）' : String(err.message).split('\n')[0];
+          const reason = notReady ? '尚无 observe 事件流（events.jsonl 不存在）' : String(err.message).split('\n')[0];
           broadcast('loop-skipped', { project_dir: projectDir, reason });
           return;
         }
@@ -222,7 +222,7 @@ function scheduleLoopTrigger(projectDir: string, broadcast: (event: string, data
         const after = new Set(fs.existsSync(proposalsDir) ? fs.readdirSync(proposalsDir) : []);
         const newProposals = [...after].filter((f) => !before.has(f));
         if (newProposals.length > 0) {
-          const line = `[loop 回流] ${projectDir} 产生 ${newProposals.length} 条新提案（${newProposals.map((p) => p.replace('.json', '')).join(', ')}）· camera-dsl proposals 查看，approve 后并入设计 DSL`;
+          const line = `[loop 回流] ${projectDir} 产生 ${newProposals.length} 条新提案（${newProposals.map((p) => p.replace('.json', '')).join(', ')}）· observe-dsl proposals 查看，approve 后并入设计 DSL`;
           pushAlert({ project_dir: projectDir, seq: 0, line, created_at: new Date().toISOString() });
           broadcast('loop-proposal', { project_dir: projectDir, proposals: newProposals, at: new Date().toISOString() });
         } else {

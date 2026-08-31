@@ -204,7 +204,7 @@ export function layoutCanvas(
 /** 积木→图标（lucide path 内联）；未知积木按三层角色兜底。 */
 function iconOf(brickId: string, role: 'brick' | 'contract' | 'glue'): string {
   const MAP: Record<string, string> = {
-    camera: 'camera',
+    observe: 'observe',
     daemon: 'server',
     db: 'database',
     dsl: 'code',
@@ -218,7 +218,7 @@ function iconOf(brickId: string, role: 'brick' | 'contract' | 'glue'): string {
 
 /** lucide 单 path 图标库（24x24 viewBox，stroke=currentColor）。 */
 const ICONS: Record<string, string> = {
-  camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+  observe: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
   server: '<rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
   code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',

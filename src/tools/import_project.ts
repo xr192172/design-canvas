@@ -480,7 +480,7 @@ export interface BrickFoldInfo {
 /**
  * 读拼装区出生证明（assembly.json）的积木清单。
  * 设计动机：拼装区里已治理积木对 DSL/LLM 是黑盒——检索不进内部、
- * 语义层只见契约投影（exposes/consumes/emits），除非 camera 检出异常才深挖。
+ * 语义层只见契约投影（exposes/consumes/emits），除非 observe 检出异常才深挖。
  * 诚实边界：无出生证明 / JSON 损坏 → 空数组，退化为普通项目全量解析
  * （不因证明损坏而拒绝解析，也不猜积木边界）。
  */

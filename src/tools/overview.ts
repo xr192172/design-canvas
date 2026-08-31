@@ -364,7 +364,7 @@ export async function getOverview(input: GetOverviewInput): Promise<OverviewResu
   }
 
   // 1.5 平铺兜底修复 + 规则树升级：小白第一屏不能是文件名列表，功能名也不能
-  // 一直是目录名（tools/camera）。两种情况需要（重）生成功能树：
+  // 一直是目录名（tools/observe）。两种情况需要（重）生成功能树：
   //   a) 导图平铺（DSL 缺 feature_tree）→ 现场聚类（refresh_llm 时用 LLM 命名）
   //   b) refresh_llm 且现有树是规则版（source!=='llm'）→ 用 LLM 重新归并命名
   // 树更新后 teach 导图需重建（吃新功能名）；树已是 LLM 版但 teach 未升级时也补生成。

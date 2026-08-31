@@ -11,12 +11,12 @@
  *   slim_brick（本工具，编排）——读盒内积木 → 调剪刀 → 非 Go 资产按需搬运 →
  *     依赖清单对账 → 产出 -slim 衍生积木回盒
  *
- * 纪律（Camera 宪法同构）：
+ * 纪律（Observe 宪法同构）：
  *   - 原积木永不覆盖——衍生积木是独立目录 <brick>-slim/，机器产物可随时重生成
  *     （删除后重跑本工具即可）
  *   - 剪刀只对人拍板后的剔除负责：live 集是入盒时的事实档案，本工具执行不发明
  *   - 四层验证渐进：build 层可当场做（verify_build，临时目录 go build）；
- *     源测试/camera/效果验收由人后续补进 slim_verification
+ *     源测试/observe/效果验收由人后续补进 slim_verification
  *
  * 诚实边界：
  *   - 路径对齐防线：live 明细键与盒内 files/ 相对路径零命中 = 档案漂移，
@@ -393,7 +393,7 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
     //   a) 存活 .go 文件 //go:embed 引用的资产（模式相对该 .go 文件目录解析，
     //      逐段 glob；模式命中目录 = 整棵子树，与 Go embed 语义一致）
     //   b) 存活目录（含存活 .go 文件的目录）的 .s/.S 汇编（包编译即需要）
-    // 运行时 os.ReadFile 读的资产静态看不见——camera/效果验收层把关
+    // 运行时 os.ReadFile 读的资产静态看不见——observe/效果验收层把关
     const producedGo = walkRelative(outRoot).filter((p) => p.endsWith('.go'));
     const survivingDirs = new Set(producedGo.map((p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')));
     const embedPatterns: Array<{ dir: string; pattern: string }> = [];
@@ -605,7 +605,7 @@ export async function slimBrick(input: SlimBrickInput): Promise<SlimBrickResult>
         `瘦身${write ? '完成' : '预演'}：${input.brick_name} → ${slimName}` +
         `（文件 ${filesBefore}→${filesAfter}，顶层声明 ${symbolsBefore}→${symbolsAfter}，` +
         `剔除三方依赖 ${depsRemoved.length} 个${depsRemoved.length ? `：${depsRemoved.join(', ')}` : ''}）${verifyNote}。` +
-        `原积木未动；四层验证剩余三层（源测试/camera/效果验收）未做——剔除生效前请人工补验。`,
+        `原积木未动；四层验证剩余三层（源测试/observe/效果验收）未做——剔除生效前请人工补验。`,
     };
   } finally {
     if (!write) fs.rmSync(outRoot, { recursive: true, force: true });
@@ -1187,7 +1187,7 @@ async function slimTsBrickCore(
         `瘦身${write ? '完成' : '预演'}：${input.brick_name} → ${slimName}` +
         `（文件 ${filesBefore}→${filesAfter}，顶层声明 ${symbolsBefore}→${symbolsAfter}，` +
         `剔除三方依赖 ${depsRemoved.length} 个${depsRemoved.length ? `：${depsRemoved.join(', ')}` : ''}）${verifyNote}。` +
-        `原积木未动；四层验证剩余层（源测试/camera/效果验收）未做——剔除生效前请人工补验。`,
+        `原积木未动；四层验证剩余层（源测试/observe/效果验收）未做——剔除生效前请人工补验。`,
     };
   } finally {
     if (!write) fs.rmSync(outRoot, { recursive: true, force: true });

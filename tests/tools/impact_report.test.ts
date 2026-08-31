@@ -19,8 +19,8 @@ import { diffImpact } from '../../src/tools/diff_impact';
 import { importProject } from '../../src/tools/import_project';
 import { openDb } from '../../src/db/db';
 import { watchProjectTool, closeAllActiveWatches } from '../../src/tools/watch_project_tool';
-import { setGlobalProbeSink, loadTSEvents } from '../../src/camera/probe';
-import { judgeEvent } from '../../src/camera/judge';
+import { setGlobalProbeSink, loadTSEvents } from '../../src/observe/probe';
+import { judgeEvent } from '../../src/observe/judge';
 
 const roots: string[] = [];
 
@@ -150,8 +150,8 @@ describe('watch 集成：impact_on_change 自动报告', () => {
       expect(full.message).toContain('=== 变更影响分析');
       expect(full.message).toContain('src/a.ts'); // callers
 
-      // Step 3 合流：影响事件应已注入 Camera 事件流（lazy sink → 项目级 events.jsonl）
-      const eventsPath = path.join(root, '.design-canvas', 'camera', 'events.jsonl');
+      // Step 3 合流：影响事件应已注入 Observe 事件流（lazy sink → 项目级 events.jsonl）
+      const eventsPath = path.join(root, '.design-canvas', 'observe', 'events.jsonl');
       expect(fs.existsSync(eventsPath)).toBe(true);
       const { events } = loadTSEvents(eventsPath);
       const impactEvents = events.filter((e) => e.probe === 'impact.report');
@@ -159,7 +159,7 @@ describe('watch 集成：impact_on_change 自动报告', () => {
       const ie = impactEvents[0];
       expect(ie.fields['seq']).toBe(seq);
       expect(ie.fields['summary']).toContain(`[影响#${seq}]`);
-      expect(ie.fields['file']).toBe('src/b.ts'); // camera_log 按文件过滤的锚点
+      expect(ie.fields['file']).toBe('src/b.ts'); // observe_log 按文件过滤的锚点
       // 判定：3 文件项目半径远小于阈值 → ok；serve SSE 同此判定不会误报
       const v = judgeEvent(ie);
       expect(v.result).toBe('ok');

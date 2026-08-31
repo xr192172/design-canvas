@@ -73,7 +73,7 @@ export function defaultPipelineTaxonomy(): Taxonomy {
         id: 'observe',
         label: '观测质检',
         desc: '系统自我观测与质量保障（插桩、埋点、日志、监控、测试、一致性校验）。判据：看系统自己跑得对不对。',
-        keywords: ['camera', 'instrument', 'trace', 'log', 'monitor', 'test', 'verify', 'check', 'consistency', 'probe', 'signal'],
+        keywords: ['observe', 'instrument', 'trace', 'log', 'monitor', 'test', 'verify', 'check', 'consistency', 'probe', 'signal'],
       },
       {
         id: 'review',

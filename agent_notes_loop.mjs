@@ -78,7 +78,7 @@ await httpPost('/api/canvas-notes', {
   feature: FEATURE,
   canvas_notes: [
     { id: 'ag-1', groupId: 'ag-g1', type: 'highlight', anchor: { nodeId: 'file_camera_chain_ts' }, points: [[100, 100], [150, 120], [200, 100]], text: 'rebuildChains 匹配阈值待评估', color: '#fbbf24', status: 'open' },
-    { id: 'ag-2', groupId: 'ag-g2', type: 'sticky', x: 320, y: 220, w: 160, h: 104, text: 'camera_chain 的入口参数校验缺失', color: '#fde68a', status: 'open' },
+    { id: 'ag-2', groupId: 'ag-g2', type: 'sticky', x: 320, y: 220, w: 160, h: 104, text: 'observe_chain 的入口参数校验缺失', color: '#fde68a', status: 'open' },
   ],
 });
 console.log('[0] 预置 2 条 open 批注（锚定真实文件节点），决策模式 mock=' + mock);
@@ -169,7 +169,7 @@ const digest = await httpGet('/api/canvas-notes/digest?feature=' + FEATURE);
 check('HTTP digest 与 MCP 状态一致', digest.open === 0 && digest.done === d2r.done && digest.rejected === d2r.rejected, `open=${digest.open} done=${digest.done} rejected=${digest.rejected}`);
 const md = digest.markdown;
 check('digest 已处理段含 ag-1 文字', md.includes('rebuildChains 匹配阈值待评估') && md.includes('已处理'));
-check('digest 已处理段含 ag-2 文字', md.includes('camera_chain 的入口参数校验缺失') && md.includes('已处理'));
+check('digest 已处理段含 ag-2 文字', md.includes('observe_chain 的入口参数校验缺失') && md.includes('已处理'));
 
 /* ---------- 7. 清理还原 ---------- */
 await httpPost('/api/canvas-notes', { feature: FEATURE, canvas_notes: [] });

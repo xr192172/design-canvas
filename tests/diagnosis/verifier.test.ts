@@ -70,13 +70,13 @@ describe('suggestVerification 验证建议', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('design-canvas 管理项目（.design-canvas 存在）→ 追加 camera 渲染自检', () => {
+  it('design-canvas 管理项目（.design-canvas 存在）→ 追加 observe 渲染自检', () => {
     const dir = tmp();
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.mkdirSync(path.join(dir, '.design-canvas'));
     const v = suggestVerification({ project_dir: dir, impact: emptyImpact, root_cause: rootCause });
-    expect(v.some((x) => x.type === 'camera')).toBe(true);
-    expect(v.find((x) => x.type === 'camera')?.command_hint).toContain('src/util.ts');
+    expect(v.some((x) => x.type === 'observe')).toBe(true);
+    expect(v.find((x) => x.type === 'observe')?.command_hint).toContain('src/util.ts');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

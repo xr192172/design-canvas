@@ -60,7 +60,7 @@ describe('顶层 const 符号（狗食缺陷修复：handler 形态）', () => {
   const HANDLER_SAMPLE = `import { wrap } from './wrap.js';
 
 /** handler：wrap 装配形态 */
-const cameraJudgeHandler = wrap(async (a) => {
+const observeJudgeHandler = wrap(async (a) => {
   return { message: 'ok' };
 });
 
@@ -80,15 +80,15 @@ export function real() {
     const parsed = await parseFileFull(p, HANDLER_SAMPLE);
     const consts = parsed.symbols.filter((s) => s.kind === 'const');
     const names = consts.map((s) => s.name);
-    expect(names).toContain('cameraJudgeHandler');
+    expect(names).toContain('observeJudgeHandler');
     expect(names).toContain('A');
     expect(names).toContain('count');
     expect(names).not.toContain('inner'); // 局部 const 不索引
     expect(names).not.toContain('x'); // 解构跳过
     expect(names).not.toContain('p'); // 多声明器跳过
-    const h = consts.find((s) => s.name === 'cameraJudgeHandler')!;
+    const h = consts.find((s) => s.name === 'observeJudgeHandler')!;
     expect(h.signature).toContain('wrap(async (a) =>');
-    expect(h.qualified_name).toBe('cameraJudgeHandler');
+    expect(h.qualified_name).toBe('observeJudgeHandler');
   });
 
   it('edit_code 可 replace 顶层 const handler（此前符号未找到）', async () => {
@@ -97,8 +97,8 @@ export function real() {
       project_dir: dir,
       file: p,
       op: 'replace',
-      symbol: 'cameraJudgeHandler',
-      code: `const cameraJudgeHandler = wrap(async (a) => {
+      symbol: 'observeJudgeHandler',
+      code: `const observeJudgeHandler = wrap(async (a) => {
   return { message: 'v2' };
 });`,
     });

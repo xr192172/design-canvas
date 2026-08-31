@@ -15,7 +15,7 @@
 
 两个长期困扰工程协作的问题，design-canvas 同时给出解法：
 
-**问题一：文档漂移。** 任何设计文档、架构图都会在代码演进后过期，最终没人敢信。design-canvas 把「设计真相」编码为**结构化的 DSL JSON**，随代码一起演进：语义层记录文件契约（files / apis / decisions），由 `backfill_scaffold` 从实现自动回填、由运行时观测（Camera）自动校正——**文档不再会过期**。
+**问题一：文档漂移。** 任何设计文档、架构图都会在代码演进后过期，最终没人敢信。design-canvas 把「设计真相」编码为**结构化的 DSL JSON**，随代码一起演进：语义层记录文件契约（files / apis / decisions），由 `backfill_scaffold` 从实现自动回填、由运行时观测（Observe）自动校正——**文档不再会过期**。
 
 **问题二：改动失控。** LLM 改代码经常改错位置、改坏文件、无法验证，只能返工。design-canvas 提供一条受控的改造流水线：符号级准确编辑（`edit_code`）→ 改前真实 diff 审批 → 运行时探针对账验证 → 通过才提交、失败自动回滚——**改动不再靠赌**。
 
@@ -44,7 +44,7 @@ DSL 双层结构是两者的共同根基：
 | **可视化协议层**        | DSL 读写编辑、设计视图与实际代码快照对比、内置渲染兜底                  | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` / `diff_views`                                           |
 | **代码理解**          | 工程导入、语义搜索、影响分析、架构分层、单体拆分、算法/数据流推导              | `import_project` / `explore_code`                                                                                 |
 | **代码积木体系**        | 从任意来源（URL / 本地工程）收割代码为带契约的积木，支持切块、抽契约、瘦身、搜索与拼装 | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
-| **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `camera_instrument` / `camera_judge` / `chain_recon` / `reconcile_brick` / `reconcile_effects`                    |
+| **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects`                    |
 | **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架，解析实现回填契约，输出一致性报告                  | `scaffold` / `backfill_scaffold` / `consistency_check`                                                            |
 | **确定性改造（防返工）**    | 符号级代码编辑（绝不匹配错）、批量/跨文件重命名、死代码清理、改前 diff 审批、失败回滚 | `edit_code` / `rename_*` / `refactor_pipeline`                                                                    |
 | **诊断闭环**          | 症状 → 根因 → 修复 → 验证 → 提交（或回退）的完整链路               | `diagnose` / `refactor_judge` / `diagnose-loop`(CLI)                                                              |
@@ -144,14 +144,14 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `slim_brick`        | 将 Go 积木瘦身为派生积木（编译器式死码剪枝）        |
 | `narrate_step`      | 将流水线步骤叙述为受治理的叙述积木               |
 
-**运行时验证（Camera）**
+**运行时验证（Observe）**
 
 | 工具                  | 用途                           |
 | ------------------- | ---------------------------- |
-| `camera_instrument` | 自动插桩 / 还原 TS 项目，写盘后生成探针台账与统计 |
-| `camera_log`        | 按文件查询运行时日志                   |
-| `camera_judge`      | 批量裁决运行时事件                    |
-| `chain_recon`       | 将宿主链与其真实运行事件对账               |
+| `observe_instrument` | 自动插桩 / 还原 TS 项目，写盘后生成探针台账与统计 |
+| `observe_log`        | 按文件查询运行时日志                   |
+| `observe_judge`      | 批量裁决运行时事件                    |
+| `reconcile_chain`       | 将宿主链与其真实运行事件对账               |
 
 **确定性改造**
 

@@ -15,8 +15,8 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { watchProjectTool, closeAllActiveWatches } from '../../src/tools/watch_project_tool';
 import { importProject } from '../../src/tools/import_project';
 import { openDb } from '../../src/db/db';
-import { setGlobalProbeSink, loadTSEvents } from '../../src/camera/probe';
-import { judgeEvent } from '../../src/camera/judge';
+import { setGlobalProbeSink, loadTSEvents } from '../../src/observe/probe';
+import { judgeEvent } from '../../src/observe/judge';
 import { clearAlertInbox, peekAlerts } from '../../src/tools/alert_inbox';
 import { loadLedger } from '../../src/tools/impact_ledger_store';
 
@@ -74,7 +74,7 @@ async function waitSpreadCount(root: string, n: number): Promise<void> {
 }
 
 function eventsOf(root: string, probe: string): ReturnType<typeof loadTSEvents>['events'] {
-  const p = path.join(root, '.design-canvas', 'camera', 'events.jsonl');
+  const p = path.join(root, '.design-canvas', 'observe', 'events.jsonl');
   return loadTSEvents(p).events.filter((e) => e.probe === probe);
 }
 

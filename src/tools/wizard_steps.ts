@@ -130,13 +130,13 @@ export function wizardSteps(): WizardStep[] {
       desc: '插桩自测 + 一致性 + LLM 审——拿不准的上抛给人，闭环收口。',
       role: 'review',
       tools: [
-        { name: 'camera_instrument', kind: 'mcp', note: '给新代码插桩，跑一遍留证据' },
+        { name: 'observe_instrument', kind: 'mcp', note: '给新代码插桩，跑一遍留证据' },
         { name: 'consistency_check', kind: 'mcp', note: '设计 vs 实现一致性校验' },
         { name: 'refactor_judge', kind: 'mcp', note: 'LLM 裁决门：拿不准的问题上抛人审（双入口）' },
       ],
       input: '登记后的 DSL + 代码',
       output: '绿点通过，或人审收件箱里的问题清单',
-      doneWhen: 'camera 判通过 + 无一致性红项 + 无未决上抛',
+      doneWhen: 'observe 判通过 + 无一致性红项 + 无未决上抛',
     },
   ];
 }

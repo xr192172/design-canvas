@@ -6,7 +6,7 @@
  *
  *   浏览：无参数列出全部积木概况（语言/来源/规模/exposes/effects/验证状态）
  *   检索：query 关键词打分（积木名 > 形状名 > 字段名 > 人话介绍）
- *   过滤：language / verified（有 camera 运行证据）/ has_invariants / zero_third_party
+ *   过滤：language / verified（有 observe 运行证据）/ has_invariants / zero_third_party
  *   详情：name 精确命中（或 detail=true）→ 完整契约（fields/effects/invariants/闭包/验证档案）
  *
  * 数据源是 manifest.json（自包含快照档案），不碰项目 cache.db——积木盒
@@ -31,7 +31,7 @@ export interface SearchBricksInput {
   query?: string;
   /** 语言过滤（从闭包文件扩展名推断） */
   language?: 'go' | 'typescript' | 'python' | 'javascript';
-  /** 只看有 camera 运行验证的（effect_verification 档案存在） */
+  /** 只看有 observe 运行验证的（effect_verification 档案存在） */
   verified?: boolean;
   /** 只看有数学不变量的（acceptance.invariants 存在且非空） */
   has_invariants?: boolean;
@@ -297,7 +297,7 @@ export async function searchBricks(input: SearchBricksInput): Promise<SearchBric
         `积木「${input.name}」详情：${entry.files} 文件（${entry.language}）` +
         `，exposes ${entry.exposes.length} 形状，effects ${entry.effects.writes ?? '?'} writes/${entry.effects.holds ?? '?'} holds/${entry.effects.emits} emits` +
         `（不可逆 ${entry.effects.irreversible}）` +
-        (entry.verified ? `，camera 已验证（转正 ${entry.confirmed_effects} 条）` : '，未做 camera 验证') +
+        (entry.verified ? `，observe 已验证（转正 ${entry.confirmed_effects} 条）` : '，未做 observe 验证') +
         (entry.invariants ? `，不变量 ${entry.invariants} 条` : '') +
         (entry.dead_third_party
           ? `，死依赖候选 ${entry.dead_third_party}/${entry.third_party} 项（slim 前须四层验证）`

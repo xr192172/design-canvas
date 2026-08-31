@@ -36,13 +36,13 @@ jobs:
       - name: 类型检查 + 构建（tsc + gen bundle）
         run: npm run build
 
-  # ─── Go 插桩组件：go-camera / go-slim ───
+  # ─── Go 插桩组件：go-observe / go-slim ───
   go-test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        module: [go-camera, go-slim]
+        module: [go-observe, go-slim]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

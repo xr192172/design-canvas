@@ -46,7 +46,7 @@
     "start": "node dist/src/server.js",
     "serve": "node dist/src/tools/serve.js",
     "daemon": "node dist/src/daemon/daemon.js",
-    "instrument": "node dist/src/camera/instrument_cli.js",
+    "instrument": "node dist/src/observe/instrument_cli.js",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --doctor",
     "rebuild": "node scripts/rebuild_feature.mjs",

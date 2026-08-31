@@ -80,7 +80,7 @@ export function suggestVerification(input: VerifyInput): Verification[] {
 
   if (isDesignCanvasManaged) {
     out.push({
-      type: 'camera',
+      type: 'observe',
       command_hint: `渲染自检：${root_cause?.file_path ?? '根因文件'} 修改后，用项目自带截图/渲染自检确认 DSL 图与预期一致`,
     });
   }

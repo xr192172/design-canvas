@@ -31,7 +31,7 @@ function setupBox(t: { name: string }): {
   const brickDir = path.join(boxDir, 'demo_brick');
   const verifyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-verify-'));
   fs.mkdirSync(brickDir, { recursive: true });
-  fs.mkdirSync(path.join(verifyDir, '.agent', 'camera'), { recursive: true });
+  fs.mkdirSync(path.join(verifyDir, '.agent', 'observe'), { recursive: true });
 
   const contracts = {
     'internal/store/file.go': {
@@ -58,7 +58,7 @@ function setupBox(t: { name: string }): {
   fs.writeFileSync(path.join(brickDir, 'contracts.json'), JSON.stringify(contracts, null, 2), 'utf8');
   fs.writeFileSync(path.join(brickDir, 'manifest.json'), JSON.stringify({ name: 'demo_brick' }, null, 2), 'utf8');
 
-  const eventsFile = path.join(verifyDir, '.agent', 'camera', 'events-test.jsonl');
+  const eventsFile = path.join(verifyDir, '.agent', 'observe', 'events-test.jsonl');
   return { boxDir, brickDir, verifyDir, eventsFile };
 }
 

@@ -25,7 +25,7 @@ import {
   type LedgerEntry,
 } from './impact_ledger_store.js';
 import { pushAlert } from './alert_inbox.js';
-import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../camera/probe.js';
+import { captureProbe, TSProbeCapture, setGlobalProbeSink, hasGlobalProbeSink } from '../observe/probe.js';
 import { watchProject, type WatchHandle, type WatchBatchSummary, type ReconcileSummary } from './watch_project.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ const ALERTS_CAP = 20;
 /** watch 工具对外播报的事件（daemon 借此触发 loop 回流 / SSE 广播） */
 export type WatchToolEvent =
   | {
-      /** Impact Ledger 消费定损出现 violated（计划外扩散）——daemon 触发 camera-dsl loop 的信号 */
+      /** Impact Ledger 消费定损出现 violated（计划外扩散）——daemon 触发 observe-dsl loop 的信号 */
       type: 'ledger-violated';
       project_dir: string;
       entry_ids: string[];
@@ -309,17 +309,17 @@ export interface WatchProjectToolResult {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * impact 事件入 Camera 流的 lazy sink（Step 3 合流）：
+ * impact 事件入 Observe 流的 lazy sink（Step 3 合流）：
  * MCP stdio 进程默认无全局 sink（captureProbe 是 no-op，事件会丢）——首次注入前
- * 按项目落盘 <projectRoot>/.design-canvas/camera/events.jsonl。
- * 已有 sink（serve 设 CAMERA_EVENTS_FILE / 先前 watch 已建）则复用不覆盖。
+ * 按项目落盘 <projectRoot>/.design-canvas/observe/events.jsonl。
+ * 已有 sink（serve 设 OBSERVE_EVENTS_FILE / 先前 watch 已建）则复用不覆盖。
  * 注：全局 sink 只有一个，多项目同进程 watch 时共用首个项目的流（可接受：serve
  * 场景本来就走全局单文件）。
  */
-function ensureCameraSink(projectRoot: string): void {
-  if (process.env.CAMERA_EVENTS_FILE) return; // serve/哨兵已配置，复用全局
+function ensureObserveSink(projectRoot: string): void {
+  if (process.env.OBSERVE_EVENTS_FILE) return; // serve/哨兵已配置，复用全局
   if (hasGlobalProbeSink()) return;
-  const eventsPath = TSProbeCapture.pathFor(path.join(projectRoot, '.design-canvas', 'camera'));
+  const eventsPath = TSProbeCapture.pathFor(path.join(projectRoot, '.design-canvas', 'observe'));
   setGlobalProbeSink(new TSProbeCapture(eventsPath));
 }
 
@@ -371,8 +371,8 @@ async function doWork(entry: ActiveWatch): Promise<void> {
   }
 
   // ② 影响报告：取走冷却窗口内积累的变更文件，全文落盘 + 摘要入 alerts
-  //    + 注入 Camera 事件流（Step 3 合流：serve SSE 即时播报 / camera_log 事后查 /
-  //      camera_judge 判定爆炸半径 design:impact-blast-radius）
+  //    + 注入 Observe 事件流（Step 3 合流：serve SSE 即时播报 / observe_log 事后查 /
+  //      observe_judge 判定爆炸半径 design:impact-blast-radius）
   if (entry.impact_on_change && entry.pending_files.size > 0) {
     const files = [...entry.pending_files];
     entry.pending_files.clear();
@@ -389,7 +389,7 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       entry.last_impact_seq = s.seq;
       // 响应注入通道：任何 MCP 工具的下一次响应自动附带此提醒（一次投递即消费）
       pushAlert({ project_dir: entry.project_dir, seq: s.seq, line: s.summary_line, created_at: s.created_at });
-      ensureCameraSink(entry.project_dir); // 先建 sink，下方 spread/report 事件才能落流
+      ensureObserveSink(entry.project_dir); // 先建 sink，下方 spread/report 事件才能落流
 
       // Impact Ledger 对比：未消费预告按变更文件匹配消费（可多条并集），无匹配回退消费最旧
       if (entry.declarations.length > 0) {
@@ -418,7 +418,7 @@ async function doWork(entry: ActiveWatch): Promise<void> {
           };
         });
         markConsumed(entry.project_dir, verdicts);
-        // daemon 事件钩子（方向 E）：出现 violated → daemon 防抖触发 camera-dsl loop 回流
+        // daemon 事件钩子（方向 E）：出现 violated → daemon 防抖触发 observe-dsl loop 回流
         const violatedIds = verdicts.filter((v) => v.status === 'violated').map((v) => v.id);
         if (violatedIds.length > 0 && watchToolEventListener) {
           try {
@@ -481,7 +481,7 @@ async function doWork(entry: ActiveWatch): Promise<void> {
       // 影响报告失败不阻断监听（如 cache 未建），记录到 error + 注入失败事件
       // （err 非空 → silentErrorDiscard 判 deviation → serve SSE 即时报警）
       entry.error = '影响报告失败: ' + (e as Error).message;
-      ensureCameraSink(entry.project_dir);
+      ensureObserveSink(entry.project_dir);
       captureProbe(
         'impact.report',
         { file: files[0], op: 'impact-report', err: (e as Error).message, level: 'event', changed_files: files },
@@ -769,7 +769,7 @@ async function declareWatch(input: WatchProjectToolInput): Promise<WatchProjectT
   entry.declarations.push({
     entry_id: ledgerEntry.id, declared_files: declared, expected_files: expected, created_at: ledgerEntry.created_at,
   });
-  ensureCameraSink(entry.project_dir);
+  ensureObserveSink(entry.project_dir);
   captureProbe(
     'impact.declare',
     {

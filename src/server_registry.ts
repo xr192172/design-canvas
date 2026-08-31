@@ -73,12 +73,12 @@ import { listProjectDocs, readProjectDoc, matchDocsForTargets, buildDocsPromptBl
 import { listProvidersMasked, upsertProvider, deleteProvider, getStats, resetStats, testProvider } from './tools/gateway.js';
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
-import { queryCameraLog } from './camera/log_query.js';
-import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './camera/judge_service.js';
-import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './camera/contract.js';
-import { rebuildChains } from './camera/chain.js';
-import { chainRecon } from './tools/chain_recon.js';
-import type { ChainReconInput } from './tools/chain_recon.js';
+import { queryObserveLog } from './observe/log_query.js';
+import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './observe/judge_service.js';
+import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './observe/contract.js';
+import { rebuildChains } from './observe/chain.js';
+import { reconcileChain } from './tools/reconcile_chain.js';
+import type { ReconcileChainInput } from './tools/reconcile_chain.js';
 import {
   instrumentProject,
   collectTsFiles,
@@ -87,7 +87,7 @@ import {
   saveProbeLedger,
   clearProbeLedger,
   ledgerSummary,
-} from './camera/instrument.js';
+} from './observe/instrument.js';
 import path from 'node:path';
 import { statSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -378,21 +378,21 @@ const harvestDecisionsHandler = wrap(async (a) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Camera 观测工具 handler（设计→开发→测试闭环的「测试」端）
-// 与 design 主工具并列同一套 MCP。底层复用 camera/* 纯函数，不重写逻辑。
+// Observe 观测工具 handler（设计→开发→测试闭环的「测试」端）
+// 与 design 主工具并列同一套 MCP。底层复用 observe/* 纯函数，不重写逻辑。
 // ─────────────────────────────────────────────────────────────
 
-/** camera_log：按文件/全量查询 Camera 运行日志（复用 queryCameraLog） */
-const cameraLogHandler = wrap(async (a) => {
+/** observe_log：按文件/全量查询 Observe 运行日志（复用 queryObserveLog） */
+const observeLogHandler = wrap(async (a) => {
   const eventsFile = a.events_file as string | undefined;
   if (!eventsFile) {
-    throw new Error('camera_log 需要 events_file 参数：传 Camera 事件文件路径（events.jsonl）。');
+    throw new Error('observe_log 需要 events_file 参数：传 Observe 事件文件路径（events.jsonl）。');
   }
   const files = Array.isArray(a.files) ? (a.files as string[]).filter(Boolean) : [];
   const all = a.all === true || a.all === 'true' || a.all === '1';
-  const r = queryCameraLog(eventsFile, { files, all });
+  const r = queryObserveLog(eventsFile, { files, all });
   const lines = [
-    `Camera 日志 [${r.eventsPath}]`,
+    `Observe 日志 [${r.eventsPath}]`,
     `  事件 ${r.total} · 偏差 ${r.anomalyCount} · 跳过 ${r.skipped} · 返回 ${r.entries.length} 条`,
     ...(r.entries.length === 0 ? ['  （无匹配事件）'] : []),
   ];
@@ -407,13 +407,13 @@ const cameraLogHandler = wrap(async (a) => {
   return { message: lines.join('\n'), data: r.entries };
 });
 
-/** camera_judge：对一批事件执行偏差判定。decls（可选）提供时额外执行 P2 链路契约判定——
+/** observe_judge：对一批事件执行偏差判定。decls（可选）提供时额外执行 P2 链路契约判定——
  * 重建实测调用链（trace 三元组）+ Comparator 全量对比（探针级 + 链路级），
  * 链路断裂（chain-broken）带 trace_id 与实测窗口。不传 decls 保持逐事件判定。 */
-const cameraJudgeHandler = wrap(async (a) => {
+const observeJudgeHandler = wrap(async (a) => {
   const events = a.events;
   if (!Array.isArray(events) || events.length === 0) {
-    throw new Error('camera_judge 需要 events 参数：传要判定的事件数组（符合 TSEvent 形状）。');
+    throw new Error('observe_judge 需要 events 参数：传要判定的事件数组（符合 TSEvent 形状）。');
   }
   const { events: norm, error } = normalizeEvents(events);
   if (error) throw new Error(error);
@@ -443,16 +443,16 @@ const cameraJudgeHandler = wrap(async (a) => {
 });
 
 /**
- * chain_recon：中观档——按「文件/宿主节点」一条命令的真跑 + 查数据 + 对账。
+ * reconcile_chain：中观档——按「文件/宿主节点」一条命令的真跑 + 查数据 + 对账。
  * 后工具自动前置：宿主下无 detail 链时自动调用 deriveDetailChain（缓存判断——已有链即跳过），
  * 再自动发现事件文件、按链文件过滤真跑事件、逐事件判定、重建实测链、链路契约匹配。
  */
-const chainReconHandler = wrapData(async (a) => {
-  const input = a as unknown as ChainReconInput;
+const reconcileChainHandler = wrapData(async (a) => {
+  const input = a as unknown as ReconcileChainInput;
   if (!input.feature || !input.node_id) {
-    throw new Error('chain_recon 需要 feature + node_id：指定宿主文件节点（detail 链挂在它下面）做中观档对账。');
+    throw new Error('reconcile_chain 需要 feature + node_id：指定宿主文件节点（detail 链挂在它下面）做中观档对账。');
   }
-  const r = await chainRecon({
+  const r = await reconcileChain({
     feature: String(input.feature),
     node_id: String(input.node_id),
     project_dir: String(input.project_dir ?? process.cwd()),
@@ -463,11 +463,11 @@ const chainReconHandler = wrapData(async (a) => {
   return { message: r.message, data: r };
 });
 
-/** camera_instrument：对目标项目全自动插桩 / 还原（复用 instrumentProject/restoreInstrumented） */
-const cameraInstrumentHandler = wrap(async (a) => {
+/** observe_instrument：对目标项目全自动插桩 / 还原（复用 instrumentProject/restoreInstrumented） */
+const observeInstrumentHandler = wrap(async (a) => {
   const target = a.target as string | undefined;
   if (!target) {
-    throw new Error('camera_instrument 需要 target 参数：传要插桩的项目目录。');
+    throw new Error('observe_instrument 需要 target 参数：传要插桩的项目目录。');
   }
   const unintrument = a.action === 'uninstrument' || a.action === 'restore';
   const dryRun = a.dry_run === true || a.dry_run === 'true' || a.dry_run === '1';
@@ -481,11 +481,11 @@ const cameraInstrumentHandler = wrap(async (a) => {
     const restored = restoreInstrumented(target);
     const cleared = clearProbeLedger(target);
     if (restored.length === 0 && !cleared) {
-      return { message: 'Camera 一键全拔：未找到备份与台账，无需还原（可能从未插桩，或备份已删）。', data: [] };
+      return { message: 'Observe 一键全拔：未找到备份与台账，无需还原（可能从未插桩，或备份已删）。', data: [] };
     }
     return {
       message:
-        `Camera 一键全拔：已还原 ${restored.length} 个文件并删除备份目录${cleared ? '，已清理探针台账' : ''}。\n` +
+        `Observe 一键全拔：已还原 ${restored.length} 个文件并删除备份目录${cleared ? '，已清理探针台账' : ''}。\n` +
         restored.map((f) => `  ↺ ${f}`).join('\n'),
       data: { restored, ledger_cleared: cleared },
     };
@@ -498,7 +498,7 @@ const cameraInstrumentHandler = wrap(async (a) => {
   let skipped = 0;
   let errors = 0;
   const mode = contractProbes ? `契约模式（${contractProbes.length} 个探针）` : '探索模式（全量插桩）';
-  const lines = [`Camera 插桩 [${mode}] ${dryRun ? 'DRY-RUN' : 'WRITE'} → ${target}`, `  扫描 ${files.length} 个 .ts 文件`];
+  const lines = [`Observe 插桩 [${mode}] ${dryRun ? 'DRY-RUN' : 'WRITE'} → ${target}`, `  扫描 ${files.length} 个 .ts 文件`];
   for (const r of results) {
     if (r.error) {
       errors++;
@@ -894,9 +894,9 @@ const TOOL_DEFS: ToolDef[] = [
       'role（业务/功能二分：依赖方向图算法，零 token，"功能不依赖业务，业务组装功能"）、' +
       'shapes（struct/interface/class 数据形状+字段，结构化类型匹配的判定单元）、' +
       'effects（reads_config=env/flag 读取点；writes/holds/emits=静态候选 origin:ast——' +
-      '模块级变量写/listen/句柄/chan send/emit 调用，待 camera 观测转正 origin:runtime）。' +
+      '模块级变量写/listen/句柄/chan send/emit 调用，待 observe 观测转正 origin:runtime）。' +
       '提供 feature 时写回 DSL 的 SemanticFile.contract（write_dsl=false 可只读预演）。' +
-      'LLM 不产生事实：结构化字段只接受 AST/camera 源。' +
+      'LLM 不产生事实：结构化字段只接受 AST/observe 源。' +
       '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md Phase 2.5/2.7。',
     inputSchema: {
       project_dir: z.string().describe('目标项目根目录（须先 import_project 建缓存）'),
@@ -914,16 +914,16 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'reconcile_effects',
-    title: 'Reconcile effect candidates with camera runtime observation',
+    title: 'Reconcile effect candidates with observe runtime observation',
     description:
-      '积木契约动静对账（Brick Harvest Phase 2c 合龙）：读 <project>/.agent/camera/events-*.jsonl 中' +
-      '的 effect 事件（go-camera instrument --effects 插桩产生），与 DSL 契约候选对账——' +
+      '积木契约动静对账（Brick Harvest Phase 2c 合龙）：读 <project>/.agent/observe/events-*.jsonl 中' +
+      '的 effect 事件（go-observe instrument --effects 插桩产生），与 DSL 契约候选对账——' +
       '命中转正（origin ast→runtime）、候选外新观测补进契约并记 incomplete 告警（静态漏了）、' +
       '未触发候选保持 ast（不证伪），并填充 contract.runtime（call_count/top_callers/observed_targets/last_seen）。' +
       '前置链：import_project → extract_contracts → instrument --effects → 运行项目 → 本工具。' +
-      'LLM 不产生事实：只搬运 camera 观测，判定规则全部机械。',
+      'LLM 不产生事实：只搬运 observe 观测，判定规则全部机械。',
     inputSchema: {
-      project_dir: z.string().describe('被观测项目根目录（其下 .agent/camera/events-*.jsonl 是事件源）'),
+      project_dir: z.string().describe('被观测项目根目录（其下 .agent/observe/events-*.jsonl 是事件源）'),
       feature: z.string().describe('DSL feature 名（契约在其 SemanticFile.contract）'),
       events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
       write_dsl: z.boolean().optional().describe('false=只对账预演不写回，默认 true'),
@@ -972,9 +972,9 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'reconcile_brick',
-    title: 'Reconcile brick-box contracts with camera runtime observation',
+    title: 'Reconcile brick-box contracts with observe runtime observation',
     description:
-      '积木盒动静对账（Brick Harvest Phase 3R-C 工具化）：读 camera effect 事件，与积木盒 contracts.json 对账——' +
+      '积木盒动静对账（Brick Harvest Phase 3R-C 工具化）：读 observe effect 事件，与积木盒 contracts.json 对账——' +
       '候选命中观测 → origin ast→runtime 转正；候选外新观测 → 补进契约 + incomplete 告警（静态漏了）；' +
       '未触发候选保持 ast（不证伪），gap_notes 登记人工归因（not_triggered/probe_gap/static_only）。' +
       '证据档案写 manifest.effect_verification（重抽保留字段——快照可重抽，运行证据只有一份）。' +
@@ -985,7 +985,7 @@ const TOOL_DEFS: ToolDef[] = [
       brick_name: z.string().optional().describe('积木名（搭配 box_dir：<box_dir>/<brick_name>）'),
       box_dir: z.string().optional().describe('积木盒根目录（默认 <cwd>/.design-canvas/bricks）'),
       events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
-      verify_dir: z.string().optional().describe('验证项目根目录（自动发现其 .agent/camera/events-*.jsonl）'),
+      verify_dir: z.string().optional().describe('验证项目根目录（自动发现其 .agent/observe/events-*.jsonl）'),
       gap_notes: z
         .record(z.string(), z.string())
         .optional()
@@ -1006,14 +1006,14 @@ const TOOL_DEFS: ToolDef[] = [
       '积木货架（Brick Harvest Phase 4：跨项目统一检索层）——浏览/检索积木盒 .design-canvas/bricks/ 的全部积木，' +
       '"拎之前先看它要什么、给什么"。三种模式：①浏览（无参数：全部积木概况——语言/来源/规模/exposes/验证状态）；' +
       '②检索（query 关键词打分：积木名 > 形状名 > 字段名 > 人话介绍，matched 明细可追溯）；' +
-      '③详情（name 精确：完整契约——形状 fields、effects 全清单、不变量断言、闭包、camera 验证档案）。' +
+      '③详情（name 精确：完整契约——形状 fields、effects 全清单、不变量断言、闭包、observe 验证档案）。' +
       '过滤：language / verified（有运行证据）/ has_invariants / zero_third_party（拎走即跑）。' +
       '数据源是盒内 manifest.json 自包含档案（跨项目资产的统一命名空间就是盒本身，不碰项目 cache.db）。' +
       '这是"我要 X 功能 → 找到积木 → 拎取拼装"价值链的检索环节。',
     inputSchema: {
       query: z.string().optional().describe('关键词检索（多词独立打分求和：命中积木名/形状名/字段名/description）'),
       language: z.enum(['go', 'typescript', 'python', 'javascript']).optional().describe('语言过滤（闭包文件扩展名推断）'),
-      verified: z.boolean().optional().describe('只看有 camera 运行验证的（effect_verification 档案）'),
+      verified: z.boolean().optional().describe('只看有 observe 运行验证的（effect_verification 档案）'),
       has_invariants: z.boolean().optional().describe('只看有数学不变量的（acceptance.invariants）'),
       zero_third_party: z.boolean().optional().describe('只看零三方依赖的（拎走即跑）'),
       name: z.string().optional().describe('精确积木名 → 详情模式（完整契约输出）'),
@@ -1064,7 +1064,7 @@ const TOOL_DEFS: ToolDef[] = [
       '（go/ast 声明过滤 + 包内不动点 + import 剪枝），把盒内 Go 积木剪成 <brick>-slim 衍生积木回盒。' +
       '纪律：原积木永不覆盖（衍生积木是机器产物，删除后重跑本工具可再生成）；非 Go 文件原样搬运' +
       '（embed 资产等）；无可剪内容不生成空壳。可选 verify_build：临时目录 go build ./... 当场编译验证' +
-      '（需 Go 工具链+网络），结果写 slim_verification.build。四层验证剩余三层（源测试/camera/效果验收）' +
+      '（需 Go 工具链+网络），结果写 slim_verification.build。四层验证剩余三层（源测试/observe/效果验收）' +
       '由人后续补——剔除生效前请人工补验。',
     inputSchema: {
       brick_name: z.string().describe('原积木名（盒内 <box_dir>/<brick_name>；须为 Go 积木且带 slim_candidates live 档案）'),
@@ -1104,16 +1104,16 @@ const TOOL_DEFS: ToolDef[] = [
     }),
   },
   {
-    name: 'camera_log',
-    title: 'Query Camera runtime logs by file',
+    name: 'observe_log',
+    title: 'Query Observe runtime logs by file',
     description:
-      '查询 Camera 运行时日志（events.jsonl）。可传 files 按文件路径过滤（精确/后缀/包含匹配），' +
+      '查询 Observe 运行时日志（events.jsonl）。可传 files 按文件路径过滤（精确/后缀/包含匹配），' +
       '只返回命中路径的事件；不传 files 时默认只返回偏差，all=true 才全量。' +
       '适用于：LLM 按需拉取某文件/某条链路的数据流与异常，而非全量丢出。',
     inputSchema: {
       events_file: z
         .string()
-        .describe('Camera 事件文件路径（events.jsonl）。由插桩/哨兵运行时产生，如 <dataHome>/.design-canvas/camera/events.jsonl'),
+        .describe('Observe 事件文件路径（events.jsonl）。由插桩/哨兵运行时产生，如 <dataHome>/.design-canvas/observe/events.jsonl'),
       files: z
         .array(z.string())
         .optional()
@@ -1123,13 +1123,13 @@ const TOOL_DEFS: ToolDef[] = [
         .optional()
         .describe('不传 files 时：true=列出全部事件；false=只列偏差（默认）'),
     },
-    handler: cameraLogHandler,
+    handler: observeLogHandler,
   },
   {
-    name: 'camera_judge',
-    title: 'Judge a batch of Camera events',
+    name: 'observe_judge',
+    title: 'Judge a batch of Observe events',
     description:
-      '对一批 Camera 事件执行偏差判定（语言无关）。传 events 数组（符合 TSEvent 形状：probe/fields[err/op/benign]，可含 trace_id/frame_id）。' +
+      '对一批 Observe 事件执行偏差判定（语言无关）。传 events 数组（符合 TSEvent 形状：probe/fields[err/op/benign]，可含 trace_id/frame_id）。' +
       '返回逐条判定 + 汇总（total/ok/deviation）。text=true 返回人类可读报告，否则返回 JSON。' +
       '传 decls（设计声明数组）时额外执行链路契约判定（P2）：从事件 trace 三元组重建实测调用链，' +
       '声明的调用序（decl.chain）必须是某条实测链的子序列，断裂报 chain-broken（含 trace_id 与实测窗口）。' +
@@ -1145,16 +1145,16 @@ const TOOL_DEFS: ToolDef[] = [
       text: z.boolean().optional().describe('true=返回人类可读报告；false=返回 JSON（默认 JSON）'),
       use_llm: z.boolean().optional().describe('true=对可疑事件做 LLM 行为级复核（默认 false 纯规则秒判）'),
     },
-    handler: cameraJudgeHandler,
+    handler: observeJudgeHandler,
   },
   {
-    name: 'chain_recon',
-    title: 'Reconcile a host chain with its real-run camera events (meso tier)',
+    name: 'reconcile_chain',
+    title: 'Reconcile a host chain with its real-run observe events (meso tier)',
     description:
       '中观档对账（工具可用性复盘缺口 C）：按「文件/宿主节点」一条命令的真跑 + 查数据 + 对账，' +
       '填补宏观（整项目对账）与微观（trace-exec 纯函数子集）之间的空档。' +
       '后工具自动前置 + 缓存跳过：宿主下无 detail 链时自动调用 deriveDetailChain 建链' +
-      '（已有链则命中缓存跳过派生），自动发现被观测项目事件文件（.agent/camera + .design-canvas/camera），' +
+      '（已有链则命中缓存跳过派生），自动发现被观测项目事件文件（.agent/observe + .design-canvas/observe），' +
       '按链涉及文件过滤出这条链的真跑事件 → judgeEvent 逐事件判定偏差 → rebuildChains 重建实测调用链' +
       '→ 链路契约匹配（声明链须是某条实测链的子序列，mode=bare-name 近似）。' +
       '该链无任何事件时 not_run=true 并明示「先跑一遍再对账」，绝不伪造事件降级冒充成品。' +
@@ -1162,21 +1162,21 @@ const TOOL_DEFS: ToolDef[] = [
     inputSchema: {
       feature: z.string().describe('DSL feature 名'),
       node_id: z.string().describe('宿主文件节点 id（detail 链挂在它下面，作为对账的链根）'),
-      project_dir: z.string().describe('被观测项目根目录（其下 .agent/camera/events-*.jsonl 是事件源）'),
+      project_dir: z.string().describe('被观测项目根目录（其下 .agent/observe/events-*.jsonl 是事件源）'),
       events_files: z.array(z.string()).optional().describe('显式事件文件列表（缺省自动发现）'),
       force: z.boolean().optional().describe('true=忽略缓存强制重新派生链（默认 false，已有链则跳过派生）'),
       max_steps: z.number().optional().describe('派生入链函数上限（默认 12，仅需派生时生效）'),
     },
-    handler: chainReconHandler,
+    handler: reconcileChainHandler,
   },
   {
-    name: 'camera_instrument',
+    name: 'observe_instrument',
     title: 'Auto-instrument or restore a TS project',
     description:
       '对目标项目全自动 AST 插桩（函数出入口/return/catch/IO 写盘），幂等（已含探针文件跳过）。' +
       'action=uninstrument|restore 一键全拔（从自动备份拷回原文件、删备份目录、清理探针台账）。' +
       'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。' +
-      '写盘插桩成功后自动生成探针台账（data.ledger：全部探针点+统计，落盘 .design-canvas/camera-ledger.json）。' +
+      '写盘插桩成功后自动生成探针台账（data.ledger：全部探针点+统计，落盘 .design-canvas/observe-ledger.json）。' +
       '契约模式：contract_probes 传探针 id 数组（如 ["store.save.writefile"]）则只注入声明的探针点；' +
       '缺省/空数组则探索模式全量插桩（挖掘隐藏问题）。',
     inputSchema: {
@@ -1190,9 +1190,9 @@ const TOOL_DEFS: ToolDef[] = [
         .array(z.string())
         .optional()
         .describe('契约模式探针 id 数组（如 ["store.save.writefile"]），只注入这些探针点；缺省=探索模式全量插桩'),
-      project_root: z.string().optional().describe('design-canvas 根（探针实现 src/camera/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
+      project_root: z.string().optional().describe('design-canvas 根（探针实现 src/observe/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
     },
-    handler: cameraInstrumentHandler,
+    handler: observeInstrumentHandler,
   },
   {
     name: 'edit_code',

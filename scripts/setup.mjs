@@ -7,8 +7,8 @@
  *   - TS 静态插桩   → 复用 dist/src/camera/instrument_cli.js（幂等，--uninstrument 还原）
  *   - skill 安装    → 本脚本新增：把 .trae/skills/ 拷进目标 agent skills 目录
  *   - 事件目录规约   → 本脚本新增：确保 <target>/.design-canvas/camera + .agent/camera 存在
- *                   （这两处正是 chain_recon.discoverEventFiles 自动发现的两个事件源）
- *   - 跑一轮出事件  → 本脚本新增：带 CAMERA_EVENTS_FILE sink 跑用户给的命令，产出真事件
+ *                   （这两处正是 reconcile_chain.discoverEventFiles 自动发现的两个事件源）
+ *   - 跑一轮出事件  → 本脚本新增：带 OBSERVE_EVENTS_FILE sink 跑用户给的命令，产出真事件
  *   - 体检报告      → 本脚本新增：doctor 逐项检测就绪度，给可执行提示，不静默
  *
  * 用法（design-canvas 根）：
@@ -130,7 +130,7 @@ function runDoctor() {
   if (evFiles.length === 0) {
     fail++;
     console.log(no(`事件源：无（<target>/.design-canvas/camera 与 .agent/camera 均无 events*.jsonl）`));
-    console.log(dim(`   → chain_recon/trace-exec 面对本项目会一直 not_run。先跑：`));
+    console.log(dim(`   → reconcile_chain/trace-exec 面对本项目会一直 not_run。先跑：`));
     console.log(dim(`     node scripts/setup.mjs ${T} --instrument --run "<项目入口命令>"`));
   } else {
     pass++;
@@ -234,7 +234,7 @@ async function runSetup() {
     }
   }
 
-  // 3) 事件目录规约（chain_recon 自动发现的这两处）
+  // 3) 事件目录规约（reconcile_chain 自动发现的这两处）
   for (const rel of EVENT_DIRS_TPL) {
     const dir = path.join(T, ...rel.split('/'));
     if (fs.existsSync(dir)) continue;
@@ -254,7 +254,7 @@ async function runSetup() {
     }
   }
 
-  // 5) 跑一轮出真事件（带 CAMERA_EVENTS_FILE sink）
+  // 5) 跑一轮出真事件（带 OBSERVE_EVENTS_FILE sink）
   if (RUN) {
     const evDir = path.join(T, '.agent', 'camera');
     const evFile = path.join(evDir, `events-${Date.now().toString(36)}.jsonl`);
@@ -263,7 +263,7 @@ async function runSetup() {
     if (DRY) { console.log(`[dry-run] ${RUN}`); }
     else {
       fs.mkdirSync(evDir, { recursive: true });
-      const r = spawnSync(RUN, { shell: true, cwd: T, encoding: 'utf-8', env: { ...process.env, CAMERA_EVENTS_FILE: evFile } });
+      const r = spawnSync(RUN, { shell: true, cwd: T, encoding: 'utf-8', env: { ...process.env, OBSERVE_EVENTS_FILE: evFile } });
       console.log((r.stdout || '').slice(-2000));
       if (r.status !== 0 && r.status !== null) console.warn(`  ⚠ 命令退出码 ${r.status}${r.stderr ? '\n' + r.stderr : ''}`);
       const n = fs.existsSync(evFile) ? (fs.readFileSync(evFile, 'utf-8').trim().split('\n').filter(Boolean)).length : 0;

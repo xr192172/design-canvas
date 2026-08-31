@@ -84,7 +84,7 @@ function annotateByRule(tools: FunctionEntry[], taxonomy: Taxonomy): Record<stri
     ['design', ['dsl', 'feature', 'scaffold', 'render', 'simulation']],
     ['query', ['get_', 'explore', 'diff', 'search', 'find_']],
     ['refactor', ['rename', 'assemble', 'slim', 'brick', 'pipeline', 'dead', 'contract', 'effects']],
-    ['observe', ['camera', 'log', 'judge', 'consistency', 'instrument', 'narrate', 'trace']],
+    ['observe', ['observe', 'log', 'judge', 'consistency', 'instrument', 'narrate', 'trace']],
     ['harvest', ['harvest', 'import_']],
     ['edit', ['edit_']],
     ['export', ['export']],

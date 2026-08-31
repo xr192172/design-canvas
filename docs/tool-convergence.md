@@ -41,7 +41,7 @@
 | **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                          |
 | **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
 | **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
-| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
+| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `observe_log` `observe_judge` `observe_instrument` `reconcile_chain` `consistency_check` `reconcile_brick` `reconcile_effects`           |
 | **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `canvas_notes`(decide/mark)                                                                                             |
 | **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `search_bricks` `assemble_bricks` `slim_brick`              |
 | **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `canvas_notes`(read)                                                                        |
@@ -62,7 +62,7 @@
 | `signal_review_cli`                  | judge              | 信号审批终端形态  |
 | `split_stage_cli`                    | refactor           | 拆分阶段终端形态  |
 | `deprecate_offline_cli`              | refactor           | 下线遗留终端形态  |
-| `camera / instrument_cli`            | observe            | 插桩终终端形态   |
+| `observe / instrument_cli`           | observe            | 插桩终终端形态   |
 
 ### 第三层 · 工程基建（不属于产品能力）
 
@@ -88,7 +88,7 @@
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `rename_symbol` / `rename_file` / `rename_many` | **不合并**。三种底层机制：单文件作用域折叠(ast\_rename) vs 跨文件符号引用图(rename\_symbol) vs 文件系统迁移+全仓 import 改写(rename\_file)。抽公共内核纯属糅合。 |
 | `suggest_renames` / `find_similar_names`        | **不合并**。两种互补视角：无意义短名 vs 易混淆孪生名。两者都输出可喂 `rename_many` 的数据，是上下游配合。                                                 |
-| `camera_log` / `chain_recon`                    | **不合并**。纯事件查询 vs 中观对账编排聚合。前缀统一是命名风格而非代码合并，收益有限。                                                                  |
+| `observe_log` / `reconcile_chain`               | **不合并**。纯事件查询 vs 中观对账编排聚合。前缀统一是命名风格而非代码合并，收益有限。                                                                  |
 
 > 从 A 组的教训看：**"名称相似"不等于"职责重叠"，收敛必须以源实现核验为准。**
 
@@ -141,7 +141,7 @@
 
 - **Phase 0 · 定性登记**（本文即产物）：三层框架落地，全部 MCP+CLI 归入三层 → 验收文档。
 
-- **Phase 1 · 高确定合并**：A 组无风险合并（rename 内核、camera 前缀统一）→ 验收 diff + 回归全绿。
+- **Phase 1 · 高确定合并**：A 组无风险合并（rename 内核、observe 前缀统一）→ 验收 diff + 回归全绿。
 
 - **Phase 2 · 审计后取舍**：B 组逐项审计 → 每项一个小验收说明。
 
@@ -153,7 +153,7 @@
 
 ## 5.5 命名审计（起名 vs 实际功能）
 
-> 逐个核验工具名与真实职能是否匹配。**结论：大部分隐喻自洽；camera 存在真实命名摩擦。**
+> 逐个核验工具名与真实职能是否匹配。**结论：大部分隐喻自洽；observe 存在真实命名摩擦。**
 
 ### 起名贴切（隐喻自洽 + 直白）
 
@@ -168,21 +168,21 @@
 
 ### 起名有摩擦（待决定是否改）
 
-| 工具                 | 实际功能            | 摩擦点                                                 | 评级       |
-| ------------------ | --------------- | --------------------------------------------------- | -------- |
-| **`camera_*`**     | 插桩→记录→判定（运行时观测） | "摄像头"隐喻对外不直白；与 probe/instrument/observe 概念重叠        | ⚠️ 中等    |
-| `reconcile_*`（对账）  | 用运行时观测校准契约      | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微    |
-| `chain_recon`（链对账） | 声明链 vs 实测链对账    | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 拼写不一致 |
+| 工具                     | 实际功能            | 摩擦点                                                 | 评级       |
+| ---------------------- | --------------- | --------------------------------------------------- | -------- |
+| **`camera_*`**         | 插桩→记录→判定（运行时观测） | "摄像头"隐喻对外不直白；与 probe/instrument/observe 概念重叠        | ⚠️ 中等    |
+| `reconcile_*`（对账）      | 用运行时观测校准契约      | "对账"偏财务术语，实际是"用观测校准"                                | ⚠️ 轻微    |
+| `reconcile_chain`（链对账） | 声明链 vs 实测链对账    | 与 `reconcile_*` 同义不同拼（recon vs reconcile），**拼写不统一** | ⚠️ 拼写不一致 |
 
-### 关键发现：camera / probe / instrument / observe 命名通胀
+### 关键发现：observe / probe / instrument / observe 命名通胀
 
 同一套「运行时观测」机制，代码里混用了 4 个词：
 
-- **camera** —— 观测系统总称（隐喻"摄像头"）
+- **observe** —— 观测系统总称（隐喻"摄像头"）
 
 - **probe** —— 探针（插桩点）
 
-- **instrument** —— 插桩动作（`camera_instrument`）
+- **instrument** —— 插桩动作（`observe_instrument`）
 
 - **observe** —— 能力域名
 
@@ -238,10 +238,10 @@
 
   - 结果：不改代码。
 
-- [x] 候选组：`camera_log` / `chain_recon`
+- [x] 候选组：`observe_log` / `reconcile_chain`
   - 核验：读源实现 ✓
 
-  - 发现：`camera_log`=纯事件查询（按文件过滤读 events.jsonl）；`chain_recon`=中观对账编排（派生链→过滤事件→判定偏差→链路契约匹配）。后者内部用到前者的读取能力，是编排聚合。
+  - 发现：`observe_log`=纯事件查询（按文件过滤读 events.jsonl）；`reconcile_chain`=中观对账编排（派生链→过滤事件→判定偏差→链路契约匹配）。后者内部用到前者的读取能力，是编排聚合。
 
   - 处理：判**不合并**。`camera_*` 前缀统一属命名风格，非代码合并，收益有限。
 

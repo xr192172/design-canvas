@@ -3,9 +3,9 @@
  *
  * "动静结合"主线的合龙动作：
  *   静（extract_contracts，origin='ast'）：AST 扫出的 effects 候选——"疑似"
- *   动（camera effect 探针）：go-camera --effects 插桩，运行时 Capture
+ *   动（observe effect 探针）：go-observe --effects 插桩，运行时 Capture
  *       {level:'effect', kind, target, op}——"实锤"
- *   对账（本工具）：读 <project>/.agent/camera/events-*.jsonl，按文件聚合 effect
+ *   对账（本工具）：读 <project>/.agent/observe/events-*.jsonl，按文件聚合 effect
  *   事件，与 DSL 契约（SemanticFile.contract.effects）对账：
  *     - 候选命中观测  → origin: 'ast' 升格 'runtime'（候选转正）
  *     - 观测在候选外  → 新增 EffectTarget(origin:'runtime') + 记入 incomplete
@@ -19,7 +19,7 @@
  *   hold  : goroutine / ticker 精确；listen / db-pool 前缀（探针不捕获运行时
  *           参数，静态侧有 addr/driver 细节）；探针 file-handle ↔ 静态 file:*
  *
- * LLM 不产生事实：本工具只搬运 camera 观测，判定规则全部机械。
+ * LLM 不产生事实：本工具只搬运 observe 观测，判定规则全部机械。
  */
 
 import fs from 'node:fs';
@@ -29,11 +29,11 @@ import { getDSL, saveDSL } from '../storage.js';
 import type { EffectTarget } from '../dsl/contract.js';
 
 export interface ReconcileEffectsInput {
-  /** 被观测项目根目录（其下 .agent/camera/events-*.jsonl 是事件源） */
+  /** 被观测项目根目录（其下 .agent/observe/events-*.jsonl 是事件源） */
   project_dir: string;
   /** DSL feature 名（契约挂在其 SemanticFile.contract） */
   feature: string;
-  /** 显式事件文件（缺省自动发现 .agent/camera/events-*.jsonl） */
+  /** 显式事件文件（缺省自动发现 .agent/observe/events-*.jsonl） */
   events_files?: string[];
   /** false 只对账预演不写回 DSL（默认 true） */
   write_dsl?: boolean;
@@ -81,7 +81,7 @@ export interface ReconcileEffectsResult {
   message: string;
 }
 
-/** 一条 effect 事件的最小形态（camera probe.Event 的子集） */
+/** 一条 effect 事件的最小形态（observe probe.Event 的子集） */
 interface EffectEvent {
   probe: string;
   time: string;
@@ -105,10 +105,10 @@ interface FileObservation {
   lastSeen: string;
 }
 
-/** 自动发现事件文件：.agent/camera/events-*.jsonl（含裸 events.jsonl） */
+/** 自动发现事件文件：.agent/observe/events-*.jsonl（含裸 events.jsonl） */
 function discoverEventFiles(root: string): string[] {
   const out: string[] = [];
-  for (const dirRel of ['.agent/camera', '.design-canvas/camera']) {
+  for (const dirRel of ['.agent/observe', '.design-canvas/observe']) {
     const dir = path.join(root, ...dirRel.split('/'));
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
@@ -186,7 +186,7 @@ export async function reconcileEffects(input: ReconcileEffectsInput): Promise<Re
       incomplete: [],
       written_to_dsl: false,
       stats: { files_matched: 0, candidates_confirmed: 0, newly_observed: 0, unobserved: 0 },
-      message: `未发现事件文件（${path.join(root, '.agent', 'camera')} 下无 events-*.jsonl）。先插桩（instrument --effects）并运行项目产生观测。`,
+      message: `未发现事件文件（${path.join(root, '.agent', 'observe')} 下无 events-*.jsonl）。先插桩（instrument --effects）并运行项目产生观测。`,
     };
   }
 

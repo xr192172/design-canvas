@@ -253,7 +253,7 @@
             "source_project": { "type": "string" },
             "commit": { "type": "string" },
             "harvested_at": { "type": "string" },
-            "last_reconciled": { "type": "string", "description": "最近一次 camera 动静对账时间" }
+            "last_reconciled": { "type": "string", "description": "最近一次 observe 动静对账时间" }
           }
         }
       }
@@ -287,7 +287,7 @@
         "target": { "type": "string" },
         "op": { "type": "string", "enum": ["write", "append", "delete", "acquire", "release"] },
         "reversible": { "type": "string" },
-        "origin": { "type": "string", "enum": ["ast", "runtime"], "description": "ast=静态扫描候选；runtime=camera 实测确认" }
+        "origin": { "type": "string", "enum": ["ast", "runtime"], "description": "ast=静态扫描候选；runtime=observe 实测确认" }
       }
     },
     "Annotation": {

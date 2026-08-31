@@ -11,7 +11,7 @@
  *     文件 → 主导社区 → 功能 的归属映射（file_map）。
  *
  * 归并策略（目录优先，结构保真——功能树必须对得上实际项目、符合人类阅读习惯）：
- *   - 社区按"成员文件主导目录"聚成功能（dsl/db/daemon/renderer/camera… 各成功能，
+ *   - 社区按"成员文件主导目录"聚成功能（dsl/db/daemon/renderer/observe… 各成功能，
  *     tools 大桶再按能力域拆成 8 类，杜绝"工具"一口大锅）；
  *   - 零社区的目录（纯定义/配置/入口文件，如 dsl 类型、db 存储、daemon 守护、tools 脚本）
  *     按目录直挂补成功能，不凭空消失；
@@ -61,16 +61,16 @@ function dirOf(p: string): string {
 
 /**
  * 顶层目录 → 中文功能名（规则归并时功能名符合人类阅读习惯，而非裸目录名）。
- * 未列出的目录保持原名（如 go-camera、go-slim 等外部子项目）。
+ * 未列出的目录保持原名（如 go-observe、go-slim 等外部子项目）。
  */
 const DIR_FEATURE_NAMES: Record<string, string> = {
   dsl: 'DSL 协议定义',
   db: '数据存储',
   daemon: '守护进程',
   renderer: '渲染引擎',
-  camera: '观测探针',
+  observe: '观测探针',
   diagnosis: '诊断分析',
-  go_camera: 'Go 探针引擎',
+  go_observe: 'Go 探针引擎',
   go_slim: '轻量探针',
   scripts: '构建脚本',
   schema: 'Schema 定义',
@@ -100,8 +100,8 @@ export const TOOL_DOMAINS: Array<{ id: string; label: string; files: string[]; k
   },
   {
     id: 'observe', label: '观测质检',
-    files: ['camera_chain_view', 'chain_recon', 'cluster_narrator', 'narrate_step', 'consistency', 'trace_evidence', 'trace_exec', 'trace_reasoning', 'inject_replay', 'dogfood_stats', 'index_freshness', 'alert_inbox'],
-    kws: ['camera', 'chain_recon', 'narrat', 'consistency', 'trace', 'replay', 'dogfood', 'signal_', 'instrument'],
+    files: ['observe_chain_view', 'reconcile_chain', 'cluster_narrator', 'narrate_step', 'consistency', 'trace_evidence', 'trace_exec', 'trace_reasoning', 'inject_replay', 'dogfood_stats', 'index_freshness', 'alert_inbox'],
+    kws: ['observe', 'reconcile_chain', 'narrat', 'consistency', 'trace', 'replay', 'dogfood', 'signal_', 'instrument'],
   },
   {
     id: 'judge', label: '治理裁决',
@@ -325,12 +325,12 @@ export async function deriveFeatureTree(
   });
   // 语义基准：live 视图（功能树是"实际代码结构"的产物，必须对齐 cache.db 索引的代码快照）。
   // 不能用设计视图（design）：设计视图是人工/历史拼装态，可能混入跨项目残留文件
-  //（曾因 cwd 漂移把 go-camera、camera-conformance 等并进来），命中率闸门会误判"不相关"而拒生成。
+  //（曾因 cwd 漂移把 go-observe、observe-conformance 等并进来），命中率闸门会误判"不相关"而拒生成。
   const liveDsl = input.feature ? getDSLByView(input.feature, 'live') : null;
   const semanticFiles = liveDsl?.semantic?.files ?? [];
 
   // 4.5 建"目录主键 → 功能"索引 + 补零社区目录功能（B）：
-  //     数据/协议/服务/工具等目录的纯定义/配置/入口文件（dsl/db/daemon/tools/camera 等）没有调用边，
+  //     数据/协议/服务/工具等目录的纯定义/配置/入口文件（dsl/db/daemon/tools/observe 等）没有调用边，
   //     进不了社区；按目录直挂补成功能，保证 L2 层体现真实目录，而不是凭空消失。
   const keyToFeature = new Map<string, string>();
   const coveredKeys = new Set<string>();
@@ -375,7 +375,7 @@ export async function deriveFeatureTree(
   }));
 
   // 5. file_map：文件 → 功能（社区优先保原子性，孤儿文件目录直挂补全）
-  // 路径形态可能不一致：cache.db 的路径相对其项目根（如本仓库 camera/internal/...），
+  // 路径形态可能不一致：cache.db 的路径相对其项目根（如本仓库 observe/internal/...），
   // DSL 的路径相对导入快照根（顶层目录已剥，如 internal/...）。
   // 用后缀索引兜底（≥2 段，避免单文件名误命中）。
   const suffixToCommunity = new Map<string, number>();
@@ -397,8 +397,8 @@ export async function deriveFeatureTree(
   const fileMap: Record<string, { feature_id: string; community_id: number }> = {};
   // 归属原则（E，v2 目录优先）：文件按"自己的目录/能力域"归属功能（fileKeyOf），
   //   - L4 下钻是"文件层"，文件必须落在它实际所在的目录功能里（tools 文件按能力域、
-  //     camera 文件归观测探针），不能跟着"社区的主目录"跑——否则跨目录社区会把
-  //     camera/diagnosis 的文件拖进 tools 大功能，对不上实际项目。
+  //     observe 文件归观测探针），不能跟着"社区的主目录"跑——否则跨目录社区会把
+  //     observe/diagnosis 的文件拖进 tools 大功能，对不上实际项目。
   //   - community_id 仅作参考保留（L3 实现路径仍按社区协作模块叙事）。
   //   - 目录键对不上（理论上不会，keyToFeature 覆盖全部语义文件目录）→ 按社区兜底。
   for (const sf of semanticFiles) {

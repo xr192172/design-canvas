@@ -21,7 +21,7 @@ import {
 import { watchProjectTool, closeAllActiveWatches } from '../../src/tools/watch_project_tool';
 import { importProject } from '../../src/tools/import_project';
 import { openDb } from '../../src/db/db';
-import { setGlobalProbeSink } from '../../src/camera/probe';
+import { setGlobalProbeSink } from '../../src/observe/probe';
 
 const roots: string[] = [];
 

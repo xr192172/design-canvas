@@ -23,7 +23,7 @@ scripts/*.tmp.mjs
 .design-canvas.bak-*/
 # MCP server 运行时 DSL（项目根，随使用场景变化，不入库）
 design-canvas.json
-# Camera DSL 仓库（运行时生成：{projectRoot}/.agent/camera/dsl.json + history）
+# Observe DSL 仓库（运行时生成：{projectRoot}/.agent/observe/dsl.json + history）
 .agent/
 # Go 编译产物
 *.exe
@@ -93,9 +93,9 @@ test_*.ts
 test_*.txt
 
 # ───── 发布划界（内部实验/诊断/目标项目专属，不入发布仓库） ─────
-# 内部 Go 插桩实验与探针（区分于 svc 的 go-slim/go-camera 运行时依赖）
+# 内部 Go 插桩实验与探针（区分于 svc 的 go-slim/go-observe 运行时依赖）
 go-trace/
-camera-conformance/
+observe-conformance/
 scaffold/
 # 内部文档（dev 过程稿：plans/progress/验收纪要/报告/preview html）
 docs/*
@@ -129,8 +129,8 @@ scripts/reorg_env.cjs
 scripts/audit_env.cjs
 scripts/batch_import.cjs
 scripts/scan_projects.cjs
-# go-camera 迁移交接文档（本地保留，含个人工程路径，不入发布仓库）
-go-camera/MIGRATED_FROM_AI_BASE.md
+# go-observe 迁移交接文档（本地保留，含个人工程路径，不入发布仓库）
+go-observe/MIGRATED_FROM_AI_BASE.md
 # 狗食落盘 runner（直接对外部真实项目写盘，clone 后不可运行，不入发布套件）
 tests/tools/z_dg_*.test.ts
 

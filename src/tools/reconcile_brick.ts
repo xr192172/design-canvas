@@ -6,7 +6,7 @@
  * 保持 ast 不证伪），对账对象从 DSL SemanticFile.contract 换成积木盒
  * contracts.json + manifest.json：
  *
- *   前置链：harvest_from_url 入盒 → go-camera instrument --effects 插桩积木
+ *   前置链：harvest_from_url 入盒 → go-observe instrument --effects 插桩积木
  *   快照（或临时验证项目）→ 驱动运行产生 events-*.jsonl → 本工具。
  *
  *   输入契约：积木盒 <box>/<brick>/contracts.json（按文件键，含 effects）
@@ -25,7 +25,7 @@
  *   not_triggered=观测窗口未覆盖（如轮转阈值未达） / probe_gap=静态候选有
  *   而探针无检测点 / static_only=包级字面量初始化的静态噪声。
  *
- * LLM 不产生事实：本工具只搬运 camera 观测，判定规则全部机械；
+ * LLM 不产生事实：本工具只搬运 observe 观测，判定规则全部机械；
  * gap_notes 是调用方提供的归因输入（人工分析），工具如实登记。
  */
 
@@ -43,9 +43,9 @@ export interface ReconcileBrickInput {
   brick_name?: string;
   /** 积木盒根目录（默认 <dataHome>/.design-canvas/bricks；brick_name 模式必填或可默认） */
   box_dir?: string;
-  /** 事件文件（缺省自动发现 <brick_dir>/.agent/camera/events-*.jsonl 及验证项目常见位置） */
+  /** 事件文件（缺省自动发现 <brick_dir>/.agent/observe/events-*.jsonl 及验证项目常见位置） */
   events_files?: string[];
-  /** 验证项目根目录（自动发现其 .agent/camera/events-*.jsonl） */
+  /** 验证项目根目录（自动发现其 .agent/observe/events-*.jsonl） */
   verify_dir?: string;
   /** 未观测候选归因（人工/LLM 分析输入；键=文件名|target，值=归因说明） */
   gap_notes?: Record<string, string>;
@@ -107,10 +107,10 @@ function defaultBoxDir(): string {
   return path.resolve(path.join(getStorageRoot(), 'bricks'));
 }
 
-/** 自动发现事件文件：.agent/camera/events-*.jsonl（含裸 events.jsonl） */
+/** 自动发现事件文件：.agent/observe/events-*.jsonl（含裸 events.jsonl） */
 function discoverEventFiles(root: string): string[] {
   const out: string[] = [];
-  for (const dirRel of ['.agent/camera', '.design-canvas/camera']) {
+  for (const dirRel of ['.agent/observe', '.design-canvas/observe']) {
     const dir = path.join(root, ...dirRel.split('/'));
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
@@ -206,7 +206,7 @@ export async function reconcileBrick(input: ReconcileBrickInput): Promise<Reconc
 
   if (eventsFiles.length === 0) {
     return emptyResult(
-      `未发现事件文件（${input.verify_dir ?? brickDir} 下无 .agent/camera/events-*.jsonl）。` +
+      `未发现事件文件（${input.verify_dir ?? brickDir} 下无 .agent/observe/events-*.jsonl）。` +
         '前置链：instrument --effects 插桩积木快照 → 驱动运行产生观测。',
     );
   }
@@ -360,7 +360,7 @@ export async function reconcileBrick(input: ReconcileBrickInput): Promise<Reconc
     }
     manifest.effect_verification = {
       verified_at: new Date().toISOString(),
-      method: input.method ?? 'go-camera instrument --effects 插桩 + 驱动运行（详见事件文件）',
+      method: input.method ?? 'go-observe instrument --effects 插桩 + 驱动运行（详见事件文件）',
       events: events.length,
       stats: { confirmed: confirmedTotal, unobserved: unobservedTotal },
       files: reports.map((r) => ({

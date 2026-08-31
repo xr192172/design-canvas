@@ -65,7 +65,7 @@ describe('classifyByRule 启发式降级（粒度=簇）', () => {
     const r = resultWith([
       brick('tools', [
         { sid: 'tools#1', files: ['tools/brickify_cluster.ts', 'tools/refactor_pipeline.ts'] },   // compute
-        { sid: 'tools#2', files: ['tools/camera_instrument.ts', 'tools/signal_check.ts'] },      // observe
+        { sid: 'tools#2', files: ['tools/observe_instrument.ts', 'tools/signal_check.ts'] },      // observe
         { sid: 'tools#3', files: ['tools/refactor_judge.ts', 'tools/alert_inbox_review.ts'] },   // review
       ]),
     ]);
@@ -98,17 +98,17 @@ describe('classifyBricks 主流程（无 LLM 环境）', () => {
 
   it('每簇恰好归一槽；槽位顺序保持；空槽如实渲染；未归类独立', async () => {
     const r = resultWith([
-      brick('camera', [{ sid: 'camera#1', files: ['camera/instrument.ts'] }]),
+      brick('observe', [{ sid: 'observe#1', files: ['observe/instrument.ts'] }]),
       brick('misc', [{ sid: 'misc#1', files: ['misc/zzz.ts'] }]),
     ]);
     const out = await classifyBricks(r, undefined);
     expect(out.meta.mode).toBe('rule');
     expect(out.unclassified).toEqual(['misc#1']);
     expect(out.slots.map((s) => s.slot.id)).toEqual(defaultPipelineTaxonomy().slots.map((s) => s.id));
-    const cameraLane = out.slots.find((s) => s.slot.id === 'observe')!;
-    expect(cameraLane.groups).toHaveLength(1);
-    expect(cameraLane.groups[0].brick).toBe('camera');
-    expect(cameraLane.groups[0].clusters.map((c) => c.id)).toEqual(['camera#1']);
+    const observeLane = out.slots.find((s) => s.slot.id === 'observe')!;
+    expect(observeLane.groups).toHaveLength(1);
+    expect(observeLane.groups[0].brick).toBe('observe');
+    expect(observeLane.groups[0].clusters.map((c) => c.id)).toEqual(['observe#1']);
     expect(out.slots.find((s) => s.slot.id === 'intake')!.groups).toHaveLength(0);
     expect(out.meta.total).toBe(2);
   });
@@ -143,7 +143,7 @@ describe('renderAnatomyHtml 泳道视图（簇粒度）', () => {
 
   it('泳道/积木分组/簇节点/悬窗文件清单全渲染；启发式徽章区分', async () => {
     const r = resultWith([
-      brick('camera', [{ sid: 'camera#1', files: ['camera/instrument.ts'] }]),
+      brick('observe', [{ sid: 'observe#1', files: ['observe/instrument.ts'] }]),
       brick('misc', [{ sid: 'misc#1', files: ['misc/zzz.ts'] }]),
     ]);
     const anatomy = await classifyBricks(r, undefined);
@@ -152,11 +152,11 @@ describe('renderAnatomyHtml 泳道视图（簇粒度）', () => {
     expect(html).toContain('人机闭环');
     expect(html).toContain('空槽——本项目没有这部分');
     // 簇节点 + 归类徽章
-    expect(html).toContain('data-cluster="camera#1"');
+    expect(html).toContain('data-cluster="observe#1"');
     expect(html).toContain('启发'); // rule 徽章
     // 积木分组标签
     expect(html).toContain('an-group');
-    expect(html).toContain('camera/');
+    expect(html).toContain('observe/');
     // 未归类泳道
     expect(html).toContain('未归类');
     // 悬窗数据（簇级：面包屑+文件清单）
@@ -166,7 +166,7 @@ describe('renderAnatomyHtml 泳道视图（簇粒度）', () => {
   });
 
   it('有人话时簇节点标题用翻译', async () => {
-    const r = resultWith([brick('camera', [{ sid: 'camera#1', files: ['camera/instrument.ts'] }])]);
+    const r = resultWith([brick('observe', [{ sid: 'observe#1', files: ['observe/instrument.ts'] }])]);
     const anatomy = await classifyBricks(r, undefined);
     anatomy.slots.find((s) => s.slot.id === 'observe')!.groups[0].clusters[0].title = '插桩探针';
     const html = renderAnatomyHtml(r, anatomy);

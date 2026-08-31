@@ -297,7 +297,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       const replaced = fs.existsSync(path.join(brickDir, 'manifest.json'));
 
       // 重抽保留：acceptance/matches/effect_verification/description 是人工沉淀
-      // （验收判据、匹配历史、camera 动静对账证据档案、人话介绍），不随快照覆盖
+      // （验收判据、匹配历史、observe 动静对账证据档案、人话介绍），不随快照覆盖
       // 丢失——契约/闭包/文件由重抽重算，人的判断与运行证据只有一份。
       let preserved: Pick<
         BrickManifest,
@@ -381,7 +381,7 @@ export async function harvestFromUrl(input: HarvestFromUrlInput): Promise<Harves
       }
 
       // 死依赖检测（瘦身事实层）：种子不可达代码引入的三方依赖 = 死候选。
-      // Camera 宪法同构——只报告不剔除；机器可重算，重抽刷新。
+      // Observe 宪法同构——只报告不剔除；机器可重算，重抽刷新。
       // 门槛：有源码文件即跑（不再要求三方依赖存在）——live 明细档案
       // （live_symbols_by_file）是剪刀的 keep 集，零三方积木的符号级剪枝
       // （剪死函数）同样需要它

@@ -33,7 +33,7 @@ import { deriveSplit, type DeriveSplitResult } from './derive_split.js';
 
 /** 单个文件的拆分执行计划（由复核采纳信号推导） */
 export interface SplitStagePlan {
-  /** 相对 project_dir 的目标文件，如 camera/export_incident.ts */
+  /** 相对 project_dir 的目标文件，如 observe/export_incident.ts */
   file: string;
   /** 采纳簇申领的积木/功能名（新文件命名依据，缺省回退默认 __split） */
   feature: string;

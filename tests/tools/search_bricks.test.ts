@@ -197,7 +197,7 @@ describe('searchBricks', () => {
     expect(e.brick_dir).toBe(path.join(f.boxDir, 'go_logging'));
     expect(r.effects_detail?.['internal/logging/logging.go']).toBeDefined();
     expect((r.contracts as Record<string, unknown>)['internal/logging/logging.go']).toBeDefined();
-    expect(r.message).toContain('camera 已验证');
+    expect(r.message).toContain('observe 已验证');
     expect(r.message).toContain('不变量 2 条');
   });
 

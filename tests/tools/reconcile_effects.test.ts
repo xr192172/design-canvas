@@ -69,7 +69,7 @@ function makeDslWithContract(): void {
 }
 
 function writeEvents(lines: string[]): void {
-  const dir = path.join(root, '.agent', 'camera');
+  const dir = path.join(root, '.agent', 'observe');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'events-20260820.jsonl'), lines.join('\n') + '\n', 'utf-8');
 }
@@ -168,9 +168,9 @@ describe('reconcile_effects - 动静对账', () => {
     expect(r1.written_to_dsl).toBe(false);
     expect(r1.message).toContain('未发现事件文件');
 
-    fs.mkdirSync(path.join(root, '.agent', 'camera'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.agent', 'observe'), { recursive: true });
     fs.writeFileSync(
-      path.join(root, '.agent', 'camera', 'events.jsonl'),
+      path.join(root, '.agent', 'observe', 'events.jsonl'),
       ev({ level: 'core', file: 'worker.go' }, 'worker.Run.enter') + '\n',
     );
     const r2 = await reconcileEffects({ project_dir: root, feature: 'f_reconcile' });

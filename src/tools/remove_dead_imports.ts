@@ -1,7 +1,7 @@
 /**
  * remove_dead_imports —— 移除死 import 执行器（积木瘦身的"剪刀"辅助）
  *
- * 与 dead_deps 配套：dead_deps 负责"只报告偏差、绝不自动改写"（Camera 宪法），
+ * 与 dead_deps 配套：dead_deps 负责"只报告偏差、绝不自动改写"（Observe 宪法），
  * 产出 DeadDepCandidate[]（source + 导入它的文件）；本模块负责"人拍板后
  * 执行改写"，把闭包内指向死三方源（third_party 且被判定死候选）的
  * import/require/re-export 语句从文件里删掉。

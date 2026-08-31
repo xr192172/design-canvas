@@ -10,7 +10,7 @@
  * 落盘：<project>/.design-canvas/impact/ledger.json（与影响报告 rp-*.json 同目录）。
  * 历史封顶：pending/violated 永不裁剪，其余（ok/resolved/expired）保留最近 100 条。
  *
- * 与 verification gate 的关系（对齐 go-camera proposal.go 的"提案-审批-证据"语义）：
+ * 与 verification gate 的关系（对齐 go-observe proposal.go 的"提案-审批-证据"语义）：
  *   - violated entry 即"实际改动超出预告"的证据——matched_seq 指向 rp-<seq>.json 全文
  *   - resolve 是过门动作：reviewer + reason 写入 resolution，未处理的 violated 是债务
  *     （watch status 播报计数），处理动作本身留痕

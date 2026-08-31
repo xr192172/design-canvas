@@ -15,7 +15,7 @@
 
 Two chronic problems in engineering collaboration, both addressed by design-canvas:
 
-**Problem 1: Documentation drift.** Every design doc and architecture diagram goes stale as code evolves, until nobody trusts it. design-canvas encodes the "design truth" as **structured DSL JSON** that evolves with the code: the semantic layer records file contracts (files / apis / decisions), auto-backfilled from the implementation by `backfill_scaffold` and corrected by runtime observation (Camera) — **documentation no longer goes stale**.
+**Problem 1: Documentation drift.** Every design doc and architecture diagram goes stale as code evolves, until nobody trusts it. design-canvas encodes the "design truth" as **structured DSL JSON** that evolves with the code: the semantic layer records file contracts (files / apis / decisions), auto-backfilled from the implementation by `backfill_scaffold` and corrected by runtime observation (Observe) — **documentation no longer goes stale**.
 
 **Problem 2: Uncontrolled changes.** LLMs often edit the wrong location, break files, and produce changes that can't be verified — forcing rework. design-canvas provides a controlled change pipeline: symbol-level precise editing (`edit_code`) → real diff review before applying → runtime probe reconciliation → commit only on pass, auto-rollback on failure — **changes no longer rely on luck**.
 
@@ -43,7 +43,7 @@ One thread runs through everything: **any code → bricks (production) → trust
 | **Visual protocol layer** | DSL read/write/edit, design view vs. actual code snapshot diff, built-in render fallback | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` / `diff_views` |
 | **Code understanding** | Project import, semantic search, impact analysis, architecture layering, monolith splitting, algorithm/dataflow derivation | `import_project` / `explore_code` |
 | **Brick system** | Harvest code from any source (URL / local project) into contract-bearing bricks: extraction, slimming, search, and assembly | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
-| **Runtime verification** | Reconcile contracts and behavior baselines against actual runtime observations, forming a "commit only if verified, roll back on failure" gate | `camera_instrument` / `camera_judge` / `chain_recon` / `reconcile_brick` / `reconcile_effects` |
+| **Runtime verification** | Reconcile contracts and behavior baselines against actual runtime observations, forming a "commit only if verified, roll back on failure" gate | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects` |
 | **Generation / backfill / consistency** | Generate code skeleton from DSL, backfill contracts from implementation, output consistency reports | `scaffold` / `backfill_scaffold` / `consistency_check` |
 | **Deterministic refactoring (no rework)** | Symbol-level editing (never matches wrong), bulk/cross-file renaming, dead code removal, diff review before applying, rollback on failure | `edit_code` / `rename_*` / `refactor_pipeline` |
 | **Diagnosis loop** | Full chain from symptom → root cause → fix → verify → commit (or roll back) | `diagnose` / `refactor_judge` / `diagnose-loop` (CLI) |
@@ -143,14 +143,14 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | `slim_brick` | Slim a Go brick into a derived brick (compiler-style dead code elimination) |
 | `narrate_step` | Narrate a pipeline step as a governed narration brick |
 
-**Runtime verification (Camera)**
+**Runtime verification (Observe)**
 
 | Tool | Purpose |
 |------|------|
-| `camera_instrument` | Auto-instrument / restore TS projects; writes a probe ledger and stats after the run |
-| `camera_log` | Query runtime logs per file |
-| `camera_judge` | Batch-judge runtime events |
-| `chain_recon` | Reconcile a host chain against its real runtime events |
+| `observe_instrument` | Auto-instrument / restore TS projects; writes a probe ledger and stats after the run |
+| `observe_log` | Query runtime logs per file |
+| `observe_judge` | Batch-judge runtime events |
+| `reconcile_chain` | Reconcile a host chain against its real runtime events |
 
 **Deterministic refactoring**
 

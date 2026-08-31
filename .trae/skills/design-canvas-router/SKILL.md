@@ -53,8 +53,8 @@ description: "design-canvas 渐进披露路由。遇到『画图/看代码/重�
 - 提交前怕 go:embed 产物没进库 → 提交层自检（`submit_gate`）
 
 ### E · 插桩 / 摄像头
-- 给代码动态插桩采集真实行为 → `src/camera/`（TS）+ `go-camera/`（Go）
-- 用真跑事件对账实际 vs 设计 DSL → `chain_recon`（会自动前置、缓存跳过、诚实标 `not_run`）
+- 给代码动态插桩采集真实行为 → `src/observe/`（TS）+ `go-observe/`（Go）
+- 用真跑事件对账实际 vs 设计 DSL → `reconcile_chain`（会自动前置、缓存跳过、诚实标 `not_run`）
 - 审事件/判定偏差 → `log_query` → `judge` → `chain.rebuildChains`
 
 ## 第三层：都定位不到？→ 三连招

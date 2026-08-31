@@ -88,7 +88,7 @@ export interface FixSuggestion {
 
 /** 验证方式（只给建议，不自动执行） */
 export interface Verification {
-  type: 'test' | 'typecheck' | 'build' | 'camera' | 'rerun' | 'manual';
+  type: 'test' | 'typecheck' | 'build' | 'observe' | 'rerun' | 'manual';
   command_hint: string;
 }
 

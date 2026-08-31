@@ -17,11 +17,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, exec } from 'node:child_process';
 import { saveDSL, getDSL, getLiveDslFile, getLiveFeature, onDslChange } from '../storage.js';
-import { enableCameraFromEnv } from '../camera/run_sentinel.js';
-import { judgeEvent } from '../camera/judge.js';
-import { queryCameraLog } from '../camera/log_query.js';
-import { judgeEvents, judgeEventsWithLLM, normalizeEvents, renderJudgeReport } from '../camera/judge_service.js';
-import { judgeGuardLog } from '../camera/judge_guard.js';
+import { enableObserveFromEnv } from '../observe/run_sentinel.js';
+import { judgeEvent } from '../observe/judge.js';
+import { queryObserveLog } from '../observe/log_query.js';
+import { judgeEvents, judgeEventsWithLLM, normalizeEvents, renderJudgeReport } from '../observe/judge_service.js';
+import { judgeGuardLog } from '../observe/judge_guard.js';
 import { importProject } from './import_project.js';
 import { getProjectCacheDb, openDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
@@ -53,7 +53,7 @@ import type { MindMap } from '../dsl/mindmap.js';
 import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
 import { deriveDetailChain } from './derive_chain.js';
-import { chainRecon } from './chain_recon.js';
+import { reconcileChain } from './reconcile_chain.js';
 import type { DesignDSL } from '../dsl/types.js';
 import { loadLlmConfig, pickKeyNodes, type ChainNodeInfo } from './llm_focus.js';
 import {
@@ -223,30 +223,30 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
   }
 }
 
-/** GET /api/camera/log?file=<path>&file=<path>&all=1：按文件路径查询 Camera 异常日志。
- * 事件文件取自 CAMERA_EVENTS_FILE；未设置时返回 424（未启用）。可与
- * camera-dsl log --file <path> 等价使用，供 LLM/前端按文件主动拉取某条链路的日志。 */
-function handleApiCameraLog(req: http.IncomingMessage, res: http.ServerResponse): void {
+/** GET /api/observe/log?file=<path>&file=<path>&all=1：按文件路径查询 Observe 异常日志。
+ * 事件文件取自 OBSERVE_EVENTS_FILE；未设置时返回 424（未启用）。可与
+ * observe-dsl log --file <path> 等价使用，供 LLM/前端按文件主动拉取某条链路的日志。 */
+function handleApiObserveLog(req: http.IncomingMessage, res: http.ServerResponse): void {
   try {
-    const eventsPath = process.env.CAMERA_EVENTS_FILE;
+    const eventsPath = process.env.OBSERVE_EVENTS_FILE;
     if (!eventsPath) {
-      sendError(res, 424, 'CAMERA_EVENTS_FILE 未设置，Camera 日志未启用。请在启动 serve 前设置该环境变量。');
+      sendError(res, 424, 'OBSERVE_EVENTS_FILE 未设置，Observe 日志未启用。请在启动 serve 前设置该环境变量。');
       return;
     }
     const url = new URL(req.url || '/', 'http://localhost');
     const files = url.searchParams.getAll('file').filter((f) => f.trim() !== '');
     const all = url.searchParams.get('all') === '1' || url.searchParams.get('all') === 'true';
-    const result = queryCameraLog(eventsPath, { files, all });
+    const result = queryObserveLog(eventsPath, { files, all });
     sendJson(res, 200, result);
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
 }
 
-/** Camera 判定下沉服务（语言无关）：POST /api/camera/judge 判定一批事件。
+/** Observe 判定下沉服务（语言无关）：POST /api/observe/judge 判定一批事件。
  * body: { events: TSEvent[] } → 逐条判定 + 汇总。任何语言的探针都能 POST。
  * 可选 ?text=1 返回人类可读报告（等价 Go RenderReport）。 */
-async function handleApiCameraJudge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleApiObserveJudge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
     let parsed: unknown;
@@ -765,7 +765,7 @@ async function handleApiTraceExec(req: http.IncomingMessage, res: http.ServerRes
 }
 
 /** POST /api/chain-recon：中观档对账——一条命令真跑 + 查数据 + 对账（后工具自动前置 + 缓存跳过） */
-async function handleApiChainRecon(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleApiReconcileChain(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
     const { feature, node_id, project_dir, events_files, force, max_steps } = JSON.parse(body.toString('utf-8'));
@@ -773,7 +773,7 @@ async function handleApiChainRecon(req: http.IncomingMessage, res: http.ServerRe
       sendError(res, 400, '缺少参数：feature / node_id（指定宿主文件节点做中观档对账）');
       return;
     }
-    const r = await chainRecon({
+    const r = await reconcileChain({
       feature: String(feature),
       node_id: String(node_id),
       project_dir: String(project_dir ?? getServeProjectRoot()),
@@ -2434,16 +2434,16 @@ async function handleOpenAICompat(req: http.IncomingMessage, res: http.ServerRes
 export async function startServer(port?: number): Promise<void> {
   const listenPort = port || PORT;
 
-  // Camera 运行哨兵：设置 CAMERA_EVENTS_FILE 时激活全局探针 sink，
+  // Observe 运行哨兵：设置 OBSERVE_EVENTS_FILE 时激活全局探针 sink，
   // 运行中自动采集数据流事件（saveDSL 写盘等）。每条事件落盘后立即用轻量
   // 判定器判断，命中契约偏差就 SSE 推送给画布（开发时即时观测提示）。
   // 未设置时 no-op，不改变 serve 行为。
-  enableCameraFromEnv((ev) => {
-    // 长时压测守门：CAMERA_GUARD=1 时把偏差实时打印到控制台（仅打印，不中断）
+  enableObserveFromEnv((ev) => {
+    // 长时压测守门：OBSERVE_GUARD=1 时把偏差实时打印到控制台（仅打印，不中断）
     judgeGuardLog(ev);
     const v = judgeEvent(ev);
     if (v.result === 'deviation') {
-      broadcastSSE('camera-alert', {
+      broadcastSSE('observe-alert', {
         probe: v.probe,
         rule: v.rule,
         reason: v.reason,
@@ -2529,13 +2529,13 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
-    if (url.startsWith('/api/camera/log') && method === 'GET') {
-      handleApiCameraLog(req, res);
+    if (url.startsWith('/api/observe/log') && method === 'GET') {
+      handleApiObserveLog(req, res);
       return;
     }
 
-    if (url.startsWith('/api/camera/judge') && method === 'POST') {
-      void handleApiCameraJudge(req, res);
+    if (url.startsWith('/api/observe/judge') && method === 'POST') {
+      void handleApiObserveJudge(req, res);
       return;
     }
 
@@ -2850,7 +2850,7 @@ export async function startServer(port?: number): Promise<void> {
     }
 
     if (url.startsWith('/api/chain-recon') && method === 'POST') {
-      handleApiChainRecon(req, res);
+      handleApiReconcileChain(req, res);
       return;
     }
 

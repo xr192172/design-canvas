@@ -7,7 +7,7 @@
  *   - shapes：数据形状（复用判定单元——形状匹配 = 可复用）
  *   - effects：时空可组合性验收单元（空间=reversible 清单；时间=emits 事件流）
  *
- * 提取来源纪律：结构化字段（shapes/effects）只接受 AST 与 camera 两个可信源；
+ * 提取来源纪律：结构化字段（shapes/effects）只接受 AST 与 observe 两个可信源；
  * LLM 结论只进 role.reasons / notes——LLM 不产生事实。
  */
 
@@ -26,7 +26,7 @@ export interface ShapeSchema {
   kind: 'struct' | 'interface' | 'type' | 'class';
   /** Go interface 的"字段"是方法签名（name=方法名，type=完整签名） */
   fields: ShapeField[];
-  /** 提取来源：ast=符号索引+源码解析 / runtime=camera 观测 / llm=推断（当前仅 ast） */
+  /** 提取来源：ast=符号索引+源码解析 / runtime=observe 观测 / llm=推断（当前仅 ast） */
   origin: 'ast' | 'runtime' | 'llm';
   notes?: string;
 }
@@ -39,9 +39,9 @@ export interface EffectTarget {
   /** 回收方式（拔积木时怎么撤销）；缺省 = 不可逆，匹配时标红 */
   reversible?: string;
   /**
-   * 来源标记：ast=静态扫描候选（camera 观测前是"疑似"，可能有误报）；
-   * runtime=camera 实测确认（观测窗口内真实发生过）。
-   * 升格规则：camera 观测到同 target 的写 → 候选转正；观测到候选外的 → 契约不完整告警。
+   * 来源标记：ast=静态扫描候选（observe 观测前是"疑似"，可能有误报）；
+   * runtime=observe 实测确认（观测窗口内真实发生过）。
+   * 升格规则：observe 观测到同 target 的写 → 候选转正；观测到候选外的 → 契约不完整告警。
    */
   origin?: 'ast' | 'runtime';
 }
@@ -49,7 +49,7 @@ export interface EffectTarget {
 /** 文件角色判定（业务/功能二分，DDD 核心域 vs 支撑域） */
 export interface BrickRole {
   class: 'business' | 'functional' | 'hybrid';
-  /** 判定依据：graph=依赖方向算法 / runtime=camera 证据 / llm=语义 / mixed */
+  /** 判定依据：graph=依赖方向算法 / runtime=observe 证据 / llm=语义 / mixed */
   basis: 'graph' | 'runtime' | 'llm' | 'mixed';
   /** 0-1；< 0.7 时 Phase 3 检索降权。静态判定（无 runtime 证据）封顶 0.7 */
   confidence: number;
@@ -68,16 +68,16 @@ export interface BrickContract {
   };
   /** effects 清单（空间可组合性验收单元） */
   effects: {
-    /** 写哪些外部状态（全局 var/单例字段/文件系统）——静态提取范围外，camera 补 */
+    /** 写哪些外部状态（全局 var/单例字段/文件系统）——静态提取范围外，observe 补 */
     writes: EffectTarget[];
-    /** 占用哪些资源（端口/goroutine/连接池/句柄）——camera 补 */
+    /** 占用哪些资源（端口/goroutine/连接池/句柄）——observe 补 */
     holds: EffectTarget[];
-    /** 发出哪些事件（时间可组合性通道）——camera 补 */
+    /** 发出哪些事件（时间可组合性通道）——observe 补 */
     emits: string[];
     /** 读哪些配置项/env（积木"出厂环境要求"，AST 提取） */
     reads_config: string[];
   };
-  /** 运行证据（camera 事件流累积；静态提取阶段为空） */
+  /** 运行证据（observe 事件流累积；静态提取阶段为空） */
   runtime?: {
     /** 观测窗口内调用次数（0 = 纯静态判定，confidence 上限 0.7） */
     call_count: number;
@@ -92,7 +92,7 @@ export interface BrickContract {
     source_project?: string;
     commit?: string;
     harvested_at?: string;
-    /** 最近一次 camera 动静对账时间（reconcile_effects 写入） */
+    /** 最近一次 observe 动静对账时间（reconcile_effects 写入） */
     last_reconciled?: string;
   };
 }
@@ -162,7 +162,7 @@ export interface BrickManifest {
     at: string;
   }>;
   /**
-   * camera 动静对账证据档案（重抽保留字段——运行证据只有一份）。
+   * observe 动静对账证据档案（重抽保留字段——运行证据只有一份）。
    * 命中候选在 contracts.json 里 origin ast→runtime；本槽是全量证据：
    * 含未观测候选的覆盖缺口归因（probe_gap / not_triggered / static_only）。
    */
@@ -192,8 +192,8 @@ export interface BrickManifest {
    */
   npm_requires?: Record<string, string>;
   /**
-   * 死依赖候选档案（积木瘦身事实层 Phase 5+）。Camera 宪法同构：只报告偏差，
-   * 绝不自动改写——剔除=改写=风险，须人拍板 + 四层验证（编译/源测试/camera/效果验收）
+   * 死依赖候选档案（积木瘦身事实层 Phase 5+）。Observe 宪法同构：只报告偏差，
+   * 绝不自动改写——剔除=改写=风险，须人拍板 + 四层验证（编译/源测试/observe/效果验收）
    * 后产出 -slim 衍生积木，原积木永不覆盖。
    * 机器可重算字段——重抽时重新分析刷新（不进重抽保留列表）。
    */
@@ -232,7 +232,7 @@ export interface BrickManifest {
     deps_before: string[];
     deps_after: string[];
   };
-  /** 瘦身验证档案（四层验证渐进填充：build=slim_brick --verify_build；源测试/camera/效果验收后续）。
+  /** 瘦身验证档案（四层验证渐进填充：build=slim_brick --verify_build；源测试/observe/效果验收后续）。
    *  skipped = TS 贫困编译降级（typescript 包不可用/无源文件）——工具链缺席不是产物失败 */
   slim_verification?: {
     build?: { status: 'pass' | 'fail' | 'skipped'; at: string; detail?: string };
