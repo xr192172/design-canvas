@@ -26,16 +26,16 @@
 
 产品功能面，8 域基本保留（可微调），只登记 **MCP 工具**。
 
-| 能力域               | 含义               | 代表 MCP 工具                                                                                                                                |
-| ----------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                          |
-| **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
-| **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
-| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
-| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `mark_canvas_notes_status` `decide_canvas_notes`                                                                        |
-| **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `search_bricks` `assemble_bricks` `slim_brick`              |
-| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `read_canvas_notes`                                                                         |
-| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_list_providers` `gateway_upsert_provider` `gateway_delete_provider` `gateway_stats`                                             |
+| 能力域               | 含义               | 代表 MCP 工具                                                                                                                                    |
+| ----------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                              |
+| **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                          |
+| **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code`     |
+| **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                      |
+| **judge** 治理裁决    | 人审闭环/问题上抛        | `refactor_judge` `mark_canvas_notes_status` `decide_canvas_notes`                                                                            |
+| **harvest** 逆向采集  | 从 URL/项目反向采集     | `harvest_from_url` `harvest_closure` `harvest_decisions` `extract_contracts` `sync_contracts` `search_bricks` `assemble_bricks` `slim_brick` |
+| **export** 交付导出   | 产出给人看的产物         | `narrate_step` `archive_node` `list_archive` `read_canvas_notes`                                                                             |
+| **内务**（暂归入域外）     | 配置/网关管理          | `gateway_list_providers` `gateway_upsert_provider` `gateway_delete_provider` `gateway_stats`                                                 |
 
 > 说明：上表为初版归属，纯数据可再微调，不阻塞收敛。
 
@@ -62,7 +62,9 @@
 
 - **构建/生成**：`rebuild_feature.mjs` `gen_anim_core_bundle.mjs` `gen_teach.cjs` `rebuild_teach.cjs`
 
-- **探针/验证/一次性诊断**（内部质量基建，多为 dev 自检）：`probe_*.mjs` `sim_gap.mjs` `sim_l4.mjs` `agent_notes_loop.mjs` `backfill_stepflow.mjs` `dogfood/*.mjs` `_api_verify.mjs` `_regen_verify.mjs`
+- **演示**：`demo.mjs`
+
+- **探针/验证/一次性诊断**（内部质量基建，多为 dev 自检）：`probe_*.mjs`（`probe_notes` `probe_mcp_smoke` `probe_stepflow` `probe_stepflow_detail` `probe_pins_v2` `probe_e2e_notes`）`sim_gap.mjs` `sim_l4.mjs` `agent_notes_loop.mjs` `backfill_stepflow.mjs` `dogfood/*.mjs`（`build_cache` `check_cache` `verify_space_bug` `verify_spec_form`）`_api_verify.mjs` `_regen_verify.mjs`
 
 ***
 
