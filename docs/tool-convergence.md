@@ -246,7 +246,7 @@
 
 > **watcher 二轮优化（2026-09）**：drift 独立于 rebuild（盯 drift 不必全量重建 live）；状态转换去重（仅「未过时→过时」pushAlert，stale 持续期不重复轰炸）。
 >
-> **✅ 已实现：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时，reconcile 定期全量扫盘兜补漏改，并对有变更的文件精确补判 drift）。原设想的障碍「`ReconcileSummary` 不暴露变更文件」已解决：`ReconcileSummary.changed_files` 由 `reconcileProject` 透出；`watch_project_tool` 的 `onReconcile` 在 reconcile 有实际变更时，按 `changed_files` 以 `scope='changed'` 补判 drift（`runDriftCheck`）；reconcile 由 `setInterval(reconcile_interval_ms)` 周期触发，另暴露 `reconcileNow()` 手动兜补。**注**：`watch_project_tool.test` 覆盖 drift\_on\_change 基本透传/依赖；reconcile→drift 兜底的精确 scope 集成路径暂无专门 flaky-free 测试，列为后续低成本验证项。
+> **✅ 已实现：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时，reconcile 定期全量扫盘兜补漏改，并对有变更的文件精确补判 drift）。原设想的障碍「`ReconcileSummary` 不暴露变更文件」已解决：`ReconcileSummary.changed_files` 由 `reconcileProject` 透出；`watch_project_tool` 的 `onReconcile` 在 reconcile 有实际变更时，按 `changed_files` 以 `scope='changed'` 补判 drift（`runDriftCheck`）；reconcile 由 `setInterval(reconcile_interval_ms)` 周期触发，另暴露 `reconcileNow()` 手动兜补。**注**：`watch_project_tool.test` 已补 reconcile→drift 兜底专用用例（`reconcile_interval_ms` 周期触发 + `waitUntil` 轮询 status，无真实 fs.watch 时序依赖，flaky-free）：设计声明 b 但代码缺 b → missing\_impl，断言 `has_drift=true` + `drift_alert` 有值 + `last_reconcile` 已记录。
 
 ***
 

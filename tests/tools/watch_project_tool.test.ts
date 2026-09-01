@@ -19,6 +19,7 @@ import path from 'node:path';
 import { describe, it, expect, afterAll } from 'vitest';
 import { watchProjectTool, closeAllActiveWatches, createRebuildThrottler } from '../../src/tools/watch_project_tool';
 import { openDb } from '../../src/db/db';
+import { getFeatureFile } from '../../src/storage';
 
 const roots: string[] = [];
 
@@ -39,6 +40,30 @@ function makeRoot(): string {
   fs.mkdirSync(path.join(root, 'src'), { recursive: true });
   fs.writeFileSync(path.join(root, 'src/a.ts'), 'export function a(): void {}\n', 'utf-8');
   return root;
+}
+
+/** 往 storage（经全局 setup 重定向的临时 home）写 feature DSL */
+function writeFeatureToHome(feature: string, expected_apis: string[], filePath: string): void {
+  const dsl = {
+    feature,
+    geometry: {},
+    semantic: {
+      files: [{ id: 'f1', path: filePath, responsibility: 'test', expected_apis: expected_apis.map((signature) => ({ signature })) }],
+    },
+  };
+  fs.mkdirSync(path.dirname(getFeatureFile(feature)), { recursive: true });
+  fs.writeFileSync(getFeatureFile(feature), JSON.stringify(dsl), 'utf-8');
+}
+
+/** 确定性轮询：fn 直到返回真或超时（避免依赖真实 fs.watch / reconcile 的异步时序） */
+async function waitUntil(fn: () => Promise<boolean>, timeoutMs: number): Promise<void> {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`waitUntil 超时（${timeoutMs}ms）`);
 }
 
 describe('watchProjectTool start/status/stop', () => {
@@ -102,6 +127,23 @@ describe('watchProjectTool start/status/stop', () => {
     const start = await watchProjectTool({ project_dir: root, drift_on_change: true });
     expect(start.rebuild).toBe(false);
     expect(start.message).not.toContain('drift 过时判定');
+  });
+
+  it('drift_on_change：reconcile 兜底周期性扫盘找回漏改并精确补判 drift', async () => {
+    // 设计声明 src/a.ts 应有 b()，但代码只有 a() → b 缺失 → missing_impl → 过时。
+    // 启动后不产生任何 fs.watch 事件，只有 reconcile 周期扫盘能发现这个漂移——正是"丢事件兜底"的场景。
+    const root = makeRoot();
+    writeFeatureToHome('reconcile-drift', ['b()'], 'src/a.ts');
+    await watchProjectTool({ project_dir: root, feature: 'reconcile-drift', drift_on_change: true, reconcile_interval_ms: 60 });
+    try {
+      // 轮询 status：has_drift=true 且 drift_alert 有值，且 last_reconcile 已记录（证明走了 reconcile 兜底）
+      await waitUntil(async () => {
+        const st = await watchProjectTool({ project_dir: root, action: 'status' });
+        return st.has_drift === true && st.drift_alert !== undefined && (st.last_reconcile as object | undefined) !== undefined;
+      }, 8000);
+    } finally {
+      await watchProjectTool({ project_dir: root, action: 'stop' });
+    }
   });
 });
 
