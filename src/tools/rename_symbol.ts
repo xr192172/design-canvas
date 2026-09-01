@@ -27,7 +27,7 @@ import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
 import { renameFile } from './rename_file.js';
-import { resolveProjectRoot, expandClosure } from './project_root.js';
+import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport } from './project_root.js';
 
 // ─────────────────────────────────────────────
 // 最小 tree-sitter 节点面（同 Kernel）
@@ -564,6 +564,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   const defAbs = fileAbs;
   // 项目根：显式传则用；否则自动定位（git 根→manifest→file 目录），消除"必须先知 project_dir"的摩擦
   const resolvedRoot = effectiveRoot ?? resolveProjectRoot(fileAbs);
+  // tsconfig 路径别名（@/ 等）：闭包扩展与 importer 匹配共用同一份，保证"拉进闭包"与"命中改名"一致
+  const aliasCfg = loadAliasConfig(resolvedRoot);
 
   const defExt = path.extname(defAbs);
   if (!TS_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS 系（${defExt}），跨文件改名暂只支持 TS/JS 模块级符号`] };
@@ -587,8 +589,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   for (const r of def.exportRefs) if (r.name === symbol) defEditSet.add(r.offset);
   const defEdits: Edit[] = [...defEditSet].map((pos) => ({ pos, len: symbol.length, text: to }));
 
-  // 收集自包含闭包源文件（项目根内全部 + 沿 import 边扩展边界外本地文件），构建相对解析表
-  const files = await expandClosure(defAbs, resolvedRoot);
+  // 收集自包含闭包源文件（项目根内全部 + 沿 import 边/别名边扩展边界外本地文件），构建相对解析表
+  const files = await expandClosure(defAbs, resolvedRoot, aliasCfg);
   const byNoExt = buildNoExt(files);
 
   // 解析 importer 文件
@@ -597,6 +599,9 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     if (path.resolve(f) === defAbs) continue;
     const ext = path.extname(f);
     if (!TS_EXTS.has(ext)) continue;
+    // 导入源 → 本地文件：相对走 byNoExt 表；别名（@/）走 tsconfig 解析（与 expandClosure 一致）
+    const resolveEdge = (source: string): string | null =>
+      source.startsWith('.') ? resolveRel(source, f, byNoExt) : aliasCfg ? resolveAliasedImport(source, aliasCfg) : null;
     let fmod: ModuleAnalysis | null;
     let src: string;
     try {
@@ -616,13 +621,13 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
       if (e.star) {
         // 星号转发：若指向目标文件 → 阻断
         if (e.remoteName === null) {
-          const resolved = resolveRel(e.source, f, byNoExt);
+          const resolved = resolveEdge(e.source);
           if (resolved && path.resolve(resolved) === defAbs) blocked.push(`${path.basename(f)} 用 export * 转发自定义文件，无法按名追改下游引用`);
         }
         continue;
       }
       if (e.remoteName !== symbol) continue;
-      const resolved = resolveRel(e.source, f, byNoExt);
+      const resolved = resolveEdge(e.source);
       if (!resolved || path.resolve(resolved) !== defAbs) continue;
 
       // 命中 importer。先做撞名检查（原子性：任一 importer 撞名 → 全阻断）

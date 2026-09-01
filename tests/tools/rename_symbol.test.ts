@@ -407,3 +407,24 @@ describe('renameSymbol - dry_run 结构化 diff 预览', () => {
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - tsconfig 路径别名（@/）', () => {
+  it('importer 用 @/def 别名导入 → import 远程名 + 使用点都改', async () => {
+    const dir = mkProj({
+      'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }),
+      'src/def.ts': 'export function compute(a: number): number { return a; }\n',
+      'src/a.ts': "import { compute } from '@/def';\nexport function run() { return compute(1); }\n",
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件改名
+    expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function tally');
+    // 别名 importer：import 子句远程名 + 使用点都改，别名前缀保留
+    const a = readFileSync(path.join(dir, 'src/a.ts'), 'utf-8');
+    expect(a).toContain("import { tally } from '@/def';");
+    expect(a).toContain('return tally(1);');
+    rmForce(dir);
+  });
+});

@@ -19,6 +19,8 @@ import {
   resolveProjectRoot,
   realResolveImport,
   expandClosure,
+  loadAliasConfig,
+  resolveAliasedImport,
 } from '../../src/tools/project_root';
 
 function mkProj(files: Record<string, string>): string {
@@ -157,6 +159,113 @@ describe('expandClosure - 动态闭包边界', () => {
     const norm = files.map((f) => f.replace(/\\/g, '/'));
     expect(norm).toContain(path.join(dir, 'src/def.ts').replace(/\\/g, '/'));
     expect(norm).not.toContain(expect.stringContaining('lodash'));
+    rmForce(dir);
+  });
+});
+
+describe('loadAliasConfig - tsconfig 路径别名读取', () => {
+  it('读 baseUrl+paths，最长前缀优先排序', () => {
+    const dir = mkProj({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'], '@lib/*': ['lib/*'] } },
+      }),
+      'src/a.ts': '',
+      'lib/b.ts': '',
+    });
+    const cfg = loadAliasConfig(dir);
+    expect(cfg).not.toBeNull();
+    expect(path.resolve(cfg!.baseUrl)).toBe(path.resolve(dir));
+    // 最长前缀优先：@lib/* 在 @/* 前
+    expect(cfg!.paths.map((p) => p.prefix)).toEqual(['@lib/*', '@/*']);
+    rmForce(dir);
+  });
+
+  it('支持一级 extends（子配置覆盖父配置的 baseUrl/paths）', () => {
+    const dir = mkProj({
+      'base.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@base/*': ['base/*'] } } }),
+      'tsconfig.json': JSON.stringify({ extends: './base.json', compilerOptions: { paths: { '@/*': ['src/*'] } } }),
+    });
+    const cfg = loadAliasConfig(dir);
+    expect(cfg).not.toBeNull();
+    // extends 合并：paths 子覆盖父
+    expect(cfg!.paths.map((p) => p.prefix)).toEqual(['@/*']);
+    rmForce(dir);
+  });
+
+  it('无 tsconfig / 无 paths → null', () => {
+    const dir = mkProj({ 'package.json': '{}\n' });
+    expect(loadAliasConfig(dir)).toBeNull();
+    const dir2 = mkProj({ 'tsconfig.json': JSON.stringify({ compilerOptions: { target: 'ES2020' } }) });
+    expect(loadAliasConfig(dir2)).toBeNull();
+    rmForce(dir);
+    rmForce(dir2);
+  });
+
+  it('向上找最近的 tsconfig（monorepo：根配置，包内文件在子目录）', () => {
+    const dir = mkProj({
+      'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }),
+      'packages/a/src/def.ts': 'export const x = 1;\n',
+      'src/foo.ts': 'export const foo = 1;\n',
+    });
+    // 从包内深路径向上定位根 tsconfig
+    const cfg = loadAliasConfig(path.join(dir, 'packages/a/src'));
+    expect(cfg).not.toBeNull();
+    expect(path.resolve(cfg!.baseUrl)).toBe(path.resolve(dir));
+    expect(resolveAliasedImport('@/foo', cfg!)).toBe(path.join(dir, 'src/foo.ts'));
+    rmForce(dir);
+  });
+});
+
+describe('resolveAliasedImport - 别名导入落盘解析', () => {
+  it('通配前缀 / 目录索引 / 未命中裸包', () => {
+    const dir = mkProj({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'], '@lib/*': ['lib/*'] } },
+      }),
+      'src/foo.ts': 'export const foo = 1;\n',
+      'src/dir/index.ts': 'export const d = 1;\n',
+      'lib/util.ts': 'export const u = 1;\n',
+    });
+    const cfg = loadAliasConfig(dir)!;
+    expect(resolveAliasedImport('@/foo', cfg)).toBe(path.join(dir, 'src/foo.ts'));
+    expect(resolveAliasedImport('@/dir', cfg)).toBe(path.join(dir, 'src/dir/index.ts'));
+    expect(resolveAliasedImport('@lib/util', cfg)).toBe(path.join(dir, 'lib/util.ts'));
+    expect(resolveAliasedImport('lodash', cfg)).toBeNull(); // 裸包，本地无此文件
+    rmForce(dir);
+  });
+
+  it('baseUrl 直连兜底：未配 paths 也能命中 baseUrl 下文件', () => {
+    const dir = mkProj({
+      'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.' } }),
+      'shared/util.ts': 'export const u = 1;\n',
+    });
+    const cfg = loadAliasConfig(dir)!;
+    expect(cfg.paths.length).toBe(0);
+    expect(resolveAliasedImport('shared/util', cfg)).toBe(path.join(dir, 'shared/util.ts'));
+    rmForce(dir);
+  });
+});
+
+describe('expandClosure - 别名边跨根扩展', () => {
+  it('def 用别名 @shared/* 依赖根外 helper.ts → 闭包沿别名边扩入', async () => {
+    const dir = mkProj({
+      // 项目 A：manifest 根 + tsconfig 把 @shared/* 映射到根外 ../shared/*
+      'A/package.json': '{ "name": "a" }\n',
+      'A/tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['../shared/*'] } } }),
+      'A/src/def.ts': "import { helper } from '@shared/helper';\nexport function compute() { return helper(); }\n",
+      // 根外 shared/helper.ts：只能经别名边可达
+      'shared/helper.ts': 'export function helper() { return 1; }\n',
+    });
+
+    const root = resolveProjectRoot(path.join(dir, 'A/src/def.ts'));
+    expect(path.resolve(root)).toBe(path.resolve(path.join(dir, 'A')));
+    const cfg = loadAliasConfig(root);
+
+    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), root, cfg);
+    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
+    // 根外 helper.ts 经别名边被纳入
+    expect(norm).toContain(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'));
     rmForce(dir);
   });
 });

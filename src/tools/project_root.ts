@@ -105,6 +105,24 @@ export function walkProjectFiles(dir: string, out: string[]): void {
   }
 }
 
+/** 把绝对路径 base 补成真实文件：直接命中 / 补扩展名 / 目录索引（.go/.py/.vue 一并） */
+export function resolveToFile(p: string): string | null {
+  if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+  if (!path.extname(p)) {
+    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue']) {
+      const cand = p + ext;
+      if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+    }
+  }
+  if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+    for (const name of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'mod.ts', 'mod.go', '__init__.py']) {
+      const cand = path.join(p, name);
+      if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+    }
+  }
+  return null;
+}
+
 /**
  * 真实解析相对 import 到磁盘文件（不依赖任何预建索引表）。
  * 处理：扩展名补全（./x → x.ts/tsx/js/...）、目录索引（./dir → dir/index.ts）。
@@ -112,27 +130,104 @@ export function walkProjectFiles(dir: string, out: string[]): void {
  */
 export function realResolveImport(importerAbs: string, source: string): string | null {
   if (!source.startsWith('.')) return null;
-  const importerDir = path.dirname(importerAbs);
-  const base = path.resolve(importerDir, source);
-  const tryCandidates = (p: string): string | null => {
-    if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
-    // 补扩展名
-    if (!path.extname(p)) {
-      for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue']) {
-        const cand = p + ext;
-        if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
-      }
+  return resolveToFile(path.resolve(path.dirname(importerAbs), source));
+}
+
+// ─────────────────────────────────────────────
+// tsconfig 路径别名（@/ 等）：真实项目几乎必用，别名导入若解析不到 → 漏改
+// ─────────────────────────────────────────────
+
+/** 解析后的别名配置：baseUrl（绝对）+ paths 前缀映射（最长前缀优先） */
+export interface AliasConfig {
+  /** baseUrl 绝对路径（无显式时=tsconfig 所在目录） */
+  baseUrl: string;
+  /** paths 展开：prefix（如 '@/'）→ 目标模板数组（相对 baseUrl；含 '*' 通配） */
+  paths: Array<{ prefix: string; targets: string[] }>;
+}
+
+/**
+ * 从 root 向上找最近的 tsconfig.json / jsconfig.json（jsconfig 兜底）。
+ * 向上搜索覆盖 monorepo：paths 常定义在仓库根 tsconfig，包内文件在子目录。
+ */
+function findConfigFile(root: string): string | null {
+  let dir = path.resolve(root);
+  for (;;) {
+    for (const name of ['tsconfig.json', 'jsconfig.json']) {
+      const p = path.join(dir, name);
+      if (fs.existsSync(p)) return p;
     }
-    // 目录索引（./dir → ./dir/index.ts 等）
-    if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
-      for (const name of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'mod.ts', 'mod.go', '__init__.py']) {
-        const cand = path.join(p, name);
-        if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
-      }
-    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * 读取并合并 tsconfig compilerOptions（支持一级 extends；子配置覆盖父）。
+ * 无 tsconfig / 无 baseUrl+paths → 返回 null。
+ */
+export function loadAliasConfig(root: string): AliasConfig | null {
+  const cfgFile = findConfigFile(root);
+  if (!cfgFile) return null;
+  const cfgDir = path.dirname(cfgFile);
+  let cfg: any = null;
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'));
+  } catch {
     return null;
-  };
-  return tryCandidates(base);
+  }
+  // 一级 extends：父配置提供默认，子配置覆盖
+  if (cfg && typeof cfg.extends === 'string') {
+    try {
+      const parent = JSON.parse(fs.readFileSync(path.resolve(cfgDir, cfg.extends), 'utf-8'));
+      cfg = { ...parent, ...cfg, compilerOptions: { ...parent?.compilerOptions, ...cfg?.compilerOptions } };
+    } catch {
+      /* extends 解析失败不影响自身配置 */
+    }
+  }
+  const opts = cfg?.compilerOptions;
+  if (!opts) return null;
+  const baseUrl = opts.baseUrl ? path.resolve(cfgDir, opts.baseUrl) : cfgDir;
+  const paths = opts.paths && typeof opts.paths === 'object' ? opts.paths : {};
+  const list: AliasConfig['paths'] = Object.entries(paths)
+    .map(([prefix, targets]) => ({ prefix, targets: Array.isArray(targets) ? targets.map(String) : [] }))
+    .filter((p) => p.targets.length > 0)
+    .sort((a, b) => b.prefix.length - a.prefix.length); // 最长前缀优先（TS 语义）
+  const hasPaths = list.length > 0;
+  const hasBaseUrl = typeof opts.baseUrl === 'string';
+  if (!hasPaths && !hasBaseUrl) return null;
+  return { baseUrl, paths: list };
+}
+
+/**
+ * 非相对导入 → 本地文件：paths 前缀（key 中 '*' 是通配，拆出头部做前缀匹配）→ baseUrl 直连。
+ * 解析不到本地文件（如裸包 node_modules）→ null（不属本地闭包）。
+ */
+export function resolveAliasedImport(source: string, alias: AliasConfig): string | null {
+  // 1) paths 前缀
+  for (const { prefix, targets } of alias.paths) {
+    const starIdx = prefix.indexOf('*');
+    let rest: string | null = null;
+    if (starIdx === -1) {
+      // 精确 key：必须全等
+      if (source === prefix) rest = '';
+    } else {
+      // 通配 key：'@/*' → 头 '@/'；source 以头开头、以尾结尾（尾通常为空）
+      const head = prefix.slice(0, starIdx);
+      const tail = prefix.slice(starIdx + 1);
+      if (source.startsWith(head) && source.endsWith(tail) && source.length >= head.length + tail.length) {
+        rest = source.slice(head.length, source.length - tail.length);
+      }
+    }
+    if (rest === null) continue;
+    for (const t of targets) {
+      const mapped = t.includes('*') ? t.replace('*', rest) : t;
+      const hit = resolveToFile(path.resolve(alias.baseUrl, mapped));
+      if (hit) return hit;
+    }
+  }
+  // 2) baseUrl 直连（如 'shared/util' 未配 paths，但 baseUrl 下恰好有该文件）
+  return resolveToFile(path.resolve(alias.baseUrl, source));
 }
 
 /** 判断绝对路径是否属于本地源码（非 node_modules/隐目录/三方），供闭包纳入判定 */
@@ -144,10 +239,13 @@ export function isLocalSource(abs: string): boolean {
 /**
  * 动态闭包边界：给定种子文件 + 初始项目根，返回自包含的本地源文件集合。
  *  - 初始 = 项目根内全部本地源（importer 方向全覆盖：谁引用 seed 不漏）
- *  - BFS 沿 import 边扩展：相对导入解析到边界外本地文件 → 扩入（importee 方向：seed 依赖不漏）
+ *  - BFS 沿 import 边扩展：相对导入（./ ../）或别名导入（@/ 等，需 alias）真实解析到
+ *    边界外本地文件 → 扩入（importee 方向：seed 依赖不漏）
  *  - 跨 git 根引用也被纳入（不依赖单一 project_dir 的物理边界）
+ *  - alias 可省略：缺省时按 root 的 tsconfig 自动加载；传 null 显式禁用别名解析
  */
-export async function expandClosure(seedFile: string, root: string): Promise<string[]> {
+export async function expandClosure(seedFile: string, root: string, alias?: AliasConfig | null): Promise<string[]> {
+  const aliasCfg = alias === undefined ? loadAliasConfig(root) : alias;
   const included = new Map<string, boolean>(); // absPath → 是否已解析其 imports
   const queue: string[] = [];
   const seedAbs = path.resolve(seedFile);
@@ -182,8 +280,13 @@ export async function expandClosure(seedFile: string, root: string): Promise<str
     }
     if (!mod) continue;
     for (const e of mod.imports) {
-      if (!e.source || !e.source.startsWith('.')) continue;
-      const real = realResolveImport(f, e.source);
+      if (!e.source) continue;
+      let real: string | null = null;
+      if (e.source.startsWith('.')) {
+        real = realResolveImport(f, e.source);
+      } else if (aliasCfg) {
+        real = resolveAliasedImport(e.source, aliasCfg);
+      }
       if (!real || !isLocalSource(real)) continue;
       if (!included.has(real)) {
         included.set(real, false);
