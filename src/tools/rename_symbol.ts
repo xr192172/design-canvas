@@ -589,7 +589,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   const defNodeTypes = kindNodeTypes(kind);
   for (const r of def.rootRefs) if (r.name === symbol && defNodeTypes.has(r.nodeType)) defEditSet.add(r.offset);
   for (const r of def.exportRefs) if (r.name === symbol) defEditSet.add(r.offset);
-  const defEdits: Edit[] = [...defEditSet].map((pos) => ({ pos, len: symbol.length, text: to }));
+  const defEditList: Edit[] = [...defEditSet].map((pos) => ({ pos, len: symbol.length, text: to }));
 
   // 收集自包含闭包源文件（项目根内全部 + 沿 import 边/别名边扩展边界外本地文件），构建相对解析表
   const files = await expandClosure(defAbs, resolvedRoot, aliasCfg);
@@ -675,8 +675,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   // 落盘（dry_run=true 时只算 diff 不写文件；filesWritten 始终=实际落盘数）
   let filesWritten = 0;
   const importers: RenameSymbolFileInfo[] = [];
-  if (defEdits.length > 0) {
-    const out = applyEdits(defSrc, defEdits);
+  if (defEditList.length > 0) {
+    const out = applyEdits(defSrc, defEditList);
     if (out !== defSrc && !dryRun) {
       writeFileSync(defAbs, out, 'utf-8');
       filesWritten++;
@@ -720,7 +720,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     symbol,
     to,
     dryRun: dryRun || undefined,
-    definition: { file: (path.relative(resolvedRoot, defAbs) || defAbs).replace(/\\/g, '/'), edits: defEdits.length, note: '定义+同文件引用', ops: toOps(defSrc, defEdits) },
+    definition: { file: (path.relative(resolvedRoot, defAbs) || defAbs).replace(/\\/g, '/'), edits: defEditList.length, note: '定义+同文件引用', ops: toOps(defSrc, defEditList) },
     importers,
     filesWritten,
     ...(fileRenamed !== undefined ? { fileRenamed } : {}),

@@ -93,12 +93,12 @@ export async function renameSymbols(input: {
   })();
   let literals: RenameSymbolsResult['literals'];
   if (input.report_literals === true && rootDir) {
-    const needles = [...new Set(renames.map((it) => camelToSnake(it.symbol)).filter(Boolean))];
+    const needles = [...new Set(renames.map((item) => camelToSnake(item.symbol)).filter(Boolean))];
     const scanned = scanLiteralOccurrences(rootDir, needles);
-    literals = renames.map((it, index) => {
-      const needle = camelToSnake(it.symbol);
-      const h = scanned.find((s) => s.needle === needle);
-      return { index, item: it, needle, matches: h ? h.matches : [] };
+    literals = renames.map((item, index) => {
+      const needle = camelToSnake(item.symbol);
+      const hit = scanned.find((s) => s.needle === needle);
+      return { index, item: item, needle, matches: hit ? hit.matches : [] };
     });
   }
 
@@ -106,10 +106,10 @@ export async function renameSymbols(input: {
   const previews: RenameSymbolsResult['previews'] = [];
   let allOk = true;
   for (let i = 0; i < renames.length; i++) {
-    const it = renames[i];
-    const r = await renameSymbol({ project_dir: projectDir, file: it.file, symbol: it.symbol, to: it.to, rename_file_if_matching: it.rename_file_if_matching === true, dry_run: true });
-    previews.push({ index: i, item: it, ok: r.ok, blocked: r.ok ? undefined : r.blocked, result: r });
-    if (!r.ok) allOk = false;
+    const item = renames[i];
+    const result = await renameSymbol({ project_dir: projectDir, file: item.file, symbol: item.symbol, to: item.to, rename_file_if_matching: item.rename_file_if_matching === true, dry_run: true });
+    previews.push({ index: i, item: item, ok: result.ok, blocked: result.ok ? undefined : result.blocked, result: result });
+    if (!result.ok) allOk = false;
   }
 
   // 任一阻断 → 整体不落盘，给预览报告
@@ -122,20 +122,20 @@ export async function renameSymbols(input: {
   const applied: RenameSymbolsResult['applied'] = [];
   let filesWritten = 0;
   for (let i = 0; i < renames.length; i++) {
-    const it = renames[i];
-    const r = await renameSymbol({ project_dir: projectDir, file: it.file, symbol: it.symbol, to: it.to, rename_file_if_matching: it.rename_file_if_matching === true, dry_run: false });
-    if (!r.ok) {
+    const item = renames[i];
+    const result = await renameSymbol({ project_dir: projectDir, file: item.file, symbol: item.symbol, to: item.to, rename_file_if_matching: item.rename_file_if_matching === true, dry_run: false });
+    if (!result.ok) {
       return {
         ok: false,
         previews,
         applied,
         filesWritten,
-        blocked: [`条目 ${i}（${it.file} 的 ${it.symbol}→${it.to}）实际落盘时被阻断：${(r.blocked || []).join('；')}。已应用 ${applied.length} 条，之后条目未执行`],
+        blocked: [`条目 ${i}（${item.file} 的 ${item.symbol}→${item.to}）实际落盘时被阻断：${(result.blocked || []).join('；')}。已应用 ${applied.length} 条，之后条目未执行`],
         literals,
       };
     }
-    filesWritten += r.filesWritten;
-    applied.push({ index: i, item: it, result: r });
+    filesWritten += result.filesWritten;
+    applied.push({ index: i, item: item, result: result });
   }
 
   return { ok: true, previews, applied, filesWritten, literals };
@@ -144,8 +144,8 @@ export async function renameSymbols(input: {
 // ──────────────── 字面量引用扫描（只报告，不改动） ────────────────
 
 /** camelCase/PascalCase → snake_case。如 'renderDesign' → 'render_design'。 */
-function camelToSnake(s: string): string {
-  return s.replace(/([A-Z])/g, '_$1').replace(/^_/, '').toLowerCase();
+function camelToSnake(str: string): string {
+  return str.replace(/([A-Z])/g, '_$1').replace(/^_/, '').toLowerCase();
 }
 
 /** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中 |
