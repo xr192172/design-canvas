@@ -22,6 +22,7 @@ import path from 'node:path';
 import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
+import { parseFileFull } from './ts_kernel/index.js';
 
 export interface ReferenceSite {
   /** export/import/使用点所在的字节偏移 */
@@ -170,16 +171,36 @@ export async function findReferences(input: {
   for (const f of files) {
     if (path.resolve(f) === fileAbs) continue;
     const src = readFileSync(f, 'utf-8');
-    // 跨语言引用（Go/Python 等）：expandClosure 已按 import 边把这些文件纳入闭包，但"引用提取"是 TS AST 专属。
-    // 对非 TS 文件用词边界文本探针报告疑似引用（kind=cross-usage），供 LLM 按行核实——非 AST 级精确，但补上跨语言波及面。
     if (!TS_FILE_RE.test(f)) {
+      // 跨语言（Go/Python 等）：这类文件在 expandClosure 闭包内（项目全源码），但引用提取是 TS AST 专属。
+      // 升级为 AST 级：① 调用边(callee)与类型引用(type_name)精确命中；② 兜底词边界探针，跳过注释/字符串样式的行减噪
+      // （保留兜底是为兼容命名约定差异——如 Go 导出符号首字母大写，可能大小写对不上 target，靠行内探针补召回）。
       const needle = symbol!;
-      const re = new RegExp(`\\b${needle}\\b`);
-      const crossRefs: ReferenceSite[] = [];
       const lines = src.split('\n');
+      let running = 0;
+      const lineOffsets: number[] = [];
+      for (const ln of lines) { lineOffsets.push(running); running += ln.length + 1; }
+      const crossRefs: ReferenceSite[] = [];
+      try {
+        const parsed = await parseFileFull(f, src);
+        // ① AST 调用边：本文件某处 callee（去点尾部标识符）== symbol
+        for (const c of parsed.calls) {
+          if (c.callee === needle) crossRefs.push({ offset: lineOffsets[c.line - 1] ?? 0, line: c.line, text: c.callee_expr || needle, kind: 'cross-call' });
+        }
+        // ① AST 类型引用：type_name == symbol（如 Python 类型注解、Java 类引用等）
+        for (const t of parsed.type_refs) {
+          if (t.type_name === needle) crossRefs.push({ offset: lineOffsets[t.line - 1] ?? 0, line: t.line, text: t.type_name, kind: 'cross-type' });
+        }
+      } catch { /* AST 解析失败则走兜底 */ }
+      // ② 兜底词边界行内探针（跳过空白/注释样式行），保证命名约定差异也不漏
+      const re = new RegExp(`\\b${needle}\\b`);
+      const reported = new Set(crossRefs.map((x) => x.line));
       for (let i = 0; i < lines.length; i++) {
+        if (reported.has(i + 1)) continue;
+        const t = lines[i].trim();
+        if (!t || t.startsWith('//') || t.startsWith('#') || t.startsWith('/*') || t.startsWith('*')) continue;
         const idx = lines[i].search(re);
-        if (idx >= 0) crossRefs.push({ offset: idx, line: i + 1, text: needle, kind: 'cross-usage' });
+        if (idx >= 0) crossRefs.push({ offset: (lineOffsets[i] ?? 0) + idx, line: i + 1, text: needle, kind: 'cross-usage' });
       }
       if (crossRefs.length > 0) {
         importers.push({ file: (path.relative(resolvedRoot, f) || f).replace(/\\/g, '/'), refs: crossRefs, importSources: [] });

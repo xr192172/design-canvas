@@ -153,7 +153,7 @@ describe('findReferences', () => {
     rmForce(dir);
   });
 
-  it('跨语言（Go）文件里的引用：以 cross-usage 文本探针报告（AST 提取不了但闭包含它）', async () => {
+  it('跨语言（Go）文件里的引用：AST 调用边(cross-call)或兜底探针报告', async () => {
     const dir = mkProj({
       'src/def.ts': 'export function compute(a: number): number { return a; }\n',
       'src/main.go': 'package main\n\nfunc run(v int) int {\n\treturn compute(v)\n}\n',
@@ -162,7 +162,8 @@ describe('findReferences', () => {
     expect(r.ok).toBe(true);
     const go = r.importers!.find((x) => x.file === 'src/main.go');
     expect(go).toBeDefined(); // expandClosure 闭包含该项目内全部源文件 → main.go 在内
-    expect(go!.refs.some((x) => x.kind === 'cross-usage' && x.line === 4 && x.text === 'compute')).toBe(true);
+    // 命中的第 4 行（return compute(v)）：AST 提取得到 cross-call，否则兜底为 cross-usage
+    expect(go!.refs.some((x) => x.line === 4 && (x.kind === 'cross-call' || x.kind === 'cross-usage'))).toBe(true);
     rmForce(dir);
   });
 });
