@@ -146,4 +146,43 @@ describe('renameSymbols - 批量跨文件符号改名', () => {
     expect(readFileSync(path.join(dir, 'src/a.ts'), 'utf-8')).toContain('function alpha');
     rmForce(dir);
   });
+
+  it('report_literals=true：扫描旧符号 snake 变体的字面量引用（仅报告，不改动）', async () => {
+    const dir = mkProj({
+      'src/render.ts': 'export function renderDsl(): string { return "v"; }\n',
+      'README.md': '# t\n\n请先 render_dsl 渲染，或用 render_dsl 预览。\n',
+      'notes.txt': '非扫描扩展，render_dsl 不应计入\n',
+    });
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      report_literals: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.literals).toBeDefined();
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    expect(l).toBeDefined();
+    expect(l.matches.length).toBeGreaterThan(0);
+    // 命中 README.md 的字面量串，且返回行号
+    expect(l.matches.some((m) => m.file.endsWith('README.md') && m.line >= 1)).toBe(true);
+    // 非扫描扩展（.txt）不纳入
+    expect(l.matches.some((m) => m.file.endsWith('notes.txt'))).toBe(false);
+    // 仅报告，代码里的字面量未被动
+    expect(readFileSync(path.join(dir, 'README.md'), 'utf-8')).toContain('render_dsl');
+    rmForce(dir);
+  });
+
+  it('report_literals 缺省：不返回 literals', async () => {
+    const dir = mkProj({
+      'src/render.ts': 'export function renderDsl(): string { return "v"; }\n',
+      'README.md': 'render_dsl 仍在，但不扫\n',
+    });
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.literals).toBeUndefined();
+    rmForce(dir);
+  });
 });

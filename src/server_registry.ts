@@ -1366,7 +1366,8 @@ const TOOL_DEFS: ToolDef[] = [
       '输入 renames=[{file,symbol,to,rename_file_if_matching?}]。' +
       '先对所有条目按原始文件态 dry_run 算结构化 diff（每处 old→new，可验证）；任一条被阻断（撞名/星号转发/非模块级符号）→ 整体不落盘，返回预览报告。' +
       '全部可落盘时才逐条落盘并返回每条 preview(含 applied 的实际 diff)。apply 阶段若前面改动使后续条目被阻断，立即中止并如实报告已应用条数。' +
-      '与 rename_many 互补：rename_many 是单文件局部变量批量；本品是跨文件模块级符号批量。',
+      '与 rename_many 互补：rename_many 是单文件局部变量批量；本品是跨文件模块级符号批量。' +
+      'report_literals=true 时，额外扫描每个旧符号的 snake 变体在项目文本里的字面量引用（如工具名 render_dsl 在错误提示/README 里的串），返回清单待确认，仅报告不改动。',
     inputSchema: {
       project_dir: z.string().optional().describe('目标项目根（可选；缺省各条自动定位；统一定位时传）'),
       renames: z
@@ -1380,6 +1381,7 @@ const TOOL_DEFS: ToolDef[] = [
         )
         .describe('待批量改名的符号条目'),
       dry_run: z.boolean().optional().describe('true=只算全部 dry-run diff 不落盘（默认：先整体校验，全通过才落盘）'),
+      report_literals: z.boolean().optional().describe('true=扫描旧符号 snake 变体的字面量引用清单（错误提示/README 等纯字符串），仅报告不改动'),
     },
     handler: wrap(async (a) => {
       const r = await renameSymbols({
@@ -1391,6 +1393,7 @@ const TOOL_DEFS: ToolDef[] = [
           rename_file_if_matching: (x as { rename_file_if_matching?: boolean }).rename_file_if_matching === true,
         })),
         dry_run: a.dry_run === true,
+        report_literals: a.report_literals === true,
       });
       const fmt = (item: { file: string; symbol: string; to: string }, res?: { definition?: { file: string }; importers?: { file: string; ops?: { old: string; new: string }[] }[] }): string => {
         const lines = [`  - ${item.file} 的 ${item.symbol} → ${item.to}`];
@@ -1400,17 +1403,25 @@ const TOOL_DEFS: ToolDef[] = [
         }
         return lines.join('\n');
       };
+      const appendLiterals = (parts: string[], res: typeof r): void => {
+        const hits = (res.literals || []).filter((l) => l.matches.length > 0);
+        if (hits.length === 0) return;
+        parts.push('\n字面量引用（report_literals，仅报告未改动）：');
+        for (const l of hits) parts.push(`  • "${l.needle}" → ${l.matches.length} 处（如 ${l.matches[0].file}:${l.matches[0].line}）`);
+      };
       if (!r.ok) {
         const parts = [`批量改名被阻断（${r.dryRun ? '整体未落盘' : '部分已应用后中止'}）：`];
         parts.push(`\t${(r.blocked || []).join('\n\t')}`);
         parts.push('\tdry-run 各条状态：');
         for (const p of r.previews) parts.push(`\t  [${p.ok ? '可落盘' : '被阻断'}] ${fmt(p.item, p.result)}`.replace(/\n/g, '\n\t  '));
+        appendLiterals(parts, r);
         return { message: parts.join('\n'), data: r };
       }
       const parts = [
         r.dryRun ? `[批量 dry-run 预览·未落盘] 共 ${r.previews.length} 条` : `批量改名完成：${r.previews.length} 条，落盘 ${r.filesWritten} 个文件`,
       ];
       for (const p of r.previews) parts.push(fmt(p.item, p.result).replace(/\n/g, '\n\t'));
+      appendLiterals(parts, r);
       return { message: parts.join('\n'), data: r };
     }),
   },
