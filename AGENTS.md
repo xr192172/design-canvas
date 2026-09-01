@@ -16,6 +16,7 @@
 | 日常维护（补节点/改描述/加标注） | `edit_dsl weight=routine`                                           | 轻量写路径：跳过 L4 证据回溯，仍留 L1-L3 防空话；改架构/契约等重改用 normal 全链  |
 | 改一个模块级符号名               | `rename_symbol`                                                     | 自动定根+闭包+跨语言，先 dry_run 看 diff                                          |
 | 批量改多个符号                   | `rename_symbols`                                                    | 先整体 dry-run，全部可落盘才落                                                    |
+| 改**对外契约名 / MCP 工具名**    | `rename_symbols report_literals=true`                               | 扫旧名 snake 字面量清单，按 kind 分治(契约/历史/文档/测试/代码)；契约变更才跟文档 |
 | 改文件名并联动全仓 import        | `rename_file`                                                       | 防文件悬空                                                                        |
 | 单文件局部变量/形参批量改名      | `rename_many`                                                       | 作用域隔离                                                                        |
 | 改一段代码（函数体/range）       | `edit_code`                                                         | 按符号/行号定位改写                                                               |
