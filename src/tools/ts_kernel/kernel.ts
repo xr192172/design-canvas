@@ -312,7 +312,7 @@ function traverseAndExtract(
 
 /** 语言适配器注册表：深适配语言 = 一条记录（callNode + import/binding 提取 + 顶层调用）。加语言 = 加一行，kernel 消费查此 map。 */
 interface LangImportAdapter {
-  callNode?: string;
+  callNode?: string | string[];
   topLevelCall?: boolean;
   extractImportSources?: (node: SyntaxNodeLike) => string[];
   extractImportBindings?: (node: SyntaxNodeLike, paths: string[]) => string[];
@@ -418,6 +418,63 @@ export const LANG_ADAPTERS: Record<string, LangImportAdapter> = {
       return last && !last.includes('{') ? [last.trim()] : [];
     },
   },
+  c_sharp: {
+    callNode: 'invocation_expression',
+    // `using System;` / `using static System.Math;` / `using Alias = System.Console;`
+    // source = 命名空间全名（别名形式取 RHS，静态 using 去 static）
+    extractImportSources(node) {
+      let t = node.text.replace(/^\s*using\s+/, '').replace(/;\s*$/, '').trim();
+      t = t.replace(/^static\s+/, '');
+      const eq = t.indexOf('=');
+      if (eq >= 0) t = t.slice(eq + 1).trim(); // using Alias = X; → X
+      return t ? [t] : [];
+    },
+    // binding = 命名空间末段（当前命名空间内可直接引用该段而非全限定名）
+    extractImportBindings(node) {
+      let t = node.text.replace(/^\s*using\s+/, '').replace(/;\s*$/, '').trim();
+      t = t.replace(/^static\s+/, '');
+      const eq = t.indexOf('=');
+      if (eq >= 0) t = t.slice(eq + 1).trim(); // using Alias = X; → 绑定 Alias
+      else t = t.split('.').pop() || t; // using System.X → X
+      return t ? [t.replace(/[\s]/g, '')] : [];
+    },
+  },
+  php: {
+    // PHP 调用形式多样：自由函数 foo()=function_call_expression；静态 Class::m()=scoped_call_expression；实例 $o->m()=member_call_expression
+    callNode: ['function_call_expression', 'scoped_call_expression', 'member_call_expression'],
+    // `use Foo\Bar<;>` / `use Foo\Bar as Baz;` / `use Foo\{Bar, Baz};` / `use function Foo\bar;`
+    extractImportSources(node) {
+      let t = node.text.replace(/^\s*use\s+/, '').replace(/;\s*$/, '').trim();
+      t = t.replace(/^function\s+/, '').replace(/^const\s+/, '');
+      const brace = t.indexOf('{');
+      if (brace >= 0) {
+        const head = t.slice(0, brace).trim().replace(/\\$/, '');
+        return head ? [head] : []; // 分组形式：主命名空间作为 source（成员 binding 已各自提取）
+      }
+      // 单条：Foo\Bar [/as Baz]
+      const base = t.split(/\s+as\s+|\s+/, 1)[0] || t;
+      return base ? [base] : [];
+    },
+    // binding：`use Foo\Bar as Baz → Baz`；否则末段 `Bar`；分组形式取每个成员末段
+    extractImportBindings(node) {
+      let t = node.text.replace(/^\s*use\s+/, '').replace(/;\s*$/, '').trim();
+      t = t.replace(/^function\s+/, '').replace(/^const\s+/, '');
+      const brace = t.indexOf('{');
+      if (brace >= 0) {
+        const inner = t.slice(brace + 1, t.lastIndexOf('}'));
+        return inner.split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
+          const asM = s.match(/as\s+([A-Za-z_\x80-\xff]\w*)/);
+          if (asM) return [asM[1]];
+          const seg = s.trim().split('\\').pop()?.trim() || '';
+          return seg ? [seg] : [];
+        }).flat();
+      }
+      const asM = t.match(/\s+as\s+([A-Za-z_\x80-\xff]\w*)\s*$/);
+      if (asM) return [asM[1]];
+      const last = t.split('\\').pop()?.trim();
+      return last ? [last] : [];
+    },
+  },
   typescript: { callNode: 'call_expression' },
   tsx: { callNode: 'call_expression' },
   javascript: { callNode: 'call_expression' },
@@ -442,7 +499,7 @@ function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: st
 }
 
 function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
-  return LANG_ADAPTERS[lang.name]?.callNode === node.type;
+  return LANG_ADAPTERS[lang.name]?.callNode === node.type || (Array.isArray(LANG_ADAPTERS[lang.name]?.callNode) && (LANG_ADAPTERS[lang.name]!.callNode as string[]).includes(node.type));
 }
 
 /** 从 call 节点提取被调用名：取 function 字段文本的尾部标识符（去点、去泛型参数） */

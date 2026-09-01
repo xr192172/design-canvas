@@ -48,6 +48,14 @@ export async function loadLanguage(lang: LanguageEntry): Promise<Language | null
       return picked as Language;
     }
 
+    // tree-sitter-php 特殊处理（CJS 原生绑定导出 { php, php_only }，Language 在 .php 上）
+    if (lang.pkg === 'php') {
+      const bag = (mod as { default?: { php?: unknown } }).default ?? mod;
+      const picked = (bag as { php?: unknown }).php ?? null;
+      if (!picked) throw new Error('tree-sitter-php 导出结构中未找到 php 语言对象');
+      return picked as Language;
+    }
+
     return language as Language;
   } catch (e) {
     if (!failedWarned.has(lang.pkg)) {

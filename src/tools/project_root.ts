@@ -226,7 +226,9 @@ const LANG_RESOLVERS: Record<string, (absFile: string, imp: ParsedImport, ctx: L
   '.py': resolvePythonImport,
   '.java': resolveJavaImport,
   '.rs': resolveRustImport,
-  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（C#/C/CPP/Kotlin/...）
+  '.cs': resolveCsImport,
+  '.php': resolvePhpImport,
+  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底
 };
 
 /** Rust：use 路径 → src 下 .rs / mod.rs（crate:: 相对 project root src） */
@@ -260,6 +262,42 @@ function resolveJavaImport(absFile: string, imp: ParsedImport, ctx: LangResolveC
   ]) {
     // 末段可能是类名（import com.foo.Bar → 文件 com/foo/Bar.java）；也可能含类名需退一级不适用（包导入）
     const hit = resolveToFile(path.join(base, relPath + '.java')) || resolveToFile(path.resolve(base, relPath));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** C#：点分命名空间 → 常见 src 根下 .cs（标准 .NET 布局 + root 兜底） */
+function resolveCsImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  if (!imp.source) return null;
+  // 跳过 BCL/框架命名空间（System.*）：纯框架类型不落到本地项目文件
+  if (/^System(\.|$)/.test(imp.source)) return null;
+  const relPath = imp.source.replace(/\./g, '/'); // MyApp.Utils.Helper → MyApp/Utils/Helper
+  for (const base of [
+    path.join(ctx.root, 'src'),
+    path.join(ctx.root, 'csharp'),
+    ctx.root,
+  ]) {
+    const hit = resolveToFile(path.join(base, relPath + '.cs')) || resolveToFile(path.resolve(base, relPath));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** PHP：反斜杠命名空间 → src 根下 .php（PSR-4 composer src + root 兜底） */
+function resolvePhpImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  if (!imp.source) return null;
+  const relPath = imp.source.replace(/\\/g, '/').replace(/^\/+/, ''); // Foo\Bar → Foo/Bar
+  for (const base of [
+    path.join(ctx.root, 'src'),
+    path.join(ctx.root, 'app'),
+    ctx.root,
+  ]) {
+    const hit = resolveToFile(path.join(base, relPath + '.php')) || resolveToFile(path.resolve(base, relPath));
     if (hit) return hit;
   }
   return null;

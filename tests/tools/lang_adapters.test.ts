@@ -17,8 +17,8 @@ describe('语言适配器注册表完备性', () => {
     }
   });
 
-  it('深适配语言（go/python/java/rust）同时具备 callNode 与 import/binding 提取', () => {
-    for (const name of ['go', 'python', 'java', 'rust']) {
+  it('深适配语言（go/python/java/rust/c_sharp/php）同时具备 callNode 与 import/binding 提取', () => {
+    for (const name of ['go', 'python', 'java', 'rust', 'c_sharp', 'php']) {
       const a = LANG_ADAPTERS[name]!;
       expect(a.callNode, `${name} 缺 callNode`).toBeDefined();
       expect(typeof a.extractImportSources, `${name} 缺 extractImportSources`).toBe('function');
@@ -32,9 +32,18 @@ describe('语言适配器注册表完备性', () => {
     expect(LANG_ADAPTERS.typescript.extractImportBindings).toBeUndefined();
   });
 
+  it('c_sharp/php 已配 using/use import_nodes，使闭包可沿 C#/PHP import 边扩展', () => {
+    const cs = LANGUAGES.find((l) => l.name === 'c_sharp')!;
+    const php = LANGUAGES.find((l) => l.name === 'php')!;
+    expect(cs.import_nodes).toEqual(['using_directive']);
+    expect(php.import_nodes).toEqual(['namespace_use_declaration']);
+    // 与注册表一致性：声明了 import_nodes 必有其适配器（上一条已断言）
+    expect(LANG_ADAPTERS['c_sharp'].callNode).toBe('invocation_expression');
+    expect(Array.isArray(LANG_ADAPTERS['php'].callNode)).toBe(true);
+  });
+
   it('无深适配/无 import_nodes 的语言不要求 adapter（保持未装语言静默禁用）', () => {
-    // 任意未深适配语言（如 c_sharp）可不注册，但若有 import_nodes 则上一条测试已拦截
-    const c = LANGUAGES.find((l) => l.name === 'c_sharp')!;
+    const c = LANGUAGES.find((l) => l.name === 'c')!;
     expect(c.import_nodes).toBeUndefined();
   });
 });
