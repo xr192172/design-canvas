@@ -1,8 +1,8 @@
 # AGENTS.md — design-canvas 开发约定（为 AI agent 编写）
 
 > 本文件约束在此仓库内进行开发时，agent（Trae/Claude 等）应遵循的规则。
-> 核心目标：让日常开发动作（改名/编辑/理解/清理/健康检查/引用查找）走项目自带 MCP 工具，
-> 而不是用 grep+脚本手动硬改。
+> 核心目标：让日常开发动作（改名/编辑/理解/清理/引用查找/测试）走项目自带 MCP 工具，
+> 而不是用 grep+脚本手动硬改——那是"工具被想起"的最大障碍。
 
 > 注意：本文件的「触发点总表」曾多次被外部进程还原成旧版（只剩改名表）。
 > 以 git 提交历史为准；每次改动随 commit 固化。
@@ -19,6 +19,7 @@
 | 理解一串代码/结构          | `explore_code`                         | 只读、即时答案                       |
 | 清理无效 import        | `remove_dead_imports`                  | 剪刀剪 dead\_deps                |
 | 看"谁引用了 X / 谁调用了 X" | `find_references`                      | 只读引用查询（改/删前看波及面）              |
+| 跑测试/提交前回归          | `run_tests`                            | 结构化失败定位（filter 定向 or 全量）      |
 | 提交前健康检查            | `consistency_check` / `sync_contracts` | 契约/一致性                        |
 | 改前看影响面             | `diff_views` / `reconcile_chain`       | 波及方向                          |
 
@@ -40,12 +41,14 @@
 
 - 非 TS/JS/Go/Python 文件的改名，且本仓库工具不支持时。
 
+## 测试约定
+
+- 改完代码用 `run_tests`（filter 定向）快速确认，提交前跑全量 `npm test` 须全绿（当前基线 1381+）。
+
 ## 工具自检（强约束）
 
 - 本仓库 MCP 工具依赖 `dist/` 构建产物。改了 `src/` 下的代码，**必须**先
   `npm run build` 再调用工具，否则跑的是旧逻辑（STALE BUILD）。
-
-- 每次提交前运行全量测试 `npm test`，须全部通过（当前基线 1379+）。
 
 ## 决策记录
 
