@@ -443,7 +443,9 @@ export function resolveRel(source: string, importerAbs: string, byNoExt: Map<str
   for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']) {
     const key = target.endsWith(ext) ? target.slice(0, -ext.length) : target;
     const h = byNoExt.get(key);
-    if (h && h.endsWith(ext)) return h;
+    // import './x.js' 在 TS 中可指向 x.ts（allowJs/emit 产物）；命中任一 TS 系源码即接受，
+    // 否则带扩展名 import（续改写产物）会漏掉 .ts/.tsx 源码目标
+    if (h && (h.endsWith(ext) || TS_EXTS.has(path.extname(h)))) return h;
   }
   // 目录形式（./dir → ./dir/index.ts）
   const dirKey = target.replace(/\/+$/, '');

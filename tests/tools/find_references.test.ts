@@ -77,4 +77,16 @@ describe('findReferences', () => {
     expect(r.importers).toEqual([]);
     rmForce(dir);
   });
+
+  it('带扩展名 import（从 ./def.js 指向 def.ts）也能命中（修复 resolveRel 扩展名回退）', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export function compute(a: number) { return a; }\n',
+      'src/a.ts': "import { compute } from './def.js';\nexport function run() { return compute(1); }\n",
+    });
+    const r = await findReferences({ project_dir: dir, file: 'src/def.ts', symbol: 'compute' });
+    expect(r.ok).toBe(true);
+    // 修复前：source='./def.js' 在 resolveRel 中因 h.endsWith('.js')=false 漏掉 def.ts
+    expect(r.importers!.some((x) => x.file === 'src/a.ts')).toBe(true);
+    rmForce(dir);
+  });
 });
