@@ -3,7 +3,7 @@
  *
  * 来源：DSL 协作工作台.zip → pages/DSL 协作工作台.html 的三段 <style>
  * （theme-vars / semantic-token-fallback / critical-layout），逐行保留。
- * render_dsl_workbench 复用此壳，数据全换真。
+ * render_workbench 复用此壳，数据全换真。
  */
 
 export const WORKBENCH_SHELL_CSS = ` 

@@ -9,7 +9,7 @@
  *
  * 设计参照 DataFlow-Harness（北大 OpenDCAI, arXiv:2607.16617）的分层：
  *   Pipeline Backend 是权威数据源（DAG=节点+边+状态），WebUI 只是投影。
- * 本层同理：WorkbenchData 是权威快照，render_dsl_workbench 只做渲染，
+ * 本层同理：WorkbenchData 是权威快照，render_workbench 只做渲染，
  * 前端B 也可直接消费同一份 JSON——一份契约，两个消费方。
  *
  * 忠实纪律（数据装配规则，前端不可不知）：

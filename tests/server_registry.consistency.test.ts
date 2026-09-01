@@ -21,7 +21,7 @@ const toSnake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerC
 
 /** 内部/主工具实现模块（有主函数但非独立 MCP 工具），漏注册检测豁免。
  *  注：query_feature/update_feature 分别是 get_dsl/edit_dsl 的实现（注册名≠文件名）；
- *     list_features 是 get_dsl query=features 的实现；feature_ops(createFeature)/render_dsl_workbench
+ *     list_features 是 get_dsl query=features 的实现；feature_ops(createFeature)/render_workbench
  *     /feature_map(buildFeatureMap)/derive_feature_tree 是 manage_feature/render_brickwork/import_project
  *     等已注册工具的内部派生/渲染助手；其余为被各工具调用的内部辅助模块。
  *  新增真正的 MCP 工具文件（src/tools/{x}.ts 且 export function {x}()）→ 必须注册，不在豁免表。 */
@@ -29,7 +29,7 @@ const INTERNAL_MODULES = new Set([
   'analyze_monolith', 'collect_functions', 'contract_gate', 'dag_layout', 'derive_reasoning',
   'detect_dead_imports', 'diff_impact', 'guided_tour', 'inject_replay', 'language_concepts',
   'list_features', 'query_feature', 'update_feature', 'watch_project', 'wizard_steps',
-  'feature_ops', 'render_dsl_workbench', 'feature_map', 'derive_feature_tree',
+  'feature_ops', 'render_workbench', 'feature_map', 'derive_feature_tree',
 ]);
 
 describe('server_registry 一致性', () => {

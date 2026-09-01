@@ -21,7 +21,7 @@ import { renderBrickifyWorkbenchHtml } from './render_brickwork.js';
 import { renderBrickifyMindMapHtml } from './render_mindmap.js';
 import { narrateClusters } from './cluster_narrator.js';
 import { renderClusterWorkbenchHtml } from './render_cluster_workbench.js';
-import { renderSandboxCanvasHtml } from './render_sandbox_canvas.js';
+import { renderDepCanvasHtml } from './render_dep_canvas.js';
 import { classifyBricks } from './classify_bricks.js';
 import { renderAnatomyHtml } from './render_anatomy.js';
 import { extractRegistryToolsFromFile } from './registry_extract.js';
@@ -30,7 +30,7 @@ import { collectFunctions } from './collect_functions.js';
 import { classifyTools } from './classify_tools.js';
 import { renderToolsMapHtml } from './render_tools_map.js';
 import { renderWizardHtml } from './render_wizard.js';
-import { renderDslWorkbenchHtml } from './render_dsl_workbench.js';
+import { renderWorkbenchHtml } from './render_workbench.js';
 import { registerArtifact } from './registry.js';
 import { buildWorkbenchData, writeWorkbenchDataJson } from './workbench_data.js';
 
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
     console.log(`[brickify] 簇级协作工作台 HTML → ${abs}`);
   }
   if (sandboxOut) {
-    const html = renderSandboxCanvasHtml(result, narratives);
+    const html = renderDepCanvasHtml(result, narratives);
     const abs = path.resolve(sandboxOut);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
       console.log(`[dsl-workbench] 空槽如实呈现: ${anatomy.slots.filter((l) => l.groups.length === 0).map((l) => l.slot.label).join('、')}`);
     }
     console.log(`[dsl-workbench] 问题清单（真实信号）: ${result.mixed_files.length} 混合文件 + ${anatomy.limitations.length} 倒挂 = ${totalIssues}`);
-    const html = renderDslWorkbenchHtml(result, anatomy, narratives, path.basename(path.resolve(project)));
+    const html = renderWorkbenchHtml(result, anatomy, narratives, path.basename(path.resolve(project)));
     const abs = path.resolve(dslWorkbenchOut);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, html, 'utf-8');

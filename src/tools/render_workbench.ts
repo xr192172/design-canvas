@@ -1,5 +1,5 @@
 /**
- * render_dsl_workbench —— DSL 协作工作台渲染层（契约的投影）
+ * render_workbench —— 契约投影工作台渲染层（契约的投影）
  *
  * 用户定调（2026-08-25）：载体 = `DSL 协作工作台.zip` 的页面本身。壳照抄
  * （sidebar/toolbar/画布/minimap/审核面板/版本滑条 + 1173 行 CSS 原样快照）。
@@ -114,7 +114,7 @@ function dataJsonFor(s: WorkbenchSlot): string {
 
 // ─── HTML 生成 ───
 
-export function renderDslWorkbenchHtml(
+export function renderWorkbenchHtml(
   result: BrickifyResult,
   anatomy: AnatomyResult,
   narratives: ClusterNarratives,
@@ -491,14 +491,14 @@ if (window.lucide) lucide.createIcons();
 }
 
 /** 落盘便捷入口。 */
-export function buildDslWorkbenchHtml(opts: {
+export function buildWorkbenchHtml(opts: {
   out_file: string;
   result: BrickifyResult;
   anatomy: AnatomyResult;
   narratives: ClusterNarratives;
   projectName: string;
 }): string {
-  const html = renderDslWorkbenchHtml(opts.result, opts.anatomy, opts.narratives, opts.projectName);
+  const html = renderWorkbenchHtml(opts.result, opts.anatomy, opts.narratives, opts.projectName);
   const abs = path.resolve(opts.out_file);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, html, 'utf-8');

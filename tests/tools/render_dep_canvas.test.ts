@@ -1,12 +1,12 @@
 /**
- * render_sandbox_canvas（mock 样式真数据画布沙盘）测试：
+ * render_dep_canvas（mock 样式真数据依赖图画布）测试：
  *   - SCC 缩点分层布局：无环节点按依赖深度分列；环内节点塌缩同层
  *   - 连线路径程序生成（右缘中点→左缘中点贝塞尔）
  *   - 节点状态点忠实映射（整层耦合=warn / 待翻译=gray / 正常=ok）
  *   - HTML 骨架完整（节点/连线/小地图/悬窗数据）
  */
 import { describe, it, expect } from 'vitest';
-import { layoutCanvas, renderSandboxCanvasHtml } from '../../src/tools/render_sandbox_canvas';
+import { layoutCanvas, renderDepCanvasHtml } from '../../src/tools/render_dep_canvas';
 import type { BrickifyResult } from '../../src/tools/brickify';
 
 function brick(id: string, subIds: string[], opts?: { degenerate?: boolean }): BrickifyResult['bricks'][number] {
@@ -116,13 +116,13 @@ describe('layoutCanvas SCC 分层布局（mock 没有的运算逻辑）', () => 
   });
 });
 
-describe('renderSandboxCanvasHtml（mock 壳 + 真数据）', () => {
+describe('renderDepCanvasHtml（mock 壳 + 真数据）', () => {
   it('节点/连线/小地图/悬窗/交互脚本全在；状态点忠实映射', () => {
     const r = resultWith(
       [brick('a', ['a'], { degenerate: true }), brick('b', ['b'])],
       [{ from: 'b/b_0.ts', to: 'a/a_0.ts', count: 3 }],
     );
-    const html = renderSandboxCanvasHtml(r);
+    const html = renderDepCanvasHtml(r);
     // mock 壳的关键结构
     expect(html).toContain('dslw-node');
     expect(html).toContain('dslw-connections');
@@ -150,7 +150,7 @@ describe('renderSandboxCanvasHtml（mock 壳 + 真数据）', () => {
       clusters: { 'a#1': { title: '渲染引擎核心', desc: '把数据变成画面', mode: 'llm' as const } },
       meta: { llm_ok: 1, total: 1, degraded: false },
     };
-    const html = renderSandboxCanvasHtml(r, nar);
+    const html = renderDepCanvasHtml(r, nar);
     expect(html).toContain('渲染引擎核心');
     expect(html).toContain('把数据变成画面');
     expect(html).toContain('画布测试项目'); // 总览进顶栏

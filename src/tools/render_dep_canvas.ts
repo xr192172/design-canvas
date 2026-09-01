@@ -1,5 +1,5 @@
 /**
- * render_sandbox_canvas —— 画布沙盘（在 mock「DSL 协作工作台」HTML 上改的真数据版）
+ * render_dep_canvas —— 依赖图画布（在 mock「DSL 协作工作台」HTML 上改的真数据版）
  *
  * 用户定调（2026-08-25）：最终形态演进到 `DSL 协作工作台.zip` 的样式。该 mock 是
  * "高完成度拼凑"——视觉皮肤（CSS 变量/节点卡/连线/小地图/悬窗）精致，但数据写死、
@@ -275,7 +275,7 @@ const ROLE_BADGE: Record<string, string> = {
 };
 const ROLE_TXT: Record<string, string> = { brick: '功能', contract: '契约', glue: '胶水' };
 
-export function renderSandboxCanvasHtml(
+export function renderDepCanvasHtml(
   r: BrickifyResult,
   narratives?: ClusterNarratives,
 ): string {
@@ -561,12 +561,12 @@ fit();
 }
 
 /** 落盘便捷入口。 */
-export function buildSandboxCanvas(opts: {
+export function buildDepCanvas(opts: {
   result: BrickifyResult;
   narratives?: ClusterNarratives;
   out_file?: string;
 }): string {
-  const html = renderSandboxCanvasHtml(opts.result, opts.narratives);
+  const html = renderDepCanvasHtml(opts.result, opts.narratives);
   if (opts.out_file) {
     const abs = path.resolve(opts.out_file);
     fs.mkdirSync(path.dirname(abs), { recursive: true });

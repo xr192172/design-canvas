@@ -258,12 +258,12 @@
 
 - `list_features` / `query_feature` / `update_feature`：`get_dsl` / `edit_dsl` 的实现（注册名≠文件名），已在豁免表。
 
-- `feature_ops`(createFeature) / `render_dsl_workbench` / `feature_map`(buildFeatureMap) /
+- `feature_ops`(createFeature) / `render_workbench` / `feature_map`(buildFeatureMap) /
   `derive_feature_tree`：manage\_feature / render\_brickwork / import\_project / overview 的内部派生、
   渲染助手，主函数名 ≠ 文件名 camelCase 或为 async，天然不触发漏注册检测；本次显式加入豁免表，
   让「内部模块」边界的意图文档化。
 
-- **遗留命名重叠**：`render_dsl` / `render_dsl_workbench` / `render_sandbox` 的 render 语义仍待定（见待办）。
+- **遗留命名重叠（2026-09 部分收口）**：内部渲染模块 `render_dsl_workbench`→`render_workbench`（契约投影工作台）、`render_sandbox_canvas`→`render_dep_canvas`（依赖图画布）已改名，消除「疑似 render_dsl 子变体」的混淆；`render_dsl`（设计稿） vs `render_brickwork`（积木工作台）的 render 一词两职责仍待定（见待办）。
 
 ***
 
