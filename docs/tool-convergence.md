@@ -246,7 +246,7 @@
 
 > **watcher 二轮优化（2026-09）**：drift 独立于 rebuild（盯 drift 不必全量重建 live）；状态转换去重（仅「未过时→过时」pushAlert，stale 持续期不重复轰炸）。
 >
-> **未做：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时靠 reconcile 兜补漏改）。理由：`ReconcileSummary` 不暴露本次实际变更文件集（内部 flushBatch 已消费），拿不到 → drift 无法按变更作用域精确算（只能退化为 scope=all 全量）；要拿到须改 reconcileProject 签名/onReconcile 回调（增量同步核心路径，风险高）；且 reconcile 本就低频、收益场景窄——只在"fs.watch 恰好漏了那次影响过时判定的变更"才真有价值。与现 diff/impact 均不做 reconcile 兜底一致，故保留为开放项。
+> **✅ 已实现：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时，reconcile 定期全量扫盘兜补漏改，并对有变更的文件精确补判 drift）。原设想的障碍「`ReconcileSummary` 不暴露变更文件」已解决：`ReconcileSummary.changed_files` 由 `reconcileProject` 透出；`watch_project_tool` 的 `onReconcile` 在 reconcile 有实际变更时，按 `changed_files` 以 `scope='changed'` 补判 drift（`runDriftCheck`）；reconcile 由 `setInterval(reconcile_interval_ms)` 周期触发，另暴露 `reconcileNow()` 手动兜补。**注**：`watch_project_tool.test` 覆盖 drift\_on\_change 基本透传/依赖；reconcile→drift 兜底的精确 scope 集成路径暂无专门 flaky-free 测试，列为后续低成本验证项。
 
 ***
 
@@ -299,7 +299,7 @@
 
 ## 6. 待办 / 开放问题
 
-- [ ] 决定 `drift 挂周期性 reconcile 兜底` 是否做（受限于 `ReconcileSummary` 不暴露变更文件集，需改 watch 核心；见 detect\_drift 记录）
+- [x] 决定 `drift 挂周期性 reconcile 兜底` 是否做 —— ✅ **已实现（见 detect\_drift 记录）**：`ReconcileSummary.changed_files` 透出 + `onReconcile` 按变更文件以 `scope='changed'` 精确补判 drift。
 
 - [x] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理 —— ✅ **已成（2026-09）**：`render_dsl`→`render_design`（渲染设计稿）、`render_sandbox`(现 `render_brickwork`) 早成 `render_brickwork`。render 前缀下对象各异：`render_design`/`render_brickwork`/`render_workbench`/`render_dep_canvas`/`render_cluster_workbench`，职责清晰。
 
