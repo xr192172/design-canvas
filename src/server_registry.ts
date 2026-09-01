@@ -54,6 +54,7 @@ import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
+import { renameSymbols } from './tools/rename_symbols.js';
 import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1308,6 +1309,62 @@ const TOOL_DEFS: ToolDef[] = [
       } else {
         parts.push('\t无其它文件引用该符号');
       }
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'rename_symbols',
+    title: 'Batch cross-file module-level symbol renames with structured-diff preview',
+    description:
+      '跨文件符号批量改名：一次调用对多个「模块级导出符号」批量改名（对标脚本效率，但带结构化 diff 预览/验证）。' +
+      '输入 renames=[{file,symbol,to,rename_file_if_matching?}]。' +
+      '先对所有条目按原始文件态 dry_run 算结构化 diff（每处 old→new，可验证）；任一条被阻断（撞名/星号转发/非模块级符号）→ 整体不落盘，返回预览报告。' +
+      '全部可落盘时才逐条落盘并返回每条 preview(含 applied 的实际 diff)。apply 阶段若前面改动使后续条目被阻断，立即中止并如实报告已应用条数。' +
+      '与 rename_many 互补：rename_many 是单文件局部变量批量；本品是跨文件模块级符号批量。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根（可选；缺省各条自动定位；统一定位时传）'),
+      renames: z
+        .array(
+          z.object({
+            file: z.string().describe('定义符号的文件（绝对路径；或相对 cwd/project_dir 路径）'),
+            symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
+            to: z.string().describe('新符号名（合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
+            rename_file_if_matching: z.boolean().optional().describe('true=符号是文件主导出时联动改文件名（默认 false）'),
+          }),
+        )
+        .describe('待批量改名的符号条目'),
+      dry_run: z.boolean().optional().describe('true=只算全部 dry-run diff 不落盘（默认：先整体校验，全通过才落盘）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await renameSymbols({
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        renames: (a.renames as Array<{ file: string; symbol: string; to: string; rename_file_if_matching?: boolean }>).map((x) => ({
+          file: String(x.file),
+          symbol: String(x.symbol),
+          to: String(x.to),
+          rename_file_if_matching: (x as { rename_file_if_matching?: boolean }).rename_file_if_matching === true,
+        })),
+        dry_run: a.dry_run === true,
+      });
+      const fmt = (item: { file: string; symbol: string; to: string }, res?: { definition?: { file: string }; importers?: { file: string; ops?: { old: string; new: string }[] }[] }): string => {
+        const lines = [`  - ${item.file} 的 ${item.symbol} → ${item.to}`];
+        if (res?.definition) lines.push(`\t定义 ${res.definition.file}`);
+        if (res?.importers?.length) {
+          for (const i of res.importers) lines.push(`\t导入 ${i.file}（${i.ops ? [...new Map(i.ops.map((o) => [`${o.old}→${o.new}`, true])).keys()].join('，') : ''}）`);
+        }
+        return lines.join('\n');
+      };
+      if (!r.ok) {
+        const parts = [`批量改名被阻断（${r.dryRun ? '整体未落盘' : '部分已应用后中止'}）：`];
+        parts.push(`\t${(r.blocked || []).join('\n\t')}`);
+        parts.push('\tdry-run 各条状态：');
+        for (const p of r.previews) parts.push(`\t  [${p.ok ? '可落盘' : '被阻断'}] ${fmt(p.item, p.result)}`.replace(/\n/g, '\n\t  '));
+        return { message: parts.join('\n'), data: r };
+      }
+      const parts = [
+        r.dryRun ? `[批量 dry-run 预览·未落盘] 共 ${r.previews.length} 条` : `批量改名完成：${r.previews.length} 条，落盘 ${r.filesWritten} 个文件`,
+      ];
+      for (const p of r.previews) parts.push(fmt(p.item, p.result).replace(/\n/g, '\n\t'));
       return { message: parts.join('\n'), data: r };
     }),
   },
