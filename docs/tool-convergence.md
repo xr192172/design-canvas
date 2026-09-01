@@ -290,7 +290,9 @@
 ### 改进建议 → 已落地（2026-09）
 
 - ✅ **字面量感知改名**：`rename_symbols report_literals=true` 扫描旧符号 snake 变体在项目文本的字面量命中，返回清单（只报告不改）。
+
 - ✅ **注册名白名单**：命中按 `kind` 分类——`server_registry` 的 `name:`→`contract`（对外契约，清单醒目标「破坏契约需人审」），tool-convergence/docs→`history`/`docs`（保留原貌）、tests→`test`、其余→`code`；agent 据清单区分「改 / 保留 / 契约谨慎」。
+
 - ⏳ **契约变更纪律**：已写进 AGENTS「文档同步纪律（契约变更才跟）」；工具侧由 `contract` 命中的风险提示承载「需人审」的门槛，暂不自动落盘（避免误伤历史灰名单的语义判定）。
 
 ***

@@ -184,7 +184,7 @@ function scanLiteralOccurrences(
 
   // 只扫描常见可读扩展名（排除二进制/编译产物）
   const SCAN_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.mts', '.json', '.md', '.yml', '.yaml', '.html', '.css', '.vue', '.py', '.go', '.java', '.sh', '.mjs']);
-  const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.trae', '.github']);
+  const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.github']);
 
   const files: string[] = [];
   function walk(dir: string): void {
