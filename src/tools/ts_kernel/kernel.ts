@@ -49,6 +49,12 @@ export interface ParsedImport {
    * `import { type X }`（混合语句单说明符）不算——语句仍保留，保守不标。
    */
   type_only?: boolean;
+  /**
+   * 该 import 绑定的「本地可用名字」（Go/Python 提取；TS 系走 ImportEdge.remoteName/localName 精确，不填）。
+   * 用途：符号级跨语言引用判定——给定使用点 token（如 `pkg.Symbol` 的 `pkg`、`from x import n` 的 `n`，
+   * 判定它源自哪个 import 边，从而验证是否连向 target 定义模块。
+   */
+  bindings?: string[];
 }
 
 /** 函数级调用边（同文件内，AST 提取，路线图序号 3 的第一步） */
@@ -524,6 +530,51 @@ function extractImportSources(node: SyntaxNodeLike, langName: string): string[] 
   return [];
 }
 
+/** 从 import 节点提取「本地可用名字」（绑定）：供符号级跨语言引用判定用。
+ *  - Go: import_spec → 包前缀（显式 alias 或路径尾段）；对应 `pkg.Symbol` 的 `pkg`。
+ *  - Python: `from pkg import a, b` → [a, b]（本地符号名）；`import a.b.c [as d]` → [c 或 d]。
+ *  - TS 系不填（已有 ImportEdge.remoteName/localName 精确匹配）。 */
+function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: string[]): string[] {
+  if (langName === 'go') {
+    // import_spec 节点 text 形如 `alias "path"` 或 `"path"`（无 import 关键字）：
+    // 首位是标识符(alias)紧跟字符串 → 显式别名；否则用路径尾段（默认包名）
+    const m = node.text.match(/^\s*([A-Za-z_][\w.]*)\s*(?:"[^"]*"|`[^`]*`)/);
+    if (m) return [m[1]];
+    const base = paths[0]?.split('/').pop();
+    return base ? [base] : [];
+  }
+  if (langName === 'python') {
+    if (node.type === 'import_from_statement') {
+      // from pkg import a, b [as c] —— 取每个 imported 名的本地名（as 后或原名）
+      const m = node.text.match(/^from\s+[\w.]*\s+import\s+(.+)$/);
+      if (!m) return [];
+      return m[1]
+        .split(',')
+        .map((s) => s.trim())
+        .map((s) => (s.match(/as\s+([A-Za-z_]\w*)/i) || [])[1] || s.replace(/[()]/g, ''))
+        .filter((s) => s && !s.startsWith('('));
+    }
+    if (node.type === 'import_statement') {
+      // import a.b.c [as d], x.y —— dotted 取尾段；aliased 取 as 后名
+      const out: string[] = [];
+      const walk = (n: SyntaxNodeLike): void => {
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (!c) continue;
+          if (c.type === 'dotted_name') out.push(c.text.split('.').pop() || c.text);
+          else if (c.type === 'aliased_import') {
+            const as = c.text.match(/as\s+([A-Za-z_]\w*)/i);
+            out.push(as ? as[1] : (c.text.split('.').pop() || c.text));
+          } else walk(c);
+        }
+      };
+      walk(node);
+      return out;
+    }
+  }
+  return [];
+}
+
 function traverseAndExtractImports(
   node: SyntaxNodeLike,
   lang: LanguageEntry,
@@ -536,12 +587,14 @@ function traverseAndExtractImports(
     // TS 系 `import type` 整条语句运行时擦除——标记 type_only，依赖图/闭包不算边
     const isTs = lang.name === 'typescript' || lang.name === 'tsx' || lang.name === 'javascript' || lang.name === 'jsx';
     const typeOnly = isTs && /^\s*import\s+type\b/.test(node.text);
+    const bindings = extractImportBindings(node, lang.name, sources);
     for (const src of sources) {
       imports.push({
         source: src,
         kind: src.startsWith('.') ? 'relative' : 'package',
         line: node.startPosition.row + 1,
         ...(typeOnly ? { type_only: true } : {}),
+        ...(bindings.length > 0 ? { bindings } : {}),
       });
     }
     return; // import 节点内部不再递归
