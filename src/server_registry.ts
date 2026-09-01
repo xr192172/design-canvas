@@ -93,7 +93,7 @@ import {
   ledgerSummary,
 } from './observe/instrument.js';
 import path from 'node:path';
-import { statSync, readFileSync, writeFileSync } from 'node:fs';
+import { statSync, readFileSync, writeFileSync, readdirSync, type Dirent } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // ─────────────────────────────────────────────────────────────
@@ -144,6 +144,64 @@ export function staleBuildWarningFor(loadedMtimeMs: number | null, curMtimeMs: n
 /** dist 已更新（进程仍在跑旧代码）时返回重启警告，否则空串。 */
 function staleBuildWarning(): string {
   return staleBuildWarningFor(SELF_MTIME_MS, SELF_PATH ? safeMtimeMs(SELF_PATH) : null);
+}
+
+// ───── STALE SOURCE：改了 src 却忘了 build 的检测 ─────
+// 补齐 staleBuildWarning 覆盖不到的缺口——它只在 dist 被重建后(un进程仍旧)提示，
+// 若用户改了 src 但没 build，dist mtime 不变则完全无感。此处检测「src 比 dist 新」。
+const PACKAGE_ROOT = SELF_PATH ? path.resolve(path.dirname(SELF_PATH), '..', '..') : null;
+const SRC_DIR = PACKAGE_ROOT ? path.join(PACKAGE_ROOT, 'src') : null;
+const DIST_DIR = PACKAGE_ROOT ? path.join(PACKAGE_ROOT, 'dist') : null;
+
+/** 递归取目录内最新文件 mtime（跳过 node_modules；skipGen 时忽略 *.gen.ts 生成物，避免 build 自己造成误判） */
+export function newestMtime(dir: string | null, skipGen: boolean): number | null {
+  if (!dir) return null;
+  let max: number | null = null;
+  const stack: string[] = [dir];
+  while (stack.length > 0) {
+    const d = stack.pop()!;
+    let ents: Dirent[];
+    try {
+      ents = readdirSync(d, { withFileTypes: true });
+    } catch {
+      continue; // 目录不存在/无权限 → 视为可跳过
+    }
+    for (const e of ents) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== 'node_modules') stack.push(p);
+      } else if (e.isFile()) {
+        if (skipGen && e.name.endsWith('.gen.ts')) continue;
+        const m = safeMtimeMs(p);
+        if (m !== null && (max === null || m > max)) max = m;
+      }
+    }
+  }
+  return max;
+}
+
+let _srcMaxCache: { at: number; v: number | null } | null = null;
+/** src 树最新 mtime，5s 缓存避免每次工具调用递归扫全树。 */
+function cachedSrcMtime(): number | null {
+  const now = Date.now();
+  if (_srcMaxCache && now - _srcMaxCache.at < 5000) return _srcMaxCache.v;
+  const v = newestMtime(SRC_DIR, true);
+  _srcMaxCache = { at: now, v };
+  return v;
+}
+
+/** src 比 dist 新（改了源码未 build）→ 提示，否则空串。 */
+function staleSourceWarning(): string {
+  const srcMax = cachedSrcMtime();
+  const distMax = newestMtime(DIST_DIR, false);
+  if (srcMax === null || distMax === null) return '';
+  if (srcMax > distMax) {
+    return (
+      '\n⚠️ STALE SOURCE：`src/` 比 `dist/` 新（疑似改了源码但未 `npm run build`）。' +
+      '当前工具跑的是旧编译产物——请运行 `npm run build` 后再重启 design-canvas MCP server 生效。'
+    );
+  }
+  return '';
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2199,7 +2257,7 @@ export function registerAllTools(server: McpServer): void {
       // 响应注入：① 陈旧构建警告（dist 重建后进程仍跑旧代码 → 明确提示重启，防误信旧结果）
       //          ② watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）。
       //            方向 E：本地 inbox（降级路径）+ daemon 游标拉取（权威路径）合并注入
-      return textOut(r.text + staleBuildWarning() + await collectPendingAlertText(def.name), r.isError);
+      return textOut(r.text + staleBuildWarning() + staleSourceWarning() + await collectPendingAlertText(def.name), r.isError);
     });
   }
 }
