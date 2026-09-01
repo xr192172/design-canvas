@@ -152,4 +152,17 @@ describe('findReferences', () => {
     expect(r.typeCandidates!.some((c) => c.file === 'src/b.ts')).toBe(false); // 只 1 个成员交叠
     rmForce(dir);
   });
+
+  it('跨语言（Go）文件里的引用：以 cross-usage 文本探针报告（AST 提取不了但闭包含它）', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export function compute(a: number): number { return a; }\n',
+      'src/main.go': 'package main\n\nfunc run(v int) int {\n\treturn compute(v)\n}\n',
+    });
+    const r = await findReferences({ project_dir: dir, file: 'src/def.ts', symbol: 'compute' });
+    expect(r.ok).toBe(true);
+    const go = r.importers!.find((x) => x.file === 'src/main.go');
+    expect(go).toBeDefined(); // expandClosure 闭包含该项目内全部源文件 → main.go 在内
+    expect(go!.refs.some((x) => x.kind === 'cross-usage' && x.line === 4 && x.text === 'compute')).toBe(true);
+    rmForce(dir);
+  });
 });

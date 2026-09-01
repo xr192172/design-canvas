@@ -166,9 +166,26 @@ export async function findReferences(input: {
   };
 
   const importers: ReferenceFile[] = [];
+  const TS_FILE_RE = /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i;
   for (const f of files) {
     if (path.resolve(f) === fileAbs) continue;
     const src = readFileSync(f, 'utf-8');
+    // 跨语言引用（Go/Python 等）：expandClosure 已按 import 边把这些文件纳入闭包，但"引用提取"是 TS AST 专属。
+    // 对非 TS 文件用词边界文本探针报告疑似引用（kind=cross-usage），供 LLM 按行核实——非 AST 级精确，但补上跨语言波及面。
+    if (!TS_FILE_RE.test(f)) {
+      const needle = symbol!;
+      const re = new RegExp(`\\b${needle}\\b`);
+      const crossRefs: ReferenceSite[] = [];
+      const lines = src.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const idx = lines[i].search(re);
+        if (idx >= 0) crossRefs.push({ offset: idx, line: i + 1, text: needle, kind: 'cross-usage' });
+      }
+      if (crossRefs.length > 0) {
+        importers.push({ file: (path.relative(resolvedRoot, f) || f).replace(/\\/g, '/'), refs: crossRefs, importSources: [] });
+      }
+      continue;
+    }
     const mod = await analyzeModuleSource(src, f);
     if (!mod) continue;
     const refs: ReferenceSite[] = [];
