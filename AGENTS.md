@@ -6,17 +6,18 @@
 
 ## 触发点总表（按开发动作）
 
-| 开发动作             | 必用工具                                   | 说明                            |
-| ---------------- | -------------------------------------- | ----------------------------- |
-| 改一个模块级符号名        | `rename_symbol`                        | 自动定根+闭包+跨语言，先 dry\_run 看 diff |
-| 批量改多个符号          | `rename_symbols`                       | 先整体 dry-run，全部可落盘才落           |
-| 改文件名并联动全仓 import | `rename_file`                          | 防文件悬空                         |
-| 单文件局部变量/形参批量改名   | `rename_many`                          | 作用域隔离                         |
-| 改一段代码（函数体/range） | `edit_code`                            | 按符号/行号定位改写                    |
-| 理解一串代码/结构        | `explore_code`                         | 只读、即时答案                       |
-| 清理无效 import      | `remove_dead_imports`                  | 剪刀剪 dead\_deps                |
-| 提交前健康检查          | `consistency_check` / `sync_contracts` | 契约/一致性                        |
-| 改前看影响面           | `diff_views` / `reconcile_chain`       | 波及方向                          |
+| 开发动作               | 必用工具                                   | 说明                            |
+| ------------------ | -------------------------------------- | ----------------------------- |
+| 改一个模块级符号名          | `rename_symbol`                        | 自动定根+闭包+跨语言，先 dry\_run 看 diff |
+| 批量改多个符号            | `rename_symbols`                       | 先整体 dry-run，全部可落盘才落           |
+| 改文件名并联动全仓 import   | `rename_file`                          | 防文件悬空                         |
+| 单文件局部变量/形参批量改名     | `rename_many`                          | 作用域隔离                         |
+| 改一段代码（函数体/range）   | `edit_code`                            | 按符号/行号定位改写                    |
+| 理解一串代码/结构          | `explore_code`                         | 只读、即时答案                       |
+| 清理无效 import        | `remove_dead_imports`                  | 剪刀剪 dead\_deps                |
+| 看"谁引用了 X / 谁调用了 X" | `find_references`                      | 只读引用查询（改/删前看波及面）              |
+| 提交前健康检查            | `consistency_check` / `sync_contracts` | 契约/一致性                        |
+| 改前看影响面             | `diff_views` / `reconcile_chain`       | 波及方向                          |
 
 ## 改名约定（强制优先用工具）
 

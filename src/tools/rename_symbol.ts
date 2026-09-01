@@ -434,7 +434,7 @@ function kindNodeTypes(kind: string): Set<NodeType> {
 // ─────────────────────────────────────────────
 // 相对 import 解析（项目内文件集合来自 project_root.expandClosure）
 // ─────────────────────────────────────────────
-function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, string>): string | null {
+export function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, string>): string | null {
   if (!source.startsWith('.')) return null; // 包导入 / 外部 → 不是项目内相对引用
   const impRelDir = path.posix.dirname(importerAbs.replace(/\\/g, '/')).replace(/\/$/, '');
   const target = path.posix.join(impRelDir, source);
@@ -453,7 +453,7 @@ function resolveRel(source: string, importerAbs: string, byNoExt: Map<string, st
   return null;
 }
 
-function buildNoExt(files: string[]): Map<string, string> {
+export function buildNoExt(files: string[]): Map<string, string> {
   const m = new Map<string, string>();
   for (const f of files) {
     const rel = f.replace(/\\/g, '/');

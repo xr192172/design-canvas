@@ -55,6 +55,7 @@ import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
 import { renameSymbols } from './tools/rename_symbols.js';
+import { findReferences } from './tools/find_references.js';
 import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1365,6 +1366,38 @@ const TOOL_DEFS: ToolDef[] = [
         r.dryRun ? `[批量 dry-run 预览·未落盘] 共 ${r.previews.length} 条` : `批量改名完成：${r.previews.length} 条，落盘 ${r.filesWritten} 个文件`,
       ];
       for (const p of r.previews) parts.push(fmt(p.item, p.result).replace(/\n/g, '\n\t'));
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'find_references',
+    title: 'Find symbol references (callers/importers), read-only',
+    description:
+      '查找一个模块级符号的所有引用（调用方/import 方）——改/删前看波及面。只读，不改文件。' +
+      '输入 {file(定义文件), symbol}。返回：定义文件 + 所有 import 该符号的文件（含 import 子句 source、' +
+      '无别名使用点位置与行号）。复用 rename 的闭包/引用图内核（自动定位项目根 + 闭包 + 别名边 + 跨语言）。' +
+      '不产生编辑，纯查询，是"谁引用了它"的直答。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根（可选；缺省自动定位）'),
+      file: z.string().describe('定义符号的文件（绝对路径；或相对 cwd/project_dir）'),
+      symbol: z.string().describe('符号名（模块级声明名）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await findReferences({
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        file: String(a.file),
+        symbol: String(a.symbol),
+      });
+      if (!r.ok) {
+        return { message: `引用查找失败：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
+      }
+      const parts = [`符号 ${r.symbol} 的引用（定义文件 ${r.definition!.file}，${r.importerCount} 个 import 方）：`];
+      if (r.definition) {
+        parts.push(`\t定义 ${r.definition.file}（${r.definition.kind}），${r.definition.refs.length} 处引用点`);
+      }
+      for (const imp of r.importers!) {
+        parts.push(`\t- ${imp.file}（import ${imp.importSources.join(', ')}）：行 ${imp.refs.map((x) => x.line).join(', ')}`);
+      }
       return { message: parts.join('\n'), data: r };
     }),
   },
