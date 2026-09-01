@@ -1506,7 +1506,9 @@ const TOOL_DEFS: ToolDef[] = [
       '返回字段的「读取点」(obj.field/obj.field)、「构造点」({field: v})、「解构点」、「声明点」，' +
       'AST 分类 + 行内上下文 snapshot，**含定义文件内部**——用于"加字段/改签名"前看清谁读谁构造。' +
       'mode=type：输入 {file, symbol(类型名), min_hit?}，从类型声明解出成员字段集，找与其交叠 ≥ min_hit 的' +
-      '对象字面量候选构造点（启发式，非类型求解器）。',
+      '对象字面量候选构造点（启发式，非类型求解器）。' +
+      'report_literals=true：任一模式额外扫描符号 snake 变体（renderDsl→render_dsl）在项目文本（文档/测试/契约/工具注册名）里的字面量命中，' +
+      '返回清单待核验——补 AST 查不到的字符串/文档引用，改名/删符号前一次看清全量波及面。',
     inputSchema: {
       project_dir: z.string().optional().describe('目标项目根（可选；缺省自动定位）'),
       mode: z.enum(['symbol', 'field', 'type']).optional().describe('symbol=找符号引用（默认）；field=找字段读/构/解/声明点；type=找形如某类型的对象字面量构造候选'),
@@ -1515,12 +1517,14 @@ const TOOL_DEFS: ToolDef[] = [
       file: z.string().optional().describe('mode=symbol 必填：定义符号的文件（绝对路径或相对 cwd/project_dir）；field/type 可选（用于定 scope）'),
       symbol: z.string().optional().describe('mode=symbol/type 必填：符号/类型名（模块级声明名）'),
       field: z.string().optional().describe('mode=field 必填：要查的字段名'),
+      report_literals: z.boolean().optional().describe('true=额外扫描符号 snake 变体在项目文本里的字面量命中（文档/测试/契约/工具注册名），返回清单待核验，不改动'),
     },
     handler: wrap(async (a) => {
       const common = {
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         scope: a.scope === 'all' ? ('all' as const) : ('closure' as const),
         file: typeof a.file === 'string' && a.file ? a.file : undefined,
+        report_literals: a.report_literals === true,
       };
       // mode=field：AST 分类的读/构/解/声明点 + snippet
       if (a.mode === 'field') {
@@ -1539,6 +1543,7 @@ const TOOL_DEFS: ToolDef[] = [
           lines.push(`\t- ${f.file}（${summary}）：`);
           for (const x of f.refs) lines.push(`\t    L${x.line}[${kindLabel[x.kind]}] ${x.snippet}`);
         }
+        if (r.literals) for (const kv of r.literals) for (const m of kv.matches) lines.push(`\t[字面 ${kv.needle}] ${path.basename(m.file)} L${m.line} [${m.kind}] ${m.snippet}`);
         return { message: lines.join('\n'), data: r };
       }
       // mode=type：成员 + 候选构造点
@@ -1552,6 +1557,7 @@ const TOOL_DEFS: ToolDef[] = [
         for (const c of r.typeCandidates!) {
           lines.push(`\t- ${c.file}:L${c.line}（命中 ${c.matched.join(', ')}） ${c.snippet}`);
         }
+        if (r.literals) for (const kv of r.literals) for (const m of kv.matches) lines.push(`\t[字面 ${kv.needle}] ${path.basename(m.file)} L${m.line} [${m.kind}] ${m.snippet}`);
         return { message: lines.join('\n'), data: r };
       }
       // mode=symbol：既有逻辑
@@ -1559,6 +1565,7 @@ const TOOL_DEFS: ToolDef[] = [
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         file: String(a.file),
         symbol: String(a.symbol),
+        report_literals: common.report_literals,
       });
       if (!r.ok) {
         return { message: `引用查找失败：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
@@ -1570,6 +1577,7 @@ const TOOL_DEFS: ToolDef[] = [
       for (const imp of r.importers!) {
         parts.push(`\t- ${imp.file}（import ${imp.importSources.join(', ')}）：行 ${imp.refs.map((x) => x.line).join(', ')}`);
       }
+      if (r.literals) for (const kv of r.literals) for (const m of kv.matches) parts.push(`\t[字面 ${kv.needle}] ${path.basename(m.file)} L${m.line} [${m.kind}] ${m.snippet}`);
       return { message: parts.join('\n'), data: r };
     }),
   },

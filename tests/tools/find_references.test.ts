@@ -199,4 +199,36 @@ describe('findReferences', () => {
     expect(use!.refs.some((x) => x.kind === 'cross-call' && x.text === 'Bar.run')).toBe(true);
     rmForce(dir);
   });
+
+  it('report_literals=true：额外扫符号 snake 变体在文档/用例里的字面量命中（只报不改）', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export function renderDsl() { return "v"; }\n',
+      'README.md': '# t\n请先 render_dsl 渲染，或用 render_dsl 预览。\n',
+      'src/idle.ts': 'const s = "find_references 在别处仍叫这个名字";\n', // 无关噪音
+    });
+    const r = await findReferences({ project_dir: dir, file: 'src/def.ts', symbol: 'renderDsl', report_literals: true });
+    expect(r.ok).toBe(true);
+    expect(r.literals).toBeDefined();
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    expect(l).toBeDefined();
+    expect(l.matches.length).toBeGreaterThan(0);
+    // README.md 命中 snake 串，且带行号
+    expect(l.matches.some((m) => m.file.endsWith('README.md') && m.line >= 1)).toBe(true);
+    // 缺省不扫 → 不返回 literals
+    const r2 = await findReferences({ project_dir: dir, file: 'src/def.ts', symbol: 'renderDsl' });
+    expect(r2.literals).toBeUndefined();
+    rmForce(dir);
+  });
+
+  it('report_literals=true：mode=field 也报字段名 snake 变体的字面量命中', async () => {
+    const dir = mkProj({
+      'src/use.ts': 'const obj = { activeCount: 3 };\n',
+      'docs/meta.md': '字段 active_count 用于统计。\n',
+    });
+    const r = await findReferences({ project_dir: dir, mode: 'field', field: 'activeCount', scope: 'all', report_literals: true });
+    expect(r.ok).toBe(true);
+    expect(r.literals!.find((x) => x.needle === 'active_count')).toBeDefined();
+    expect(r.literals!.find((x) => x.needle === 'active_count')!.matches.some((m) => m.file.includes('docs') && m.file.endsWith('meta.md'))).toBe(true);
+    rmForce(dir);
+  });
 });

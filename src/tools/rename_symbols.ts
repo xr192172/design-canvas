@@ -155,7 +155,7 @@ export async function renameSymbols(input: {
 // ──────────────── 字面量引用扫描（只报告，不改动） ────────────────
 
 /** camelCase/PascalCase → snake_case。如 'renderDesign' → 'render_design'。 */
-function camelToSnake(str: string): string {
+export function camelToSnake(str: string): string {
   return str.replace(/([A-Z])/g, '_$1').replace(/^_/, '').toLowerCase();
 }
 
@@ -175,7 +175,7 @@ function classifyLiteral(file: string, lineText: string, needle: string): Litera
 
 /** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中 |
  * 只扫描非二进制可读文件，限于设计图纸/文档/脚本/测试（非 node_modules 非 dist） */
-function scanLiteralOccurrences(
+export function scanLiteralOccurrences(
   projectDir: string,
   needles: string[],
 ): Array<{ needle: string; matches: LiteralMatch[] }> {

@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, resolveLangImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
+import { camelToSnake, scanLiteralOccurrences, type LiteralMatch } from './rename_symbols.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 import { parseFileFull } from './ts_kernel/index.js';
 
@@ -58,12 +59,23 @@ export interface FindReferencesResult {
   typeMembers?: string[];
   /** mode=type 时：与类型成员交叠 ≥ min_hit 的对象字面量候选构造点 */
   typeCandidates?: TypeConstructCandidate[];
+  /** report_literals=true 时：符号 snake 变体在项目文本里的字面量命中（如工具注册名/README/测试里的串），只扫描不改 */
+  literals?: Array<{ needle: string; matches: LiteralMatch[] }>;
   /** 阻断/非模块级符号等理由 */
   blocked?: string[];
 }
 
 function lineOf(src: string, offset: number): number {
   return src.slice(0, offset).split('\n').length;
+}
+
+/** report_literals=true 时：扫描符号名 snake 变体（及原串兜底）在项目文本里的字面量命中，只报告不改动 */
+async function scanLiterals(projectDir: string, symbol: string): Promise<Array<{ needle: string; matches: LiteralMatch[] }> | undefined> {
+  const needle = camelToSnake(symbol);
+  if (!needle) return undefined;
+  // 原串与 snake 变体都扫：符号本身就可能以 kebab/snake 出现在文档（如 findSymbol→find_symbol；纯小写则只用原串）
+  const needles = needle === symbol ? [needle] : [needle, symbol];
+  return scanLiteralOccurrences(projectDir, [...new Set(needles)]);
 }
 
 const FIELD_KIND_LABEL: Record<string, string> = {
@@ -86,6 +98,8 @@ export async function findReferences(input: {
   scope?: 'closure' | 'all';
   /** type 模式：与类型成员交叠 ≥ 该值才判为候选构造点（默认 2） */
   min_hit?: number;
+  /** true=额外扫描符号 snake 变体（如 renderDsl→render_dsl）在项目文本里的字面量命中（文档/测试/契约/工具注册名），返回清单待核验，不改动 */
+  report_literals?: boolean;
   project_dir?: string;
 }): Promise<FindReferencesResult> {
   const effectiveRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
@@ -108,6 +122,7 @@ export async function findReferences(input: {
       importerCount: 0,
       typeMembers: members,
       typeCandidates: candidates,
+      literals: input.report_literals ? await scanLiterals(projectDir, input.symbol) : undefined,
       blocked: members.length === 0 ? ['未从声明中解出成员字段（认 interface/type { ... }）'] : candidates.length === 0 ? ['未找到交叠 ≥ min_hit 的对象字面量候选'] : undefined,
     };
   }
@@ -128,6 +143,7 @@ export async function findReferences(input: {
       mode: 'field',
       importerCount: 0,
       fieldRefs,
+      literals: input.report_literals ? await scanLiterals(projectDir, field) : undefined,
       blocked: fieldRefs.length === 0 ? ['项目中未找到对该字段的引用'] : undefined,
     };
   }
@@ -290,5 +306,6 @@ export async function findReferences(input: {
     definition: { file: (path.relative(resolvedRoot, fileAbs) || fileAbs).replace(/\\/g, '/'), kind: kind ?? 'module', refs: defRefs },
     importers,
     importerCount: importers.length,
+    literals: input.report_literals ? await scanLiterals(resolvedRoot, symbol!) : undefined,
   };
 }
