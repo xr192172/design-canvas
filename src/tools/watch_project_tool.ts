@@ -169,6 +169,8 @@ interface ActiveWatch {
   last_drift_at?: string;
   /** 上次 drift 状态（转换去重：仅状态变化时 push） */
   last_drift_status?: DriftData['status'];
+  /** drift 判定单飞标记（fs 事件与 reconcile 兜底两路复用 runDriftCheck 防并发） */
+  drift_running?: boolean;
   /** 未读影响提醒（一行摘要 × 报告序号），新→旧，cap 20；watch status 时 piggyback 带回 */
   alerts: { seq: number; created_at: string; line: string }[];
   last_impact_seq?: number;
@@ -360,6 +362,35 @@ function driftBrief(d: DriftData): string {
     (d.drifted ? ' — 设计需同步（edit_dsl/import_project）' : ' — 对齐');
 }
 
+/**
+ * 跑一次 drift 判定并落台账 + 状态转换去重告警。单飞：已在跑则跳过（fs 事件与 reconcile
+ * 兜底两路可能并发，避免重复判定/重复告警）。
+ * changedFiles 为空 → 全量对标（scope=all，reconcile 兜底场景）；非空 → 按变更文件精确作用域。
+ */
+async function runDriftCheck(entry: ActiveWatch, changedFiles: string[]): Promise<void> {
+  if (entry.drift_running) return;
+  entry.drift_running = true;
+  try {
+    const drift = await detectDrift({
+      feature: entry.feature!,
+      code_dir: entry.project_dir,
+      scope: changedFiles.length > 0 ? 'changed' : 'all',
+      changed_files: changedFiles.length > 0 ? changedFiles.map((f) => relOf(entry.project_dir, f)) : undefined,
+    });
+    entry.last_drift = drift;
+    entry.last_drift_at = new Date().toISOString();
+    // 状态转换去重：只在「未过时 → 过时」时 push，stale 持续期不重复轰炸同一过时状态
+    if (drift.drifted && entry.last_drift_status !== drift.status) {
+      pushAlert({ project_dir: entry.project_dir, seq: 0, line: driftBrief(drift), created_at: new Date().toISOString() });
+    }
+    entry.last_drift_status = drift.status;
+  } catch (driftErr) {
+    entry.error = 'drift 检测失败: ' + (driftErr as Error).message;
+  } finally {
+    entry.drift_running = false;
+  }
+}
+
 /** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + drift + 影响报告） */
 async function onBatchChange(entry: ActiveWatch, summary: WatchBatchSummary): Promise<void> {
   entry.last_change_at = new Date().toISOString();
@@ -409,23 +440,7 @@ async function doWork(entry: ActiveWatch): Promise<void> {
     const driftFiles = [...entry.pending_drift_files];
     entry.pending_drift_files.clear();
     if (driftFiles.length > 0) {
-      try {
-        const drift = await detectDrift({
-          feature: entry.feature,
-          code_dir: entry.project_dir,
-          scope: 'changed',
-          changed_files: driftFiles.map((f) => relOf(entry.project_dir, f)),
-        });
-        entry.last_drift = drift;
-        entry.last_drift_at = new Date().toISOString();
-        // 状态转换去重：只在「未过时 → 过时」时 push，stale 持续期不重复轰炸同一过时状态
-        if (drift.drifted && entry.last_drift_status !== drift.status) {
-          pushAlert({ project_dir: entry.project_dir, seq: 0, line: driftBrief(drift), created_at: new Date().toISOString() });
-        }
-        entry.last_drift_status = drift.status;
-      } catch (driftErr) {
-        entry.error = 'drift 检测失败: ' + (driftErr as Error).message;
-      }
+      await runDriftCheck(entry, driftFiles);
     }
   }
 
@@ -604,7 +619,13 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
       debounce_ms: debounceMs,
       reconcile_interval_ms: input.reconcile_interval_ms,
       onChange: (summary) => void onBatchChange(entry, summary),
-      onReconcile: (summary) => { entry.last_reconcile = summary; },
+      onReconcile: (summary) => {
+        entry.last_reconcile = summary;
+        // reconcile 兜底：fs.watch 丢事件时周期性全量扫盘找回漏改，补一次 drift 全量判定（无需变更集）
+        if ((summary.changed + summary.deleted > 0) && entry.drift_on_change && entry.feature) {
+          void runDriftCheck(entry, []);
+        }
+      },
       onError: (err) => { entry.error = err.message; },
     });
   } catch (e) {

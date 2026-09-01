@@ -242,7 +242,7 @@
 
 > **watcher 二轮优化（2026-09）**：drift 独立于 rebuild（盯 drift 不必全量重建 live）；状态转换去重（仅「未过时→过时」pushAlert，stale 持续期不重复轰炸）。
 >
-> **未做：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时靠 reconcile 兜补漏改）。理由：`ReconcileSummary` 不暴露本次实际变更文件集（内部 flushBatch 已消费），拿不到 → drift 无法按变更作用域精确算（只能退化为 scope=all 全量）；要拿到须改 reconcileProject 签名/onReconcile 回调（增量同步核心路径，风险高）；且 reconcile 本就低频、收益场景窄——只在"fs.watch 恰好漏了那次影响过时判定的变更"才真有价值。与现 diff/impact 均不做 reconcile 兜底一致，故保留为开放项。
+> **reconcile 兜底（2026-09 落地）**：`onReconcile` 兜底已接。fs.watch 丢事件时周期性全量扫盘找回漏改，触发的 reconcile 若发现实际变更（changed+deleted>0）即以 scope=all 全量跑一次 detect\_drift 补判——不依赖 `ReconcileSummary` 的变更文件集（回调里拿不到也不必要），**无需改 watch 核心**（reconcileProject/onReconcile 签名不变），复用现成 `detect_drift` 工具 + `runDriftCheck` 单飞 Helper（与 fs 事件路复用同一去重/告警逻辑，`drift_running` 防并发重复判定/告警）。早前评估"需改 watch 核心"是假设"drift 必须按变更集精确算"所致，后修正：兜底场景按全量判即可闭环，成本低、无核心侵入。
 
 ***
 
@@ -264,8 +264,6 @@
 ***
 
 ## 6. 待办 / 开放问题
-
-- [ ] 决定 `drift 挂周期性 reconcile 兜底` 是否做（受限于 `ReconcileSummary` 不暴露变更文件集，需改 watch 核心；见 detect_drift 记录）
 
 - [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
 
