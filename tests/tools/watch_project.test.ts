@@ -187,6 +187,17 @@ describe('reconcileProject 兜底', () => {
     expect(summary.changed).toBe(0);
     db.close();
   });
+
+  it('reconcile 透出本次实际变更文件集（changed_files 含增改与删除，供 drift 精确作用域）', async () => {
+    const { root, db } = await makeProject('r4');
+    // 新增一个文件 + 删除原 auth.ts → reconcile 应同时捕获增改与删除
+    put(root, 'src/new.ts', `export const n = 1;\n`);
+    fs.rmSync(path.join(root, 'src/auth.ts'));
+    const summary = await reconcileProject(db, root);
+    expect(summary.changed_files).toContain('src/new.ts'); // 新增在集内
+    expect(summary.changed_files).toContain('src/auth.ts'); // 被删文件也在集内（供 drift 判 missing_impl）
+    db.close();
+  });
 });
 
 describe('watchProject stop 清理', () => {

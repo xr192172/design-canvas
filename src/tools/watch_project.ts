@@ -141,6 +141,8 @@ export interface ReconcileSummary {
   changed: number;
   /** 库中已删除（磁盘消失） */
   deleted: number;
+  /** 本次实际增改/删除的文件（相对项目根 posix），供下游（如 drift）按变更作用域精确算 */
+  changed_files: string[];
   /** 跨文件调用重解析统计 */
   cross: CrossFileResolveStats;
 }
@@ -206,6 +208,7 @@ export async function reconcileProject(db: Database, projectRoot: string): Promi
     scanned: absFiles.length,
     changed: batch.changed,
     deleted: deletedRels.length,
+    changed_files: [...new Set([...changedRels, ...deletedRels])],
     cross: batch.cross,
   };
 }
@@ -282,7 +285,7 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
   const doReconcile = async (): Promise<ReconcileSummary> => {
     if (closed || reconciling) {
       reconcileAgain = true;
-      return { scanned: 0, changed: 0, deleted: 0, cross: { total: 0, resolved: 0, external: 0, failed: 0 } };
+      return { scanned: 0, changed: 0, deleted: 0, changed_files: [], cross: { total: 0, resolved: 0, external: 0, failed: 0 } };
     }
     reconciling = true;
     try {
@@ -295,7 +298,7 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
       return summary;
     } catch (e) {
       if (onError) onError(e as Error);
-      return { scanned: 0, changed: 0, deleted: 0, cross: { total: 0, resolved: 0, external: 0, failed: 0 } };
+      return { scanned: 0, changed: 0, deleted: 0, changed_files: [], cross: { total: 0, resolved: 0, external: 0, failed: 0 } };
     } finally {
       reconciling = false;
     }

@@ -621,9 +621,10 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
       onChange: (summary) => void onBatchChange(entry, summary),
       onReconcile: (summary) => {
         entry.last_reconcile = summary;
-        // reconcile 兜底：fs.watch 丢事件时周期性全量扫盘找回漏改，补一次 drift 全量判定（无需变更集）
+        // reconcile 兜底：fs.watch 丢事件时周期性全量扫盘找回漏改；有实际变更即按本次变更文件
+        // 精确作用域补判 drift（ReconcileSummary.changed_files 由核心 reconcileProject 透出）
         if ((summary.changed + summary.deleted > 0) && entry.drift_on_change && entry.feature) {
-          void runDriftCheck(entry, []);
+          void runDriftCheck(entry, summary.changed_files ?? []);
         }
       },
       onError: (err) => { entry.error = err.message; },
