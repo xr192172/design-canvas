@@ -1,0 +1,10 @@
+# 统一行尾为 LF：消除 core.autocrlf=true 对混合行尾文件造成的假修改(git status M)
+# 构建/生成脚本(s)一律写 LF；文档也固定 LF，避免 checkout 转 CRLF 后反复误报。
+* text=auto
+
+# 生成物（gen_* 脚本写 \n）
+*.gen.ts text eol=lf
+*.mjs    text eol=lf
+
+# 文档与决策记录
+*.md     text eol=lf
