@@ -50,10 +50,17 @@ export interface ReasonEvidenceResolver {
 
 /** 校验入参 */
 export interface ValidateReasonInput {
-  /** 变更原因（自然语言，必填且需通过四层校验） */
+  /** 变更原因（自然语言，必填且需通过校验） */
   reason: string;
   /** 可选：显式证据链（L4 校验其可回溯） */
   evidence?: ReasonEvidenceRef[];
+  /**
+   * 校验级数（1-4）。默认 4=全链。
+   * 活文档「轻量写路径」：routine=3（仍强制 L1 非空 / L2 套话 / L3 实体绑定，
+   * 但**跳过 L4 证据回溯**）——给日常维护（补节点/改描述/加标注）放行，
+   * 不再要求先跑代码留 trace 证据；重改仍走 level=4 强闸。
+   */
+  level?: 1 | 2 | 3 | 4;
   /** 可选：L3/L4 的实体与证据解析上下文 */
   resolver?: ReasonEvidenceResolver;
 }
@@ -127,6 +134,7 @@ const FUNCTION_WORDS = [
  */
 export function validateReason(input: ValidateReasonInput): ReasonValidationResult {
   const { reason, evidence = [], resolver = {} } = input;
+  const level = input.level ?? 4;
 
   // ── L1 非空 ──
   const trimmed = (reason ?? '').trim();
@@ -150,7 +158,7 @@ export function validateReason(input: ValidateReasonInput): ReasonValidationResu
   }
 
   // ── L4 前置：提供了 evidence 但根本没有解析器 → 优先打回（无法回溯，必属编造/空挂）──
-  if (evidence.length > 0 && !resolver.exists) {
+  if (level >= 4 && evidence.length > 0 && !resolver.exists) {
     return {
       ok: false,
       layer: 4,
@@ -168,8 +176,8 @@ export function validateReason(input: ValidateReasonInput): ReasonValidationResu
     };
   }
 
-  // ── L4 证据回溯 ──
-  if (evidence.length > 0) {
+  // ── L4 证据回溯（只在 level=4 强闸时执行）──
+  if (level >= 4 && evidence.length > 0) {
     const exists = resolver.exists as (ev: ReasonEvidenceRef) => boolean;
     for (const ev of evidence) {
       if (!exists(ev)) {

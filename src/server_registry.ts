@@ -213,9 +213,11 @@ const editDslHandler = wrap(async (a) => {
         '要重建实际视图请用 import_project 工具（全量导入），增量监听用 explore_code action=watch。',
     );
   }
-  // 活文档：变更原因四层校验（L1-L4），不通过拒绝写入
+  // 活文档：变更原因校验（L1-L4）。weight=routine → 轻量写路径（level=3，仍有 L1/L2/L3，
+  // 跳过 L4 证据回溯），给日常维护放行；默认 normal → 全链强闸。
   const reason = (a.reason as string | undefined) ?? '';
   const evidence = (a.evidence as ReasonEvidenceRef[] | undefined) ?? [];
+  const level = a.weight === 'routine' ? 3 : 4;
   const dsl = getDSLByView(a.feature as string, 'design');
   const entityIds: string[] = [];
   if (dsl) {
@@ -227,13 +229,20 @@ const editDslHandler = wrap(async (a) => {
     }
   }
   // L4 证据回溯：从真实 trace 库（<feature>.trace.json）加载记录并复算校验；
-  // 无 trace 文件 → 无法回溯 → evidence 一律打回（宁缺毋滥，杜绝编造证据进库）
-  const traceFile = path.join(getLiveDir(), `${a.feature as string}.trace.json`);
-  const records = loadTraceRecords(traceFile);
-  const traceResolver = records.length > 0 ? buildTraceResolver(records) : undefined;
+  // 无 trace 文件 → 无法回溯 → evidence 一律打回（宁缺毋滥，杜绝编造证据进库）。
+  // routine 轻量路径跳过此步（level=3，不加载 trace）。
+  let traceResolver:
+    | { exists?: (ev: ReasonEvidenceRef) => boolean; traceRefs?: string[] }
+    | undefined;
+  if (level >= 4) {
+    const traceFile = path.join(getLiveDir(), `${a.feature as string}.trace.json`);
+    const records = loadTraceRecords(traceFile);
+    traceResolver = records.length > 0 ? buildTraceResolver(records) : undefined;
+  }
   const v = validateReason({
     reason,
     evidence,
+    level,
     resolver: {
       entityIds,
       exists: traceResolver?.exists,
@@ -600,10 +609,16 @@ const TOOL_DEFS: ToolDef[] = [
       '标注/审批/快照/布局/仿真 用 data 传参（annotation.add data.text；annotation.resolve data.annotation_id；' +
       'approval.submit/review data.annotation_id；snapshot.save data.label；snapshot.rollback/delete data.snapshot_id；' +
       'layout.apply data.algo=dag|force|grid；simulation.reset 无参）。' +
-      'view: design（默认，改设计视图）/ live（拒绝写入，实际代码快照只能由 import/watch 重建）。',
+      'view: design（默认，改设计视图）/ live（拒绝写入，实际代码快照只能由 import/watch 重建）。' +
+      'weight: normal（默认）/ routine。routine=轻量写路径：跳过 L4 证据回溯（仍留 L1-L3 防空话/套话/泛谈），' +
+      '适合日常维护（补节点/改职责描述/加标注/改属性），不必先跑代码留 trace 证据；改架构/契约等重改请用 normal 全链强闸。',
     inputSchema: {
       feature: z.string().describe('feature 名'),
       view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认）；live=实际代码快照，只读，拒绝写入'),
+      weight: z
+        .enum(['normal', 'routine'])
+        .optional()
+        .describe('校验强度：normal=全链 L1-L4（默认，防编造证据）；routine=轻量（跳过 L4 证据回溯，日常维护用）'),
       reason: z
         .string()
         .describe(

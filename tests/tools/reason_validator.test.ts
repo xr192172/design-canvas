@@ -117,3 +117,37 @@ describe('reason_validator - 真实理由整体放行', () => {
     expect(r.ok).toBe(true);
   });
 });
+
+describe('reason_validator - 轻量写路径（level=3，routine）', () => {
+  it('跳过 L4：无 trace 解析器也放行（日常维护不被证据回溯卡住）', () => {
+    const r = validateReason({
+      reason: 'checkout 节点责任描述改一下，超时从 3s 改 10s',
+      evidence: [{ type: 'trace', ref: 'no_such_trace' }], // routine 下不校验能否回溯
+      level: 3,
+      resolver: { entityIds: ['checkout'] },
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('仍留 L3：泛泛而谈不绑实体 → routine 也拦截', () => {
+    const r = validateReason({ reason: '优化改进调整一下代码', level: 3 });
+    expect(r.ok).toBe(false);
+    expect(r.layer).toBe(3); // 够长过 L1/L2，但无实体 → L3 拦截（routine 仍防空泛）
+  });
+
+  it('仍留 L2/L3：够长的套话无实体 → 拦截（非 L4）', () => {
+    const r = validateReason({ reason: '我更新了代码因为要改进性能所以要更新', level: 3 });
+    expect(r.ok).toBe(false);
+    expect(r.layer).not.toBe(4); // 轻量路径绝不因 L4 拒绝，但仍因 L2/L3 拒绝
+  });
+
+  it('level=4（默认强闸）：有 evidence 无解析器 → 打回 L4', () => {
+    const r = validateReason({
+      reason: 'checkout 节点责任描述改一下，超时从 3s 改 10s',
+      evidence: [{ type: 'trace', ref: 'x' }],
+      resolver: { entityIds: ['checkout'] }, // 无 exists → L4 前置打回
+    });
+    expect(r.ok).toBe(false);
+    expect(r.layer).toBe(4);
+  });
+});
