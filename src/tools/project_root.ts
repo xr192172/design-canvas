@@ -144,32 +144,88 @@ export function realResolveImport(importerAbs: string, source: string): string |
 // ─────────────────────────────────────────────
 
 /**
- * 多语言 (Go/Python) import → 本地文件。
- *  - relative（./ ../ 或 Python 前导点）→ realResolveImport
- *  - Go 包路径：按 go.mod 前缀剥离 → 落到 go.mod 所在目录（root + gm.dir + rest）→ resolveToFile
- *  - Python 点分模块/单段包：从 importer 目录、再工程根各试 → resolveToFile
- *  - 解析不到（外部依赖 / 标准库 / 未装本地）→ null（不属本地闭包）
+ * 多语言 resolution 上下文（各语言 resolver 内部可能需要）
  */
-export function resolveLangImport(absFile: string, imp: ParsedImport, goModules: GoModule[], root: string): string | null {
+export interface LangResolveCtx {
+  /** 工程根（定位 Go 包目录 / Python 同包用） */
+  root: string;
+  /** Go module 列表（只 Go 用；已按 module 长度降序） */
+  goModules: GoModule[];
+  /** seed 所在项目名（裸包 workspace 互引用；可为 undefined） */
+  seedPkgName?: string;
+}
+
+/**
+ * 跨语言 import → 本地文件。
+ *
+ * 扩展点：本函数按文件扩展名分派到 `LANG_RESOLVERS[lang]`；未注册的语言走
+ * `resolveGenericLangImport` 通用兜底（把 import 字符串按分隔符转路径，从 importer
+ * 目录/工程根逐级落盘）。AST import 提取由 ts_kernel.parseFileFull 通用完成——
+ * LANGUAGES 注册表已覆盖 150+ 语言，故【加一个新语言 = 给 LANG_RESOLVERS 加一条
+ * 扩展名→resolver 映射】，AST 层零改动。
+ */
+export function resolveLangImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const ext = path.extname(absFile);
+  const resolver = LANG_RESOLVERS[ext];
+  if (resolver) return resolver(absFile, imp, ctx);
+  return resolveGenericLangImport(absFile, imp);
+}
+
+/** 相对（./ ../ 或 Python 前导点）→ realResolveImport——所有语言统一 */
+function resolveRelative(absFile: string, imp: ParsedImport): string | null {
   if (imp.kind === 'relative') return realResolveImport(absFile, imp.source);
-  const impDir = path.dirname(absFile);
-  // Go 包路径：命中 go.mod module 前缀（readGoModules 已按 module 长度降序）
-  for (const gm of goModules) {
+  return null;
+}
+
+/** Go：Go 包路径按 go.mod module 前缀剥离 → 落到 go.mod 所在目录 */
+function resolveGoImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  for (const gm of ctx.goModules) {
     if (imp.source === gm.module || imp.source.startsWith(gm.module + '/')) {
       const rest = imp.source.slice(gm.module.length).replace(/^\//, '');
-      const base = path.resolve(root, gm.dir || '.', rest);
-      const hit = resolveToFile(base);
-      if (hit) return hit;
+      return resolveToFile(path.resolve(ctx.root, gm.dir || '.', rest)) ?? null;
     }
   }
-  // Python 点分模块 / 单段包：importer 目录 → 工程根，逐级试
+  return null;
+}
+
+/** Python：点分模块/单段包 → importer 目录 → 工程根逐级试 */
+function resolvePythonImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
   const asPath = imp.source.split('.').join('/');
-  for (const base of [impDir, root]) {
+  for (const base of [path.dirname(absFile), ctx.root]) {
     const hit = resolveToFile(path.resolve(base, asPath));
     if (hit) return hit;
   }
   return null;
 }
+
+/** 通用兜底：把 import 字符串按 `::`/`.`/`/` 分隔符归一化为路径，从 importer 目录/工程根逐级落盘 */
+function resolveGenericLangImport(absFile: string, imp: ParsedImport): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  const asPath = imp.source.replace(/::/g, '/').replace(/\./g, '/');
+  for (const base of [path.dirname(absFile), path.resolve(absFile, '../..')]) {
+    const hit = resolveToFile(path.resolve(base, asPath));
+    if (hit) return hit;
+  }
+  // 末段可能是符号名（如 Java 'com.x.Bar' 的 Bar 是类名，文件在 com/x/）→ 退目录一级
+  const dirAsPath = asPath.replace(/\/[^/]+$/, '');
+  for (const base of [path.dirname(absFile), path.resolve(absFile, '../..')]) {
+    const hit = resolveToFile(path.resolve(base, dirAsPath));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** 各语言 resolver 注册表：加语言 = 加一条 [ext] → resolver */
+const LANG_RESOLVERS: Record<string, (absFile: string, imp: ParsedImport, ctx: LangResolveCtx) => string | null> = {
+  '.go': resolveGoImport,
+  '.py': resolvePythonImport,
+  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（Java/Rust/C#/C/CPP/Kotlin/...）
+};
 
 // ─────────────────────────────────────────────
 // tsconfig 路径别名（@/ 等）：真实项目几乎必用，别名导入若解析不到 → 漏改
@@ -287,9 +343,9 @@ export function isProjectDir(d: string): boolean {
  * 文件是否通过 import 真实引用 targetAbs（TS 系才解析）。
  *  - 相对导入（./ ../）→ realResolveImport
  *  - 别名导入（@/ 等）→ resolveAliasedImport（用本文件所属项目的 tsconfig，aliasCfg 传近）
- *  - 裸包导入（非相对、非别名）→ 本版跳过（宁漏不误；见 docs 边界）
+ *  - 裸包导入（非相对、非别名）→ 若匹配 seed 所在项目包名（workspace 互引）则命中
  */
-async function importsTargetFile(fileAbs: string, targetAbs: string, aliasCfg?: AliasConfig | null): Promise<boolean> {
+async function importsTargetFile(fileAbs: string, targetAbs: string, aliasCfg?: AliasConfig | null, seedPkgName?: string): Promise<boolean> {
   const ext = path.extname(fileAbs);
   if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) return false;
   let mod: Awaited<ReturnType<typeof analyzeModuleSource>> | null = null;
@@ -306,10 +362,25 @@ async function importsTargetFile(fileAbs: string, targetAbs: string, aliasCfg?: 
       real = realResolveImport(fileAbs, e.source);
     } else if (aliasCfg) {
       real = resolveAliasedImport(e.source, aliasCfg);
+    } else if (seedPkgName && e.source === seedPkgName) {
+      // 裸包 workspace 互引：import 了 seed 所在包（如 monorepo 内 B 引 A 包名）→ 命中
+      return true;
     }
     if (real && path.resolve(real) === targetAbs) return true;
   }
   return false;
+}
+
+/** 读项目根 package.json 的 name（裸包 workspace 互引匹配用）；无则 undefined */
+export function readPackageName(root: string): string | undefined {
+  try {
+    const p = path.join(root, 'package.json');
+    if (!fs.existsSync(p)) return undefined;
+    const j = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    return typeof j.name === 'string' && j.name ? j.name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -355,6 +426,8 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
   const out: string[] = [];
   // 松散文件（非项目样兄弟）用 seed 根的别名兜底
   const rootAlias = loadAliasConfig(rootAbs);
+  // 裸包 workspace 互引：seed 所在项目包名（B `import {..} from 'a'`，a=A 包名 → 命中）
+  const rootPkgName = readPackageName(rootAbs);
   for (const e of entries) {
     if (!e) continue;
     if (isSkippedDir(e.name)) continue;
@@ -369,12 +442,12 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
       for (const f of projFiles) {
         const abs = path.resolve(f);
         if (abs === seedAbs || !isLocalSource(abs)) continue;
-        if (await importsTargetFile(abs, seedAbs, projAlias)) out.push(abs);
+        if (await importsTargetFile(abs, seedAbs, projAlias, rootPkgName)) out.push(abs);
       }
     } else if (e.isFile() && SRC_EXTS.has(path.extname(e.name))) {
       const abs = path.resolve(p);
       if (abs === seedAbs || !isLocalSource(abs)) continue;
-      if (await importsTargetFile(abs, seedAbs, rootAlias)) out.push(abs);
+      if (await importsTargetFile(abs, seedAbs, rootAlias, rootPkgName)) out.push(abs);
     }
   }
   return out;
@@ -450,7 +523,7 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
           parsed = null;
         }
         if (!parsed) continue;
-        for (const e of parsed.imports) edges.push(resolveLangImport(f, e, goModules, root));
+        for (const e of parsed.imports) edges.push(resolveLangImport(f, e, { root, goModules }));
       } else {
         continue; // 不支持的扩展名（.vue/.java 等本版不解析 import）
       }

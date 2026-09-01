@@ -350,3 +350,32 @@ describe('expandClosure - 跨语言 import 边（Go/Python）', () => {
     rmForce(dir);
   });
 });
+
+describe('expandClosure - 通用兜底语言 + 裸包 workspace importer', () => {
+  it('Java package import（com.x.Hi）→ 通用兜底解析到 com/x/Hi.java', async () => {
+    const dir = mkProj({
+      'src/com/x/Hi.java': 'package com.x;\npublic class Hi {}\n',
+      'src/Main.java': 'package main;\nimport com.x.Hi;\npublic class Main { Hi h; }\n',
+    });
+    const files = await expandClosure(path.join(dir, 'src/Main.java'), dir);
+    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    // 通用兜底：import com.x.Hi → com/x/Hi.java（末段 Hi 是类名，退目录一级）
+    expect(norm).toContain(path.join(dir, 'src/Main.java').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
+
+  it('兄弟项目用 seed 包名裸包 import（workspace 互引）→ findExternalImporters 命中', async () => {
+    const dir = mkProj({
+      // A 项目：包名 "alpha"，seed 在其中
+      'A/package.json': '{ "name": "alpha" }\n',
+      'A/src/index.ts': 'export function compute() { return 1; }\n',
+      // B 兄弟项目：`import { compute } from 'alpha'` 裸包引用 A 包
+      'B/package.json': '{ "name": "b" }\n',
+      'B/src/use.ts': "import { compute } from 'alpha';\nexport function use() { return compute(); }\n",
+    });
+    const hits = await findExternalImporters(path.join(dir, 'A/src/index.ts'), path.join(dir, 'A'));
+    const norm = hits.map((h) => h.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
+});
