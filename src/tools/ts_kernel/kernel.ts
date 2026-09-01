@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tree-sitter Kernel
  *
  * 统一接口：parseFile(path, content) → ParsedSymbol[]
@@ -310,20 +310,139 @@ function traverseAndExtract(
 // 调用边提取（函数级，AST 级，路线图序号 3）
 // ─────────────────────────────────────────────────────────────
 
-/** 各语言 call 节点类型 */
-const CALL_NODES: Record<string, string> = {
-  go: 'call_expression',
-  typescript: 'call_expression',
-  tsx: 'call_expression',
-  javascript: 'call_expression',
-  jsx: 'call_expression',
-  python: 'call',
-  java: 'method_invocation',
-  rust: 'call_expression',
+/** 语言适配器注册表：深适配语言 = 一条记录（callNode + import/binding 提取 + 顶层调用）。加语言 = 加一行，kernel 消费查此 map。 */
+interface LangImportAdapter {
+  callNode?: string;
+  topLevelCall?: boolean;
+  extractImportSources?: (node: SyntaxNodeLike) => string[];
+  extractImportBindings?: (node: SyntaxNodeLike, paths: string[]) => string[];
+}
+export const LANG_ADAPTERS: Record<string, LangImportAdapter> = {
+  go: {
+    callNode: 'call_expression',
+    extractImportSources(node) {
+      const p = fieldText(node, 'path');
+      return p ? [stripQuotes(p)] : [];
+    },
+    extractImportBindings(node, paths) {
+      const m = node.text.match(/^\s*([A-Za-z_][\w.]*)\s*(?:"[^"]*"|`[^`]*`)/);
+      if (m) return [m[1]];
+      const base = paths[0]?.split('/').pop();
+      return base ? [base] : [];
+    },
+  },
+  python: {
+    callNode: 'call',
+    topLevelCall: true,
+    extractImportSources(node) {
+      if (node.type === 'import_statement') {
+        const out: string[] = [];
+        const collect = (n: SyntaxNodeLike): void => {
+          for (let i = 0; i < n.childCount; i++) {
+            const c = n.child(i);
+            if (!c) continue;
+            if (c.type === 'dotted_name') out.push(c.text);
+            else if (c.type === 'aliased_import') collect(c);
+          }
+        };
+        collect(node);
+        return out;
+      }
+      if (node.type === 'import_from_statement') {
+        const m = node.text.match(/^\s*from\s+(\.*)([\w.]*)\s+import/);
+        if (!m) return [];
+        const dots = m[1] || '';
+        const mod = m[2] || '';
+        if (dots) return [dots + mod];
+        return mod ? [mod] : [];
+      }
+      return [];
+    },
+    extractImportBindings(node) {
+      if (node.type === 'import_from_statement') {
+        const m = node.text.match(/^from\s+[\w.]*\s+import\s+(.+)$/);
+        if (!m) return [];
+        return m[1].split(',').map((s) => s.trim()).map((s) => (s.match(/as\s+([A-Za-z_]\w*)/i) || [])[1] || s.replace(/[()]/g, '')).filter((s) => s && !s.startsWith('('));
+      }
+      if (node.type === 'import_statement') {
+        const out: string[] = [];
+        const walk = (n: SyntaxNodeLike): void => {
+          for (let i = 0; i < n.childCount; i++) {
+            const c = n.child(i);
+            if (!c) continue;
+            if (c.type === 'dotted_name') out.push(c.text.split('.').pop() || c.text);
+            else if (c.type === 'aliased_import') {
+              const as = c.text.match(/as\s+([A-Za-z_]\w*)/i);
+              out.push(as ? as[1] : (c.text.split('.').pop() || c.text));
+            } else walk(c);
+          }
+        };
+        walk(node);
+        return out;
+      }
+      return [];
+    },
+  },
+  java: {
+    callNode: 'method_invocation',
+    extractImportSources(node) {
+      const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
+      return m ? [m[1]] : [];
+    },
+    extractImportBindings(node) {
+      const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
+      if (!m) return [];
+      const segs = m[1].split('.');
+      return segs.length > 0 ? [segs[segs.length - 1]] : [];
+    },
+  },
+  rust: {
+    callNode: 'call_expression',
+    extractImportSources(node) {
+      const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
+      const brace = t.indexOf('{');
+      const head = (brace >= 0 ? t.slice(0, brace) : t).trim().replace(/::$/, '');
+      const src = head.replace(/^crate::/, '').replace(/^::/, '').replace(/^super::/, '');
+      return src ? [src] : [];
+    },
+    extractImportBindings(node) {
+      const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
+      const brace = t.indexOf('{');
+      if (brace >= 0) {
+        const inner = t.slice(brace + 1, t.lastIndexOf('}'));
+        return inner.split(',').map((s) => s.trim()).filter(Boolean).map((s) => (s.match(/as\s+([A-Za-z_]\w*)/) || [])[1] || s.split('::').pop() || s);
+      }
+      const asM = t.match(/as\s+([A-Za-z_]\w*)/);
+      if (asM) return [asM[1]];
+      const last = t.split('::').pop();
+      return last && !last.includes('{') ? [last.trim()] : [];
+    },
+  },
+  typescript: { callNode: 'call_expression' },
+  tsx: { callNode: 'call_expression' },
+  javascript: { callNode: 'call_expression' },
+  jsx: { callNode: 'call_expression' },
 };
 
+/** 取某语言 import 的 source 列表（深适配查注册表，否则 TS/flutter 通用） */
+function extractImportSources(node: SyntaxNodeLike, langName: string): string[] {
+  const a = LANG_ADAPTERS[langName];
+  if (a?.extractImportSources) return a.extractImportSources(node);
+  if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript' || langName === 'jsx') {
+    const s = fieldText(node, 'source');
+    return s ? [stripQuotes(s)] : [];
+  }
+  return [];
+}
+
+/** 取某语言 import 的本地绑定名（深适配查注册表；无则空） */
+function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: string[]): string[] {
+  const a = LANG_ADAPTERS[langName];
+  return a?.extractImportBindings ? a.extractImportBindings(node, paths) : [];
+}
+
 function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
-  return CALL_NODES[lang.name] === node.type;
+  return LANG_ADAPTERS[lang.name]?.callNode === node.type;
 }
 
 /** 从 call 节点提取被调用名：取 function 字段文本的尾部标识符（去点、去泛型参数） */
@@ -421,7 +540,7 @@ function traverseAndExtractCalls(
     const child = node.child(i);
     if (!child) continue;
     // 模块顶层调用（Python 等）：无包裹函数，调用归属 <module>；只在不进函数体内时提取（函数内由 extractCallsFromBody 处理）
-    if (lang.name === 'python' && funcStack.length === 0 && isCallNode(child, lang)) {
+    if (LANG_ADAPTERS[lang.name]?.topLevelCall && funcStack.length === 0 && isCallNode(child, lang)) {
       const c = extractCallee(child, lang.name);
       if (c) {
         const sym = symbols.find((s) => s.name === c.name);
@@ -502,124 +621,6 @@ function stripQuotes(s: string): string {
     return s.slice(1, -1);
   }
   return s;
-}
-
-/** 从 import 节点提取 source 列表（一个节点可能含多个 source，如 Python `import a, b`） */
-function extractImportSources(node: SyntaxNodeLike, langName: string): string[] {
-  if (langName === 'go') {
-    // import_spec → path 字段（interpreted_string_literal）
-    const p = fieldText(node, 'path');
-    return p ? [stripQuotes(p)] : [];
-  }
-  if (langName === 'java') {
-    // import com.foo.Bar; / import static com.foo.Bar.*; —— 取全限定包路径（去 static/通配/分号）
-    const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
-    return m ? [m[1]] : [];
-  }
-  if (langName === 'rust') {
-    // use a::b::{c,d} / use crate::foo::Bar; —— 取到花括号前的模块路径（去 use/;/
-    const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
-    const brace = t.indexOf('{');
-    const head = (brace >= 0 ? t.slice(0, brace) : t).trim().replace(/::$/, '');
-    const src = head.replace(/^crate::/, '').replace(/^::/, '').replace(/^super::/, '');
-    return src ? [src] : [];
-  }
-  if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript' || langName === 'jsx') {
-    // import_statement → source 字段（string）
-    const s = fieldText(node, 'source');
-    return s ? [stripQuotes(s)] : [];
-  }
-  if (langName === 'python') {
-    if (node.type === 'import_statement') {
-      // import a, b as c, d.e —— 收集所有 dotted_name（含 aliased_import 内嵌的）
-      const out: string[] = [];
-      const collect = (n: SyntaxNodeLike): void => {
-        for (let i = 0; i < n.childCount; i++) {
-          const c = n.child(i);
-          if (!c) continue;
-          if (c.type === 'dotted_name') out.push(c.text);
-          else if (c.type === 'aliased_import') collect(c);
-        }
-      };
-      collect(node);
-      return out;
-    }
-    if (node.type === 'import_from_statement') {
-      // from .foo import x / from pkg.mod import y —— 用节点文本解析前导点（AST 中 relative_import 结构不稳定）
-      const m = node.text.match(/^\s*from\s+(\.*)([\w.]*)\s+import/);
-      if (!m) return [];
-      const dots = m[1] || '';
-      const mod = m[2] || '';
-      if (dots) return [dots + mod];
-      return mod ? [mod] : [];
-    }
-  }
-  return [];
-}
-
-/** 从 import 节点提取「本地可用名字」（绑定）：供符号级跨语言引用判定用。
- *  - Go: import_spec → 包前缀（显式 alias 或路径尾段）；对应 `pkg.Symbol` 的 `pkg`。
- *  - Python: `from pkg import a, b` → [a, b]（本地符号名）；`import a.b.c [as d]` → [c 或 d]。
- *  - TS 系不填（已有 ImportEdge.remoteName/localName 精确匹配）。 */
-function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: string[]): string[] {
-  if (langName === 'rust') {
-    // use a::{b as x, c} → [x, c]；use a::b::Item → [Item]；use a::b as m → [m]
-    const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
-    const brace = t.indexOf('{');
-    if (brace >= 0) {
-      const inner = t.slice(brace + 1, t.lastIndexOf('}'));
-      return inner.split(',').map((s) => s.trim()).filter(Boolean).map((s) => (s.match(/as\s+([A-Za-z_]\w*)/) || [])[1] || s.split('::').pop() || s);
-    }
-    const asM = t.match(/as\s+([A-Za-z_]\w*)/);
-    if (asM) return [asM[1]];
-    const last = t.split('::').pop();
-    return last && !last.includes('{') ? [last.trim()] : [];
-  }
-  if (langName === 'java') {
-    // import com.foo.Bar; → 绑定 = 类简单名 Bar（源码里用 Foo 引用，省略前缀）
-    const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
-    if (!m) return [];
-    const segs = m[1].split('.');
-    return segs.length > 0 ? [segs[segs.length - 1]] : [];
-  }
-  if (langName === 'go') {
-    // import_spec 节点 text 形如 `alias "path"` 或 `"path"`（无 import 关键字）：
-    // 首位是标识符(alias)紧跟字符串 → 显式别名；否则用路径尾段（默认包名）
-    const m = node.text.match(/^\s*([A-Za-z_][\w.]*)\s*(?:"[^"]*"|`[^`]*`)/);
-    if (m) return [m[1]];
-    const base = paths[0]?.split('/').pop();
-    return base ? [base] : [];
-  }
-  if (langName === 'python') {
-    if (node.type === 'import_from_statement') {
-      // from pkg import a, b [as c] —— 取每个 imported 名的本地名（as 后或原名）
-      const m = node.text.match(/^from\s+[\w.]*\s+import\s+(.+)$/);
-      if (!m) return [];
-      return m[1]
-        .split(',')
-        .map((s) => s.trim())
-        .map((s) => (s.match(/as\s+([A-Za-z_]\w*)/i) || [])[1] || s.replace(/[()]/g, ''))
-        .filter((s) => s && !s.startsWith('('));
-    }
-    if (node.type === 'import_statement') {
-      // import a.b.c [as d], x.y —— dotted 取尾段；aliased 取 as 后名
-      const out: string[] = [];
-      const walk = (n: SyntaxNodeLike): void => {
-        for (let i = 0; i < n.childCount; i++) {
-          const c = n.child(i);
-          if (!c) continue;
-          if (c.type === 'dotted_name') out.push(c.text.split('.').pop() || c.text);
-          else if (c.type === 'aliased_import') {
-            const as = c.text.match(/as\s+([A-Za-z_]\w*)/i);
-            out.push(as ? as[1] : (c.text.split('.').pop() || c.text));
-          } else walk(c);
-        }
-      };
-      walk(node);
-      return out;
-    }
-  }
-  return [];
 }
 
 function traverseAndExtractImports(
