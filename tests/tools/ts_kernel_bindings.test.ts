@@ -57,4 +57,20 @@ describe('ts_kernel 跨语言 import 绑定提取', () => {
     // 函数内照常归属函数
     expect(calls.some((c) => c.caller === 'go' && c.callee === 'compute')).toBe(true);
   });
+
+  it('Java：import→全限定 source + 简类名 binding；调用边 callee 带 object 限定前缀', async () => {
+    const pf = await parseFileFull(
+      'a.java',
+      'package com.foo;\nimport com.foo.Bar;\nimport java.util.List;\npublic class Use {\n  void go() { Bar.run(); run(); List.of(1); new Bar(); }\n}\n',
+    );
+    const imp = pf.imports.find((i) => i.source === 'com.foo.Bar');
+    expect(imp).toBeDefined();
+    expect(imp!.bindings).toContain('Bar');
+    const jl = pf.imports.find((i) => i.source === 'java.util.List');
+    expect(jl).toBeDefined();
+    expect(jl!.bindings).toContain('List');
+    // 调用边：限定调用 Bar.run() → callee=run, callee_expr=Bar.run；裸 run() → expr=run
+    expect(pf.calls.some((c) => c.callee === 'run' && c.callee_expr === 'Bar.run')).toBe(true);
+    expect(pf.calls.some((c) => c.callee === 'run' && c.callee_expr === 'run')).toBe(true);
+  });
 });

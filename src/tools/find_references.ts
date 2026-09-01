@@ -142,13 +142,23 @@ export async function findReferences(input: {
 
   const defSrc = readFileSync(fileAbs, 'utf-8');
   const def = await analyzeModuleSource(defSrc, fileAbs);
-  if (!def) return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: ['定义文件解析失败'] };
-  const kind = def.rootKinds.get(symbol!);
-  if (!kind) return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: [`"${symbol}" 不是该文件的模块级声明`] };
-  if (kind === 'import' || kind === 'reexport' || kind === 'exported') {
-    return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: [`"${symbol}" 在 ${path.basename(fileAbs)} 中是 import 绑定，请在定义文件上查询`] };
+  const isTsDef = /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i.test(fileAbs);
+  if (!isTsDef) {
+    // 非 TS target（跨语言，如 Java）：语言内核确认符号定义于此文件（类/方法/函数均可，不做"模块级声明"约束）
+    const pf = await parseFileFull(path.basename(fileAbs), defSrc);
+    if (!pf || !pf.symbols.some((s) => s.name === symbol!)) {
+      return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: [`"${symbol}" 未在 ${path.basename(fileAbs)} 中找到定义`] };
+    }
   }
-  const declOffset = def.rootOffsets.get(symbol!)!;
+  const kind = def?.rootKinds.get(symbol!);
+  if (isTsDef) {
+    if (!def) return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: ['定义文件解析失败'] };
+    if (!kind) return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: [`"${symbol}" 不是该文件的模块级声明`] };
+    if (kind === 'import' || kind === 'reexport' || kind === 'exported') {
+      return { ok: false, symbol: symbol!, mode, importerCount: 0, blocked: [`"${symbol}" 在 ${path.basename(fileAbs)} 中是 import 绑定，请在定义文件上查询`] };
+    }
+  }
+  const declOffset = (isTsDef && def ? def.rootOffsets.get(symbol!) ?? 0 : 0);
 
   // 闭包内引用点收集（import + usage + export_list）
   const files = await expandClosure(fileAbs, resolvedRoot, rootAlias);
@@ -270,14 +280,14 @@ export async function findReferences(input: {
 
   // 定义文件自身的 export/使用点
   const defRefs: ReferenceSite[] = [{ offset: declOffset, line: lineOf(defSrc, declOffset), text: symbol!, kind: 'definition' }];
-  for (const r of def.rootRefs) if (r.name === symbol!) defRefs.push({ offset: r.offset, line: lineOf(defSrc, r.offset), text: symbol!, kind: 'usage' });
-  for (const r of def.exportRefs) if (r.name === symbol!) defRefs.push({ offset: r.offset, line: lineOf(defSrc, r.offset), text: symbol!, kind: 'export_list' });
+  for (const r of def?.rootRefs ?? []) if (r.name === symbol!) defRefs.push({ offset: r.offset, line: lineOf(defSrc, r.offset), text: symbol!, kind: 'usage' });
+  for (const r of def?.exportRefs ?? []) if (r.name === symbol!) defRefs.push({ offset: r.offset, line: lineOf(defSrc, r.offset), text: symbol!, kind: 'export_list' });
 
   return {
     ok: true,
     symbol: symbol!,
     mode,
-    definition: { file: (path.relative(resolvedRoot, fileAbs) || fileAbs).replace(/\\/g, '/'), kind, refs: defRefs },
+    definition: { file: (path.relative(resolvedRoot, fileAbs) || fileAbs).replace(/\\/g, '/'), kind: kind ?? 'module', refs: defRefs },
     importers,
     importerCount: importers.length,
   };

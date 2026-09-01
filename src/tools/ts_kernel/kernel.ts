@@ -318,6 +318,7 @@ const CALL_NODES: Record<string, string> = {
   javascript: 'call_expression',
   jsx: 'call_expression',
   python: 'call',
+  java: 'method_invocation',
 };
 
 function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
@@ -326,9 +327,12 @@ function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
 
 /** 从 call 节点提取被调用名：取 function 字段文本的尾部标识符（去点、去泛型参数） */
 function extractCallee(callNode: SyntaxNodeLike, langName: string): { name: string; expr: string } | null {
-  const fn = callNode.childForFieldName('function');
+  // TS/Go/C/Rust 用 function 字段；Java method_invocation 用 name(+object) 字段
+  const fn = callNode.childForFieldName('function') || callNode.childForFieldName('name');
   if (!fn) return null;
-  const expr = fn.text;
+  // Java 中对象与方法名分离（object='Bar'、name='run'）→ 拼回 qualified 前缀供 is-target 用
+  const obj = langName === 'java' ? callNode.childForFieldName('object') : null;
+  const expr = obj && obj.text ? `${obj.text}.${fn.text}` : fn.text;
   // 泛型调用 fn<T>(...)：取 < 前的基底再取尾部标识符（`svc.Process` → Process / `a.b.c` → c）
   const base = expr.split('<')[0].trim();
   const m = base.match(/([A-Za-z_$][\w$]*)\s*$/);
@@ -506,6 +510,11 @@ function extractImportSources(node: SyntaxNodeLike, langName: string): string[] 
     const p = fieldText(node, 'path');
     return p ? [stripQuotes(p)] : [];
   }
+  if (langName === 'java') {
+    // import com.foo.Bar; / import static com.foo.Bar.*; —— 取全限定包路径（去 static/通配/分号）
+    const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
+    return m ? [m[1]] : [];
+  }
   if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript' || langName === 'jsx') {
     // import_statement → source 字段（string）
     const s = fieldText(node, 'source');
@@ -544,6 +553,13 @@ function extractImportSources(node: SyntaxNodeLike, langName: string): string[] 
  *  - Python: `from pkg import a, b` → [a, b]（本地符号名）；`import a.b.c [as d]` → [c 或 d]。
  *  - TS 系不填（已有 ImportEdge.remoteName/localName 精确匹配）。 */
 function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: string[]): string[] {
+  if (langName === 'java') {
+    // import com.foo.Bar; → 绑定 = 类简单名 Bar（源码里用 Foo 引用，省略前缀）
+    const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
+    if (!m) return [];
+    const segs = m[1].split('.');
+    return segs.length > 0 ? [segs[segs.length - 1]] : [];
+  }
   if (langName === 'go') {
     // import_spec 节点 text 形如 `alias "path"` 或 `"path"`（无 import 关键字）：
     // 首位是标识符(alias)紧跟字符串 → 显式别名；否则用路径尾段（默认包名）

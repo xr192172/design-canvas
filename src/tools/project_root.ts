@@ -224,8 +224,29 @@ function resolveGenericLangImport(absFile: string, imp: ParsedImport): string | 
 const LANG_RESOLVERS: Record<string, (absFile: string, imp: ParsedImport, ctx: LangResolveCtx) => string | null> = {
   '.go': resolveGoImport,
   '.py': resolvePythonImport,
-  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（Java/Rust/C#/C/CPP/Kotlin/...）
+  '.java': resolveJavaImport,
+  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（Rust/C#/C/CPP/Kotlin/...）
 };
+
+/** Java：全限定包路径 → 常见 src 根下 .java（标准 Maven/Gradle 布局 + root 兜底） */
+function resolveJavaImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  if (!imp.source) return null;
+  const relPath = imp.source.replace(/\./g, '/'); // com.foo.Bar → com/foo/Bar
+  for (const base of [
+    path.join(ctx.root, 'src/main/java'),
+    path.join(ctx.root, 'src/main'),
+    path.join(ctx.root, 'src'),
+    path.join(ctx.root, 'java'),
+    ctx.root,
+  ]) {
+    // 末段可能是类名（import com.foo.Bar → 文件 com/foo/Bar.java）；也可能含类名需退一级不适用（包导入）
+    const hit = resolveToFile(path.join(base, relPath + '.java')) || resolveToFile(path.resolve(base, relPath));
+    if (hit) return hit;
+  }
+  return null;
+}
 
 // ─────────────────────────────────────────────
 // tsconfig 路径别名（@/ 等）：真实项目几乎必用，别名导入若解析不到 → 漏改

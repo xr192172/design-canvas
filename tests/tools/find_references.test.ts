@@ -185,4 +185,18 @@ describe('findReferences', () => {
     expect(v!.refs.some((x) => x.kind === 'cross-usage')).toBe(true);
     rmForce(dir);
   });
+
+  it('Java is-target：全限定 import + Bar.run 限定调用 → 经 .java resolver 连 target 报告 cross-call', async () => {
+    const dir = mkProj({
+      'src/main/java/com/foo/Bar.java': 'package com.foo;\npublic class Bar { static void run() { } }\n',
+      // Use.java 跨包 import com.foo.Bar，限定调用 Bar.run()
+      'src/main/java/com/bar/Use.java': 'package com.bar;\nimport com.foo.Bar;\npublic class Use { void go() { Bar.run(); } }\n',
+    });
+    const r = await findReferences({ project_dir: dir, file: 'src/main/java/com/foo/Bar.java', symbol: 'run' });
+    expect(r.ok).toBe(true);
+    const use = r.importers!.find((x) => x.file === 'src/main/java/com/bar/Use.java');
+    expect(use).toBeDefined();
+    expect(use!.refs.some((x) => x.kind === 'cross-call' && x.text === 'Bar.run')).toBe(true);
+    rmForce(dir);
+  });
 });
