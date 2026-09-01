@@ -166,4 +166,23 @@ describe('findReferences', () => {
     expect(go!.refs.some((x) => x.line === 4 && (x.kind === 'cross-call' || x.kind === 'cross-usage'))).toBe(true);
     rmForce(dir);
   });
+
+  it('跨语言 is-target：限定 pkg.compute 未连 target → 剔除误报；裸引用保留疑似', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export function compute() { return 1; }\n',
+      // u.py 通过 other 包限定调用 — 前缀 other 未连到 def.ts → 应被 is-target 剔除（降误报）
+      'src/u.py': 'import other\nx = other.compute(1)\n',
+      // v.py 裸调用 compute（无 import 引入，类似异构同名）→ 保留为疑似 cross-usage
+      'src/v.py': 'def go():\n    return compute(1)\n',
+    });
+    const r = await findReferences({ project_dir: dir, file: 'src/def.ts', symbol: 'compute' });
+    expect(r.ok).toBe(true);
+    // u.py 的限定引用前缀 other 未连 target → 不报（误报剔除）
+    expect(r.importers!.find((x) => x.file === 'src/u.py')).toBeUndefined();
+    // v.py 裸引用 → 保留 cross-usage 疑似
+    const v = r.importers!.find((x) => x.file === 'src/v.py');
+    expect(v).toBeDefined();
+    expect(v!.refs.some((x) => x.kind === 'cross-usage')).toBe(true);
+    rmForce(dir);
+  });
 });

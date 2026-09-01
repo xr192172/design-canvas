@@ -19,7 +19,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport } from './project_root.js';
+import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, resolveLangImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 import { parseFileFull } from './ts_kernel/index.js';
@@ -172,35 +172,73 @@ export async function findReferences(input: {
     if (path.resolve(f) === fileAbs) continue;
     const src = readFileSync(f, 'utf-8');
     if (!TS_FILE_RE.test(f)) {
-      // 跨语言（Go/Python 等）：这类文件在 expandClosure 闭包内（项目全源码），但引用提取是 TS AST 专属。
-      // 升级为 AST 级：① 调用边(callee)与类型引用(type_name)精确命中；② 兜底词边界探针，跳过注释/字符串样式的行减噪
-      // （保留兜底是为兼容命名约定差异——如 Go 导出符号首字母大写，可能大小写对不上 target，靠行内探针补召回）。
+      // 跨语言引用 + is-target：对「pkg.Symbol」限定引用做精准门槛——`pkg` 必须经某 import 连到 target
+      // 定义模块才报高信任(cross-call)，前缀属于其它包则剔除（降误报）；裸引用无法确认也不可剔除 → 保留为
+      // cross-usage 疑似（异构同名场景的真实召回手段，不因无法联证而误删）。
       const needle = symbol!;
       const lines = src.split('\n');
       let running = 0;
       const lineOffsets: number[] = [];
       for (const ln of lines) { lineOffsets.push(running); running += ln.length + 1; }
       const crossRefs: ReferenceSite[] = [];
+      let anyAstHit = false; // 该 symbol 在本文件是否有 AST 踪迹（含被 is-target 剔除的）——有则不再文本兜底
+      const reportAt = (line: number, kind: ReferenceSite['kind'], text = needle) =>
+        crossRefs.push({ offset: lineOffsets[line - 1] ?? 0, line, text, kind });
+      // targetBindings：连到 target 定义模块（同文件/同目录）的 import 所引入的本地名
+      const targetBindings = new Set<string>();
+      let parsed: Awaited<ReturnType<typeof parseFileFull>> | null = null;
       try {
-        const parsed = await parseFileFull(f, src);
-        // ① AST 调用边：本文件某处 callee（去点尾部标识符）== symbol
-        for (const c of parsed.calls) {
-          if (c.callee === needle) crossRefs.push({ offset: lineOffsets[c.line - 1] ?? 0, line: c.line, text: c.callee_expr || needle, kind: 'cross-call' });
+        parsed = await parseFileFull(f, src);
+        for (const imp of parsed.imports) {
+          if (!imp.bindings) continue;
+          let connects = false;
+          try {
+            const resolved = resolveLangImport(f, imp, { root: resolvedRoot, goModules: [] });
+            const ra = resolved ? path.resolve(resolved) : null;
+            if (ra && (ra === fileAbs || path.dirname(ra) === path.dirname(fileAbs))) connects = true;
+          } catch { /* resolve 失败视为不连 */ }
+          if (connects) for (const b of imp.bindings) targetBindings.add(b);
         }
-        // ① AST 类型引用：type_name == symbol（如 Python 类型注解、Java 类引用等）
+        for (const c of parsed.calls) {
+          if (c.callee !== needle) continue;
+          anyAstHit = true;
+          const expr = c.callee_expr || needle;
+          const dot = expr.indexOf('.');
+          if (dot >= 0) {
+            // 限定引用 pkg.Symbol：只报「pkg 连到 target」；其它包前缀 → 剔除误报
+            const pkg = expr.slice(0, dot);
+            if (targetBindings.has(pkg)) reportAt(c.line, 'cross-call', expr);
+          } else {
+            reportAt(c.line, 'cross-usage'); // 裸引用：疑似保留
+          }
+        }
         for (const t of parsed.type_refs) {
-          if (t.type_name === needle) crossRefs.push({ offset: lineOffsets[t.line - 1] ?? 0, line: t.line, text: t.type_name, kind: 'cross-type' });
+          if (t.type_name !== needle) continue;
+          anyAstHit = true;
+          reportAt(t.line, 'cross-usage');
         }
       } catch { /* AST 解析失败则走兜底 */ }
-      // ② 兜底词边界行内探针（跳过空白/注释样式行），保证命名约定差异也不漏
-      const re = new RegExp(`\\b${needle}\\b`);
-      const reported = new Set(crossRefs.map((x) => x.line));
-      for (let i = 0; i < lines.length; i++) {
-        if (reported.has(i + 1)) continue;
-        const t = lines[i].trim();
-        if (!t || t.startsWith('//') || t.startsWith('#') || t.startsWith('/*') || t.startsWith('*')) continue;
-        const idx = lines[i].search(re);
-        if (idx >= 0) crossRefs.push({ offset: (lineOffsets[i] ?? 0) + idx, line: i + 1, text: needle, kind: 'cross-usage' });
+      // 兜底词边界探针（仅当该 symbol 在 AST 完全无踪迹时跑，跳过注释/字符串样式行，保异构召回）。
+      // is-target 也在此做文本级判定：限定式 `pkg.compute` 的前缀若非「连到 target 的 import binding」→ 剔除误报；
+      // 裸 `compute`（无前缀）无法确认 → 保留为疑似。
+      if (!anyAstHit) {
+        const qualifiedRe = new RegExp(`([A-Za-z_][\\w.]*)\\.\\b${needle}\\b`);
+        const bareRe = new RegExp(`\\b${needle}\\b`);
+        for (let i = 0; i < lines.length; i++) {
+          const raw = lines[i];
+          const trim = raw.trim();
+          if (!trim || trim.startsWith('//') || trim.startsWith('#') || trim.startsWith('/*') || trim.startsWith('*')) continue;
+          const qm = raw.match(qualifiedRe);
+          if (qm) {
+            // 限定引用：仅当前缀是连到 target 的 import binding 才报，否则剔除
+            if (targetBindings.has(qm[1])) {
+              crossRefs.push({ offset: (lineOffsets[i] ?? 0) + raw.search(qualifiedRe), line: i + 1, text: needle, kind: 'cross-usage' });
+            }
+            continue;
+          }
+          const idx = raw.search(bareRe);
+          if (idx >= 0) crossRefs.push({ offset: (lineOffsets[i] ?? 0) + idx, line: i + 1, text: needle, kind: 'cross-usage' });
+        }
       }
       if (crossRefs.length > 0) {
         importers.push({ file: (path.relative(resolvedRoot, f) || f).replace(/\\/g, '/'), refs: crossRefs, importSources: [] });
