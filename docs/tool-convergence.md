@@ -230,11 +230,13 @@
 1. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`）。
 2. **输出可直接消费** —— ✅ **已实施**：`rename_symbol` 返回结构化 diff（`ops: [{pos,len,old,new}]` 可重放验证），新增 `dry_run=true`。MCP handler 渲染每处 `old→new`。
 3. **闭包 importer 方向** —— ✅ **已实施**：`findExternalImporters` 有界扫 seed 根直属兄弟项目/松散文件里引用 seed 的本地文件并纳入闭包（含各自别名、裸包 workspace 互引）。防御 `NEIGHBOR_LIMIT(20)` 短路。
-4. **批量操作** —— ✅ **已实施**：新增 `rename_symbols` 跨文件符号批量改名。先全部 dry\_run 算结构化 diff，任一条被阻断→整体不落盘；全部可落盘才逐条落盘。
+4. **批量操作** —— ✅ **已实施**：新增 `rename_symbols` 跨文件符号批量改名。先全部 dry_run 算结构化 diff，任一条被阻断→整体不落盘；全部可落盘才逐条落盘。
 
-**跨语言 import 边（扩展点）**：AST import 提取由 `ts_kernel.parseFileFull` 通用完成（`LANGUAGES` 注册表覆盖 150+ 语言）；`resolveLangImport` 按扩展名分派到 `LANG_RESOLVERS`（已注册 `.go`/`.py`），未注册语言走 `resolveGenericLangImport` 通用兜底（分隔符→路径）。**加新语言 = 给** **`LANG_RESOLVERS`** **加一条** **`[ext]→resolver`** **映射，AST 层零改动。**
+**跨语言 import 边（扩展点）**：AST import 提取由 `ts_kernel.parseFileFull` 通用完成（`LANGUAGES` 注册表覆盖 150+ 语言）；`resolveLangImport` 按扩展名分派到 `LANG_RESOLVERS`（已注册 `.go`/`.py`），未注册语言走 `resolveGenericLangImport` 通用兜底（分隔符→路径）。**加新语言 = 给 `LANG_RESOLVERS` 加一条 `[ext]→resolver` 映射，AST 层零改动。**
 
-> ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。
+**引用查找** —— ✅ **已实施（2026-08）**：新增 `find_references` 工具——改/删一个符号前查"谁引用了它"，只读不落盘，复用 rename 闭包/引用图内核。已入 AGENTS.md 触发点表。
+
+> ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。另：引用查找 `find_references` 目前只认 TS 系 import（邻域/跨语言引用未覆盖，可复用 expandClosure 续坡）。
 
 ***
 
