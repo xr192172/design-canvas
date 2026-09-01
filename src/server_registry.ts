@@ -24,6 +24,7 @@ import { scaffold } from './tools/scaffold.js';
 import { checkStatus } from './tools/status_tools.js';
 import { backfillScaffold } from './tools/backfill.js';
 import { checkConsistency } from './tools/consistency.js';
+import { detectDrift } from './tools/detect_drift.js';
 import { exploreCode, EXPLORE_ACTIONS } from './tools/explore_code.js';
 import { editCode } from './tools/edit_code.js';
 import { importProject } from './tools/import_project.js';
@@ -327,6 +328,17 @@ const consistencyHandler = wrap(async (a) => {
     code_dir: a.code_dir as string | undefined,
   });
   return { message: r.message };
+});
+
+/** detect_drift：活文档↔代码漂移检测（代码变更 → 提示 DSL 过时/欠实现），持久化台账 */
+const detectDriftHandler = wrapData(async (a) => {
+  return detectDrift({
+    feature: a.feature as string,
+    code_dir: a.code_dir as string | undefined,
+    scope: a.scope as 'changed' | 'all' | undefined,
+    since_ref: a.since_ref as string | undefined,
+    mode: a.mode as 'check' | 'status' | undefined,
+  });
 });
 
 /** explore_code：参数化代码理解（用 wrapData：data 不丢弃，杜绝「有结果却静默空输出」） */
@@ -720,6 +732,23 @@ const TOOL_DEFS: ToolDef[] = [
       code_dir: z.string().optional(),
     },
     handler: consistencyHandler,
+  },
+  {
+    name: 'detect_drift',
+    title: 'Detect live-doc drift against code',
+    description:
+      '活文档↔代码漂移检测：对比 design DSL 的 expected_apis 与当前代码，判定「设计是否过时 / 是否欠实现」，' +
+      '并持久化漂移台账。scope=changed（默认）只看 git 变更文件（相对 since_ref，默认 HEAD=未提交改动），' +
+      '圈出「这次改代码引发了哪些漂移」；scope=all 全量对标。mode=check 重新计算（默认），' +
+      'mode=status 只读最近一次台账。只读，不改 DSL；要同步设计请用 edit_dsl / import_project。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      code_dir: z.string().optional().describe('代码根目录（默认 feature 的 source_root，手工 DSL 回退 <cwd>/scaffold/<feature>）'),
+      scope: z.enum(['changed', 'all']).optional().describe('检查范围：changed=仅 git 变更文件（默认）；all=全量对标'),
+      since_ref: z.string().optional().describe('changed 模式 git 参照版本，默认 HEAD（只看未提交改动）'),
+      mode: z.enum(['check', 'status']).optional().describe('check=重新计算并写台账（默认）；status=只读最近一次台账'),
+    },
+    handler: detectDriftHandler,
   },
   {
     name: 'import_project',

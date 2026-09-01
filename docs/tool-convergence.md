@@ -238,6 +238,22 @@
 
 > ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。另：引用查找 `find_references` 目前只认 TS 系 import（邻域/跨语言引用未覆盖，可复用 expandClosure 续坡）。
 
+**活文档漂移（detect_drift）** —— ✅ **已实施（2026-09）**：补齐「代码变更 → 提示 DSL 过时/欠实现」的闭环缺口。复用 `checkConsistency` 引擎，叠加：git 变更作用域（`scope=changed` 默认只看工作区改动 / `since_ref`；`scope=all` 全量）、过时判定（`unexpected/mismatched` → `design_stale`，`missing` → `missing_impl`）、持久化台账（`<storageRoot>/drift/<feature>.drift.json`，`mode=status` 复读）。只读不改 DSL；同步设计仍走 `edit_dsl`（带 reason+evidence 门禁）/ `import_project`。已入 AGENTS.md 触发点表。遗留：后台 watcher 自动触发（当前靠 agent 在改完代码/提交前主动跑）。
+
+***
+
+## 草丛工具评估（2026-09）——零星工具文件「转正 or 归位」
+
+- **结论：零转正，全部归为内部实现。**「草丛」并非孤儿工具，而是已注册工具的实现/派生引擎；
+  其能力已被 `get_dsl`(query=features) / `edit_dsl` / `manage_feature` / `render_brickwork` /
+  `import_project` / `overview` 覆盖，转正只会继续撑大 MCP 工具面，违背本仓库收敛方向。
+- `list_features` / `query_feature` / `update_feature`：`get_dsl` / `edit_dsl` 的实现（注册名≠文件名），已在豁免表。
+- `feature_ops`(createFeature) / `render_dsl_workbench` / `feature_map`(buildFeatureMap) /
+  `derive_feature_tree`：manage_feature / render_brickwork / import_project / overview 的内部派生、
+  渲染助手，主函数名 ≠ 文件名 camelCase 或为 async，天然不触发漏注册检测；本次显式加入豁免表，
+  让「内部模块」边界的意图文档化。
+- **遗留命名重叠**：`render_dsl` / `render_dsl_workbench` / `render_sandbox` 的 render 语义仍待定（见待办）。
+
 ***
 
 ## 6. 待办 / 开放问题
