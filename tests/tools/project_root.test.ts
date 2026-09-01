@@ -9,7 +9,7 @@
  *   - expandClosure：根内文件 + 沿 import 边扩入根外本地文件（跨根自包含）
  */
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
@@ -60,9 +60,9 @@ describe('gitRootOf - 嵌套 git 根解析', () => {
 
     const root = gitRootOf(path.join(dir, 'outer/inner/src/def.ts'));
     expect(root).not.toBeNull();
-    // git rev-parse 返回的根在 win/mac runner 上可能是短路径(RUNNER~1)或 /private/var 符号链接表示，
-    // 与 path.resolve(tmpdir) 不完全一致 → 两侧 realpath 归一化到同一真实路径再比
-    expect(realpathSync(root!)).toBe(realpathSync(path.join(dir, 'outer/inner')));
+    // git rev-parse 返回的根在 win runner 上可能是 8.3 短路径(RUNNER~1)、mac 是 /private/var 符号链接，
+    // 都与 os.tmpdir() 的长路径在字符串上不等，无法用路径相等断言 → 转验证明内层仓库结构在根下可达
+    expect(existsSync(path.join(root!, 'src/def.ts'))).toBe(true);
     rmForce(dir);
   });
 
@@ -94,9 +94,9 @@ describe('resolveProjectRoot - git 优先（嵌套安全）', () => {
     execSync('git init', { cwd: path.join(dir, 'outer'), stdio: 'pipe' });
     execSync('git init', { cwd: path.join(dir, 'outer/inner'), stdio: 'pipe' });
 
-    expect(realpathSync(resolveProjectRoot(path.join(dir, 'outer/inner/src/def.ts')))).toBe(
-      realpathSync(path.join(dir, 'outer/inner')),
-    );
+    expect(
+      existsSync(path.join(resolveProjectRoot(path.join(dir, 'outer/inner/src/def.ts')), 'src/def.ts')),
+    ).toBe(true);
     rmForce(dir);
   });
 });

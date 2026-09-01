@@ -31,10 +31,10 @@ jobs:
           go-version: "stable"
       - name: 安装依赖
         run: npm ci
+      - name: 类型检查 + 构建（tsc + gen bundle，先生成 dist 供 import dist 的测试用）
+        run: npm run build
       - name: 单元测试（vitest）
         run: npm test
-      - name: 类型检查 + 构建（tsc + gen bundle）
-        run: npm run build
 
   # ─── Go 插桩组件：go-observe / go-slim ───
   go-test:
