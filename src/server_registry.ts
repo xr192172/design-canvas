@@ -56,6 +56,7 @@ import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbol } from './tools/rename_symbol.js';
 import { renameSymbols } from './tools/rename_symbols.js';
 import { findReferences } from './tools/find_references.js';
+import { runTests } from './tools/run_tests.js';
 import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1398,6 +1399,42 @@ const TOOL_DEFS: ToolDef[] = [
       for (const imp of r.importers!) {
         parts.push(`\t- ${imp.file}（import ${imp.importSources.join(', ')}）：行 ${imp.refs.map((x) => x.line).join(', ')}`);
       }
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'run_tests',
+    title: 'Run tests and return structured failures',
+    description:
+      '跑测试并返回结构化失败定位（替代"跑 npm test 看长文本再 grep 失败"）。' +
+      'filter 传单个测试文件/名称 → 秒级定向回归；省略跑全量（耗时，适合提交前检查）。' +
+      '返回 total/passed/failed + 每个失败的 {file, test, messages}，可据此直接定位到代码。' +
+      '依赖目标项目已装 vitest（本仓库自带）。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根（默认 cwd）'),
+      filter: z.string().optional().describe('测试文件/名称过滤（如 tests/tools/find_references.test.ts）'),
+      timeout_ms: z.number().optional().describe('超时毫秒（默认 120000）'),
+    },
+    handler: wrap(async (a) => {
+      const r = runTests({
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        filter: typeof a.filter === 'string' && a.filter ? a.filter : undefined,
+        timeoutMs: typeof a.timeout_ms === 'number' ? a.timeout_ms : undefined,
+      });
+      if (!r.ok) {
+        return { message: `无法运行测试：${r.error || '未知错误'}`, data: r };
+      }
+      const parts = [
+        r.success
+          ? `${r.filter ? `[定向]` : `[全量]`} 测试通过：${r.passed}/${r.total} 通过（${r.total} 个用例）`
+          : `${r.filter ? `[定向]` : `[全量]`} 测试失败：${r.passed}/${r.total} 通过，${r.failed} 个失败`,
+      ];
+      for (const f of r.failures.slice(0, 20)) {
+        parts.push(`\t❌ ${f.file} › ${f.test}`);
+        const firstMsg = (f.messages.find((m) => m && m.trim()) || '').split('\n')[0];
+        if (firstMsg) parts.push(`\t  ${firstMsg.trim()}`);
+      }
+      if (r.failures.length > 20) parts.push(`\t… 还有 ${r.failures.length - 20} 个失败（详见 outputFile）`);
       return { message: parts.join('\n'), data: r };
     }),
   },
