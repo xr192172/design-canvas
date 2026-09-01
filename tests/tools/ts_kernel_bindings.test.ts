@@ -73,4 +73,22 @@ describe('ts_kernel 跨语言 import 绑定提取', () => {
     expect(pf.calls.some((c) => c.callee === 'run' && c.callee_expr === 'Bar.run')).toBe(true);
     expect(pf.calls.some((c) => c.callee === 'run' && c.callee_expr === 'run')).toBe(true);
   });
+
+  it('Rust：use→模块路径 source + use_tree bindings；调用边 call_expression', async () => {
+    const pf = await parseFileFull(
+      'a.rs',
+      'use crate::foo::Bar;\nuse std::collections::{HashMap, HashSet as HS};\nfn go(v: i32) -> i32 { Bar::run(v); compute(v); HashMap::new(); }\n',
+    );
+    const bar = pf.imports.find((i) => i.source === 'foo::Bar');
+    expect(bar).toBeDefined();
+    expect(bar!.bindings).toContain('Bar');
+    const coll = pf.imports.find((i) => i.source === 'std::collections');
+    expect(coll).toBeDefined();
+    expect(coll!.bindings).toContain('HashMap');
+    expect(coll!.bindings).toContain('HS'); // as 别名
+    // 调用边：裸 compute 与 `Bar::run`（expr 含 ::，callee 取尾部）
+    expect(pf.calls.some((c) => c.callee === 'compute')).toBe(true);
+    // rust 调用的 callee 尾 = run（Bar:: 前缀语义暂不折进 is-target）
+    expect(pf.calls.some((c) => c.callee === 'run')).toBe(true);
+  });
 });

@@ -225,8 +225,25 @@ const LANG_RESOLVERS: Record<string, (absFile: string, imp: ParsedImport, ctx: L
   '.go': resolveGoImport,
   '.py': resolvePythonImport,
   '.java': resolveJavaImport,
-  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（Rust/C#/C/CPP/Kotlin/...）
+  '.rs': resolveRustImport,
+  // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底（C#/C/CPP/Kotlin/...）
 };
+
+/** Rust：use 路径 → src 下 .rs / mod.rs（crate:: 相对 project root src） */
+function resolveRustImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  if (!imp.source) return null;
+  const src = imp.source.split('::')[0];
+  // 外部标准库/第三方 crate（非本地模块）→ 不解析到本地
+  if (['std', 'core', 'alloc', 'allocator'].includes(src)) return null;
+  const p = imp.source.replace(/::/g, '/');
+  for (const base of [path.join(ctx.root, 'src'), path.dirname(absFile), ctx.root]) {
+    const hit = resolveToFile(path.join(base, p)) || resolveToFile(path.join(base, p, 'mod.rs')) || resolveToFile(path.join(base, p + '.rs'));
+    if (hit) return hit;
+  }
+  return null;
+}
 
 /** Java：全限定包路径 → 常见 src 根下 .java（标准 Maven/Gradle 布局 + root 兜底） */
 function resolveJavaImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {

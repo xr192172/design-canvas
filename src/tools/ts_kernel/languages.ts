@@ -59,7 +59,7 @@ export const LANGUAGES: LanguageEntry[] = [
   { name: 'c', pkg: 'c', exts: ['.c', '.h'], symbol_nodes: ['function_definition', 'struct_specifier'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'cpp', pkg: 'cpp', exts: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx'], symbol_nodes: ['function_definition', 'class_specifier', 'struct_specifier', 'namespace_definition'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'c_sharp', pkg: 'c-sharp', exts: ['.cs'], symbol_nodes: ['class_declaration', 'method_declaration', 'interface_declaration'], field_map: { name: 'name', parameters: 'parameters' } },
-  { name: 'rust', pkg: 'rust', exts: ['.rs'], symbol_nodes: ['function_item', 'struct_item', 'impl_item', 'trait_item'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
+  { name: 'rust', pkg: 'rust', exts: ['.rs'], symbol_nodes: ['function_item', 'struct_item', 'impl_item', 'trait_item'], import_nodes: ['use_declaration'], field_map: { name: 'name', parameters: 'parameters', return_type: 'return_type' } },
   { name: 'kotlin', pkg: 'kotlin', exts: ['.kt', '.kts'], symbol_nodes: ['class_declaration', 'function_declaration'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'swift', pkg: 'swift', exts: ['.swift'], symbol_nodes: ['function_declaration', 'class_declaration'], field_map: { name: 'name', parameters: 'parameters' } },
   { name: 'ruby', pkg: 'ruby', exts: ['.rb'], symbol_nodes: ['method', 'class', 'module'], field_map: { name: 'name', parameters: 'parameters' } },

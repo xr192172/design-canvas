@@ -319,6 +319,7 @@ const CALL_NODES: Record<string, string> = {
   jsx: 'call_expression',
   python: 'call',
   java: 'method_invocation',
+  rust: 'call_expression',
 };
 
 function isCallNode(node: SyntaxNodeLike, lang: LanguageEntry): boolean {
@@ -515,6 +516,14 @@ function extractImportSources(node: SyntaxNodeLike, langName: string): string[] 
     const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
     return m ? [m[1]] : [];
   }
+  if (langName === 'rust') {
+    // use a::b::{c,d} / use crate::foo::Bar; —— 取到花括号前的模块路径（去 use/;/
+    const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
+    const brace = t.indexOf('{');
+    const head = (brace >= 0 ? t.slice(0, brace) : t).trim().replace(/::$/, '');
+    const src = head.replace(/^crate::/, '').replace(/^::/, '').replace(/^super::/, '');
+    return src ? [src] : [];
+  }
   if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript' || langName === 'jsx') {
     // import_statement → source 字段（string）
     const s = fieldText(node, 'source');
@@ -553,6 +562,19 @@ function extractImportSources(node: SyntaxNodeLike, langName: string): string[] 
  *  - Python: `from pkg import a, b` → [a, b]（本地符号名）；`import a.b.c [as d]` → [c 或 d]。
  *  - TS 系不填（已有 ImportEdge.remoteName/localName 精确匹配）。 */
 function extractImportBindings(node: SyntaxNodeLike, langName: string, paths: string[]): string[] {
+  if (langName === 'rust') {
+    // use a::{b as x, c} → [x, c]；use a::b::Item → [Item]；use a::b as m → [m]
+    const t = node.text.replace(/^\s*use\s+/, '').replace(/;?\s*$/, '').trim();
+    const brace = t.indexOf('{');
+    if (brace >= 0) {
+      const inner = t.slice(brace + 1, t.lastIndexOf('}'));
+      return inner.split(',').map((s) => s.trim()).filter(Boolean).map((s) => (s.match(/as\s+([A-Za-z_]\w*)/) || [])[1] || s.split('::').pop() || s);
+    }
+    const asM = t.match(/as\s+([A-Za-z_]\w*)/);
+    if (asM) return [asM[1]];
+    const last = t.split('::').pop();
+    return last && !last.includes('{') ? [last.trim()] : [];
+  }
   if (langName === 'java') {
     // import com.foo.Bar; → 绑定 = 类简单名 Bar（源码里用 Foo 引用，省略前缀）
     const m = node.text.replace(/^\s*import\s+static\s+/, 'import ').match(/^\s*import\s+([\w.]+)(?:\.\*)?\s*;/);
