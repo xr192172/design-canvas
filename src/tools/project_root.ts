@@ -26,6 +26,8 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { analyzeModuleSource } from './rename_symbol.js';
+import { parseFileFull, isSupported, type ParsedImport } from './ts_kernel/index.js';
+import { readGoModules, type GoModule } from './import_project.js';
 
 /** 本地源扩展名（闭包只收这些；与 rename_symbol/rename_file 的 TS_EXTS 对齐） */
 const SRC_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue', '.java']);
@@ -135,6 +137,38 @@ export function resolveToFile(p: string): string | null {
 export function realResolveImport(importerAbs: string, source: string): string | null {
   if (!source.startsWith('.')) return null;
   return resolveToFile(path.resolve(path.dirname(importerAbs), source));
+}
+
+// ─────────────────────────────────────────────
+// 跨语言 import 边（Go / Python）：让闭包沿非 TS 文件的 import 边扩展
+// ─────────────────────────────────────────────
+
+/**
+ * 多语言 (Go/Python) import → 本地文件。
+ *  - relative（./ ../ 或 Python 前导点）→ realResolveImport
+ *  - Go 包路径：按 go.mod 前缀剥离 → 落到 go.mod 所在目录（root + gm.dir + rest）→ resolveToFile
+ *  - Python 点分模块/单段包：从 importer 目录、再工程根各试 → resolveToFile
+ *  - 解析不到（外部依赖 / 标准库 / 未装本地）→ null（不属本地闭包）
+ */
+export function resolveLangImport(absFile: string, imp: ParsedImport, goModules: GoModule[], root: string): string | null {
+  if (imp.kind === 'relative') return realResolveImport(absFile, imp.source);
+  const impDir = path.dirname(absFile);
+  // Go 包路径：命中 go.mod module 前缀（readGoModules 已按 module 长度降序）
+  for (const gm of goModules) {
+    if (imp.source === gm.module || imp.source.startsWith(gm.module + '/')) {
+      const rest = imp.source.slice(gm.module.length).replace(/^\//, '');
+      const base = path.resolve(root, gm.dir || '.', rest);
+      const hit = resolveToFile(base);
+      if (hit) return hit;
+    }
+  }
+  // Python 点分模块 / 单段包：importer 目录 → 工程根，逐级试
+  const asPath = imp.source.split('.').join('/');
+  for (const base of [impDir, root]) {
+    const hit = resolveToFile(path.resolve(base, asPath));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────
@@ -378,28 +412,49 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
 
   // BFS 扩展（阶段 1：根内 + importee 方向；阶段 3：邻域 importer 扩入后再扩其 import 边）
   let head = 0;
+  const TS_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
+  const goModules = readGoModules(root); // 多语言 Go 包解析（一次）
   const drain = async (): Promise<void> => {
     while (head < queue.length) {
       const f = queue[head++];
       if (included.get(f)) continue; // 已解析过
       included.set(f, true);
       const ext = path.extname(f);
-      if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) continue; // 非 TS 系不解析 import
-      let mod: Awaited<ReturnType<typeof analyzeModuleSource>>;
-      try {
-        mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
-      } catch {
-        mod = null;
-      }
-      if (!mod) continue;
-      for (const e of mod.imports) {
-        if (!e.source) continue;
-        let real: string | null = null;
-        if (e.source.startsWith('.')) {
-          real = realResolveImport(f, e.source);
-        } else if (aliasCfg) {
-          real = resolveAliasedImport(e.source, aliasCfg);
+      let edges: Array<string | null> = [];
+      if (TS_EXTS.has(ext)) {
+        // TS 系：analyzeModuleSource → import 边（相对/别名）
+        let mod: Awaited<ReturnType<typeof analyzeModuleSource>>;
+        try {
+          mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
+        } catch {
+          mod = null;
         }
+        if (!mod) continue;
+        for (const e of mod.imports) {
+          if (!e.source) continue;
+          if (e.source.startsWith('.')) edges.push(realResolveImport(f, e.source));
+          else if (aliasCfg) edges.push(resolveAliasedImport(e.source, aliasCfg));
+        }
+      } else if (isSupported(ext)) {
+        // 跨语言（Go/Python）：parseFileFull → import 边 → resolveLangImport
+        let content: string;
+        try {
+          content = fs.readFileSync(f, 'utf-8');
+        } catch {
+          continue;
+        }
+        let parsed: Awaited<ReturnType<typeof parseFileFull>> | null = null;
+        try {
+          parsed = await parseFileFull(f, content);
+        } catch {
+          parsed = null;
+        }
+        if (!parsed) continue;
+        for (const e of parsed.imports) edges.push(resolveLangImport(f, e, goModules, root));
+      } else {
+        continue; // 不支持的扩展名（.vue/.java 等本版不解析 import）
+      }
+      for (const real of edges) {
         if (!real || !isLocalSource(real)) continue;
         if (!included.has(real)) {
           included.set(real, false);

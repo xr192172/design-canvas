@@ -322,3 +322,31 @@ describe('expandClosure - importer 邻域自包含', () => {
     rmForce(dir);
   });
 });
+
+describe('expandClosure - 跨语言 import 边（Go/Python）', () => {
+  it('Go 相对 import 链 → 闭包沿 .go import 边扩展', async () => {
+    const dir = mkProj({
+      'go.mod': 'module demo\n',
+      'main.go': "package main\n\nimport \"demo/util\"\n\nfunc main() { util.Hi() }\n",
+      'util/util.go': 'package util\n\nfunc Hi() {}\n',
+    });
+    const files = await expandClosure(path.join(dir, 'main.go'), dir);
+    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'main.go').replace(/\\/g, '/'));
+    // Go 包路径 import（demo/util → util/util.go）被解析进闭包
+    expect(norm).toContain(path.join(dir, 'util/util.go').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
+
+  it('Python 相对 import → 闭包沿 .py import 边扩展', async () => {
+    const dir = mkProj({
+      'main.py': 'import sibling\n\nprint(sibling.VAL)\n',
+      'sibling.py': 'VAL = 1\n',
+    });
+    const files = await expandClosure(path.join(dir, 'main.py'), dir);
+    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'main.py').replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'sibling.py').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
+});
