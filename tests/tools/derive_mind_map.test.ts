@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { deriveMindMap } from '../../src/tools/derive_mind_map';
-import { renderDsl } from '../../src/tools/render_dsl';
+import { renderDesign } from '../../src/tools/render_design';
 import { clearAllFeatures } from '../../src/storage';
 import type { DesignDSL } from '../../src/dsl/types';
 
@@ -60,7 +60,7 @@ describe('deriveMindMap 无功能树兜底', () => {
 
   it('有语义分组：root → 分组 → 文件，按 module.y 排序，未归组文件入「未分组」', async () => {
     const feature = 'mm_grouped';
-    renderDsl({ dsl_json: JSON.stringify(makeDSL(feature, { grouped: true })) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL(feature, { grouped: true })) });
 
     const r = await deriveMindMap({ feature });
     const root = r.mind_map.root;
@@ -84,7 +84,7 @@ describe('deriveMindMap 无功能树兜底', () => {
 
   it('无分组容器：保持平铺兜底 root → 文件', async () => {
     const feature = 'mm_flat';
-    renderDsl({ dsl_json: JSON.stringify(makeDSL(feature, { grouped: false })) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL(feature, { grouped: false })) });
 
     const r = await deriveMindMap({ feature });
     const root = r.mind_map.root;

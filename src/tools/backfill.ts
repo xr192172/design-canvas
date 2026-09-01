@@ -13,7 +13,7 @@
  *
  * 工作流：
  *   scaffold 生成骨架 → LLM 填充实现 → backfill_scaffold 解析实际代码 → DSL 更新
- *   → check_status 推断状态 → render_dsl 可视化差异
+ *   → check_status 推断状态 → render_design 可视化差异
  *
  * 支持语言：.go / .ts / .py / .js（优先 tree-sitter AST，fallback 正则）
  */
@@ -261,7 +261,7 @@ export async function backfillScaffold(input: BackfillInput): Promise<BackfillRe
 
   const dsl = getDSL(feature);
   if (!dsl) {
-    throw new Error(`feature "${feature}" 不存在，请先使用 create_feature 或 render_dsl 创建`);
+    throw new Error(`feature "${feature}" 不存在，请先使用 create_feature 或 render_design 创建`);
   }
   if (!dsl.semantic || !dsl.semantic.files || dsl.semantic.files.length === 0) {
     throw new Error(`feature "${feature}" 没有 semantic.files，无法回填代码`);
@@ -309,7 +309,7 @@ export async function backfillScaffold(input: BackfillInput): Promise<BackfillRe
       `    新增  : ${u.extra.length}${u.extra.length > 0 ? ' (' + u.extra.join(', ') + ')' : ''}`,
     ]),
     '',
-    'DSL 已更新，actual_apis 已回填。调用 render_dsl 重新渲染可查看差异。',
+    'DSL 已更新，actual_apis 已回填。调用 render_design 重新渲染可查看差异。',
   ];
 
   return {

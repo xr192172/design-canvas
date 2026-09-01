@@ -32,7 +32,7 @@ The project follows a **frontend/backend separation** architecture:
 |---|---|---|
 | **Data / protocol layer** | DSL storage, code understanding, generation/backfill/consistency, brick system, runtime verification, diagnosis loop; exposes MCP tools and an HTTP API | This repository (MCP server) |
 | **Visual collaboration frontend** | Renders live DSL into an interactive workbench (sandbox, version diff, issue list, probes, contracts, code approval) | [dsl-workbench](https://github.com/xr192172/dsl-workbench) (separate repo) |
-| **Built-in renderer** | Fallback preview when no frontend is available; renders a single DSL into a self-contained HTML file | `render_dsl` (built-in) |
+| **Built-in renderer** | Fallback preview when no frontend is available; renders a single DSL into a self-contained HTML file | `render_design` (built-in) |
 
 ## Core Capabilities
 
@@ -40,7 +40,7 @@ One thread runs through everything: **any code → bricks (production) → trust
 
 | Capability | Description | Representative tools |
 |---|---|---|
-| **Visual protocol layer** | DSL read/write/edit, design view vs. actual code snapshot diff, built-in render fallback | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` / `diff_views` |
+| **Visual protocol layer** | DSL read/write/edit, design view vs. actual code snapshot diff, built-in render fallback | `get_dsl` / `edit_dsl` / `manage_feature` / `render_design` / `diff_views` |
 | **Code understanding** | Project import, semantic search, impact analysis, architecture layering, monolith splitting, algorithm/dataflow derivation | `import_project` / `explore_code` |
 | **Brick system** | Harvest code from any source (URL / local project) into contract-bearing bricks: extraction, slimming, search, and assembly | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
 | **Runtime verification** | Reconcile contracts and behavior baselines against actual runtime observations, forming a "commit only if verified, roll back on failure" gate | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects` |
@@ -100,7 +100,7 @@ npm run demo -- --prepare   # Prepare only (build + render + register), no serve
 
 Your browser opens `http://localhost:3000/workbench`: the left canvas is an interactive diagram rendered from the example DSL (click nodes for details, conditional-branch animation flows), with sandbox feedback and code approval on the right. Existing features with the same name are skipped, so your data is never overwritten.
 
-> The full visual collaboration frontend lives in [dsl-workbench](https://github.com/xr192172/dsl-workbench). Without a frontend environment, the built-in renderer (`render_dsl`) renders a single DSL into a self-contained HTML preview.
+> The full visual collaboration frontend lives in [dsl-workbench](https://github.com/xr192172/dsl-workbench). Without a frontend environment, the built-in renderer (`render_design`) renders a single DSL into a self-contained HTML preview.
 
 ## MCP Tool Reference
 
@@ -113,7 +113,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | `get_dsl` | Unified read-only entry: query DSL / nodes / edges / files / decisions / annotations / snapshots / simulation state / diffs, with `view` (design/live) and filter parameters |
 | `edit_dsl` | Unified write entry: batch `operations[]` for add/update/delete, semantic binding, status updates, annotations, approvals, auto-layout; executed in order, full rollback on any failure (atomic) |
 | `manage_feature` | Feature lifecycle management: create / clone / template / list / delete |
-| `render_dsl` | Render entry: mindmap / html / svg / markdown, with `view` and output path |
+| `render_design` | Render entry: mindmap / html / svg / markdown, with `view` and output path |
 | `scaffold` | Generate a code skeleton from the DSL semantic layer (vue / react / html) + status inference |
 | `backfill_scaffold` | Parse implementation API signatures back into actual_apis and output a diff report |
 | `consistency_check` | Compare expected contracts against actual code; output a consistency report and cross-file invariants (read-only) |

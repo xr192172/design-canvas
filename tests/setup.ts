@@ -1,8 +1,8 @@
 /**
  * Vitest 全局 setup：把 DSL 数据目录指向临时目录
  *
- * 背景：storage.ts / render_dsl.ts 的默认持久化路径基于 process.cwd()，
- * 测试里调用 saveDSL / renderDsl 会覆盖项目根目录的活态 design-canvas.json
+ * 背景：storage.ts / render_design.ts 的默认持久化路径基于 process.cwd()，
+ * 测试里调用 saveDSL / renderDesign 会覆盖项目根目录的活态 design-canvas.json
  * （曾发生 design-canvas.json 被测试 feature "no_status" 覆盖的事故）。
  *
  * 这里通过 DESIGN_CANVAS_HOME 把数据主目录重定向到临时目录，

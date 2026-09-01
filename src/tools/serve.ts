@@ -39,7 +39,7 @@ import { languageConcepts } from './language_concepts.js';
 import { buildDictionaryView, getGlobalDictFile, getProjectDictFile, loadGlobalDict, loadProjectDict, saveGlobalEntry, saveProjectEntry, splitHighlights, validateProjectRoot, type DictEntry } from './dictionary.js';
 import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
-import { renderDsl } from './render_dsl.js';
+import { renderDesign } from './render_design.js';
 import { renderWorkbenchPage } from './workbench_page.js';
 import { proposeChange, listChanges, approveChange, rejectChange } from './code_workbench.js';
 import { checkMonolith } from './monolith.js';
@@ -173,7 +173,7 @@ async function handleApiSave(req: http.IncomingMessage, res: http.ServerResponse
 function handleApiLoad(_req: http.IncomingMessage, res: http.ServerResponse): void {
   try {
     if (!fs.existsSync(LIVE_FILE)) {
-      sendError(res, 404, 'design-canvas.json 不存在，请先使用 render_dsl 创建');
+      sendError(res, 404, 'design-canvas.json 不存在，请先使用 render_design 创建');
       return;
     }
     const content = fs.readFileSync(LIVE_FILE, 'utf-8');
@@ -330,7 +330,7 @@ async function handleApiLiveRebuild(req: http.IncomingMessage, res: http.ServerR
  * body: { files: [{ path, content }], feature? } —— 前端用 webkitdirectory 选目录后
  * 逐文件读文本（已过滤 node_modules/二进制）。服务端把源码持久化到
  * .design-canvas/projects/<feature>/ → importProject 解析（DSL 记 source_root）→
- * renderDsl 渲染项目地图并注册产物。 */
+ * renderDesign 渲染项目地图并注册产物。 */
 const IMPORT_BODY_LIMIT = 200 * 1024 * 1024; // 目录上传远超通用 5MB 上限
 async function handleApiImport(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
@@ -369,7 +369,7 @@ async function handleApiImport(req: http.IncomingMessage, res: http.ServerRespon
         cacheDb.close();
       }
       const dsl = getDSL(feature);
-      const rendered = renderDsl({ dsl_json: JSON.stringify(dsl) });
+      const rendered = renderDesign({ dsl_json: JSON.stringify(dsl) });
       broadcastSSE('project-imported', { feature, at: new Date().toISOString() });
       sendJson(res, 200, { success: true, feature, html: path.basename(rendered.htmlFile), message: imp.message, local: true });
       return;
@@ -417,9 +417,9 @@ async function handleApiImport(req: http.IncomingMessage, res: http.ServerRespon
       cacheDb.close();
     }
 
-    // 导入即渲染项目地图（renderDsl 自动注册产物到 registry）
+    // 导入即渲染项目地图（renderDesign 自动注册产物到 registry）
     const dsl = getDSL(feature);
-    const rendered = renderDsl({ dsl_json: JSON.stringify(dsl) });
+    const rendered = renderDesign({ dsl_json: JSON.stringify(dsl) });
     broadcastSSE('project-imported', { feature, at: new Date().toISOString() });
     sendJson(res, 200, { success: true, feature, html: path.basename(rendered.htmlFile), message: imp.message });
   } catch (e) {
@@ -1707,7 +1707,7 @@ const EXPLAIN_SCRIPT: Array<{ title: string; n: Narrations; nodeId: string }> = 
     n: {
       newbie: 'design-canvas 的"大门"是一个叫 MCP 服务的东西。它把画布的各种能力包装成一个个小工具，让 AI 助手（比如 Claude、Cursor）能直接调用。简单说：AI 想用画布，都得先通过这个入口。',
       pm: 'MCP 是当前 AI 编程工具的标准接口。我们把它做成标准 MCP 服务，意味着 Claude Code、Cursor、VS Code 等任何客户端都能无缝接入，不用为每个工具单独适配——这是"一次开发、处处可用"的关键投资。',
-      senior: 'server.ts 实现标准 MCP stdio 传输，注册 40+ 工具（render_dsl / import_project / guided_tour 等），JSON-RPC 协议。工具集是画布能力的程序化暴露层，也是后续 MCP 收敛（路线图序号2）的改造主体。',
+      senior: 'server.ts 实现标准 MCP stdio 传输，注册 40+ 工具（render_design / import_project / guided_tour 等），JSON-RPC 协议。工具集是画布能力的程序化暴露层，也是后续 MCP 收敛（路线图序号2）的改造主体。',
     },
     nodeId: 'file_server_ts',
   },
@@ -1815,7 +1815,7 @@ const EXPLAIN_SCRIPT: Array<{ title: string; n: Narrations; nodeId: string }> = 
     n: {
       newbie: '每次生成的网页（星图、报告、示例）都会被记到一个清单里，主页会根据这个清单展示所有成果。',
       pm: '注册表是"成果目录"——统一登记每次生成的产物，让主页动态展示、可人工打标。它让项目成果可检索、可组织，也是跨产物导览的数据基础。',
-      senior: 'registry 把产物登记到 <dataHome>/output/.registry.json，render_dsl 自动注册 + 人工编辑（tags/note/title/status）。GET/POST /api/registry 暴露，Hub 首页据此动态渲染产物卡片。',
+      senior: 'registry 把产物登记到 <dataHome>/output/.registry.json，render_design 自动注册 + 人工编辑（tags/note/title/status）。GET/POST /api/registry 暴露，Hub 首页据此动态渲染产物卡片。',
     },
     nodeId: 'file_tools_registry_ts',
   },
@@ -2280,7 +2280,7 @@ function handleStaticFile(req: http.IncomingMessage, res: http.ServerResponse): 
       res.end(content);
       return;
     }
-    sendError(res, 404, 'design-canvas.json 不存在，请先使用 render_dsl 或 import_project 创建');
+    sendError(res, 404, 'design-canvas.json 不存在，请先使用 render_design 或 import_project 创建');
     return;
   }
 

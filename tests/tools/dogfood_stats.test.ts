@@ -32,7 +32,7 @@ describe('recordDogfoodUsage / snapshotDogfoodStats', () => {
     recordDogfoodUsage({ ts: 'b', tool: 'explore_code', action: 'search', ok: true, ms: 5 });
     recordDogfoodUsage({ ts: 'c', tool: 'explore_code', action: 'impact', ok: false, ms: 20, err: 'boom' });
     recordDogfoodUsage({ ts: 'd', tool: 'edit_code', action: 'replace', ok: true, ms: 40 });
-    recordDogfoodUsage({ ts: 'e', tool: 'render_dsl', ok: true, ms: 1 });
+    recordDogfoodUsage({ ts: 'e', tool: 'render_design', ok: true, ms: 1 });
 
     const s = snapshotDogfoodStats();
     expect(s.total).toBe(5);
@@ -48,7 +48,7 @@ describe('recordDogfoodUsage / snapshotDogfoodStats', () => {
     const ec2 = s.tools.find((t) => t.tool === 'edit_code')!;
     expect(ec2.by_action['replace'].ok).toBe(1);
 
-    const rd = s.tools.find((t) => t.tool === 'render_dsl')!;
+    const rd = s.tools.find((t) => t.tool === 'render_design')!;
     expect(rd.by_action['—'].calls).toBe(1);
   });
 

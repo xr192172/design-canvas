@@ -4,7 +4,7 @@
  *
  * 流程：build（缺则补）→ 渲染 examples/*.json 为「feature DSL + HTML 产物并注册」
  *       → 起 serve → 自动打开 /workbench#<首个示例>。
- * 全程复用现有工具链（render_dsl 持久化+渲染+注册、serve 静态服务），不新增业务逻辑。
+ * 全程复用现有工具链（render_design 持久化+渲染+注册、serve 静态服务），不新增业务逻辑。
  *
  * 用法（design-canvas 根）：
  *   npm run demo                 # 完整：准备示例 + 起服务 + 开浏览器
@@ -62,7 +62,7 @@ async function prepareExamples() {
     await run('npm', ['run', 'build'], ROOT);
   }
 
-  const { renderDsl } = await import(pathToFileURL(path.join(ROOT, 'dist', 'src', 'tools', 'render_dsl.js')).href);
+  const { renderDesign } = await import(pathToFileURL(path.join(ROOT, 'dist', 'src', 'tools', 'render_design.js')).href);
   if (!fs.existsSync(EXAMPLES_DIR)) {
     console.log('[demo] examples/ 目录不存在，无示例可渲染');
     return [];
@@ -95,7 +95,7 @@ async function prepareExamples() {
       continue;
     }
     try {
-      const r = renderDsl({ dsl_json: dslJson, persist: true });
+      const r = renderDesign({ dsl_json: dslJson, persist: true });
       rendered.push(feature);
       console.log(`[demo] ✓ 渲染示例 ${feature} → ${r.htmlFile}`);
     } catch (e) {

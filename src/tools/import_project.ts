@@ -1472,7 +1472,7 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
       skipped.length > 0 ? `跳过/截断:\n  - ${skipped.join('\n  - ')}` : null,
       roleNote ? `职责标题: ${roleNote}` : null,
       overlayNote ? `设计层 overlay: ${overlayNote}` : null,
-      `下一步: render_dsl 渲染预览，或 get_dsl 查看/修改。`,
+      `下一步: render_design 渲染预览，或 get_dsl 查看/修改。`,
     ].filter(Boolean).join('\n');
 
     return {

@@ -256,7 +256,7 @@ export function createFromTemplate(input: CreateFromTemplateInput): CreateFromTe
       '节点: ' + dsl.geometry.nodes.length + ' 个',
       '边: ' + (dsl.geometry.edges?.length ?? 0) + ' 条',
       '',
-      '使用 render_dsl 渲染画布，或用 add_node / add_edge 继续编辑',
+      '使用 render_design 渲染画布，或用 add_node / add_edge 继续编辑',
     ].join('\n'),
     feature,
     template_id,

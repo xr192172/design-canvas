@@ -33,7 +33,7 @@ DSL 双层结构是两者的共同根基：
 | ------------ | ----------------------------------------------------------- | ---------------------------------------------------------------- |
 | **数据 / 协议层** | DSL 存取、代码理解、生成/回填/一致性、积木体系、运行时验证、诊断闭环，对外提供 MCP 工具与 HTTP API | 本仓库（MCP server）                                                  |
 | **可视化协作前端**  | 将实时 DSL 渲染为可交互工作台（沙盘、版本对比、问题清单、探针、契约、代码审批）                  | [dsl-workbench](https://github.com/xr192172/dsl-workbench)（独立仓库） |
-| **内置渲染器**    | 无前端环境时的预览兜底，将单张 DSL 渲染为自包含 HTML                             | `render_dsl`（内置）                                                 |
+| **内置渲染器**    | 无前端环境时的预览兜底，将单张 DSL 渲染为自包含 HTML                             | `render_design`（内置）                                                 |
 
 ## 核心能力
 
@@ -41,7 +41,7 @@ DSL 双层结构是两者的共同根基：
 
 | 能力                | 说明                                             | 代表工具                                                                                                              |
 | ----------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **可视化协议层**        | DSL 读写编辑、设计视图与实际代码快照对比、内置渲染兜底                  | `get_dsl` / `edit_dsl` / `manage_feature` / `render_dsl` / `diff_views`                                           |
+| **可视化协议层**        | DSL 读写编辑、设计视图与实际代码快照对比、内置渲染兜底                  | `get_dsl` / `edit_dsl` / `manage_feature` / `render_design` / `diff_views`                                           |
 | **代码理解**          | 工程导入、语义搜索、影响分析、架构分层、单体拆分、算法/数据流推导              | `import_project` / `explore_code`                                                                                 |
 | **代码积木体系**        | 从任意来源（URL / 本地工程）收割代码为带契约的积木，支持切块、抽契约、瘦身、搜索与拼装 | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
 | **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects`                    |
@@ -101,7 +101,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 浏览器会自动打开 `http://localhost:3000/workbench`：左侧画布是示例 DSL 渲染的可交互图（点击节点查看详情、条件分支动画流），右侧是沙盘反馈与代码审批。已有同名 feature 时自动跳过，不会覆盖你的数据。
 
-> 完整可视化协作前端见 [dsl-workbench](https://github.com/xr192172/dsl-workbench)；不带前端环境时，内置渲染器（`render_dsl`）可把单张 DSL 渲染为自包含 HTML 预览。
+> 完整可视化协作前端见 [dsl-workbench](https://github.com/xr192172/dsl-workbench)；不带前端环境时，内置渲染器（`render_design`）可把单张 DSL 渲染为自包含 HTML 预览。
 
 ## MCP 工具参考
 
@@ -114,7 +114,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `get_dsl`           | 统一只读入口：DSL / 节点 / 边 / 文件 / 决策 / 批注 / 快照 / 仿真状态 / 差异等查询，支持 `view`（design/live）与过滤参数 |
 | `edit_dsl`          | 统一写入口：`operations[]` 批量增删改、语义绑定、状态更新、标注、审批、自动布局，按序执行、任一失败全量回滚（原子）                  |
 | `manage_feature`    | 功能生命周期管理：create / clone / template / list / delete                                 |
-| `render_dsl`        | 渲染入口：mindmap / html / svg / markdown，支持 `view` 与输出路径                               |
+| `render_design`        | 渲染入口：mindmap / html / svg / markdown，支持 `view` 与输出路径                               |
 | `scaffold`          | 从 DSL 语义层生成代码骨架（vue / react / html）+ 状态推断                                          |
 | `backfill_scaffold` | 解析实现代码 API 签名回填 actual\_apis，输出差异报告                                                |
 | `consistency_check` | 对比预期契约与实际代码，输出一致性报告与跨文件不变式（只读）                                                     |

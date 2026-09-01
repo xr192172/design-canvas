@@ -395,7 +395,7 @@ export async function deriveDetailChain(input: DeriveChainInput): Promise<Derive
   const projectRoot = input.project_root ? path.resolve(input.project_root) : process.cwd();
 
   const dsl = getDSL(feature);
-  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_dsl`);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_design`);
   const host = dsl.geometry.nodes.find((n) => n.id === node_id);
   if (!host) throw new Error(`节点 "${node_id}" 不存在于 feature "${feature}"`);
 

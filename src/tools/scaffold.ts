@@ -663,7 +663,7 @@ export function scaffold(input: ScaffoldInput): ScaffoldResult {
 
   const dsl = getDSL(feature);
   if (!dsl) {
-    throw new Error(`feature "${feature}" 不存在，请先使用 create_feature 或 render_dsl 创建`);
+    throw new Error(`feature "${feature}" 不存在，请先使用 create_feature 或 render_design 创建`);
   }
 
   if (!dsl.semantic || !dsl.semantic.files || dsl.semantic.files.length === 0) {

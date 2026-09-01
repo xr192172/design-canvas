@@ -2060,7 +2060,7 @@ export async function placeProposals(feature: string): Promise<PlaceProposalsRes
 export async function deriveMindMap(input: DeriveMindMapInput): Promise<DeriveMindMapResult> {
   const { feature, gen_descriptions = false, max_files_per_community = 20 } = input;
   const dsl = getDSL(feature);
-  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 render_dsl 或 import_project 创建`);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 render_design 或 import_project 创建`);
 
   const title = dsl.title || feature;
 

@@ -8,7 +8,7 @@
  * 工作流：
  *   LLM 写完代码 → check_status 扫描文件 → 自动标记 done/in_progress/draft
  *   或者：LLM 调用 update_status 手动标记
- *   → render_dsl 重新渲染，节点颜色随状态变化
+ *   → render_design 重新渲染，节点颜色随状态变化
  */
 
 import fs from 'node:fs';
@@ -164,7 +164,7 @@ export function checkStatus(input: CheckStatusInput): StatusResult {
       '各文件状态：',
       ...lines,
       '',
-      '提示：调用 render_dsl 重新渲染以查看状态可视化。',
+      '提示：调用 render_design 重新渲染以查看状态可视化。',
     ].join('\n'),
     feature,
   };

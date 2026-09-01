@@ -1,5 +1,5 @@
 /**
- * render_dsl 工具实现
+ * render_design 工具实现
  *
  * 输入：dsl_json (string, 必填) + output_path (string, 可选)
  * 行为：
@@ -11,7 +11,7 @@
  *
  * 大小限制：
  *   - dsl_json 超过 100KB 时给出警告，建议改用 feature 参数从存储读取
- *   - 分步构建流程：create_feature → 多次 edit_dsl → render_dsl(feature=xxx)
+ *   - 分步构建流程：create_feature → 多次 edit_dsl → render_design(feature=xxx)
  */
 
 import fs from 'node:fs';
@@ -21,14 +21,14 @@ import { saveDSL, getDataHome } from '../storage.js';
 import { renderHTML } from '../renderer/html_renderer.js';
 import { artifactFromDsl, registerArtifact } from './registry.js';
 
-export interface RenderDslInput {
+export interface RenderDesignInput {
   dsl_json: string;
   output_path?: string;
   /** 是否持久化 DSL 到设计层（默认 true）。live 视图渲染应传 false，避免把代码快照写进设计存档 */
   persist?: boolean;
 }
 
-export interface RenderDslResult {
+export interface RenderDesignResult {
   /** 保存的 DSL 文件绝对路径 */
   dslFile: string;
   /** 渲染的 HTML 文件绝对路径 */
@@ -61,10 +61,10 @@ function extractFeatureFromJson(json: string): string {
 const DSL_JSON_SIZE_THRESHOLD = 100 * 1024;
 
 /**
- * 执行 render_dsl
+ * 执行 render_design
  * @throws Error 当 DSL 校验失败时
  */
-export function renderDsl(input: RenderDslInput): RenderDslResult {
+export function renderDesign(input: RenderDesignInput): RenderDesignResult {
   const { dsl_json, output_path, persist = true } = input;
 
   // 0. dsl_json 大小检测：超大 DSL 建议改用 feature 参数从存储读取，避免传参溢出
@@ -72,10 +72,10 @@ export function renderDsl(input: RenderDslInput): RenderDslResult {
     const sizeKB = Math.round(dsl_json.length / 1024);
     const featureHint = extractFeatureFromJson(dsl_json);
     console.warn(
-      `[render_dsl] DSL JSON 过大（${sizeKB}KB），直接传 dsl_json 可能导致参数溢出。\n` +
-      `建议改用 feature 参数从存储读取：render_dsl({ feature: "${featureHint}", format: "html" })\n` +
+      `[render_design] DSL JSON 过大（${sizeKB}KB），直接传 dsl_json 可能导致参数溢出。\n` +
+      `建议改用 feature 参数从存储读取：render_design({ feature: "${featureHint}", format: "html" })\n` +
       `如果还没有保存，请先用 manage_feature(action=create) 创建空 DSL，\n` +
-      `然后多次调用 edit_dsl 逐步添加节点/边/文件（每次少量），最后用 render_dsl(feature=xxx) 渲染。`,
+      `然后多次调用 edit_dsl 逐步添加节点/边/文件（每次少量），最后用 render_design(feature=xxx) 渲染。`,
     );
     // 不抛错，让渲染继续执行（但大 JSON 可能已溢出，由调用方决定是否重试）
   }

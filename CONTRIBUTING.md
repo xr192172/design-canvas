@@ -8,7 +8,7 @@
 src/
   dsl/        DSL 类型、校验、语义锚定、几何/动画/推理等纯逻辑
   renderer/   自包含 HTML 渲染器（零构建链，产物单文件）
-  tools/      全部 MCP 工具实现（get_dsl / edit_dsl / render_dsl / explore_code …）
+  tools/      全部 MCP 工具实现（get_dsl / edit_dsl / render_design / explore_code …）
   observe/     observe 运行时插桩与对账（行为基线 / 金丝雀）
   diagnosis/  症状 → 根因 → 修复 → 验证 的审闭环
   daemon/     MCP 常驻服务 / 事件分发

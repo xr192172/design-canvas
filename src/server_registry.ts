@@ -15,7 +15,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
-import { renderDsl } from './tools/render_dsl.js';
+import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
 import { deriveMindMap } from './tools/derive_mind_map.js';
 import { queryFeature } from './tools/query_feature.js';
@@ -261,21 +261,21 @@ const editDslHandler = wrap(async (a) => {
 /** manage_feature：生命周期 */
 const manageFeatureHandler = wrap(async (a) => manageFeature(a as never));
 
-/** render_dsl：渲染思维导图/HTML/SVG/Markdown（format 参数聚合导出；view 决定渲染设计或实际视图） */
-const renderDslHandler = wrap(async (a) => {
+/** render_design：渲染思维导图/HTML/SVG/Markdown（format 参数聚合导出；view 决定渲染设计或实际视图） */
+const renderDesignHandler = wrap(async (a) => {
   // 默认 mindmap：现行思维导图架构（root → 功能分组 → 文件）；html 星图画布仅调试保留
   const format = typeof a.format === 'string' ? a.format : 'mindmap';
   const feature = a.feature as string;
   const view = a.view === 'live' ? 'live' : 'design';
   const output_path = typeof a.output_path === 'string' ? a.output_path : undefined;
   if (format === 'mindmap') {
-    if (!feature) throw new Error('render_dsl mindmap 模式需要 feature（从存储读取设计 DSL 派生，不支持 dsl_json 直传）');
+    if (!feature) throw new Error('render_design mindmap 模式需要 feature（从存储读取设计 DSL 派生，不支持 dsl_json 直传）');
     const r = await deriveMindMap({ feature, gen_descriptions: false });
     // 空导图回退：DSL 无 semantic.files 时导图会空，降级为 html 设计画布避免产物不可用
     if ((r.mind_map.root.children ?? []).length === 0) {
       const dsl = getDSLByView(feature, view);
       if (dsl) {
-        const rr = renderDsl({ dsl_json: JSON.stringify(dsl), output_path, persist: false });
+        const rr = renderDesign({ dsl_json: JSON.stringify(dsl), output_path, persist: false });
         return {
           message:
             `⚠ 思维导图为空（DSL 无语义文件层），已回退渲染设计画布：\n${rr.message}\n` +
@@ -300,13 +300,13 @@ const renderDslHandler = wrap(async (a) => {
   // html：优先用显式 dsl_json；否则按 view 从存储读取
   let dsl_json = a.dsl_json as string | undefined;
   if (!dsl_json) {
-    if (!feature) throw new Error('render_dsl html 模式需要 feature 或 dsl_json');
+    if (!feature) throw new Error('render_design html 模式需要 feature 或 dsl_json');
     const dsl = getDSLByView(feature, view);
     if (!dsl) throw new Error(`feature "${feature}" 不存在（视图: ${view}）`);
     dsl_json = JSON.stringify(dsl);
   }
   // live 视图渲染不写回设计层（persist=false）
-  const r = renderDsl({ dsl_json, output_path, persist: view === 'design' });
+  const r = renderDesign({ dsl_json, output_path, persist: view === 'design' });
   return { message: r.message };
 });
 
@@ -669,7 +669,7 @@ const TOOL_DEFS: ToolDef[] = [
     handler: manageFeatureHandler,
   },
   {
-    name: 'render_dsl',
+    name: 'render_design',
     title: 'Render design DSL to mindmap/HTML/SVG/Markdown',
     description:
       '渲染设计 DSL：format=mindmap（默认，现行思维导图架构：root → 功能分组 → 文件，自包含查看器 HTML；' +
@@ -683,7 +683,7 @@ const TOOL_DEFS: ToolDef[] = [
       dsl_json: z.string().optional().describe('html 模式：完整 DSL JSON 字符串'),
       output_path: z.string().optional().describe('输出路径'),
     },
-    handler: renderDslHandler,
+    handler: renderDesignHandler,
   },
   {
     name: 'render_brickwork',
@@ -772,7 +772,7 @@ const TOOL_DEFS: ToolDef[] = [
       '扫描代码项目（.go/.ts/.py/.js 等）生成 DSL：文件节点 + 调用边 + 符号/API 语义层，写入 design-canvas 存储。' +
       '默认生成设计 DSL；live_only=true 只生成"实际视图"快照（live/ 目录，供 🎭设计/⚡实际 双视图对比）。' +
       'design_mode=true 按目录聚合成模块节点；functional_mode=true 按调用图做功能性聚合（优先级高于 design_mode）。' +
-      '导入后可用 render_dsl 渲染可视化，或 diff_views 对比设计 vs 实际。',
+      '导入后可用 render_design 渲染可视化，或 diff_views 对比设计 vs 实际。',
     inputSchema: {
       project_dir: z.string().describe('目标项目根目录（绝对路径或相对 cwd）'),
       feature: z.string().describe('新 feature 名（^[a-zA-Z0-9_-]+$）'),

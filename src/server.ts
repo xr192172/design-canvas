@@ -30,8 +30,8 @@ const server = new McpServer(
     capabilities: { tools: {}, resources: {} },
     instructions:
       'design-canvas：人机共享的可视化协议层。支持两种工作流：' +
-      '\n\n1. 完整 DSL 模式：render_dsl 渲染并保存 → get_dsl 读取（query:"dsl"/"features" 等）' +
-      '\n\n2. 增量编辑模式（推荐）：manage_feature(action=create) 创建 → edit_dsl 统一提交所有写操作 → render_dsl 渲染预览' +
+      '\n\n1. 完整 DSL 模式：render_design 渲染并保存 → get_dsl 读取（query:"dsl"/"features" 等）' +
+      '\n\n2. 增量编辑模式（推荐）：manage_feature(action=create) 创建 → edit_dsl 统一提交所有写操作 → render_design 渲染预览' +
       '\n   edit_dsl 通过 operations 列表批量执行（任一失败全部回滚）：' +
       '\n   - {op:"add",type:"node",id:"n1",data:{label,x,y,bg,shape,type,status,swimlane,layer,host,shapes,...}}' +
       '\n   - 决策卡字段（设计文档层）：data.attributes={参数名:值}（类型化参数表，如 budget_mb:64）+ data.decision={summary,rationale,alternatives:[{option,rejected_because}],consequences,acceptance,status,thread,tags}（决策记录：结论/理由/否决方案/后果/验收+状态 active|superseded|draft+功能线+标签）。LLM 运化设计时必填——图上短标签，点开见全卡' +
@@ -45,7 +45,7 @@ const server = new McpServer(
       '\n\n3. 代码生成：scaffold 从设计图 semantic 层生成代码骨架（签名 + TODO + import），LLM 在骨架上填充实现。' +
       '\n\n4. 状态回填：LLM 写完代码后，调用 backfill_scaffold 自动解析实际 API 签名回填到 DSL。' +
       '\n   然后 scaffold 扫描 TODO 残留量自动推断状态，或 edit_dsl 的 status 操作手动标记。' +
-      '\n   render_dsl 重新渲染后节点颜色随状态变化：灰=待实现, 橙=实现中, 绿=已完成。' +
+      '\n   render_design 重新渲染后节点颜色随状态变化：灰=待实现, 橙=实现中, 绿=已完成。' +
       '\n\n5. 人审流程：人类在浏览器双击节点添加标注 → get_dsl（query:"annotations"）读取 → LLM 迭代修改 → edit_dsl(op=resolve,type=annotation) 关闭。' +
       '\n\n6. 自动布局：edit_dsl(op=apply,type=layout) 一键整理画布（data.algo=dag 拓扑排序 / force 力导向 / grid 网格对齐），避免连线混乱。' +
       '\n\n7. 仿真器：explore_code(action=run_simulation) 批量传入事件验证事件级联和条件触发 → get_dsl（query:"simulation_state"）读取当前状态 → edit_dsl(op=reset,type=simulation) 重置。' +

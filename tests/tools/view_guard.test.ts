@@ -4,7 +4,7 @@
  * 覆盖：
  * - getDSLByView：design → 设计层，live → 实际代码快照（只读）
  * - query_feature query=dsl view=live：读取 live 快照
- * - render_dsl view=live：渲染实际视图且不写回设计层（persist=false）
+ * - render_design view=live：渲染实际视图且不写回设计层（persist=false）
  * - edit_dsl view=live：写护栏拒绝且不落盘
  */
 
@@ -96,7 +96,7 @@ describe('视图分层 - edit_dsl view=live 写护栏', () => {
   });
 });
 
-describe('视图分层 - render_dsl view=live', () => {
+describe('视图分层 - render_design view=live', () => {
   beforeEach(() => clearAllFeatures());
   afterEach(() => clearAllFeatures());
 
@@ -106,7 +106,7 @@ describe('视图分层 - render_dsl view=live', () => {
     saveLiveFeature({ ...design, title: '代码现状版' });
     const before = JSON.stringify(getDSL('vf_rd'));
 
-    const r = await handlerOf('render_dsl')({ feature: 'vf_rd', view: 'live', format: 'html' });
+    const r = await handlerOf('render_design')({ feature: 'vf_rd', view: 'live', format: 'html' });
 
     expect(r.isError).toBeFalsy();
     expect(r.text).toMatch(/已渲染/);

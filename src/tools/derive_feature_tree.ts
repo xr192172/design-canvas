@@ -85,7 +85,7 @@ const DIR_FEATURE_NAMES: Record<string, string> = {
 export const TOOL_DOMAINS: Array<{ id: string; label: string; files: string[]; kws: string[] }> = [
   {
     id: 'design', label: '设计编辑',
-    files: ['render_dsl', 'render_brickwork', 'render_dep_canvas', 'render_workbench', 'render_cluster_workbench', 'code_workbench', 'workbench_data', 'workbench_page', 'workbench_shell_css', 'scaffold', 'backfill', 'wizard_steps', 'simulation', 'dag_layout', 'templates', 'overlay', 'serve', 'annotation_tools'],
+    files: ['render_design', 'render_brickwork', 'render_dep_canvas', 'render_workbench', 'render_cluster_workbench', 'code_workbench', 'workbench_data', 'workbench_page', 'workbench_shell_css', 'scaffold', 'backfill', 'wizard_steps', 'simulation', 'dag_layout', 'templates', 'overlay', 'serve', 'annotation_tools'],
     kws: ['render_brickwork', 'workbench', 'wizard', 'scaffold', 'simulation', 'dag_layout', 'annotation'],
   },
   {

@@ -45,7 +45,7 @@ description: "design-canvas 工具集心智外衣：注入活 DSL + 能力地图
 
 | 层 | 愿望 | 工具 |
 |---|---|---|
-| 宏观（整项目） | 建底 / 出图 / 全项目对账 | `import_project` → `render_dsl` → `reconcile_effects` |
+| 宏观（整项目） | 建底 / 出图 / 全项目对账 | `import_project` → `render_design` → `reconcile_effects` |
 | **中观（文件/链）** | 按文件/宿主节点「真跑+查数据+对账」 | **`reconcile_chain`**（本方法论的样板实现） |
 | 微观（单函数） | 纯函数子集 / 证据 | `trace_exec` / `trace_evidence` |
 

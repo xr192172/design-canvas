@@ -89,7 +89,7 @@ function findFlow(flows: AnimationFlow[], flowId: string): AnimationFlow {
 export function injectReplay(input: InjectReplayInput): InjectReplayResult {
   const { feature, flow_id } = input;
   const dsl = getDSL(feature);
-  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_dsl`);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_design`);
 
   const flows = dsl.animations_v2?.flows ?? [];
   const flow = findFlow(flows, flow_id);

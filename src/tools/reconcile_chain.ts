@@ -187,7 +187,7 @@ export async function reconcileChain(input: ReconcileChainInput): Promise<Reconc
   const projectRoot = path.resolve(input.project_dir);
 
   let dsl = getDSL(feature);
-  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_dsl`);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在，请先 create_feature 或 render_design`);
   if (!dsl.geometry.nodes.some((n) => n.id === node_id)) {
     throw new Error(`节点 "${node_id}" 不存在于 feature "${feature}"`);
   }

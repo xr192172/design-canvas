@@ -38,7 +38,7 @@
 
 | 能力域               | 含义               | 代表 MCP 工具                                                                                                                                |
 | ----------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_dsl` `render_sandbox` `scaffold` `backfill_scaffold` `diff_views`                          |
+| **design** 设计编辑   | 改设计/DSL/脚手架/渲染视图 | `get_dsl` `edit_dsl` `manage_feature` `render_design` `render_brickwork` `scaffold` `backfill_scaffold` `diff_views`                     |
 | **query** 查询理解    | 读设计/读代码/搜索定位     | `import_project` `explore_code` `read_project_docs`                                                                                      |
 | **refactor** 重构治理 | 重命名/装配/瘦身/管线     | `rename_symbol` `rename_file` `rename_many` `remove_dead_imports` `refactor_pipeline` `suggest_renames` `find_similar_names` `edit_code` |
 | **observe** 观测质检  | 插桩/拍照/裁决/一致性     | `camera_log` `camera_judge` `camera_instrument` `chain_recon` `consistency_check` `reconcile_brick` `reconcile_effects`                  |
@@ -236,9 +236,9 @@
 
 **引用查找** —— ✅ **已实施（2026-08）**：新增 `find_references` 工具——改/删一个符号前查"谁引用了它"，只读不落盘，复用 rename 闭包/引用图内核。已入 AGENTS.md 触发点表。
 
-> **结构引用扩展 mode=field（2026-09，dogfood 驱动）**：默认 symbol 模式只报"谁 import 该符号名"，对"加字段/改签名"类改动会漏掉**定义文件内部的构造点与字段读取点**。新增 `mode=field`：扫项目内 `obj.<field>`（读取点）与 `<field>:`（构造点），**含定义文件内部**。教训：上一轮做安全改核心时 agent 反射性用了 grep——一半是触发失灵，一半暴露 find_references 真缺口；补齐后"加字段前查波及"不必再退回 grep。
+> **结构引用扩展 mode=field（2026-09，dogfood 驱动）**：默认 symbol 模式只报"谁 import 该符号名"，对"加字段/改签名"类改动会漏掉**定义文件内部的构造点与字段读取点**。新增 `mode=field`：扫项目内 `obj.<field>`（读取点）与 `<field>:`（构造点），**含定义文件内部**。教训：上一轮做安全改核心时 agent 反射性用了 grep——一半是触发失灵，一半暴露 find\_references 真缺口；补齐后"加字段前查波及"不必再退回 grep。
 >
-> **升级为 AST 分类 + type 模式（2026-09 v2）**：正则版把"构造/解构/声明"全算 field-key 且漏方括号/注释噪音。改复用 ts_kernel tree-sitter（parseAstRoot，节点带字节偏移）：`mode=field` 把每个命中按所属节点分类为 **读/构/解/声明** 四类（member_expression→读、object→构、object_pattern→解、property_signature/object_type→声明），自动跳过注释/字符串同名，补 `obj['field']` 方括号读，附行内 snippet；`scope=closure(all)` 可选（给 file 默认按闭包）。新增 `mode=type`：从 interface/type 声明解成员字段集，找与成员交叠 ≥ min_hit 的对象字面量候选构造点（启发式，非类型求解器）。新模块 `src/tools/field_refs.ts`。
+> **升级为 AST 分类 + type 模式（2026-09 v2）**：正则版把"构造/解构/声明"全算 field-key 且漏方括号/注释噪音。改复用 ts\_kernel tree-sitter（parseAstRoot，节点带字节偏移）：`mode=field` 把每个命中按所属节点分类为 **读/构/解/声明** 四类（member\_expression→读、object→构、object\_pattern→解、property\_signature/object\_type→声明），自动跳过注释/字符串同名，补 `obj['field']` 方括号读，附行内 snippet；`scope=closure(all)` 可选（给 file 默认按闭包）。新增 `mode=type`：从 interface/type 声明解成员字段集，找与成员交叠 ≥ min\_hit 的对象字面量候选构造点（启发式，非类型求解器）。新模块 `src/tools/field_refs.ts`。
 
 > ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。另：引用查找 `find_references` 目前只认 TS 系 import（邻域/跨语言引用未覆盖，可复用 expandClosure 续坡）。
 
@@ -263,7 +263,37 @@
   渲染助手，主函数名 ≠ 文件名 camelCase 或为 async，天然不触发漏注册检测；本次显式加入豁免表，
   让「内部模块」边界的意图文档化。
 
-- **遗留命名重叠（2026-09 部分收口）**：内部渲染模块 `render_dsl_workbench`→`render_workbench`（契约投影工作台）、`render_sandbox_canvas`→`render_dep_canvas`（依赖图画布）已改名，消除「疑似 render_dsl 子变体」的混淆；`render_dsl`（设计稿） vs `render_brickwork`（积木工作台）的 render 一词两职责仍待定（见待办）。
+- **遗留命名重叠（2026-09 已收口）**：`render_dsl`→`render_design`（渲染设计稿）、`render_dsl_workbench`→`render_workbench`（契约投影工作台）、`render_sandbox_canvas`→`render_dep_canvas`（依赖图画布）均已成。render 前缀下对象各异：`render_design`/`render_brickwork`/`render_workbench`/`render_dep_canvas`/`render_cluster_workbench`，职责已清晰。
+
+## 5.7 工具边界登记：`render_design` 改名 dogfood（2026-09）
+
+> 愿景校验：工具的目的是重构屎山代码，那么「全仓改名」这类场景就该由工具自己覆盖，而不是退化到脚本+grep。本次用一次真实的对外工具改名把边界量出来。
+
+### 场景与结果
+
+对**对外 MCP 契约工具** `render_dsl()`→`render_design()` 做了全仓改名，波及 **37 个文件**。改动分层如下：
+
+| 层                   | 涉及                                                                            | 工具能覆盖吗                                | 实际手段             |
+| ------------------- | ----------------------------------------------------------------------------- | ------------------------------------- | ---------------- |
+| **符号层**             | camelCase `renderDsl`（函数/import 命名、接口 `RenderDslInput` 等）                     | ✅ `rename_symbol`/`rename_symbols` 擅长 | rename 类工具（理想态）  |
+| **文件层**             | `render_dsl.ts`→`render_design.ts` + 全仓 import 路径 `.js` 引用                    | ✅ `rename_file` 联动                    | git mv + 精确编辑    |
+| **工具注册名**           | server\_registry `name: 'render_dsl'`                                         | ⚠️ 注册名是字符串字面量，rename 不认               | 精确编辑             |
+| **user-facing 字符串** | 几十处「请先 render\_dsl」错误提示、`README`/`AGENTS`(生成)/`skill`/`CONTRIBUTING`/issue 模板 | ❌ **纯字符串，rename 工具完全碰不到**             | 逐文件 replace\_all |
+| **文档/测试断言**         | `tool-convergence` 历史记录（应保留）、dogfood tool 名断言、describe 字符串                    | ❌ 字符串                                 | 精确甄别             |
+
+### 结论：能力边界缺口
+
+1. **`rename_*`** **只认 import + camCase 符号，不认 snake 字面量（工具注册名）与 user-facing 字符串**。这类跨文件字面量同步要逐个 replace\_all，正是 5.6 障碍 #4「粒度太细+黑盒」的原样重现。
+2. **历史记录需要灰名单**：改名时 `docs/tool-convergence` 的历史核验/判定记录（如「render\_sandbox 曾判 render\_dsl 不合并」）必须保留原名还原语境，不能被无脑全局替换。这要求工具支持「按语义保留的原名白名单」。
+3. **生成物源头优先**：`AGENTS.md` 里的工具名由 `gen_agents.mjs` TRIGGER\_ROWS 驱动，改工具名必须改源头而非生成物本身（生成物会被 build 自愈重建）。
+
+### 改进建议（待立项）
+
+- **字面量感知改名**：让 `rename_symbols` 支持「同步 user-facing 输出字符串」，扫描代码里 `'render_dsl'` 字样并给出确认清单，而非只改符号。
+
+- **注册名白名单**：重命名工具理解「对外工具注册名」这一概念，改名时联动更新 server\_registry 的 `name:` 与 README/AGENTS 引用。
+
+- **文档灰名单**：对 `docs/tool-convergence` 的历史记录段打标记，批量替换时回退原名。
 
 ***
 
@@ -271,7 +301,7 @@
 
 - [ ] 决定 `drift 挂周期性 reconcile 兜底` 是否做（受限于 `ReconcileSummary` 不暴露变更文件集，需改 watch 核心；见 detect\_drift 记录）
 
-- [ ] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理
+- [x] 决定 `render_dsl`/`render_sandbox` 的 render 一词职责拆分是否处理 —— ✅ **已成（2026-09）**：`render_dsl`→`render_design`（渲染设计稿）、`render_sandbox`(现 `render_brickwork`) 早成 `render_brickwork`。render 前缀下对象各异：`render_design`/`render_brickwork`/`render_workbench`/`render_dep_canvas`/`render_cluster_workbench`，职责清晰。
 
 - [ ] 决定 `harvest_*` vs `extract_*` 语义边界是否明确
 

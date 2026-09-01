@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { renderDsl } from '../../src/tools/render_dsl';
+import { renderDesign } from '../../src/tools/render_design';
 import { getDsl } from '../../src/tools/get_dsl';
 import { listFeatures } from '../../src/tools/list_features';
 import { clearAllFeatures } from '../../src/storage';
@@ -46,7 +46,7 @@ describe('get_dsl', () => {
 
   it('能读回已保存的 DSL', () => {
     const dsl = makeDSL('alpha', 'in_progress');
-    renderDsl({ dsl_json: JSON.stringify(dsl) });
+    renderDesign({ dsl_json: JSON.stringify(dsl) });
     const result = getDsl({ feature_name: 'alpha' });
     const parsed = JSON.parse(result.json);
     expect(parsed.feature).toBe('alpha');
@@ -71,7 +71,7 @@ describe('list_features', () => {
   });
 
   it('单个 feature 正确列出', () => {
-    renderDsl({ dsl_json: JSON.stringify(makeDSL('alpha', 'done')) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL('alpha', 'done')) });
     const result = listFeatures();
     expect(result.count).toBe(1);
     expect(result.message).toContain('alpha');
@@ -81,9 +81,9 @@ describe('list_features', () => {
   });
 
   it('多个 feature 按字母序排列', () => {
-    renderDsl({ dsl_json: JSON.stringify(makeDSL('zeta', 'draft')) });
-    renderDsl({ dsl_json: JSON.stringify(makeDSL('alpha', 'draft')) });
-    renderDsl({ dsl_json: JSON.stringify(makeDSL('middle', 'draft')) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL('zeta', 'draft')) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL('alpha', 'draft')) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL('middle', 'draft')) });
     const result = listFeatures();
     expect(result.count).toBe(3);
     // alpha 应该在 zeta 之前
@@ -95,7 +95,7 @@ describe('list_features', () => {
   });
 
   it('draft 状态的 feature 无不变式时不显示不变式计数异常', () => {
-    renderDsl({ dsl_json: JSON.stringify(makeDSL('draft_one', 'draft')) });
+    renderDesign({ dsl_json: JSON.stringify(makeDSL('draft_one', 'draft')) });
     const result = listFeatures();
     expect(result.message).toContain('0 不变式');
   });
@@ -103,7 +103,7 @@ describe('list_features', () => {
   it('status 默认 draft（DSL 未设 status 时）', () => {
     const dsl = makeDSL('no_status', 'done');
     delete dsl.status;
-    renderDsl({ dsl_json: JSON.stringify(dsl) });
+    renderDesign({ dsl_json: JSON.stringify(dsl) });
     const result = listFeatures();
     expect(result.message).toContain('no_status');
     expect(result.message).toContain('draft');

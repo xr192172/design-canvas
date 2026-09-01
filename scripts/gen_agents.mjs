@@ -26,7 +26,7 @@ const OUT = path.join(ROOT, 'AGENTS.md');
 // 唯一事实源：触发点总表（按开发动作分组）
 // ─────────────────────────────────────────────────────────────
 const TRIGGER_ROWS = [
-  ['开发前先看 / 画活文档', '`get_dsl` / `render_dsl` / `edit_dsl` / `manage_feature`', '开工前对齐设计，避免方向性错误'],
+  ['开发前先看 / 画活文档', '`get_dsl` / `render_design` / `edit_dsl` / `manage_feature`', '开工前对齐设计，避免方向性错误'],
   ['日常维护（补节点/改描述/加标注）', '`edit_dsl weight=routine`', '轻量写路径：跳过 L4 证据回溯，仍留 L1-L3 防空话；改架构/契约等重改用 normal 全链'],
   ['改一个模块级符号名', '`rename_symbol`', '自动定根+闭包+跨语言，先 dry_run 看 diff'],
   ['批量改多个符号', '`rename_symbols`', '先整体 dry-run，全部可落盘才落'],

@@ -11,7 +11,7 @@
  * - 异步 action（import/derive_* / watch）统一 await，错误分级可恢复
  * - 新增 action 只加 switch case，不改注册表
  *
- * 注意：render_dsl / get_dsl / diff_views 等"读"工具不在此聚合中，
+ * 注意：render_design / get_dsl / diff_views 等"读"工具不在此聚合中，
  * 它们在注册表独立存在，因为 LLM 需要在 import 后立刻渲染/查询，动作链较短。
  */
 

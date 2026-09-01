@@ -23,10 +23,10 @@ description: "design-canvas 渐进披露路由。遇到『画图/看代码/重�
 ## 第二层：落到工具
 
 ### A · 画图
-- 原始诉求是「建底 / 出图 / 全项目对账」→ `import_project` → `render_dsl` → `reconcile_effects`
+- 原始诉求是「建底 / 出图 / 全项目对账」→ `import_project` → `render_design` → `reconcile_effects`
 - 只是「改一版图 / 查当前图」→ `get_dsl`（读）+ `edit_dsl`（写，批量操作，原子回滚）
 - 新建/克隆/删一个 feature → `manage_feature`
-- 想换输出格式（html/svg/markdown）→ `render_dsl format=…`
+- 想换输出格式（html/svg/markdown）→ `render_design format=…`
 - 别手写渲染器/新布局脚本——编辑类动作都收进 `edit_dsl` 的 `operations[]`。
 
 ### B · 代码理解（全走 `explore_code`，用 `action` 分发）

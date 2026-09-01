@@ -3,7 +3,7 @@
  *
  * 背景：此前每个 feature 各生成各的 HTML，散落在 output/ 且互无索引、无语义化。
  * 本模块提供一个 .registry.json 作为"产物目录"：
- *   - 生成产物时自动注册（render_dsl 写文件后挂钩）
+ *   - 生成产物时自动注册（render_design 写文件后挂钩）
  *   - 人工可打标记/编辑（tags / note / title / status）
  *   - 供 Hub 首页动态渲染产物总览，也为后续跨产物导览（G1）铺路
  *

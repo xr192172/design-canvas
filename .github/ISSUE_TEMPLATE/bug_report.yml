@@ -21,7 +21,7 @@ body:
       label: 所属模块
       description: 问题出在哪个模块
       options:
-        - 渲染器（render_dsl / HTML）
+        - 渲染器（render_design / HTML）
         - DSL 校验 / schema
         - 代码理解（explore_code / import_project）
         - 积木线（harvest / brickify / assemble）

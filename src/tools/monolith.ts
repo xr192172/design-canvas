@@ -784,7 +784,7 @@ export async function checkMonolith(input: CheckMonolithInput): Promise<CheckMon
     for (const r of cohesive) linesOut.push(`  · ${r.path}（${r.lines} 行）`);
   }
   if (previewFeature) {
-    linesOut.push('', `预览 DSL 已保存为 feature "${previewFeature}"，用 render_dsl 渲染查看拆分后视图。`);
+    linesOut.push('', `预览 DSL 已保存为 feature "${previewFeature}"，用 render_design 渲染查看拆分后视图。`);
   }
   if (oversized.length === 0 && cohesive.length === 0) {
     linesOut.push('所有文件行数健康，无单文件化风险。');
