@@ -58,6 +58,7 @@ import { renameSymbol } from './tools/rename_symbol.js';
 import { renameSymbols } from './tools/rename_symbols.js';
 import { findReferences } from './tools/find_references.js';
 import { runTests } from './tools/run_tests.js';
+import { checkStaleBuild, formatStaleText } from './tools/stale_check.js';
 import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1595,6 +1596,16 @@ const TOOL_DEFS: ToolDef[] = [
       timeout_ms: z.number().optional().describe('超时毫秒（默认 120000）'),
     },
     handler: wrap(async (a) => {
+      // 跑测试前置：检本服务自身 dist 是否 stale（改 src 忘 build → 提示先重建，防测旧产物）
+      const staleHint = (() => {
+        try {
+          // dist/src/server_registry.js → 向上 3 级 = 项目根
+          const stale = checkStaleBuild(path.resolve(fileURLToPath(import.meta.url), '..', '..', '..'));
+          return stale.stale ? formatStaleText(stale) : null;
+        } catch {
+          return null; // 非本项目根（如外部项目）→ 静默跳过
+        }
+      })();
       const r = runTests({
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         filter: typeof a.filter === 'string' && a.filter ? a.filter : undefined,
@@ -1604,6 +1615,7 @@ const TOOL_DEFS: ToolDef[] = [
         return { message: `无法运行测试：${r.error || '未知错误'}`, data: r };
       }
       const parts = [
+        ...(staleHint ? [staleHint, ''] : []),
         r.success
           ? `${r.filter ? `[定向]` : `[全量]`} 测试通过：${r.passed}/${r.total} 通过（${r.total} 个用例）`
           : `${r.filter ? `[定向]` : `[全量]`} 测试失败：${r.passed}/${r.total} 通过，${r.failed} 个失败`,
