@@ -1,0 +1,4 @@
+#!/bin/sh
+# 提交前自愈 AGENTS.md（方案A）：确保每次 commit 都带上正确生成的触发点总表。
+# 安装：复制到 .git/hooks/pre-commit（本仓库已内置 .githooks/pre-commit，负责自装）。
+node "$(git rev-parse --show-toplevel)/scripts/gen_agents.mjs" --silent && git add AGENTS.md
