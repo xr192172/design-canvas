@@ -84,6 +84,25 @@ describe('watchProjectTool start/status/stop', () => {
     const r = await watchProjectTool({ project_dir: root });
     expect(r.rebuild).toBe(false);
   });
+
+  it('drift_on_change 透传并可从 status 回读（独立于 rebuild）', async () => {
+    const root = makeRoot();
+    const start = await watchProjectTool({ project_dir: root, feature: 'demo', drift_on_change: true });
+    expect(start.drift_on_change).toBe(true);
+    expect(start.rebuild).toBe(true); // feature 给了 → 默认 rebuild，但 drift 本就独立于 rebuild
+    expect(start.message).toContain('drift 过时判定');
+
+    const st = await watchProjectTool({ project_dir: root, action: 'status' });
+    expect(st.drift_on_change).toBe(true);
+    expect(st.drift_alert).toBeUndefined(); // 尚无变更，未产生 drift 结果
+  });
+
+  it('drift_on_change 但没给 feature → 不开 drift（漂移需要可定位的 DSL feature）', async () => {
+    const root = makeRoot();
+    const start = await watchProjectTool({ project_dir: root, drift_on_change: true });
+    expect(start.rebuild).toBe(false);
+    expect(start.message).not.toContain('drift 过时判定');
+  });
 });
 
 describe('createRebuildThrottler 节流', () => {

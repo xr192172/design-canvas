@@ -162,11 +162,13 @@ interface ActiveWatch {
   last_diff?: DiffViewsResult;
   /** 冷却窗口内积累的待分析变更文件（相对项目根），doWork 时取走清空 */
   pending_files: Set<string>;
-  /** 冷却窗口内积累的待检测漂移变更文件（相对项目根），rebuild 时取走清空；drift_on_change 用 */
+  /** 冷却窗口内积累的待检测漂移变更文件（相对项目根），drift 阶段取走清空；drift_on_change 用 */
   pending_drift_files: Set<string>;
   /** 最近一次 detect_drift 结果（仅 drift_on_change=true 时有） */
   last_drift?: DriftData;
   last_drift_at?: string;
+  /** 上次 drift 状态（转换去重：仅状态变化时 push） */
+  last_drift_status?: DriftData['status'];
   /** 未读影响提醒（一行摘要 × 报告序号），新→旧，cap 20；watch status 时 piggyback 带回 */
   alerts: { seq: number; created_at: string; line: string }[];
   last_impact_seq?: number;
@@ -358,24 +360,24 @@ function driftBrief(d: DriftData): string {
     (d.drifted ? ' — 设计需同步（edit_dsl/import_project）' : ' — 对齐');
 }
 
-/** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + 影响报告） */
+/** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + drift + 影响报告） */
 async function onBatchChange(entry: ActiveWatch, summary: WatchBatchSummary): Promise<void> {
   entry.last_change_at = new Date().toISOString();
   entry.last_summary = summary;
   if (entry.impact_on_change) {
     for (const f of summary.files) entry.pending_files.add(f);
   }
-  if (entry.rebuild && entry.feature) {
-    for (const f of summary.files) entry.pending_drift_files.add(f); // drift 作用域取本次变更
+  if (entry.drift_on_change && entry.feature) {
+    for (const f of summary.files) entry.pending_drift_files.add(f); // drift 作用域取本次变更（不依赖 rebuild）
   }
   if (!entry.throttle) return;
-  if (!entry.rebuild && !entry.impact_on_change) return;
+  if (!entry.rebuild && !entry.impact_on_change && !entry.drift_on_change) return;
   entry.throttle.trigger();
 }
 
 /**
- * 节流后的单次工作：① rebuild 实际 DSL（可选）② 影响报告（可选）。
- * 两阶段独立成败：rebuild 失败不影响 impact（缓存已在 watch 增量同步过）。
+ * 节流后的单次工作：① rebuild 实际 DSL（可选）② drift 过时判定（可选，独立于 rebuild）③ 影响报告（可选）。
+ * 各阶段独立成败：rebuild 失败不影响 drift/impact（缓存已在 watch 增量同步过）。
  */
 async function doWork(entry: ActiveWatch): Promise<void> {
   // ① rebuild（live/，不覆盖设计 DSL）
@@ -397,34 +399,37 @@ async function doWork(entry: ActiveWatch): Promise<void> {
           entry.error = 'diff 失败: ' + (diffErr as Error).message;
         }
       }
-
-      // rebuild 后若有 drift_on_change 标记，以本次变更文件为作用域做契约级过时判定
-      if (entry.drift_on_change) {
-        const driftFiles = [...entry.pending_drift_files];
-        entry.pending_drift_files.clear();
-        try {
-          const drift = await detectDrift({
-            feature: entry.feature,
-            code_dir: entry.project_dir,
-            scope: 'changed',
-            changed_files: driftFiles.length > 0 ? driftFiles.map((f) => relOf(entry.project_dir, f)) : undefined,
-          });
-          entry.last_drift = drift;
-          entry.last_drift_at = new Date().toISOString();
-          if (drift.drifted && driftFiles.length > 0) {
-            // 设计被本次代码变更甩开：直接入响应注入收件箱，提示需同步设计
-            pushAlert({ project_dir: entry.project_dir, seq: 0, line: driftBrief(drift), created_at: new Date().toISOString() });
-          }
-        } catch (driftErr) {
-          entry.error = 'drift 检测失败: ' + (driftErr as Error).message;
-        }
-      }
     } catch (e) {
       entry.error = (e as Error).message;
     }
   }
 
-  // ② 影响报告：取走冷却窗口内积累的变更文件，全文落盘 + 摘要入 alerts
+  // ② drift 过时判定（独立于 rebuild：只想盯 drift 不必全量重建 live）
+  if (entry.drift_on_change && entry.feature) {
+    const driftFiles = [...entry.pending_drift_files];
+    entry.pending_drift_files.clear();
+    if (driftFiles.length > 0) {
+      try {
+        const drift = await detectDrift({
+          feature: entry.feature,
+          code_dir: entry.project_dir,
+          scope: 'changed',
+          changed_files: driftFiles.map((f) => relOf(entry.project_dir, f)),
+        });
+        entry.last_drift = drift;
+        entry.last_drift_at = new Date().toISOString();
+        // 状态转换去重：只在「未过时 → 过时」时 push，stale 持续期不重复轰炸同一过时状态
+        if (drift.drifted && entry.last_drift_status !== drift.status) {
+          pushAlert({ project_dir: entry.project_dir, seq: 0, line: driftBrief(drift), created_at: new Date().toISOString() });
+        }
+        entry.last_drift_status = drift.status;
+      } catch (driftErr) {
+        entry.error = 'drift 检测失败: ' + (driftErr as Error).message;
+      }
+    }
+  }
+
+  // ③ 影响报告：取走冷却窗口内积累的变更文件，全文落盘 + 摘要入 alerts
   //    + 注入 Observe 事件流（Step 3 合流：serve SSE 即时播报 / observe_log 事后查 /
   //      observe_judge 判定爆炸半径 design:impact-blast-radius）
   if (entry.impact_on_change && entry.pending_files.size > 0) {
@@ -582,8 +587,8 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     alerts: [],
   };
 
-  // 节流：rebuild 或影响报告任一开启即建（冷却窗口内编辑风暴合并为一次工作）
-  if ((rebuild && feature) || impactOnChange) {
+  // 节流：rebuild/drift/影响报告任一开启即建（冷却窗口内编辑风暴合并为一次工作）
+  if ((rebuild && feature) || (driftOnChange && feature) || impactOnChange) {
     entry.throttle = createRebuildThrottler({
       windowMs: input.rebuild_window_ms ?? 2000,
       run: () => doWork(entry),
@@ -636,7 +641,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     message: `已开始监听 ${path.resolve(input.project_dir)}`
       + (rebuild && feature ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）')
       + (diffOnChange ? '，变更后自动 diff 对比' : '')
-      + (driftOnChange ? '，变更后自动 drift 过时判定' : '')
+      + (driftOnChange && feature ? '，变更后自动 drift 过时判定' : '')
       + (impactOnChange ? '，变更后自动影响报告（status 取摘要，action=impact 取全文）' : '')
       + (recovered > 0 ? `；已恢复 ${recovered} 条跨会话改前预告` : ''),
   };
