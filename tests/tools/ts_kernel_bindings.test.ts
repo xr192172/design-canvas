@@ -46,4 +46,15 @@ describe('ts_kernel 跨语言 import 绑定提取', () => {
     expect(imp).toBeDefined();
     expect(imp!.bindings).toBeUndefined();
   });
+
+  it('Python 模块顶层调用提取（caller=<module>）：限定与裸调用都报', async () => {
+    const pf = await parseFileFull(
+      'a.py',
+      'import other\nx = other.compute(1)  # 顶层限定\ndef go():\n    return compute(2)\n',
+    );
+    const calls = pf.calls;
+    expect(calls.some((c) => c.caller === '<module>' && c.callee === 'compute' && c.callee_expr === 'other.compute')).toBe(true);
+    // 函数内照常归属函数
+    expect(calls.some((c) => c.caller === 'go' && c.callee === 'compute')).toBe(true);
+  });
 });

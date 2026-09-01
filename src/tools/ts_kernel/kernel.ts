@@ -414,6 +414,15 @@ function traverseAndExtractCalls(
   }
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
+    if (!child) continue;
+    // 模块顶层调用（Python 等）：无包裹函数，调用归属 <module>；只在不进函数体内时提取（函数内由 extractCallsFromBody 处理）
+    if (lang.name === 'python' && funcStack.length === 0 && isCallNode(child, lang)) {
+      const c = extractCallee(child, lang.name);
+      if (c) {
+        const sym = symbols.find((s) => s.name === c.name);
+        calls.push({ caller: '<module>', callee: c.name, callee_expr: c.expr, line: child.startPosition.row + 1, resolved: !!sym, callee_qn: sym ? sym.qualified_name : undefined });
+      }
+    }
     if (child) traverseAndExtractCalls(child, lang, symbols, calls, funcStack, depth + 1);
   }
 }
