@@ -185,4 +185,32 @@ describe('renameSymbols - 批量跨文件符号改名', () => {
     expect(r.literals).toBeUndefined();
     rmForce(dir);
   });
+
+  it('report_literals 命中按类别分类（contract/docs/history/test）', async () => {
+    const dir = mkProj({
+      'src/render.ts': 'export function renderDsl(): string { return "v"; }\n',
+      'src/server_registry.ts': "const def = { name: 'render_dsl', title: 'x' };\n",
+      'README.md': '# t\n请先 render_dsl 渲染。\n',
+      'docs/tool-convergence.md': 'render_dsl(旧名) <- render_design(新)\n',
+      'tests/use.test.ts': "expect(tool).toBe('render_dsl');\n",
+    });
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      report_literals: true,
+    });
+    expect(r.ok).toBe(true);
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    expect(l.matches.length).toBeGreaterThan(0);
+    const byKind = (k: string) => l.matches.filter((m) => m.kind === k);
+    // server_registry 的 name: 注册名 → contract（对外契约）
+    expect(byKind('contract').some((m) => m.file.endsWith('server_registry.ts'))).toBe(true);
+    // README → docs
+    expect(byKind('docs').some((m) => m.file.endsWith('README.md'))).toBe(true);
+    // tool-convergence → history（历史记录保留原貌）
+    expect(byKind('history').some((m) => m.file.includes('tool-convergence'))).toBe(true);
+    // tests/*.test.ts → test
+    expect(byKind('test').some((m) => m.file.endsWith('use.test.ts'))).toBe(true);
+    rmForce(dir);
+  });
 });

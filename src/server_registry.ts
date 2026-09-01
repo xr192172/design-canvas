@@ -1407,7 +1407,19 @@ const TOOL_DEFS: ToolDef[] = [
         const hits = (res.literals || []).filter((l) => l.matches.length > 0);
         if (hits.length === 0) return;
         parts.push('\n字面量引用（report_literals，仅报告未改动）：');
-        for (const l of hits) parts.push(`  • "${l.needle}" → ${l.matches.length} 处（如 ${l.matches[0].file}:${l.matches[0].line}）`);
+        const kindLabel = { contract: '契约名', history: '历史', docs: '文档', test: '测试', code: '源码' } as const;
+        for (const l of hits) {
+          const tally: Partial<Record<string, number>> = {};
+          for (const m of l.matches) tally[m.kind] = (tally[m.kind] || 0) + 1;
+          const sum = Object.entries(tally)
+            .map(([k, n]) => `${kindLabel[k as keyof typeof kindLabel] ?? k}×${n}`)
+            .join(' ');
+          parts.push(`  • "${l.needle}" → ${l.matches.length} 处（${sum}），如 ${l.matches[0].file}:${l.matches[0].line}`);
+        }
+        const contractHits = hits.some((l) => l.matches.some((m) => m.kind === 'contract'));
+        if (contractHits) {
+          parts.push('  ⚠ 命中【契约名】= 对外 MCP 注册名（name:）——改名会破坏调用契约，需人审同步契约而非自动落盘。');
+        }
       };
       if (!r.ok) {
         const parts = [`批量改名被阻断（${r.dryRun ? '整体未落盘' : '部分已应用后中止'}）：`];

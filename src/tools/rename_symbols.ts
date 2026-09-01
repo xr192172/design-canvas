@@ -17,6 +17,17 @@ import path from 'node:path';
 import { renameSymbol, type RenameSymbolInput, type RenameSymbolResult } from './rename_symbol.js';
 import { resolveProjectRoot } from './project_root.js';
 
+/** 字面量命中的类别：contract=对外工具注册名(破坏契约需人审)；history=tool-convergence 历史记录(保留原貌)；docs=文档；test=测试断言；code=源码字符串 */
+export type LiteralMatchKind = 'contract' | 'history' | 'docs' | 'test' | 'code';
+
+/** 单个字面量命中 */
+export interface LiteralMatch {
+  file: string;
+  line: number;
+  snippet: string;
+  kind: LiteralMatchKind;
+}
+
 export interface RenameSymbolsItem {
   /** 定义符号的文件（绝对路径；或相对 cwd / project_dir 路径） */
   file: string;
@@ -51,7 +62,7 @@ export interface RenameSymbolsResult {
     index: number;
     item: RenameSymbolsItem;
     needle: string;
-    matches: Array<{ file: string; line: number; snippet: string }>;
+    matches: LiteralMatch[];
   }>;
 }
 
@@ -148,13 +159,27 @@ function camelToSnake(str: string): string {
   return str.replace(/([A-Z])/g, '_$1').replace(/^_/, '').toLowerCase();
 }
 
+/** 按文件名/行内容判定字面量命中的类别（契约名 / 历史记录 / 文档 / 测试 / 源码） */
+function classifyLiteral(file: string, lineText: string, needle: string): LiteralMatchKind {
+  const rel = file.split(path.sep).join('/');
+  // 对外工具注册名：server_registry 里 `name: 'needle'`（改名会破坏 MCP 调用契约 → 需人审）
+  if (/server_registry/i.test(rel) && new RegExp(`name:\\s*['"\`]${needle}['"\`]`).test(lineText)) return 'contract';
+  // 历史决策记录：tool-convergence 等，改名应保留原貌
+  if (/tool-convergence|docs\/plans/i.test(rel)) return 'history';
+  // 文档类：README / AGENTS / CONTRIBUTING / skill / issue 模板
+  if (/README|AGENTS|CONTRIBUTING|ISSUE_TEMPLATE|SKILL\.md|docs\//i.test(rel)) return 'docs';
+  // 测试断言
+  if (/tests\/|\.test\.|\.spec\./i.test(rel)) return 'test';
+  return 'code';
+}
+
 /** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中 |
  * 只扫描非二进制可读文件，限于设计图纸/文档/脚本/测试（非 node_modules 非 dist） */
 function scanLiteralOccurrences(
   projectDir: string,
   needles: string[],
-): Array<{ needle: string; matches: Array<{ file: string; line: number; snippet: string }> }> {
-  const result: Array<{ needle: string; matches: Array<{ file: string; line: number; snippet: string }> }> = [];
+): Array<{ needle: string; matches: LiteralMatch[] }> {
+  const result: Array<{ needle: string; matches: LiteralMatch[] }> = [];
   if (needles.length === 0) return result;
 
   // 只扫描常见可读扩展名（排除二进制/编译产物）
@@ -178,14 +203,19 @@ function scanLiteralOccurrences(
   // 对每个 needle 逐文件 grep
   for (const needle of needles) {
     if (!needle) continue;
-    const matches: Array<{ file: string; line: number; snippet: string }> = [];
+    const matches: LiteralMatch[] = [];
     for (const f of files) {
       try {
         const content = fs.readFileSync(f, 'utf-8');
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].includes(needle)) {
-            matches.push({ file: f, line: i + 1, snippet: lines[i].trim().substring(0, 120) });
+            matches.push({
+              file: f,
+              line: i + 1,
+              snippet: lines[i].trim().substring(0, 120),
+              kind: classifyLiteral(f, lines[i], needle),
+            });
           }
         }
       } catch { /* 跳过无法读的文件 */ }

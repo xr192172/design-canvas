@@ -287,13 +287,11 @@
 2. **历史记录需要灰名单**：改名时 `docs/tool-convergence` 的历史核验/判定记录（如「render\_sandbox 曾判 render\_dsl 不合并」）必须保留原名还原语境，不能被无脑全局替换。这要求工具支持「按语义保留的原名白名单」。
 3. **生成物源头优先**：`AGENTS.md` 里的工具名由 `gen_agents.mjs` TRIGGER\_ROWS 驱动，改工具名必须改源头而非生成物本身（生成物会被 build 自愈重建）。
 
-### 改进建议（待立项）
+### 改进建议 → 已落地（2026-09）
 
-- **字面量感知改名**：让 `rename_symbols` 支持「同步 user-facing 输出字符串」，扫描代码里 `'render_dsl'` 字样并给出确认清单，而非只改符号。
-
-- **注册名白名单**：重命名工具理解「对外工具注册名」这一概念，改名时联动更新 server\_registry 的 `name:` 与 README/AGENTS 引用。
-
-- **文档灰名单**：对 `docs/tool-convergence` 的历史记录段打标记，批量替换时回退原名。
+- ✅ **字面量感知改名**：`rename_symbols report_literals=true` 扫描旧符号 snake 变体在项目文本的字面量命中，返回清单（只报告不改）。
+- ✅ **注册名白名单**：命中按 `kind` 分类——`server_registry` 的 `name:`→`contract`（对外契约，清单醒目标「破坏契约需人审」），tool-convergence/docs→`history`/`docs`（保留原貌）、tests→`test`、其余→`code`；agent 据清单区分「改 / 保留 / 契约谨慎」。
+- ⏳ **契约变更纪律**：已写进 AGENTS「文档同步纪律（契约变更才跟）」；工具侧由 `contract` 命中的风险提示承载「需人审」的门槛，暂不自动落盘（避免误伤历史灰名单的语义判定）。
 
 ***
 
