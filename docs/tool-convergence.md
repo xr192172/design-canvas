@@ -223,14 +223,16 @@
 
 - **差异化场景**：活文档同步、契约回填、运行时观测（observe）——写代码时不主动想，但项目健康需要
 
-### 改进方向（1、2 已实施，其余待讨论）
+### 改进方向（1、2、3 已实施，4 待讨论）
 
-1. **消除前置状态** —— ✅ **已实施（2026-08）**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界（根内全量 + 沿 import 边扩入根外本地文件，自包含）。改一个符号从"先备好几步"降为"给个文件路径即可"。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`），配套测试覆盖嵌套 git 根解析、跨根 import 闭包、扩展名/索引解析。
+> 说明：本小节曾被外部工具多次还原，语义经 commit c1d4f14 / b8c2bcf / bfff6de 持续推进，此处为最新累积状态。
+
+1. **消除前置状态** —— ✅ **已实施（2026-08）**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界（根内全量 + 沿 import 边/别名边扩入根外本地文件，自包含）。改一个符号从"先备好几步"降为"给个文件路径即可"。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`），配套测试覆盖嵌套 git 根解析、跨根 import 闭包、别名（含 monorepo 根配置向上查找）、扩展名/索引解析。
 2. **输出可直接消费** —— ✅ **已实施（2026-08）**：`rename_symbol` 返回结构化 diff——每个受影响文件带 `ops: [{pos, len, old, new}]`（字节偏移 + 旧→新文本，可重放验证），并新增 `dry_run=true` 只算 diff 不落盘（含文件联动只报计划名）。MCP handler 的 message 渲染每处 `old → new`。消除"黑盒→不信任→不用"根因。
-3. **触发点埋进日常流程**（待讨论）：commit 前自动跑一致性检查、改名后自动回填契约——工具主动接入而非等 LLM 想起
+3. **闭包 importer 方向** —— ✅ **已实施（2026-08）**：`findExternalImporters` 有界扫描 seed 根的直属兄弟项目/松散文件里「相对 import 引用 seed」的本地文件并纳入闭包（覆盖跨 git 根引用，如 dsl-workbench 引用 design-canvas）。防御：项目样兄弟数量超 `NEIGHBOR_LIMIT(20)` 判定为 temp/缓存容器即短路。邻域推进时先 BFS import 边再扩 importer。
 4. **批量操作**（待讨论）：rename/操作支持多文件一次调用（对标脚本效率；依赖方向 2 的结构化 diff 做批量预览/验证）
 
-> ⚠ **已知边界**：闭包沿「import 边 / 别名边」向外扩展（seed 依赖的根外文件会被纳入；tsconfig `@/` 路径别名已支持，含 baseUrl 直连与 monorepo 根配置向上查找）。根外文件若只"引用 seed"（importer 方向）则不在闭包内——那属于调用方扫描，需另行立项。
+> ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边」扩展，已覆盖 seed 依赖（importee）与同工作区兄弟引用 seed（importer）两个方向。仍有未覆盖：a) 跨 drive/homedir 外更大范围的项目引用（防御性不扫）；b) 邻域内别名/裸包导入的 importer（邻域只按相对路径追）；c) 跨语言 `.go/.py` 文件的 import 边解析。
 
 ***
 

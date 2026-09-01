@@ -428,3 +428,28 @@ describe('renameSymbol - tsconfig 路径别名（@/）', () => {
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - 跨根 importer（兄弟项目相对引用）', () => {
+  it('B 项目用 ../A/src/def 引用 A 的 compute → 邻域扫描命中并改写', async () => {
+    const dir = mkProj({
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': 'export function compute(a: number): number { return a; }\n',
+      'B/package.json': '{ "name": "b" }\n',
+      'B/src/use.ts': "import { compute } from '../../A/src/def';\nexport function use() { return compute(1); }\n",
+    });
+
+    // 不传 project_dir：自动定位 A 根 + 邻域扫描到 B
+    const r = await renameSymbol({ file: path.join(dir, 'A/src/def.ts'), symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件改名
+    expect(readFileSync(path.join(dir, 'A/src/def.ts'), 'utf-8')).toContain('export function tally');
+    // 跨根 importer：import 远程名 + 使用点都改，相对路径保留
+    const use = readFileSync(path.join(dir, 'B/src/use.ts'), 'utf-8');
+    expect(use).toContain("import { tally } from '../../A/src/def';");
+    expect(use).toContain('return tally(1);');
+    // 结果里能看到跨根文件（相对根外一级：root=A，B 在相同父目录下）
+    expect(r.importers!.some((i) => i.file === '../B/src/use.ts')).toBe(true);
+    rmForce(dir);
+  });
+});

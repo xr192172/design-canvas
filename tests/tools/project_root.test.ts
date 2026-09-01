@@ -21,6 +21,7 @@ import {
   expandClosure,
   loadAliasConfig,
   resolveAliasedImport,
+  findExternalImporters,
 } from '../../src/tools/project_root';
 
 function mkProj(files: Record<string, string>): string {
@@ -266,6 +267,43 @@ describe('expandClosure - 别名边跨根扩展', () => {
     expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
     // 根外 helper.ts 经别名边被纳入
     expect(norm).toContain(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
+});
+
+describe('findExternalImporters - importer 邻域有界扫描', () => {
+  it('兄弟项目相对引用 seed → 命中；未引用 → 不命中', async () => {
+    const dir = mkProj({
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': 'export function compute() { return 1; }\n',
+      'B/package.json': '{ "name": "b" }\n',
+      'B/src/use.ts': "import { compute } from '../../A/src/def';\nexport function use() { return compute(); }\n",
+      'B/src/other.ts': 'export const x = 1;\n',
+    });
+    const hits = await findExternalImporters(path.join(dir, 'A/src/def.ts'), path.join(dir, 'A'));
+    const norm = hits.map((h) => h.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
+    expect(norm).not.toContain(expect.stringContaining('other.ts'));
+    rmForce(dir);
+  });
+});
+
+describe('expandClosure - importer 邻域自包含', () => {
+  it('兄弟项目引用 seed → 闭包纳入并沿其 import 边扩展（自包含）', async () => {
+    const dir = mkProj({
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': 'export function compute() { return 1; }\n',
+      'B/package.json': '{ "name": "b" }\n',
+      'B/src/use.ts': "import { compute } from '../../A/src/def';\nimport { helper } from './util';\nexport function use() { return compute() + helper(); }\n",
+      'B/src/util.ts': 'export function helper() { return 1; }\n',
+    });
+    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), path.join(dir, 'A'));
+    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
+    // 兄弟项目引用 seed 的文件被邻域扫描纳入
+    expect(norm).toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
+    // 邻域文件的本地依赖也被纳入（自包含承诺）
+    expect(norm).toContain(path.join(dir, 'B/src/util.ts').replace(/\\/g, '/'));
     rmForce(dir);
   });
 });

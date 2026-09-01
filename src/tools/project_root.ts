@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { analyzeModuleSource } from './rename_symbol.js';
 
 /** 本地源扩展名（闭包只收这些；与 rename_symbol/rename_file 的 TS_EXTS 对齐） */
@@ -34,6 +35,9 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', '.svn', '.hg
 
 /** 项目根标志文件（manifest，git 之外的项目边界判据） */
 const MANIFESTS = ['package.json', 'go.mod', 'pyproject.toml', 'Cargo.toml', 'pom.xml', 'composer.json', 'pubspec.yaml', 'build.gradle'];
+
+/** 邻域项目样兄弟数量上限：超过即判定为 temp/缓存容器（非工作区），短路不扫 */
+const NEIGHBOR_LIMIT = 20;
 
 function isSkippedDir(name: string): boolean {
   return SKIP_DIRS.has(name) || name.startsWith('.');
@@ -236,11 +240,98 @@ export function isLocalSource(abs: string): boolean {
   return !parts.some((s) => isSkippedDir(s));
 }
 
+// ─────────────────────────────────────────────
+// importer 邻域扫描：根外文件引用 seed（Git 嵌套 / 兄弟仓库互引）
+// ─────────────────────────────────────────────
+
+/** 目录是否"项目样"（有 .git 或 manifest）——邻域扫描只进入这类兄弟目录，保证有界 */
+export function isProjectDir(d: string): boolean {
+  return fs.existsSync(path.join(d, '.git')) || MANIFESTS.some((m) => fs.existsSync(path.join(d, m)));
+}
+
+/** 文件是否通过相对 import 真实引用 targetAbs（TS 系才解析；跨项目常见形态是相对路径） */
+async function importsTargetFile(fileAbs: string, targetAbs: string): Promise<boolean> {
+  const ext = path.extname(fileAbs);
+  if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) return false;
+  let mod: Awaited<ReturnType<typeof analyzeModuleSource>> | null = null;
+  try {
+    mod = await analyzeModuleSource(fs.readFileSync(fileAbs, 'utf-8'), fileAbs);
+  } catch {
+    return false;
+  }
+  if (!mod) return false;
+  for (const e of mod.imports) {
+    if (!e.source || !e.source.startsWith('.')) continue; // 邻域只按相对路径追（跨项目常见形态）
+    const real = realResolveImport(fileAbs, e.source);
+    if (real && path.resolve(real) === targetAbs) return true;
+  }
+  return false;
+}
+
+/**
+ * importer 邻域有界扫描：找到「根外、但引用了 seedFile」的本地文件。
+ *
+ * 只扫 **seed 根的直属兄弟目录**（root 的父目录里的项目样邻居 + 该层松散源文件），
+ * 不向更上层上爬 —— 避免从 Temp/build 等深层路径一路扫进整个文件树里的项目。
+ * 邻域语义 = "同 monorepo 根 / 同工作区下的平铺兄弟仓库"，本就是 root 直属层。
+ *
+ * 防御：先数项目样兄弟数量，若远超工作区规模（> NEIGHBOR_LIMIT）→ 判定为 temp/缓存
+ * 容器（历史测试残留），直接短路返回 —— 防止对上千个噪声目录逐个全量扫描。
+ *
+ *  - 只处理根的直接父目录一层：进入其中"项目样"兄弟（.git/manifest）+ 该层松散源文件
+ *  - 排除 root 自身子树 / 噪音目录 / 用户主目录 / 驱动器根
+ *  - 匹配：相对 import 真实解析到 seedFile（跨项目常见形态；别名/裸包不在本版，见 docs 边界）
+ * 返回被引用 seedFile 的文件绝对路径列表。
+ */
+export async function findExternalImporters(seedFile: string, root: string): Promise<string[]> {
+  const seedAbs = path.resolve(seedFile);
+  const rootAbs = path.resolve(root);
+  const home = path.resolve(homedir());
+  const siblingDir = path.dirname(rootAbs);
+  if (siblingDir === path.dirname(siblingDir)) return []; // root 已在驱动器（盘）根 → 无兄弟层
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(siblingDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  // 防御：项目样兄弟数量异常 → 这是 temp/缓存容器，不是工作区，短路（不逐个 walk）
+  let projectLike = 0;
+  for (const e of entries) {
+    if (!e || !e.isDirectory() || isSkippedDir(e.name)) continue;
+    const p = path.join(siblingDir, e.name);
+    if (p === rootAbs || rootAbs.startsWith(p + path.sep)) continue;
+    if (isProjectDir(p)) projectLike++;
+    if (projectLike > NEIGHBOR_LIMIT) return [];
+  }
+  const out: string[] = [];
+  const candidates: string[] = [];
+  for (const e of entries) {
+    if (!e) continue;
+    if (isSkippedDir(e.name)) continue;
+    const p = path.join(siblingDir, e.name);
+    if (p === rootAbs || rootAbs.startsWith(p + path.sep)) continue; // 排除 root 自身子树与其祖先
+    if (e.isDirectory()) {
+      if (isProjectDir(p) && path.resolve(p) !== home) walkProjectFiles(p, candidates);
+    } else if (e.isFile() && SRC_EXTS.has(path.extname(e.name))) {
+      candidates.push(p); // 该层松散源文件（如根旁的 shared.ts）
+    }
+  }
+  for (const f of candidates) {
+    const abs = path.resolve(f);
+    if (abs === seedAbs || !isLocalSource(abs)) continue;
+    if (await importsTargetFile(abs, seedAbs)) out.push(abs);
+  }
+  return out;
+}
+
 /**
  * 动态闭包边界：给定种子文件 + 初始项目根，返回自包含的本地源文件集合。
  *  - 初始 = 项目根内全部本地源（importer 方向全覆盖：谁引用 seed 不漏）
  *  - BFS 沿 import 边扩展：相对导入（./ ../）或别名导入（@/ 等，需 alias）真实解析到
  *    边界外本地文件 → 扩入（importee 方向：seed 依赖不漏）
+ *  - 邻域 importer 有界扫描：根外兄弟项目/松散文件引用 seed → 扩入（importer 方向，
+ *    覆盖跨 git 根引用，如 dsl-workbench 引用 design-canvas）
  *  - 跨 git 根引用也被纳入（不依赖单一 project_dir 的物理边界）
  *  - alias 可省略：缺省时按 root 的 tsconfig 自动加载；传 null 显式禁用别名解析
  */
@@ -264,36 +355,48 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
     queue.push(seedAbs);
   }
 
-  // BFS 扩展
+  // BFS 扩展（阶段 1：根内 + importee 方向；阶段 3：邻域 importer 扩入后再扩其 import 边）
   let head = 0;
-  while (head < queue.length) {
-    const f = queue[head++];
-    if (included.get(f)) continue; // 已解析过
-    included.set(f, true);
-    const ext = path.extname(f);
-    if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) continue; // 非 TS 系不解析 import
-    let mod: Awaited<ReturnType<typeof analyzeModuleSource>>;
-    try {
-      mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
-    } catch {
-      mod = null;
+  const drain = async (): Promise<void> => {
+    while (head < queue.length) {
+      const f = queue[head++];
+      if (included.get(f)) continue; // 已解析过
+      included.set(f, true);
+      const ext = path.extname(f);
+      if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) continue; // 非 TS 系不解析 import
+      let mod: Awaited<ReturnType<typeof analyzeModuleSource>>;
+      try {
+        mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
+      } catch {
+        mod = null;
+      }
+      if (!mod) continue;
+      for (const e of mod.imports) {
+        if (!e.source) continue;
+        let real: string | null = null;
+        if (e.source.startsWith('.')) {
+          real = realResolveImport(f, e.source);
+        } else if (aliasCfg) {
+          real = resolveAliasedImport(e.source, aliasCfg);
+        }
+        if (!real || !isLocalSource(real)) continue;
+        if (!included.has(real)) {
+          included.set(real, false);
+          queue.push(real);
+        }
+      }
     }
-    if (!mod) continue;
-    for (const e of mod.imports) {
-      if (!e.source) continue;
-      let real: string | null = null;
-      if (e.source.startsWith('.')) {
-        real = realResolveImport(f, e.source);
-      } else if (aliasCfg) {
-        real = resolveAliasedImport(e.source, aliasCfg);
-      }
-      if (!real || !isLocalSource(real)) continue;
-      if (!included.has(real)) {
-        included.set(real, false);
-        queue.push(real);
-      }
+  };
+  await drain();
+
+  // 阶段 2：邻域 importer 有界扫描（根外引用 seed 的文件）→ 扩入，再 BFS 其 import 边
+  for (const ext of await findExternalImporters(seedAbs, root)) {
+    if (!included.has(ext)) {
+      included.set(ext, false);
+      queue.push(ext);
     }
   }
+  await drain();
 
   return [...included.keys()];
 }
