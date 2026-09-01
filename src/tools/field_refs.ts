@@ -99,19 +99,31 @@ function classifyKeyOffsets(root: SyntaxNodeLike, src: string, field: string): M
   return result;
 }
 
-/** 定位 offset 所在最深节点，向上找归类祖先；返回空则视为该处不是「构造/解构/声明」用法 */
+/** 定位 offset 所在最深节点并收集祖先链，返回归类；单次下降（可靠，不再用 findParent 引用相等上溯） */
 function classifyOffset(root: SyntaxNodeLike, offset: number, _field: string): FieldRefKind | null {
-  const leaf = deepestContaining(root, offset);
-  if (!leaf) return null;
-  // 上溯路径（叶→根），返回第一条分类信号对应的 kind
   const path: SyntaxNodeLike[] = [];
-  let cur: SyntaxNodeLike | null = leaf;
-  while (cur) {
-    path.push(cur);
-    cur = findParent(root, cur);
+  const collect = (n: SyntaxNodeLike): void => {
+    if (n.startIndex !== undefined && n.endIndex !== undefined) {
+      if (offset < n.startIndex || offset >= n.endIndex) return; // 不含该字节则剪枝
+    }
+    path.push(n);
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) collect(c);
+    }
+  };
+  collect(root);
+  const deepestType = path[path.length - 1]?.type ?? '';
+  // 注释里的同名（tree-sitter 会挂到外层对象字面量下）→ 直接跳过
+  if (deepestType === 'comment') return null;
+  // 字符串里的同名：只当它是 obj['field'] 方括号读才有意义（subscript_expression 之下）；否则是普通字符串，非引用
+  if (STRING_LEAF_TYPES.has(deepestType)) {
+    for (const n of path) if (n.type === 'subscript_expression') return 'field-read';
+    return null;
   }
-  for (const node of path) {
-    const t = node.type;
+  // 叶→根 顺序判类（先验叶端，读取优先于容器键）
+  for (let i = path.length - 1; i >= 0; i--) {
+    const t = path[i].type;
     if (t === 'object_pattern') return 'field-destructure';
     if (t === 'object_type' || t === 'property_signature' || t === 'method_signature') return 'field-decl';
     if (t === 'object' || t === 'pair') return 'field-key';
@@ -120,32 +132,7 @@ function classifyOffset(root: SyntaxNodeLike, offset: number, _field: string): F
   return null;
 }
 
-/** 返回包含 offset 的最深命名节点 */
-function deepestContaining(node: SyntaxNodeLike, offset: number): SyntaxNodeLike | null {
-  if (node.startIndex !== undefined && node.endIndex !== undefined) {
-    if (offset < node.startIndex || offset >= node.endIndex) return null;
-  }
-  for (let i = 0; i < node.childCount; i++) {
-    const c = node.child(i);
-    if (!c) continue;
-    const hit = deepestContaining(c, offset);
-    if (hit) return hit;
-  }
-  return node;
-}
-
-/** 在整棵子树里找 node 的父（无 parent 指针，线性找；接受树不大） */
-function findParent(root: SyntaxNodeLike, target: SyntaxNodeLike): SyntaxNodeLike | null {
-  if (root === target) return null;
-  for (let i = 0; i < root.childCount; i++) {
-    const c = root.child(i);
-    if (!c) continue;
-    if (c === target) return root;
-    const p = findParent(c, target);
-    if (p) return p;
-  }
-  return null;
-}
+const STRING_LEAF_TYPES = new Set(['string', 'string_fragment', 'template_string', 'template_literal', 'string_literal']);
 
 /** field 模式主入口：scope 内收集字段的结构引用点 */
 export async function collectFieldRefs(input: {
