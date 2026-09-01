@@ -18,6 +18,7 @@ import path from 'node:path';
 import { getProjectCacheDb } from '../db/db.js';
 import { importProject } from './import_project.js';
 import { diffViews, type DiffViewsResult } from './diff_views.js';
+import { detectDrift, type DriftData } from './detect_drift.js';
 import { diffImpact } from './diff_impact.js';
 import { runImpactReport, readImpactReport, listImpactReports } from './impact_report.js';
 import {
@@ -141,6 +142,8 @@ interface ActiveWatch {
   feature?: string;
   rebuild: boolean;
   diff_on_change: boolean;
+  /** 变更后自动 detect_drift（契约级过时判定，比 diff_views 更细） */
+  drift_on_change: boolean;
   /** 变更后自动生成影响报告（Step 2）：摘要行入 alerts 队列，全文落盘 impact/ 目录 */
   impact_on_change: boolean;
   /**
@@ -159,6 +162,11 @@ interface ActiveWatch {
   last_diff?: DiffViewsResult;
   /** 冷却窗口内积累的待分析变更文件（相对项目根），doWork 时取走清空 */
   pending_files: Set<string>;
+  /** 冷却窗口内积累的待检测漂移变更文件（相对项目根），rebuild 时取走清空；drift_on_change 用 */
+  pending_drift_files: Set<string>;
+  /** 最近一次 detect_drift 结果（仅 drift_on_change=true 时有） */
+  last_drift?: DriftData;
+  last_drift_at?: string;
   /** 未读影响提醒（一行摘要 × 报告序号），新→旧，cap 20；watch status 时 piggyback 带回 */
   alerts: { seq: number; created_at: string; line: string }[];
   last_impact_seq?: number;
@@ -248,6 +256,12 @@ export interface WatchProjectToolInput {
    */
   diff_on_change?: boolean;
   /**
+   * rebuild 后是否自动 detect_drift（契约级过时判定：expected_apis vs 实际代码，产出
+   * design_stale/missing_impl 判定并持久化漂移台账）。默认 false。开启后每次 rebuild
+   * 自动以本次变更文件为作用域跑 detect_drift，可通过 status 查询 last_drift / drift_alert。
+   */
+  drift_on_change?: boolean;
+  /**
    * 变更后是否自动生成影响报告（Step 2，默认 false）。
    * 开启后每次变更（节流合并）自动跑 diffImpact：一行摘要入 alerts 队列
    * （watch status 时带回），全文落盘 .design-canvas/impact/rp-<seq>.json，
@@ -286,6 +300,13 @@ export interface WatchProjectToolResult {
   diff_alert?: string;
   /** diff 有无变更（true = 有变更，false = 无变更或尚未 diff） */
   has_diff_changes?: boolean;
+  /** drift 是否开启 */
+  drift_on_change?: boolean;
+  /** 最近一次 detect_drift 结果摘要（仅 drift_on_change=true 且完成后有） */
+  drift_alert?: string;
+  /** drift 是否判定为「设计过时/欠实现」（true=需同步设计，false=对齐或尚未检测） */
+  has_drift?: boolean;
+  last_drift_at?: string;
   /** 影响报告是否开启 */
   impact_on_change?: boolean;
   /** 未读影响提醒（一行摘要，新→旧，最多 10 条；全文用 action=impact 取） */
@@ -329,12 +350,23 @@ function relOf(root: string, p: string): string {
   return path.relative(root, abs).split(path.sep).join('/');
 }
 
+/** detect_drift 结果 → 一行摘要（watch 告警/status 用） */
+function driftBrief(d: DriftData): string {
+  const s = d.summary;
+  return `[drift] ${d.feature} 状态=${d.status}（满足 ${s.matched} / 待实现 ${s.missing} / 签名偏离 ${s.mismatched} / 设计未声明 ${s.unexpected}）` +
+    `${d.stale_files.length ? ' · 过时文件: ' + d.stale_files.slice(0, 3).join(', ') : ''}` +
+    (d.drifted ? ' — 设计需同步（edit_dsl/import_project）' : ' — 对齐');
+}
+
 /** 变更回调：增量同步后积累待分析文件，触发节流后的 doWork（rebuild + 影响报告） */
 async function onBatchChange(entry: ActiveWatch, summary: WatchBatchSummary): Promise<void> {
   entry.last_change_at = new Date().toISOString();
   entry.last_summary = summary;
   if (entry.impact_on_change) {
     for (const f of summary.files) entry.pending_files.add(f);
+  }
+  if (entry.rebuild && entry.feature) {
+    for (const f of summary.files) entry.pending_drift_files.add(f); // drift 作用域取本次变更
   }
   if (!entry.throttle) return;
   if (!entry.rebuild && !entry.impact_on_change) return;
@@ -363,6 +395,28 @@ async function doWork(entry: ActiveWatch): Promise<void> {
         } catch (diffErr) {
           // diff 失败不阻塞 watch，仅记录
           entry.error = 'diff 失败: ' + (diffErr as Error).message;
+        }
+      }
+
+      // rebuild 后若有 drift_on_change 标记，以本次变更文件为作用域做契约级过时判定
+      if (entry.drift_on_change) {
+        const driftFiles = [...entry.pending_drift_files];
+        entry.pending_drift_files.clear();
+        try {
+          const drift = await detectDrift({
+            feature: entry.feature,
+            code_dir: entry.project_dir,
+            scope: 'changed',
+            changed_files: driftFiles.length > 0 ? driftFiles.map((f) => relOf(entry.project_dir, f)) : undefined,
+          });
+          entry.last_drift = drift;
+          entry.last_drift_at = new Date().toISOString();
+          if (drift.drifted && driftFiles.length > 0) {
+            // 设计被本次代码变更甩开：直接入响应注入收件箱，提示需同步设计
+            pushAlert({ project_dir: entry.project_dir, seq: 0, line: driftBrief(drift), created_at: new Date().toISOString() });
+          }
+        } catch (driftErr) {
+          entry.error = 'drift 检测失败: ' + (driftErr as Error).message;
         }
       }
     } catch (e) {
@@ -496,6 +550,7 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
   const feature = input.feature?.trim() || undefined;
   const rebuild = input.rebuild_on_change ?? Boolean(feature);
   const diffOnChange = input.diff_on_change ?? false;
+  const driftOnChange = input.drift_on_change ?? false;
   const impactOnChange = input.impact_on_change ?? false;
   const debounceMs = input.debounce_ms ?? 150;
 
@@ -504,7 +559,8 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     return {
       action: 'start', project_dir: path.resolve(input.project_dir),
       watching: true, running: true, feature: existing.feature, rebuild: existing.rebuild,
-      diff_on_change: existing.diff_on_change, impact_on_change: existing.impact_on_change,
+      diff_on_change: existing.diff_on_change, drift_on_change: existing.drift_on_change,
+      impact_on_change: existing.impact_on_change,
       started_at: existing.started_at, last_change_at: existing.last_change_at,
       last_summary: existing.last_summary, last_impact_seq: existing.last_impact_seq,
       message: '已在监听（幂等复用既有句柄）' + (existing.error ? '；上次出错: ' + existing.error : ''),
@@ -517,10 +573,12 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
     feature,
     rebuild,
     diff_on_change: diffOnChange,
+    drift_on_change: driftOnChange,
     impact_on_change: impactOnChange,
     declarations: [],
     started_at: new Date().toISOString(),
     pending_files: new Set(),
+    pending_drift_files: new Set(),
     alerts: [],
   };
 
@@ -571,12 +629,14 @@ function startWatch(input: WatchProjectToolInput): WatchProjectToolResult {
 
   return {
     action: 'start', project_dir: entry.project_dir, watching: true, running: true,
-    feature, rebuild, diff_on_change: diffOnChange, impact_on_change: impactOnChange,
+    feature, rebuild, diff_on_change: diffOnChange, drift_on_change: driftOnChange,
+    impact_on_change: impactOnChange,
     pending_declarations: entry.declarations.length,
     started_at: entry.started_at,
     message: `已开始监听 ${path.resolve(input.project_dir)}`
       + (rebuild && feature ? `（变更将重建 feature=${feature} 实际 DSL）` : '（仅增量同步 cache.db）')
       + (diffOnChange ? '，变更后自动 diff 对比' : '')
+      + (driftOnChange ? '，变更后自动 drift 过时判定' : '')
       + (impactOnChange ? '，变更后自动影响报告（status 取摘要，action=impact 取全文）' : '')
       + (recovered > 0 ? `；已恢复 ${recovered} 条跨会话改前预告` : ''),
   };
@@ -609,6 +669,14 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
     }
   }
 
+  // 构建 drift_alert 摘要（detect_drift 契约级判定）
+  let driftAlert: string | undefined;
+  let hasDrift = false;
+  if (entry.last_drift) {
+    hasDrift = entry.last_drift.drifted;
+    driftAlert = driftBrief(entry.last_drift);
+  }
+
   const alerts = entry.alerts.slice(0, 10).map((a) => a.line);
   const alertNote = alerts.length > 0 ? `；${alerts.length} 条未读影响提醒（最新: ${alerts[0]}）` : '';
   const declNote =
@@ -621,13 +689,15 @@ function statusWatch(projectDir: string): WatchProjectToolResult {
   return {
     action: 'status', project_dir: entry.project_dir, watching: st.watching, running: st.watching,
     feature: entry.feature, rebuild: entry.rebuild, diff_on_change: entry.diff_on_change,
-    impact_on_change: entry.impact_on_change,
+    drift_on_change: entry.drift_on_change, impact_on_change: entry.impact_on_change,
     pending_declarations: entry.declarations.length,
     unresolved_violations: openViolations,
     started_at: entry.started_at, last_change_at: entry.last_change_at,
     last_rebuild_at: entry.last_rebuild_at, last_diff_at: entry.last_diff_at,
+    last_drift_at: entry.last_drift_at,
     last_summary: entry.last_summary, last_reconcile: entry.last_reconcile,
     diff_alert: diffAlert, has_diff_changes: hasDiffChanges,
+    drift_alert: driftAlert, has_drift: hasDrift,
     alerts: alerts.length > 0 ? alerts : undefined,
     last_impact_seq: entry.last_impact_seq,
     message: diffAlert

@@ -122,4 +122,26 @@ describe('detect_drift 漂移判定', () => {
     expect(r.status).toBe('clean');
     expect(r.summary.checked_files).toBe(1);
   });
+
+  it('changed_files 精准作用域：只对传入的变更文件下判定（watcher 用）', async () => {
+    const feature = 'drift-scoped';
+    writeFeature(feature, ['ping()', 'greet(name: string)'], 'src/app.ts');
+    // 同一文件内 ping 已实现、greet 实现签名偏离（mismatched → 过时信号）
+    const codeDir = writeCode({
+      'src/app.ts':
+        'export function ping(): string { return "pong"; }\n' +
+        'export function greet(name: string, extra: string): string { return name + extra; }\n',
+    });
+
+    // 只把 walk 无关文件标记为变更 → 不命中 src/app.ts → checked_files 0，未判定过时
+    const rNoHit = await detectDrift({ feature, code_dir: codeDir, scope: 'changed', changed_files: ['src/other.ts'] });
+    expect(rNoHit.summary.checked_files).toBe(0);
+    expect(rNoHit.drifted).toBe(false);
+
+    // 把 app.ts 列为变更 → mismatched 计入 → design_stale
+    const rHit = await detectDrift({ feature, code_dir: codeDir, scope: 'changed', changed_files: ['src/app.ts'] });
+    expect(rHit.status).toBe('design_stale');
+    expect(rHit.drifted).toBe(true);
+    expect(rHit.scope.changed_files).toBe(1);
+  });
 });

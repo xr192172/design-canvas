@@ -188,6 +188,7 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
         rebuild_window_ms: num(args, 'rebuild_window_ms'),
         reconcile_interval_ms: num(args, 'reconcile_interval_ms'),
         diff_on_change: bool(args, 'diff_on_change'),
+        drift_on_change: bool(args, 'drift_on_change'),
         impact_on_change: bool(args, 'impact_on_change'),
         seq: num(args, 'seq'),
         files: (args['files'] as string[] | undefined)?.map(String),

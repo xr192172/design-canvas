@@ -30,6 +30,12 @@ export interface DetectDriftInput {
   scope?: 'changed' | 'all';
   /** changed 模式下 git 参照版本，默认 HEAD（即只看未提交改动） */
   since_ref?: string;
+  /**
+   * 精确变更文件集（相对 code_dir）。传入时优先用它作为 changed 作用域（watcher 的
+   * fs 变更集比 git 更准——含新/未跟踪/跨根文件），忽略 git diff；scope=all 时忽略。
+   * 与 since_ref 互斥用途，二者给其一即可。
+   */
+  changed_files?: string[];
   /** check=重新计算（默认）；status=只读最近一次漂移台账 */
   mode?: 'check' | 'status';
 }
@@ -110,14 +116,18 @@ export async function detectDrift(input: DetectDriftInput): Promise<DriftData & 
   // 2. 跑一致性引擎（全量，拿到 per-file matched/missing/mismatched/unexpected + invariants）
   const r = await checkConsistency({ feature, code_dir: codeDir });
 
-  // 3. git 变更作用域
+  // 3. 变更作用域：显式 changed_files（watcher 的 fs 变更集）优先；否则 git diff
   const scopeMode = input.scope === 'all' ? ('all' as const) : ('changed' as const);
-  const sinceRef = input.since_ref ?? 'HEAD';
   let changedAbs = new Set<string>();
   if (scopeMode === 'changed') {
-    const gitRoot = gitRootOf(codeDir);
-    if (gitRoot) {
-      changedAbs = new Set(gitChangedFiles(gitRoot, sinceRef).map((rel) => norm(path.join(gitRoot, rel))));
+    if (input.changed_files && input.changed_files.length > 0) {
+      for (const f of input.changed_files) changedAbs.add(norm(path.resolve(codeDir, f)));
+    } else {
+      const sinceRef = input.since_ref ?? 'HEAD';
+      const gitRoot = gitRootOf(codeDir);
+      if (gitRoot) {
+        changedAbs = new Set(gitChangedFiles(gitRoot, sinceRef).map((rel) => norm(path.join(gitRoot, rel))));
+      }
     }
   }
 
@@ -167,7 +177,7 @@ export async function detectDrift(input: DetectDriftInput): Promise<DriftData & 
     feature,
     status,
     drifted,
-    scope: { mode: scopeMode, since_ref: scopeMode === 'changed' ? sinceRef : null, changed_files: changedAbs.size },
+    scope: { mode: scopeMode, since_ref: (scopeMode === 'changed' && !(input.changed_files && input.changed_files.length > 0)) ? (input.since_ref ?? 'HEAD') : null, changed_files: changedAbs.size },
     summary: {
       checked_files: scoped.length,
       matched,
@@ -190,7 +200,7 @@ export async function detectDrift(input: DetectDriftInput): Promise<DriftData & 
 
   const scopeNote =
     scopeMode === 'changed'
-      ? `（仅 ${changedAbs.size} 个 git 变更文件${changedAbs.size === 0 ? `，可能相对 ${sinceRef} 无改动；可用 scope=all 全量对标` : ''}）`
+      ? `（仅 ${changedAbs.size} 个相关变更文件${changedAbs.size === 0 ? `，可能相对 ${input.since_ref ?? 'HEAD'} 无改动或未命中；可用 scope=all 全量对标` : ''}）`
       : '（全量文件）';
   const lines = [
     `══ detect_drift [${feature}] ══`,
