@@ -236,7 +236,9 @@
 
 **引用查找** —— ✅ **已实施（2026-08）**：新增 `find_references` 工具——改/删一个符号前查"谁引用了它"，只读不落盘，复用 rename 闭包/引用图内核。已入 AGENTS.md 触发点表。
 
-> **结构引用扩展 mode=field（2026-09，dogfood 驱动）**：默认 symbol 模式只报"谁 import 该符号名"，对"加字段/改签名"类改动会漏掉**定义文件内部的构造点与字段读取点**。新增 `mode=field`：扫项目内 `obj.<field>`（读取点）与 `<field>:`（构造点），**含定义文件内部**。教训：上一轮做安全改核心时 agent 反射性用了 grep——一半是触发失灵，一半暴露 find\_references 真缺口；补齐后"加字段前查波及"不必再退回 grep。
+> **结构引用扩展 mode=field（2026-09，dogfood 驱动）**：默认 symbol 模式只报"谁 import 该符号名"，对"加字段/改签名"类改动会漏掉**定义文件内部的构造点与字段读取点**。新增 `mode=field`：扫项目内 `obj.<field>`（读取点）与 `<field>:`（构造点），**含定义文件内部**。教训：上一轮做安全改核心时 agent 反射性用了 grep——一半是触发失灵，一半暴露 find_references 真缺口；补齐后"加字段前查波及"不必再退回 grep。
+>
+> **升级为 AST 分类 + type 模式（2026-09 v2）**：正则版把"构造/解构/声明"全算 field-key 且漏方括号/注释噪音。改复用 ts_kernel tree-sitter（parseAstRoot，节点带字节偏移）：`mode=field` 把每个命中按所属节点分类为 **读/构/解/声明** 四类（member_expression→读、object→构、object_pattern→解、property_signature/object_type→声明），自动跳过注释/字符串同名，补 `obj['field']` 方括号读，附行内 snippet；`scope=closure(all)` 可选（给 file 默认按闭包）。新增 `mode=type`：从 interface/type 声明解成员字段集，找与成员交叠 ≥ min_hit 的对象字面量候选构造点（启发式，非类型求解器）。新模块 `src/tools/field_refs.ts`。
 
 > ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。另：引用查找 `find_references` 目前只认 TS 系 import（邻域/跨语言引用未覆盖，可复用 expandClosure 续坡）。
 

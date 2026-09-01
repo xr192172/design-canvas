@@ -1406,35 +1406,59 @@ const TOOL_DEFS: ToolDef[] = [
       '查找符号/字段的引用——改/删前看波及面。只读，不改文件。' +
       'mode=symbol（默认）：输入 {file(定义文件), symbol}，返回定义文件 + 所有 import 该符号的文件' +
       '（含 import 子句 source、无别名使用点位置与行号）。复用 rename 的闭包/引用图内核（自动定位项目根 + 闭包 + 别名边 + 跨语言）。' +
-      'mode=field：输入 {field, project_dir}（可选 file 定闭包），返回该字段在项目内的「读取点」(obj.field) 与' +
-      '「构造点」(field: 对象字面量键)，**含定义文件内部**——用于"加字段/改签名"前看清谁构造、谁读取，' +
-      '比 grep 更结构化了字面量构造站。',
+      'mode=field：输入 {field, project_dir}（可选 file 定 scope，默认 closure 按 file 闭包扫，all 全项目），' +
+      '返回字段的「读取点」(obj.field/obj.field)、「构造点」({field: v})、「解构点」、「声明点」，' +
+      'AST 分类 + 行内上下文 snapshot，**含定义文件内部**——用于"加字段/改签名"前看清谁读谁构造。' +
+      'mode=type：输入 {file, symbol(类型名), min_hit?}，从类型声明解出成员字段集，找与其交叠 ≥ min_hit 的' +
+      '对象字面量候选构造点（启发式，非类型求解器）。',
     inputSchema: {
       project_dir: z.string().optional().describe('目标项目根（可选；缺省自动定位）'),
-      mode: z.enum(['symbol', 'field']).optional().describe('symbol=找符号引用（默认）；field=找字段读取/构造点'),
-      file: z.string().optional().describe('mode=symbol 必填：定义符号的文件（绝对路径或相对 cwd/project_dir）；mode=field 可选（用于定闭包）'),
-      symbol: z.string().optional().describe('mode=symbol 必填：符号名（模块级声明名）'),
+      mode: z.enum(['symbol', 'field', 'type']).optional().describe('symbol=找符号引用（默认）；field=找字段读/构/解/声明点；type=找形如某类型的对象字面量构造候选'),
+      scope: z.enum(['closure', 'all']).optional().describe('field/type 模式：closure=按 file 的 import 闭包扫（默认）；all=全项目扫'),
+      min_hit: z.number().optional().describe('type 模式：与类型成员交叠 ≥ 该值才判候选构造点（默认 2）'),
+      file: z.string().optional().describe('mode=symbol 必填：定义符号的文件（绝对路径或相对 cwd/project_dir）；field/type 可选（用于定 scope）'),
+      symbol: z.string().optional().describe('mode=symbol/type 必填：符号/类型名（模块级声明名）'),
       field: z.string().optional().describe('mode=field 必填：要查的字段名'),
     },
     handler: wrap(async (a) => {
-      const mode = a.mode === 'field' ? 'field' : 'symbol';
-      if (mode === 'field') {
+      const common = {
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        scope: a.scope === 'all' ? ('all' as const) : ('closure' as const),
+        file: typeof a.file === 'string' && a.file ? a.file : undefined,
+      };
+      // mode=field：AST 分类的读/构/解/声明点 + snippet
+      if (a.mode === 'field') {
         if (typeof a.field !== 'string' || !a.field) return { message: 'mode=field 需要 field 参数', data: { ok: false as boolean } };
-        const r = await findReferences({
-          project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
-          mode: 'field',
-          field: a.field,
-          file: typeof a.file === 'string' && a.file ? a.file : undefined,
-        });
+        const r = await findReferences({ ...common, mode: 'field', field: a.field });
         if (!r.ok) return { message: `字段引用查找失败：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
-        const lines = [`字段 ${r.symbol} 的引用（${r.fieldRefs!.length} 个文件含读取/构造点）：`];
+        const kindLabel = { 'field-read': '读', 'field-key': '构', 'field-destructure': '解', 'field-decl': '声明' } as Record<string, string>;
+        const lines = [`字段 ${r.symbol} 的引用（${r.fieldRefs!.length} 个文件；scope=${common.scope}）：`];
         for (const f of r.fieldRefs!) {
-          const dots = f.refs.filter((x) => x.kind === 'field-read').length;
-          const keys = f.refs.filter((x) => x.kind === 'field-key').length;
-          lines.push(`\t- ${f.file}（读取 ${dots} · 构造 ${keys}）：行 ${f.refs.map((x) => `${x.line}[${x.kind === 'field-read' ? '读' : '构'}]`).join(', ')}`);
+          const cnt = new Map<string, number>();
+          for (const x of f.refs) cnt.set(x.kind, (cnt.get(x.kind) ?? 0) + 1);
+          const summary = ['read', 'key', 'destructure', 'decl']
+            .map((k) => (cnt.has(`field-${k}`) ? `${kindLabel[`field-${k}`]}${cnt.get(`field-${k}`)}` : ''))
+            .filter(Boolean)
+            .join(' ');
+          lines.push(`\t- ${f.file}（${summary}）：`);
+          for (const x of f.refs) lines.push(`\t    L${x.line}[${kindLabel[x.kind]}] ${x.snippet}`);
         }
         return { message: lines.join('\n'), data: r };
       }
+      // mode=type：成员 + 候选构造点
+      if (a.mode === 'type') {
+        const r = await findReferences({ ...common, mode: 'type', symbol: String(a.symbol), min_hit: typeof a.min_hit === 'number' ? a.min_hit : undefined });
+        if (!r.ok) return { message: `类型构造查找失败：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
+        const lines = [
+          `类型 ${r.symbol} 的成员（${r.typeMembers!.length}）：${r.typeMembers!.join(', ')}`,
+          `候选构造点（交叠 ≥ 命中成员数）：${r.typeCandidates!.length} 处`,
+        ];
+        for (const c of r.typeCandidates!) {
+          lines.push(`\t- ${c.file}:L${c.line}（命中 ${c.matched.join(', ')}） ${c.snippet}`);
+        }
+        return { message: lines.join('\n'), data: r };
+      }
+      // mode=symbol：既有逻辑
       const r = await findReferences({
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         file: String(a.file),

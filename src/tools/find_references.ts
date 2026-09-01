@@ -19,8 +19,9 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, walkProjectFiles } from './project_root.js';
+import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
+import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 
 export interface ReferenceSite {
   /** export/import/使用点所在的字节偏移 */
@@ -29,7 +30,7 @@ export interface ReferenceSite {
   line: number;
   /** 该处文本（旧名） */
   text: string;
-  /** 语义：'definition' | 'import' | 'usage' | 'export_list' | 'reexport' | 'field-read' | 'field-key' */
+  /** 语义：'definition' | 'import' | 'usage' | 'export_list' | 'reexport' */
   kind: string;
 }
 
@@ -44,14 +45,18 @@ export interface ReferenceFile {
 
 export interface FindReferencesResult {
   ok: boolean;
-  /** mode=symbol 时为符号名；mode=field 时为字段名 */
+  /** mode=symbol 时为符号名；mode=field 时为字段名；mode=type 时为类型名 */
   symbol: string;
-  mode: 'symbol' | 'field';
+  mode: 'symbol' | 'field' | 'type';
   definition?: { file: string; kind: string; refs: ReferenceSite[] };
   importers?: ReferenceFile[];
   importerCount: number;
-  /** mode=field 时：该字段的读取点/构造点（含定义文件内部），按文件分组 */
-  fieldRefs?: ReferenceFile[];
+  /** mode=field 时：该字段的读取/构造/解构/声明点（含定义文件内部），按文件分组，含行内上下文 */
+  fieldRefs?: FieldRefFile[];
+  /** mode=type 时：类型声明的成员字段集 */
+  typeMembers?: string[];
+  /** mode=type 时：与类型成员交叠 ≥ min_hit 的对象字面量候选构造点 */
+  typeCandidates?: TypeConstructCandidate[];
   /** 阻断/非模块级符号等理由 */
   blocked?: string[];
 }
@@ -60,91 +65,78 @@ function lineOf(src: string, offset: number): number {
   return src.slice(0, offset).split('\n').length;
 }
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** mode=field：扫描一批文件里对某字段的「读取点」(obj.field) 与「构造点」(field: 键) */
-function scanFieldRefs(files: string[], field: string, resolvedRoot: string): ReferenceFile[] {
-  const reDot = new RegExp(`\\.${escapeRegex(field)}\\b`, 'g');
-  const reKey = new RegExp(`\\b${escapeRegex(field)}\\s*:`, 'g');
-  const out: ReferenceFile[] = [];
-  for (const abs of files) {
-    let src: string;
-    try {
-      src = readFileSync(abs, 'utf-8');
-    } catch {
-      continue; // 二进/不可读跳过
-    }
-    const refs: ReferenceSite[] = [];
-    let m: RegExpExecArray | null;
-    reDot.lastIndex = 0;
-    while ((m = reDot.exec(src))) {
-      const off = m.index + 1; // `.field` 的 field 起点
-      refs.push({ offset: off, line: lineOf(src, off), text: `.${field}`, kind: 'field-read' });
-    }
-    reKey.lastIndex = 0;
-    while ((m = reKey.exec(src))) {
-      refs.push({ offset: m.index, line: lineOf(src, m.index), text: `${field}:`, kind: 'field-key' });
-    }
-    if (refs.length > 0) {
-      out.push({ file: (path.relative(resolvedRoot, abs) || path.basename(abs)).replace(/\\/g, '/'), refs, importSources: [] });
-    }
-  }
-  return out;
-}
+const FIELD_KIND_LABEL: Record<string, string> = {
+  'field-read': '读',
+  'field-key': '构',
+  'field-destructure': '解',
+  'field-decl': '声明',
+};
 
 export async function findReferences(input: {
-  /** mode=symbol 必填：定义符号的文件（绝对路径；或相对 project_dir/cwd）。mode=field 可选（用于定闭包） */
+  /** mode=symbol 必填：定义符号的文件（绝对路径；或相对 project_dir/cwd）。mode=field/type 可选（用于定 scope） */
   file?: string;
   /** mode=symbol 必填：符号名。mode=field 忽略 */
   symbol?: string;
   /** mode=field 必填：要查的字段名 */
   field?: string;
-  /** symbol（默认，找符号的 importers/使用点）| field（找字段的读取点/构造点） */
-  mode?: 'symbol' | 'field';
+  /** symbol（默认，找符号的 importers/使用点）| field（字段读取/构造/解构/声明点）| type（形如某类型的对象字面量构造候选） */
+  mode?: 'symbol' | 'field' | 'type';
+  /** field/type 模式：closure（默认，给 file 时按 import 闭包）| all（全项目扫） */
+  scope?: 'closure' | 'all';
+  /** type 模式：与类型成员交叠 ≥ 该值才判为候选构造点（默认 2） */
+  min_hit?: number;
   project_dir?: string;
 }): Promise<FindReferencesResult> {
-  const mode = input.mode === 'field' ? ('field' as const) : ('symbol' as const);
+  const effectiveRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
+  const projectDir = effectiveRoot ?? path.resolve(process.cwd());
 
-  // field 模式：查字段的读取/构造点（含定义文件内部），不依赖符号解析
-  if (mode === 'field') {
+  // type 模式：形如某类型的对象字面量构造候选（启发式，找成员交叠 ≥ min_hit）
+  if (input.mode === 'type') {
+    if (!input.file || !input.symbol) return { ok: false, symbol: input.symbol ?? '', mode: 'type', importerCount: 0, blocked: ['mode=type 需要 file + symbol（类型名）'] };
+    const { members, candidates } = await collectTypeConstructCandidates({
+      project_dir: projectDir,
+      file: input.file,
+      symbol: input.symbol,
+      scope: input.scope === 'all' ? 'all' : 'closure',
+      min_hit: input.min_hit,
+    });
+    return {
+      ok: true,
+      symbol: input.symbol,
+      mode: 'type',
+      importerCount: 0,
+      typeMembers: members,
+      typeCandidates: candidates,
+      blocked: members.length === 0 ? ['未从声明中解出成员字段（认 interface/type { ... }）'] : candidates.length === 0 ? ['未找到交叠 ≥ min_hit 的对象字面量候选'] : undefined,
+    };
+  }
+
+  // field 模式：字段的结构引用点（AST 分类：读/构/解/声明，含定义文件内部）
+  if (input.mode === 'field') {
     const field = input.field;
-    if (!field) return { ok: false, symbol: field ?? '', mode, importerCount: 0, blocked: ['mode=field 需要 field 参数'] };
-    const effectiveRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
-    const fileAbs = input.file ? (path.isAbsolute(input.file) ? path.resolve(input.file) : effectiveRoot ? path.resolve(effectiveRoot, input.file) : path.resolve(process.cwd(), input.file)) : undefined;
-    const resolvedRoot = effectiveRoot ?? (fileAbs ? resolveProjectRoot(fileAbs) : path.resolve(process.cwd()));
-    const scope: string[] = [];
-    if (fileAbs) {
-      const closure = await expandClosure(fileAbs, resolvedRoot, loadAliasConfig(resolvedRoot));
-      // 闭包含定义文件本身上游的间接引用，但字段读取可能发生在不 import 它的同仓文件里，
-      // 故 field 模式以项目全量为准：闭包定位 root，再全量扫项目源文件。
-      //（若 fileAbs 提供，至少确保落在项目内）
-      for (const f of closure) if (path.resolve(f).startsWith(resolvedRoot)) scope.push(f);
-    }
-    // 全量扫项目源文件（field 名唯一性通常足够，能覆盖不 import 该类型的构造/读取点）
-    const walked: string[] = [];
-    walkProjectFiles(resolvedRoot, walked);
-    const seen = new Set(scope.map((p) => path.resolve(p)));
-    for (const w of walked) if (!seen.has(path.resolve(w))) scope.push(w);
-
-    const fieldRefs = scanFieldRefs(scope, field, resolvedRoot);
-    fieldRefs.sort((a, b) => a.file.localeCompare(b.file));
+    if (!field) return { ok: false, symbol: field ?? '', mode: 'field', importerCount: 0, blocked: ['mode=field 需要 field 参数'] };
+    const fieldRefs = await collectFieldRefs({
+      project_dir: projectDir,
+      field,
+      file: input.file,
+      scope: input.scope === 'all' ? 'all' : 'closure',
+    });
     return {
       ok: true,
       symbol: field,
-      mode,
+      mode: 'field',
       importerCount: 0,
       fieldRefs,
-      blocked: fieldRefs.length === 0 ? ['项目中未找到对该字段的读取/构造'] : undefined,
+      blocked: fieldRefs.length === 0 ? ['项目中未找到对该字段的引用'] : undefined,
     };
   }
 
   // symbol 模式：既有逻辑
+  const mode = 'symbol' as const;
   const { file, symbol } = input;
-  const effectiveRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
-  const fileAbs = path.isAbsolute(file!) ? path.resolve(file!) : effectiveRoot ? path.resolve(effectiveRoot, file!) : path.resolve(process.cwd(), file!);
-  const resolvedRoot = effectiveRoot ?? resolveProjectRoot(fileAbs);
+  const symRoot = input.project_dir ? path.resolve(String(input.project_dir)) : undefined;
+  const fileAbs = path.isAbsolute(file!) ? path.resolve(file!) : symRoot ? path.resolve(symRoot, file!) : path.resolve(process.cwd(), file!);
+  const resolvedRoot = symRoot ?? resolveProjectRoot(fileAbs);
   const rootAlias = loadAliasConfig(resolvedRoot);
 
   const defSrc = readFileSync(fileAbs, 'utf-8');

@@ -101,12 +101,55 @@ describe('findReferences', () => {
     // 定义文件内部也要报（此前 symbol 模式漏掉的构造/读取点）
     const def = r.fieldRefs!.find((x) => x.file === 'src/def.ts');
     expect(def).toBeDefined();
-    expect(def!.refs.some((x) => x.kind === 'field-key')).toBe(true); // { a: 1 } 构造点
-    expect(def!.refs.some((x) => x.kind === 'field-read')).toBe(true); // x.a 读取点
+    // { a: 1 } 是构造点（field-key）；interface 里 a 是声明点（field-decl）；x.a 是读
+    expect(def!.refs.some((x) => x.kind === 'field-key')).toBe(true);
+    expect(def!.refs.some((x) => x.kind === 'field-decl')).toBe(true);
+    expect(def!.refs.some((x) => x.kind === 'field-read')).toBe(true);
     // 使用方文件
     const use = r.fieldRefs!.find((x) => x.file === 'src/use.ts');
     expect(use).toBeDefined();
-    expect(use!.refs.some((x) => x.kind === 'field-read')).toBe(true); // s.a
+    expect(use!.refs.some((x) => x.kind === 'field-read')).toBe(true);
+    // snippet 非空（免开文件）
+    expect(def!.refs[0].snippet.length).toBeGreaterThan(0);
+    rmForce(dir);
+  });
+
+  it('mode=field：读取含方括号、解构读与注释里的同名忽略', async () => {
+    const dir = mkProj({
+      'src/use.ts': [
+        'const m = obj["hidden"];', // 方括号读
+        'const { hidden } = obj;', // 解构读（field-destructure）
+        '// .hidden 这里注释里的同名不算', // 注释噪音应被 AST 跳过
+        'const s = obj.hidden2;', // 不同字段，不应命中
+      ].join('\n'),
+    });
+    const r = await findReferences({ project_dir: dir, mode: 'field', field: 'hidden', scope: 'all' });
+    const use = r.fieldRefs!.find((x) => x.file === 'src/use.ts');
+    expect(use).toBeDefined();
+    // 方括号读
+    expect(use!.refs.some((x) => x.kind === 'field-read' && x.snippet.includes('["hidden"]'))).toBe(true);
+    // 解构读
+    expect(use!.refs.some((x) => x.kind === 'field-destructure')).toBe(true);
+    // 注释里的同名不报（AST 归属不到 member/pair/object_pattern）
+    expect(use!.refs.filter((x) => x.kind === 'field-read').every((x) => !x.snippet.startsWith('//'))).toBe(true);
+    // hidden2 不同字段，不混入
+    expect(use!.refs.every((x) => !x.snippet.includes('hidden2'))).toBe(true);
+    rmForce(dir);
+  });
+
+  it('mode=type：从类型声明解成员，找交叠 ≥ min_hit 的对象字面量候选构造点', async () => {
+    const dir = mkProj({
+      'src/types.ts': 'export interface Config { host: string; port: number; ssl: boolean; }\n',
+      'src/a.ts': 'const c = { host: "x", port: 1, ssl: true };\n', // 命中 3 成员 → 候选
+      'src/b.ts': 'const d = { host: "y", timeout: 5 };\n', // 只 1 → 非候选
+    });
+    const r = await findReferences({ project_dir: dir, mode: 'type', file: 'src/types.ts', symbol: 'Config', scope: 'all' });
+    expect(r.ok).toBe(true);
+    expect(r.mode).toBe('type');
+    expect(r.typeMembers).toContain('host');
+    expect(r.typeMembers).toContain('ssl');
+    expect(r.typeCandidates!.some((c) => c.file === 'src/a.ts')).toBe(true);
+    expect(r.typeCandidates!.some((c) => c.file === 'src/b.ts')).toBe(false); // 只 1 个成员交叠
     rmForce(dir);
   });
 });
