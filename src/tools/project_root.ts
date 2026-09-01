@@ -249,8 +249,13 @@ export function isProjectDir(d: string): boolean {
   return fs.existsSync(path.join(d, '.git')) || MANIFESTS.some((m) => fs.existsSync(path.join(d, m)));
 }
 
-/** 文件是否通过相对 import 真实引用 targetAbs（TS 系才解析；跨项目常见形态是相对路径） */
-async function importsTargetFile(fileAbs: string, targetAbs: string): Promise<boolean> {
+/**
+ * 文件是否通过 import 真实引用 targetAbs（TS 系才解析）。
+ *  - 相对导入（./ ../）→ realResolveImport
+ *  - 别名导入（@/ 等）→ resolveAliasedImport（用本文件所属项目的 tsconfig，aliasCfg 传近）
+ *  - 裸包导入（非相对、非别名）→ 本版跳过（宁漏不误；见 docs 边界）
+ */
+async function importsTargetFile(fileAbs: string, targetAbs: string, aliasCfg?: AliasConfig | null): Promise<boolean> {
   const ext = path.extname(fileAbs);
   if (!['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(ext)) return false;
   let mod: Awaited<ReturnType<typeof analyzeModuleSource>> | null = null;
@@ -261,8 +266,13 @@ async function importsTargetFile(fileAbs: string, targetAbs: string): Promise<bo
   }
   if (!mod) return false;
   for (const e of mod.imports) {
-    if (!e.source || !e.source.startsWith('.')) continue; // 邻域只按相对路径追（跨项目常见形态）
-    const real = realResolveImport(fileAbs, e.source);
+    if (!e.source) continue;
+    let real: string | null = null;
+    if (e.source.startsWith('.')) {
+      real = realResolveImport(fileAbs, e.source);
+    } else if (aliasCfg) {
+      real = resolveAliasedImport(e.source, aliasCfg);
+    }
     if (real && path.resolve(real) === targetAbs) return true;
   }
   return false;
@@ -275,12 +285,16 @@ async function importsTargetFile(fileAbs: string, targetAbs: string): Promise<bo
  * 不向更上层上爬 —— 避免从 Temp/build 等深层路径一路扫进整个文件树里的项目。
  * 邻域语义 = "同 monorepo 根 / 同工作区下的平铺兄弟仓库"，本就是 root 直属层。
  *
+ * 每进入一个项目样兄弟目录，按其自身 tsconfig 解析该目录内文件的别名导入
+ * （@shared/ 等映射到 seed 项目的别名也能命中）；松散文件用 seed 根的别名兜底。
+ * 裸包导入（npm 包 #/ workspace）不在本版，见 docs 边界。
+ *
  * 防御：先数项目样兄弟数量，若远超工作区规模（> NEIGHBOR_LIMIT）→ 判定为 temp/缓存
  * 容器（历史测试残留），直接短路返回 —— 防止对上千个噪声目录逐个全量扫描。
  *
  *  - 只处理根的直接父目录一层：进入其中"项目样"兄弟（.git/manifest）+ 该层松散源文件
  *  - 排除 root 自身子树 / 噪音目录 / 用户主目录 / 驱动器根
- *  - 匹配：相对 import 真实解析到 seedFile（跨项目常见形态；别名/裸包不在本版，见 docs 边界）
+ *  - 匹配：相对 import 或别名 import 真实解析到 seedFile
  * 返回被引用 seedFile 的文件绝对路径列表。
  */
 export async function findExternalImporters(seedFile: string, root: string): Promise<string[]> {
@@ -305,22 +319,29 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
     if (projectLike > NEIGHBOR_LIMIT) return [];
   }
   const out: string[] = [];
-  const candidates: string[] = [];
+  // 松散文件（非项目样兄弟）用 seed 根的别名兜底
+  const rootAlias = loadAliasConfig(rootAbs);
   for (const e of entries) {
     if (!e) continue;
     if (isSkippedDir(e.name)) continue;
     const p = path.join(siblingDir, e.name);
     if (p === rootAbs || rootAbs.startsWith(p + path.sep)) continue; // 排除 root 自身子树与其祖先
     if (e.isDirectory()) {
-      if (isProjectDir(p) && path.resolve(p) !== home) walkProjectFiles(p, candidates);
+      if (!isProjectDir(p) || path.resolve(p) === home) continue;
+      // 每个兄弟项目按其自身 tsconfig 解析（该目录内文件可能用 @xxx/* 别名引用 seed）
+      const projAlias = loadAliasConfig(p);
+      const projFiles: string[] = [];
+      walkProjectFiles(p, projFiles);
+      for (const f of projFiles) {
+        const abs = path.resolve(f);
+        if (abs === seedAbs || !isLocalSource(abs)) continue;
+        if (await importsTargetFile(abs, seedAbs, projAlias)) out.push(abs);
+      }
     } else if (e.isFile() && SRC_EXTS.has(path.extname(e.name))) {
-      candidates.push(p); // 该层松散源文件（如根旁的 shared.ts）
+      const abs = path.resolve(p);
+      if (abs === seedAbs || !isLocalSource(abs)) continue;
+      if (await importsTargetFile(abs, seedAbs, rootAlias)) out.push(abs);
     }
-  }
-  for (const f of candidates) {
-    const abs = path.resolve(f);
-    if (abs === seedAbs || !isLocalSource(abs)) continue;
-    if (await importsTargetFile(abs, seedAbs)) out.push(abs);
   }
   return out;
 }

@@ -453,3 +453,28 @@ describe('renameSymbol - 跨根 importer（兄弟项目相对引用）', () => {
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - 跨根别名 importer（兄弟项目用自身别名引用 seed）', () => {
+  it('B 用 @shared/def 别名引用 A 的 compute → 邻域扫描按 B 自身 tsconfig 命中并改写', async () => {
+    const dir = mkProj({
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': 'export function compute(a: number): number { return a; }\n',
+      'B/package.json': '{ "name": "b" }\n',
+      'B/tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['../A/src/*'] } } }),
+      'B/src/use.ts': "import { compute } from '@shared/def';\nexport function use() { return compute(1); }\n",
+    });
+
+    const r = await renameSymbol({ file: path.join(dir, 'A/src/def.ts'), symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件改名
+    expect(readFileSync(path.join(dir, 'A/src/def.ts'), 'utf-8')).toContain('export function tally');
+    // 兄弟项目别名 importer：import 远程名 + 使用点都改（按 B 自身 tsconfig 解析）
+    const use = readFileSync(path.join(dir, 'B/src/use.ts'), 'utf-8');
+    expect(use).toContain("import { tally } from '@shared/def';");
+    expect(use).toContain('return tally(1);');
+    // 结果显示跨根别名 importer 被命中
+    expect(r.importers!.some((i) => i.file === '../B/src/use.ts')).toBe(true);
+    rmForce(dir);
+  });
+});

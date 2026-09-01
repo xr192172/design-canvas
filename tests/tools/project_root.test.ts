@@ -286,6 +286,21 @@ describe('findExternalImporters - importer 邻域有界扫描', () => {
     expect(norm).not.toContain(expect.stringContaining('other.ts'));
     rmForce(dir);
   });
+
+  it('兄弟项目用自身别名(@shared/*)引用 seed → 命中（per-project alias 解析）', async () => {
+    const dir = mkProj({
+      'A/package.json': '{ "name": "a" }\n',
+      'A/src/def.ts': 'export function compute() { return 1; }\n',
+      'B/package.json': '{ "name": "b" }\n',
+      // B 的 tsconfig 把 @shared/* 映射到 ../A/src/*（兄弟项目各自别名）
+      'B/tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['../A/src/*'] } } }),
+      'B/src/use.ts': "import { compute } from '@shared/def';\nexport function use() { return compute(); }\n",
+    });
+    const hits = await findExternalImporters(path.join(dir, 'A/src/def.ts'), path.join(dir, 'A'));
+    const norm = hits.map((h) => h.replace(/\\/g, '/'));
+    expect(norm).toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
+    rmForce(dir);
+  });
 });
 
 describe('expandClosure - importer 邻域自包含', () => {

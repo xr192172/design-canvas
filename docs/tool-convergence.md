@@ -225,14 +225,14 @@
 
 ### 改进方向（1、2、3、4 已实施）
 
-> 说明：本小节曾被外部工具多次还原，语义经 commit c1d4f14 / b8c2bcf / bfff6de / d7c9ea9 /（批量）持续推进，此处为最新累积状态。
+> 说明：本小节被外部工具反复还原（至少 6 次），每次 commit 即固化；语义已在 commit c1d4f14→b8c2bcf→bfff6de→d7c9ea9→01d21f1（及别名 importer 增量）持续推进，此处为最新累积状态。
 
-1. **消除前置状态** —— ✅ **已实施（2026-08）**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界（自包含）。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`），测试覆盖嵌套 git 根解析、跨根 import 闭包、别名（含 monorepo 根配置向上查找）、扩展名/索引解析。
-2. **输出可直接消费** —— ✅ **已实施（2026-08）**：`rename_symbol` 返回结构化 diff——每个受影响文件带 `ops: [{pos, len, old, new}]`（可重放验证），并新增 `dry_run=true` 只算 diff 不落盘。MCP handler 渲染每处 `old → new`。消除"黑盒→不信任→不用"根因。
-3. **闭包 importer 方向** —— ✅ **已实施（2026-08）**：`findExternalImporters` 有界扫 seed 根直属兄弟项目/松散文件里「相对 import 引用 seed」的本地文件并纳入闭包（覆盖跨 git 根引用）。防御：项目样兄弟数超 `NEIGHBOR_LIMIT(20)` 判定 temp/缓存即短路。先 BFS import 边再扩 importer。
-4. **批量操作** —— ✅ **已实施（2026-08）**：新增 `rename_symbols` 工具——跨文件符号批量改名。对 `renames=[{file,symbol,to}]` 先全部 dry\_run 算结构化 diff，任一条被阻断 → 整体不落盘给预览报告；全部可落盘才逐条落盘。与 `rename_many`（单文件局部变量批量）互补。测试覆盖批量落盘/纯预览/单条阻断整批不下/重复条目阻断。
+1. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界（自包含）。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`），测试覆盖嵌套 git 根解析、跨根 import 闭包、别名（含 monorepo 根配置向上查找）、扩展名/索引解析。
+2. **输出可直接消费** —— ✅ **已实施**：`rename_symbol` 返回结构化 diff——每个受影响文件带 `ops: [{pos,len,old,new}]`（可重放验证），新增 `dry_run=true` 只算 diff 不落盘。MCP handler 渲染每处 `old→new`。
+3. **闭包 importer 方向** —— ✅ **已实施**：`findExternalImporters` 有界扫 seed 根直属兄弟项目/松散文件里「相对 import 或各自别名 import 引用 seed」的本地文件并纳入闭包（覆盖跨 git 根互引）。每兄弟项目按其自身 tsconfig 解析别名。防御：项目样兄弟数超 `NEIGHBOR_LIMIT(20)` 判定 temp/缓存即短路。
+4. **批量操作** —— ✅ **已实施**：新增 `rename_symbols` 工具——跨文件符号批量改名。先全部 dry\_run 算结构化 diff，任一条被阻断 → 整体不落盘给预览；全部可落盘才逐条落盘。与 `rename_many`（单文件局部变量批量）互补。
 
-> ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边」扩展，已覆盖 importee 与同工作区兄弟引用 seed 的 importer 两个方向。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 邻域内别名/裸包导入的 importer（邻域只按相对路径追）；c) 跨语言 `.go/.py` 文件的 import 边解析。
+> ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名）」扩展，已覆盖 seed 依赖（importee）与同工作区兄弟引用 seed（importer）两方向。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 邻域内**裸包**（npm/workspace）导入的 importer；c) 跨语言 `.go/.py` 文件的 import 边解析。
 
 ***
 

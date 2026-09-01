@@ -27,7 +27,7 @@ import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
 import { renameFile } from './rename_file.js';
-import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport } from './project_root.js';
+import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, type AliasConfig } from './project_root.js';
 
 // ─────────────────────────────────────────────
 // 最小 tree-sitter 节点面（同 Kernel）
@@ -595,13 +595,22 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
 
   // 解析 importer 文件
   const importerEdits: Map<string, { edits: Edit[]; note: string; src: string }> = new Map();
+  // 按 importer 文件所属项目取 alias（邻域 importer 在兄弟项目里可能用各自别名；
+  // memo 缓存目录→alias，避免每个文件重复读 tsconfig）
+  const aliasMemo = new Map<string, AliasConfig | null>();
+  const aliasFor = (fAbs: string): AliasConfig | null => {
+    const d = path.dirname(fAbs);
+    if (!aliasMemo.has(d)) aliasMemo.set(d, loadAliasConfig(d));
+    return aliasMemo.get(d) ?? null;
+  };
   for (const f of files) {
     if (path.resolve(f) === defAbs) continue;
     const ext = path.extname(f);
     if (!TS_EXTS.has(ext)) continue;
-    // 导入源 → 本地文件：相对走 byNoExt 表；别名（@/）走 tsconfig 解析（与 expandClosure 一致）
+    // 导入源 → 本地文件：相对走 byNoExt 表；别名走该 importer 所在项目的 tsconfig 解析
+    const fAlias = aliasFor(f);
     const resolveEdge = (source: string): string | null =>
-      source.startsWith('.') ? resolveRel(source, f, byNoExt) : aliasCfg ? resolveAliasedImport(source, aliasCfg) : null;
+      source.startsWith('.') ? resolveRel(source, f, byNoExt) : fAlias ? resolveAliasedImport(source, fAlias) : null;
     let fmod: ModuleAnalysis | null;
     let src: string;
     try {
