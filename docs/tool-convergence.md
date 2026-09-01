@@ -236,13 +236,15 @@
 
 **引用查找** —— ✅ **已实施（2026-08）**：新增 `find_references` 工具——改/删一个符号前查"谁引用了它"，只读不落盘，复用 rename 闭包/引用图内核。已入 AGENTS.md 触发点表。
 
+> **结构引用扩展 mode=field（2026-09，dogfood 驱动）**：默认 symbol 模式只报"谁 import 该符号名"，对"加字段/改签名"类改动会漏掉**定义文件内部的构造点与字段读取点**。新增 `mode=field`：扫项目内 `obj.<field>`（读取点）与 `<field>:`（构造点），**含定义文件内部**。教训：上一轮做安全改核心时 agent 反射性用了 grep——一半是触发失灵，一半暴露 find\_references 真缺口；补齐后"加字段前查波及"不必再退回 grep。
+
 > ⚠ **当前边界**：闭包沿「import 边 / 别名边 / 邻域 importer 边（含各自别名+裸包 workspace）/ 跨语言 import 边（Go 包·Python 同包·通用兜底）」扩展——importee、importer（同工作区兄弟）、`.go`/`.py`/通用兜底语言（Java·Rust·C# 等）依赖边均已覆盖。仍未覆盖：a) 跨 drive/homedir 外更大范围项目引用（防御性不扫）；b) 语言特化 resolver 之外的厂商私有路径约定（如 Python 多个 sys.path、Go replace 指令重定向）。另：引用查找 `find_references` 目前只认 TS 系 import（邻域/跨语言引用未覆盖，可复用 expandClosure 续坡）。
 
 **活文档漂移（detect\_drift）** —— ✅ **已实施（2026-09）**：补齐「代码变更 → 提示 DSL 过时/欠实现」的闭环缺口。复用 `checkConsistency` 引擎，叠加：git 变更作用域（`scope=changed` 默认只看工作区改动 / `since_ref`；`scope=all` 全量）、过时判定（`unexpected/mismatched` → `design_stale`，`missing` → `missing_impl`）、持久化台账（`<storageRoot>/drift/<feature>.drift.json`，`mode=status` 复读）。只读不改 DSL；同步设计仍走 `edit_dsl`（带 reason+evidence 门禁）/ `import_project`。已入 AGENTS.md 触发点表。**后台 watcher 已接线**：watch\_project 新增 `drift_on_change`（经 explore\_code action=watch），以本次 fs 变更文件为作用域自动跑 detect\_drift，过时即 pushAlert + status 取 drift\_alert 台账。
 
 > **watcher 二轮优化（2026-09）**：drift 独立于 rebuild（盯 drift 不必全量重建 live）；状态转换去重（仅「未过时→过时」pushAlert，stale 持续期不重复轰炸）。
 >
-> **reconcile 兜底（2026-09 落地）**：先按"免改核心"用 `onReconcile` 全量判，后升级为**用 MCP 工具安全改核心**——给 `ReconcileSummary` 新增 `changed_files`（本次实际增改+删除文件，相对项目根 posix），`reconcileProject` 由内部 `changedRels/deletedRels` 透出（核心接口字段级增量，消费方 `doReconcile` 两处空摘要与 `onReconcile` 同步补齐），`onReconcile` 据此以**精确变更作用域**（scope=changed）补判 drift（fs.watch 丢事件时周期性扫盘找回漏改）。改动走工具纪律：grep 圈消费者边界 → edit 改核心 → vitest 定向+全量回归验证。`runDriftCheck` 单飞 + `drift_running` 防 fs 事件/兜底两路并发重复判定告警。
+> **未做：drift 挂周期性 reconcile 兜底**（fs.watch 丢事件时靠 reconcile 兜补漏改）。理由：`ReconcileSummary` 不暴露本次实际变更文件集（内部 flushBatch 已消费），拿不到 → drift 无法按变更作用域精确算（只能退化为 scope=all 全量）；要拿到须改 reconcileProject 签名/onReconcile 回调（增量同步核心路径，风险高）；且 reconcile 本就低频、收益场景窄——只在"fs.watch 恰好漏了那次影响过时判定的变更"才真有价值。与现 diff/impact 均不做 reconcile 兜底一致，故保留为开放项。
 
 ***
 

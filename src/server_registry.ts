@@ -1401,18 +1401,40 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'find_references',
-    title: 'Find symbol references (callers/importers), read-only',
+    title: 'Find symbol references (callers/importers, structural field refs), read-only',
     description:
-      '查找一个模块级符号的所有引用（调用方/import 方）——改/删前看波及面。只读，不改文件。' +
-      '输入 {file(定义文件), symbol}。返回：定义文件 + 所有 import 该符号的文件（含 import 子句 source、' +
-      '无别名使用点位置与行号）。复用 rename 的闭包/引用图内核（自动定位项目根 + 闭包 + 别名边 + 跨语言）。' +
-      '不产生编辑，纯查询，是"谁引用了它"的直答。',
+      '查找符号/字段的引用——改/删前看波及面。只读，不改文件。' +
+      'mode=symbol（默认）：输入 {file(定义文件), symbol}，返回定义文件 + 所有 import 该符号的文件' +
+      '（含 import 子句 source、无别名使用点位置与行号）。复用 rename 的闭包/引用图内核（自动定位项目根 + 闭包 + 别名边 + 跨语言）。' +
+      'mode=field：输入 {field, project_dir}（可选 file 定闭包），返回该字段在项目内的「读取点」(obj.field) 与' +
+      '「构造点」(field: 对象字面量键)，**含定义文件内部**——用于"加字段/改签名"前看清谁构造、谁读取，' +
+      '比 grep 更结构化了字面量构造站。',
     inputSchema: {
       project_dir: z.string().optional().describe('目标项目根（可选；缺省自动定位）'),
-      file: z.string().describe('定义符号的文件（绝对路径；或相对 cwd/project_dir）'),
-      symbol: z.string().describe('符号名（模块级声明名）'),
+      mode: z.enum(['symbol', 'field']).optional().describe('symbol=找符号引用（默认）；field=找字段读取/构造点'),
+      file: z.string().optional().describe('mode=symbol 必填：定义符号的文件（绝对路径或相对 cwd/project_dir）；mode=field 可选（用于定闭包）'),
+      symbol: z.string().optional().describe('mode=symbol 必填：符号名（模块级声明名）'),
+      field: z.string().optional().describe('mode=field 必填：要查的字段名'),
     },
     handler: wrap(async (a) => {
+      const mode = a.mode === 'field' ? 'field' : 'symbol';
+      if (mode === 'field') {
+        if (typeof a.field !== 'string' || !a.field) return { message: 'mode=field 需要 field 参数', data: { ok: false as boolean } };
+        const r = await findReferences({
+          project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+          mode: 'field',
+          field: a.field,
+          file: typeof a.file === 'string' && a.file ? a.file : undefined,
+        });
+        if (!r.ok) return { message: `字段引用查找失败：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
+        const lines = [`字段 ${r.symbol} 的引用（${r.fieldRefs!.length} 个文件含读取/构造点）：`];
+        for (const f of r.fieldRefs!) {
+          const dots = f.refs.filter((x) => x.kind === 'field-read').length;
+          const keys = f.refs.filter((x) => x.kind === 'field-key').length;
+          lines.push(`\t- ${f.file}（读取 ${dots} · 构造 ${keys}）：行 ${f.refs.map((x) => `${x.line}[${x.kind === 'field-read' ? '读' : '构'}]`).join(', ')}`);
+        }
+        return { message: lines.join('\n'), data: r };
+      }
       const r = await findReferences({
         project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
         file: String(a.file),

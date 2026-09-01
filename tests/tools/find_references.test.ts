@@ -89,4 +89,24 @@ describe('findReferences', () => {
     expect(r.importers!.some((x) => x.file === 'src/a.ts')).toBe(true);
     rmForce(dir);
   });
+
+  it('mode=field：报字段读取点(obj.field)与构造点(field:)——含定义文件内部（结构引用缺口）', async () => {
+    const dir = mkProj({
+      'src/def.ts': 'export interface S { a: number }\nconst x: S = { a: 1 };\nconst y = x.a;\n',
+      'src/use.ts': 'import { S } from "./def";\nconst q: S = { a: 2 };\nfunction f(s: S) { return s.a; }\n',
+    });
+    const r = await findReferences({ project_dir: dir, mode: 'field', field: 'a' });
+    expect(r.ok).toBe(true);
+    expect(r.mode).toBe('field');
+    // 定义文件内部也要报（此前 symbol 模式漏掉的构造/读取点）
+    const def = r.fieldRefs!.find((x) => x.file === 'src/def.ts');
+    expect(def).toBeDefined();
+    expect(def!.refs.some((x) => x.kind === 'field-key')).toBe(true); // { a: 1 } 构造点
+    expect(def!.refs.some((x) => x.kind === 'field-read')).toBe(true); // x.a 读取点
+    // 使用方文件
+    const use = r.fieldRefs!.find((x) => x.file === 'src/use.ts');
+    expect(use).toBeDefined();
+    expect(use!.refs.some((x) => x.kind === 'field-read')).toBe(true); // s.a
+    rmForce(dir);
+  });
 });
