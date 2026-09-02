@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, resolveLangImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
-import { camelToSnake, scanLiteralOccurrences, type LiteralMatch } from './rename_symbols.js';
+import { camelToSnake, scanLiteralOccurrences, type RawLiteralMatch } from './rename_symbols.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 import { parseFileFull } from './ts_kernel/index.js';
 
@@ -60,7 +60,7 @@ export interface FindReferencesResult {
   /** mode=type 时：与类型成员交叠 ≥ min_hit 的对象字面量候选构造点 */
   typeCandidates?: TypeConstructCandidate[];
   /** report_literals=true 时：符号 snake 变体在项目文本里的字面量命中（如工具注册名/README/测试里的串），只扫描不改 */
-  literals?: Array<{ needle: string; matches: LiteralMatch[] }>;
+  literals?: Array<{ needle: string; matches: RawLiteralMatch[] }>;
   /** 阻断/非模块级符号等理由 */
   blocked?: string[];
 }
@@ -70,7 +70,7 @@ function lineOf(src: string, offset: number): number {
 }
 
 /** report_literals=true 时：扫描符号名 snake 变体（及原串兜底）在项目文本里的字面量命中，只报告不改动 */
-async function scanLiterals(projectDir: string, symbol: string): Promise<Array<{ needle: string; matches: LiteralMatch[] }> | undefined> {
+async function scanLiterals(projectDir: string, symbol: string): Promise<Array<{ needle: string; matches: RawLiteralMatch[] }> | undefined> {
   const needle = camelToSnake(symbol);
   if (!needle) return undefined;
   // 原串与 snake 变体都扫：符号本身就可能以 kebab/snake 出现在文档（如 findSymbol→find_symbol；纯小写则只用原串）

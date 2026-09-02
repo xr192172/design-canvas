@@ -80,6 +80,11 @@ export interface ProtectGuard {
    * 并回传被冻结的行文本。blocked 意味着该 rename 会改写冻结行，调用方应原子阻断。
    */
   scan(absFile: string, src: string, edits: EditIn[]): { blocked: boolean; protectedLines: string[] };
+  /**
+   * 单点冻结判定：absFile 受某规则覆盖且 pos 所在行含标记 → true（字面量级逐处决策用）。
+   * 文件不受规则覆盖 / 不在标记行 → false。
+   */
+  isFrozen(absFile: string, src: string, pos: number): boolean;
 }
 
 export function createProtectGuard(root: string): ProtectGuard {
@@ -138,6 +143,17 @@ export function createProtectGuard(root: string): ProtectGuard {
         if (frozen) blocked = true;
       }
       return { blocked, protectedLines };
+    },
+    isFrozen(absFile, src, pos) {
+      if (compiled.length === 0 || !src) return false;
+      const rel = path.relative(root, absFile).replace(/\\/g, '/');
+      const rule = ruleForFile(rel);
+      if (!rule) return false;
+      const starts = buildLineStarts(src);
+      const li = lineOf(starts, pos);
+      const end = li + 1 < starts.length ? starts[li + 1] : src.length;
+      const lineText = src.slice(starts[li], end);
+      return rule.markers.some((m) => lineText.includes(m));
     },
   };
 }

@@ -16,16 +16,33 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { renameSymbol, type RenameSymbolInput, type RenameSymbolResult } from './rename_symbol.js';
 import { resolveProjectRoot } from './project_root.js';
+import { createProtectGuard } from './protect.js';
 
 /** 字面量命中的类别：contract=对外工具注册名(破坏契约需人审)；history=tool-convergence 历史记录(保留原貌)；docs=文档；test=测试断言；code=源码字符串 */
 export type LiteralMatchKind = 'contract' | 'history' | 'docs' | 'test' | 'code';
 
-/** 单个字面量命中 */
-export interface LiteralMatch {
+/** 单条字面量的改名决策：apply=可自动替换；review=契约需人审；preserve=历史保留；frozen=冻结行跳过 */
+export type LiteralDecision = 'apply' | 'review' | 'preserve' | 'frozen';
+
+/** 单个字面量命中的原始信息（扫描产出，不含决策） */
+export interface RawLiteralMatch {
   file: string;
   line: number;
+  /** needle 在该文件内的字节偏移（可精确定位替换） */
+  pos: number;
+  /** 命中字面量长度（即 needle 长度） */
+  len: number;
   snippet: string;
   kind: LiteralMatchKind;
+}
+
+/** 单个字面量命中（含决策与替换名，可落盘/验证） */
+export interface LiteralMatch extends RawLiteralMatch {
+  decision: LiteralDecision;
+  /** 命中的字面量（needle，旧蛇形名） */
+  old: string;
+  /** 替换后蛇形名（新名；仅 decision=apply 会被写盘） */
+  new: string;
 }
 
 export interface RenameSymbolsItem {
@@ -57,13 +74,17 @@ export interface RenameSymbolsResult {
   filesWritten: number;
   /** 整体阻断理由（ok=false 时给出全部） */
   blocked?: string[];
-  /** report_literals=true 时的字面量引用清单：每个旧符号的 snake 变体在项目文本里的命中（只扫描，不改） */
+  /** report_literals / apply_literals 时的字面量引用清单：每个旧符号的 snake 变体在项目文本里的命中（含决策与 new 替换名） */
   literals?: Array<{
     index: number;
     item: RenameSymbolsItem;
     needle: string;
+    /** 新蛇形名（需要的话，字面量里它替换 needle） */
+    toSnake: string;
     matches: LiteralMatch[];
   }>;
+  /** apply_literals + 非 dry_run 时，字面量落盘的文件数 */
+  literalFilesWritten?: number;
 }
 
 export async function renameSymbols(input: {
@@ -72,8 +93,10 @@ export async function renameSymbols(input: {
   renames: RenameSymbolsItem[];
   /** true=只算全部 dry-run diff 不落盘；默认优先整体校验，全通过才落盘 */
   dry_run?: boolean;
-  /** true=额外扫描每个旧符号的 snake 变体在项目文本里的字面量引用（如工具名 render_dsl 在错误提示/README 里的串），返回清单待确认，不改动 */
+  /** true=额外扫描每个旧符号的 snake 变体在项目文本里的字面量引用（如工具名 render_dsl 在错误提示/README 里的串），返回清单（只扫描，不改动） */
   report_literals?: boolean;
+  /** true=在符号改名成功后，自动替换 decision=apply 的字面量（code/docs/test）；contract→需人审、history→保留、冻结行→跳过，均不写盘。dry_run 下只预览不入盘。 */
+  apply_literals?: boolean;
 }): Promise<RenameSymbolsResult> {
   const { renames, dry_run } = input;
   const projectDir = typeof input.project_dir === 'string' && input.project_dir ? input.project_dir : undefined;
@@ -103,14 +126,12 @@ export async function renameSymbols(input: {
     return undefined;
   })();
   let literals: RenameSymbolsResult['literals'];
-  if (input.report_literals === true && rootDir) {
-    const needles = [...new Set(renames.map((item) => camelToSnake(item.symbol)).filter(Boolean))];
-    const scanned = scanLiteralOccurrences(rootDir, needles);
-    literals = renames.map((item, index) => {
-      const needle = camelToSnake(item.symbol);
-      const hit = scanned.find((s) => s.needle === needle);
-      return { index, item: item, needle, matches: hit ? hit.matches : [] };
-    });
+  let literalFilesWritten = 0;
+  const wantLiteral = input.report_literals === true || input.apply_literals === true;
+  if (wantLiteral && rootDir) {
+    const guard = createProtectGuard(rootDir);
+    // 预览计划（对当前盘态命中做决策，供 dry_run/阻断预览/最终报告）
+    literals = buildLiteralPlan(rootDir, renames, guard);
   }
 
   // 阶段 1：全部 dry_run 预览（基于原始文件态，不落盘）
@@ -143,13 +164,23 @@ export async function renameSymbols(input: {
         filesWritten,
         blocked: [`条目 ${i}（${item.file} 的 ${item.symbol}→${item.to}）实际落盘时被阻断：${(result.blocked || []).join('；')}。已应用 ${applied.length} 条，之后条目未执行`],
         literals,
+        literalFilesWritten,
       };
     }
     filesWritten += result.filesWritten;
     applied.push({ index: i, item: item, result: result });
   }
 
-  return { ok: true, previews, applied, filesWritten, literals };
+  // apply_literals：符号已全落盘 → 重新扫盘态（偏移对符号改动后的真值），只替换 decision=apply 的字面量。
+  // contract→需人审、history→保留、冻结行→跳过，均不写盘；decision 明细随 literals 返回供复核。
+  if (input.apply_literals === true && rootDir) {
+    const guard = createProtectGuard(rootDir);
+    const fresh = buildLiteralPlan(rootDir, renames, guard);
+    literalFilesWritten = applyLiteralPlan(fresh).filesWritten;
+    literals = fresh;
+  }
+
+  return { ok: true, previews, applied, filesWritten, ...(literalFilesWritten ? { literalFilesWritten } : {}), literals };
 }
 
 // ──────────────── 字面量引用扫描（只报告，不改动） ────────────────
@@ -173,13 +204,12 @@ function classifyLiteral(file: string, lineText: string, needle: string): Litera
   return 'code';
 }
 
-/** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中 |
- * 只扫描非二进制可读文件，限于设计图纸/文档/脚本/测试（非 node_modules 非 dist） */
+/** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中（含字节偏移，非二进制/非编译产物） */
 export function scanLiteralOccurrences(
   projectDir: string,
   needles: string[],
-): Array<{ needle: string; matches: LiteralMatch[] }> {
-  const result: Array<{ needle: string; matches: LiteralMatch[] }> = [];
+): Array<{ needle: string; matches: RawLiteralMatch[] }> {
+  const result: Array<{ needle: string; matches: RawLiteralMatch[] }> = [];
   if (needles.length === 0) return result;
 
   // 只扫描常见可读扩展名（排除二进制/编译产物）
@@ -200,22 +230,30 @@ export function scanLiteralOccurrences(
   }
   walk(projectDir);
 
-  // 对每个 needle 逐文件 grep
+  // 对每个 needle 逐文件扫描全部出现点（含字节偏移）
   for (const needle of needles) {
     if (!needle) continue;
-    const matches: LiteralMatch[] = [];
+    const matches: RawLiteralMatch[] = [];
     for (const f of files) {
       try {
         const content = fs.readFileSync(f, 'utf-8');
+        const lineStart: number[] = [0];
+        for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lineStart.push(i + 1);
         const lines = content.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes(needle)) {
+        for (let li = 0; li < lines.length; li++) {
+          const text = lines[li];
+          let idx = text.indexOf(needle);
+          while (idx >= 0) {
+            const pos = lineStart[li] + idx;
             matches.push({
               file: f,
-              line: i + 1,
-              snippet: lines[i].trim().substring(0, 120),
-              kind: classifyLiteral(f, lines[i], needle),
+              line: li + 1,
+              pos,
+              len: needle.length,
+              snippet: text.trim().substring(0, 120),
+              kind: classifyLiteral(f, text, needle),
             });
+            idx = text.indexOf(needle, idx + needle.length);
           }
         }
       } catch { /* 跳过无法读的文件 */ }
@@ -224,4 +262,84 @@ export function scanLiteralOccurrences(
   }
 
   return result;
+}
+
+// ──────────────── 字面量改名决策 + 落盘（补全闭环） ────────────────
+
+/** 单个字面量命中 → 改名决策：contract 契约需人审；history 历史保留；冻结行跳过；其余可自动替换 */
+function decideLiteral(kind: LiteralMatchKind, frozen: boolean): LiteralDecision {
+  if (kind === 'contract') return 'review';
+  if (kind === 'history') return 'preserve';
+  if (frozen) return 'frozen';
+  return 'apply';
+}
+
+/**
+ * 构建字面量改名计划：对每个 renames 条目，扫其蛇形旧名的全部命中，并为每处算决策与替换名。
+ * @param guard 冻结行保护守卫（可空）；为空则无冻结判定。
+ */
+export function buildLiteralPlan(
+  rootDir: string,
+  renames: RenameSymbolsItem[],
+  guard?: { isFrozen(absFile: string, src: string, pos: number): boolean } | null,
+): RenameSymbolsResult['literals'] {
+  const needles = [...new Set(renames.map((i) => camelToSnake(i.symbol)).filter(Boolean))];
+  const scanned = scanLiteralOccurrences(rootDir, needles);
+  const contentCache = new Map<string, string>();
+  const contentOf = (f: string): string => {
+    let c = contentCache.get(f);
+    if (c === undefined) {
+      try {
+        c = fs.readFileSync(f, 'utf-8');
+      } catch {
+        c = '';
+      }
+      contentCache.set(f, c);
+    }
+    return c;
+  };
+  return renames.map((item, index) => {
+    const needle = camelToSnake(item.symbol);
+    const toSnake = camelToSnake(item.to);
+    const hit = scanned.find((s) => s.needle === needle);
+    const matches = (hit ? hit.matches : []).map((m) => {
+      const frozen = guard ? guard.isFrozen(m.file, contentOf(m.file), m.pos) : false;
+      return { ...m, decision: decideLiteral(m.kind, frozen), old: needle, new: toSnake };
+    });
+    return { index, item, needle, toSnake, matches };
+  });
+}
+
+/** 落盘字面量计划：只写 decision=apply 的命中（code/docs/test；契约/历史/冻结行跳过）。返回写入文件数。 */
+export function applyLiteralPlan(plan: RenameSymbolsResult['literals']): { filesWritten: number } {
+  const byFile = new Map<string, Array<{ pos: number; len: number; text: string }>>();
+  if (!plan) return { filesWritten: 0 };
+  for (const item of plan) {
+    for (const m of item.matches) {
+      if (m.decision !== 'apply') continue;
+      let a = byFile.get(m.file);
+      if (!a) {
+        a = [];
+        byFile.set(m.file, a);
+      }
+      a.push({ pos: m.pos, len: m.len, text: m.new });
+    }
+  }
+  let filesWritten = 0;
+  for (const [file, edits] of byFile) {
+    let src: string;
+    try {
+      src = fs.readFileSync(file, 'utf-8');
+    } catch {
+      continue;
+    }
+    const sorted = [...edits].sort((a, b) => b.pos - a.pos);
+    let out = src;
+    for (const e of sorted) out = out.slice(0, e.pos) + e.text + out.slice(e.pos + e.len);
+    if (out !== src) {
+      fs.writeFileSync(file, out, 'utf-8');
+      filesWritten++;
+    }
+  }
+  return { filesWritten };
 }

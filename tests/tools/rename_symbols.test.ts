@@ -214,3 +214,90 @@ describe('renameSymbols - 批量跨文件符号改名', () => {
     rmForce(dir);
   });
 });
+
+describe('renameSymbols - apply_literals（补全字面量感知改名闭环）', () => {
+  const renderFiles = (extra: Record<string, string> = {}): Record<string, string> => ({
+    'src/render.ts': 'export function renderDsl(): string { return "v"; }\n',
+    'README.md': '# t\n请先 render_dsl 渲染，或用 render_dsl 预览。\n',
+    'src/server_registry.ts': "const def = { name: 'render_dsl', title: 'x' };\n",
+    'docs/tool-convergence.md': 'render_dsl(旧名) <- renderDesign(新)\n',
+    'tests/use.test.ts': "expect(tool).toBe('render_dsl');\n",
+    'src/usage.ts': "const hint = '请用 render_dsl 运行';\n",
+    ...extra,
+  });
+
+  it('code/docs/test 自动替换；contract/history 保留不写盘；返回决策', async () => {
+    const dir = mkProj(renderFiles());
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      apply_literals: true,
+    });
+    expect(r.ok).toBe(true);
+    // 符号改名照常
+    expect(readFileSync(path.join(dir, 'src/render.ts'), 'utf-8')).toContain('function renderDesign');
+
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    expect(l.toSnake).toBe('render_design');
+    const dec = (filePart: string) => l.matches.find((m) => m.file.endsWith(filePart));
+    // 决策分层
+    expect(dec('README.md')!.decision).toBe('apply');
+    expect(dec('use.test.ts')!.decision).toBe('apply');
+    expect(dec('usage.ts')!.decision).toBe('apply');
+    expect(dec('server_registry.ts')!.decision).toBe('review'); // 契约需人审
+    expect(dec('tool-convergence.md')!.decision).toBe('preserve'); // 历史保留
+
+    // docs/test/code 已替换；contract/history 未动
+    expect(readFileSync(path.join(dir, 'README.md'), 'utf-8')).toContain('render_design');
+    expect(readFileSync(path.join(dir, 'tests/use.test.ts'), 'utf-8')).toContain('render_design');
+    expect(readFileSync(path.join(dir, 'src/usage.ts'), 'utf-8')).toContain('render_design');
+    expect(readFileSync(path.join(dir, 'src/server_registry.ts'), 'utf-8')).toContain("'render_dsl'");
+    expect(readFileSync(path.join(dir, 'docs/tool-convergence.md'), 'utf-8')).toContain('render_dsl');
+    expect(r.literalFilesWritten).toBe(3); // README + use.test + usage
+    rmForce(dir);
+  });
+
+  it('apply_literals + dry_run=true → 只预览不入盘', async () => {
+    const dir = mkProj(renderFiles());
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      apply_literals: true,
+      dry_run: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.dryRun).toBe(true);
+    // 全都不落盘：符号 + 字面量
+    expect(readFileSync(path.join(dir, 'README.md'), 'utf-8')).toContain('render_dsl');
+    expect(readFileSync(path.join(dir, 'src/render.ts'), 'utf-8')).toContain('function renderDsl');
+    // 预览里有 apply 决策与替换目标
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    const readme = l.matches.find((m) => m.file.endsWith('README.md'))!;
+    expect(readme.decision).toBe('apply');
+    expect(readme.old).toBe('render_dsl');
+    expect(readme.new).toBe('render_design');
+    rmForce(dir);
+  });
+
+  it('冻结行保护：命中 .design-canvas.json 标记行 → decision=frozen，不写盘', async () => {
+    const dir = mkProj(
+      renderFiles({
+        '.design-canvas.json': JSON.stringify({ rename: { protect: [{ globs: ['src/usage.*'], markers: ['请用'] }] } }),
+      }),
+    );
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      apply_literals: true,
+    });
+    expect(r.ok).toBe(true);
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    const usage = l.matches.find((m) => m.file.endsWith('usage.ts'))!;
+    expect(usage.decision).toBe('frozen');
+    // 冻结行的字面量未被替换；其它 apply 文件照常替换
+    expect(readFileSync(path.join(dir, 'src/usage.ts'), 'utf-8')).toContain('render_dsl');
+    expect(readFileSync(path.join(dir, 'README.md'), 'utf-8')).toContain('render_design');
+    expect(r.literalFilesWritten).toBe(2); // README + use.test
+    rmForce(dir);
+  });
+});
