@@ -288,7 +288,8 @@ function symbolText(row: { name: string; qualified_name: string; file_path: stri
 export async function semanticSearch(input: SemanticSearchInput): Promise<SemanticSearchResult> {
   const query = input.query.trim();
   const limit = input.limit ?? 20;
-  const minScore = input.min_score ?? 0;
+  // 默认 min_score=0.3：滤掉语义无关的低分噪音（exact/fts 路径不受影响，仅 semantic 路径过滤）
+  const minScore = input.min_score ?? 0.3;
 
   if (!query) {
     return { query, provider: 'fts', indexed: 0, hits: [], message: '查询为空' };

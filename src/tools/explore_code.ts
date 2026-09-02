@@ -94,7 +94,17 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
       if (!q.trim()) {
         return { message: '查询为空', data: { query: q, provider: 'fts', indexed: 0, hits: [], message: '查询为空' } };
       }
-      const r = await semanticSearch({ query: q, project_dir: requireStr(args, 'project_dir') });
+      // top_k → limit：用户传 top_k=5 就只返 5 条，不再默认返 20 条
+      const topK = typeof args['top_k'] === 'number' ? args['top_k'] : undefined;
+      // min_score 阈值：语义搜索默认 0.3 滤低分噪音（0.50 的无关符号不再混入）；
+      // 用户可显式传 min_score=0 覆盖（exact/fts 路径不受影响——只在 semantic 路径过滤）
+      const minScore = typeof args['min_score'] === 'number' ? args['min_score'] : undefined;
+      const r = await semanticSearch({
+        query: q,
+        project_dir: requireStr(args, 'project_dir'),
+        limit: topK,
+        min_score: minScore,
+      });
       // message 内联可读命中列表：外层 wrap 只回显 message，纯 data 易被丢弃导致静默空结果
       const lines = [r.message];
       for (const h of r.hits) {

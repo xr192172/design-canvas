@@ -196,18 +196,28 @@ function cachedSrcMtime(): number | null {
   return v;
 }
 
-/** src 比 dist 新（改了源码未 build）→ 提示，否则空串。 */
+/** 上次 stale 状态（null=未检测过；'stale'=src 比 dist 新；'ok'=dist 不旧）。只在状态变化时报一次，避免每次工具调用刷屏。 */
+let _lastStaleState: 'stale' | 'ok' | null = null;
+
+/** src 比 dist 新（改了源码未 build）→ 提示，否则空串。仅在状态从 ok→stale 转变时报告，避免每次工具调用重复刷屏。 */
 function staleSourceWarning(): string {
   const srcMax = cachedSrcMtime();
   const distMax = newestMtime(DIST_DIR, false);
   if (srcMax === null || distMax === null) return '';
-  if (srcMax > distMax) {
-    return (
-      '\n⚠️ STALE SOURCE：`src/` 比 `dist/` 新（疑似改了源码但未 `npm run build`）。' +
-      '当前工具跑的是旧编译产物——请运行 `npm run build` 后再重启 design-canvas MCP server 生效。'
-    );
+  const isStale = srcMax > distMax;
+  const state: 'stale' | 'ok' = isStale ? 'stale' : 'ok';
+  try {
+    // 只在「上次不是 stale → 这次是 stale」的转变时报一次；持续 stale 期间静默
+    if (isStale && _lastStaleState !== 'stale') {
+      return (
+        '\n⚠️ STALE SOURCE：`src/` 比 `dist/` 新（疑似改了源码但未 `npm run build`）。' +
+        '当前工具跑的是旧编译产物——请运行 `npm run build` 后再重启 design-canvas MCP server 生效。'
+      );
+    }
+    return '';
+  } finally {
+    _lastStaleState = state;
   }
-  return '';
 }
 
 // ─────────────────────────────────────────────────────────────
