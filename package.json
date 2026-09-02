@@ -43,6 +43,7 @@
   },
   "scripts": {
     "build": "node scripts/gen_agents.mjs && node scripts/gen_anim_core_bundle.mjs && tsc",
+    "dev": "node scripts/dev.mjs",
     "start": "node dist/src/server.js",
     "serve": "node dist/src/tools/serve.js",
     "daemon": "node dist/src/daemon/daemon.js",

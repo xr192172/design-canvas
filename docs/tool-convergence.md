@@ -227,6 +227,10 @@
 
 > 说明：本小节被外部工具反复还原（多次），每次 commit 即固化；语义已在 c1d4f14→…→2e726a3 持续推进，此处为最新累积状态。
 
+0. **运行状态依赖（STALE BUILD）/ 障碍 #5** —— ✅ **已实施**：
+   - **检测 + 闸门**：`src/tools/stale_check.ts` 按文件精确判「src/ 手写 ts 比 dist 产物新/缺产物」；CI（ci.yml）stale 即失败；`run_tests` 前置自检本服务 dist 是否 stale，过期先提示重建——把"静默咬人"变显式。
+   - **自动重编（dev 循环）**：`scripts/dev.mjs`（`npm run dev`）监听 src/ 手写 .ts/.tsx，变更（轮询 mtime，跨平台确定）自动 `tsc` 重编，成功/失败都打印、失败自动待恢复，杜绝"忘了重跑 build"根因。诚实边界：长驻 MCP server 需重启才能加载新 dist，本循环只保证 dist 不 STALE。
+
 1. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`）。
 2. **输出可直接消费** —— ✅ **已实施**：`rename_symbol` 返回结构化 diff（`ops: [{pos,len,old,new}]` 可重放验证），新增 `dry_run=true`。MCP handler 渲染每处 `old→new`。
 3. **闭包 importer 方向** —— ✅ **已实施**：`findExternalImporters` 有界扫 seed 根直属兄弟项目/松散文件里引用 seed 的本地文件并纳入闭包（含各自别名、裸包 workspace 互引）。防御 `NEIGHBOR_LIMIT(20)` 短路。
