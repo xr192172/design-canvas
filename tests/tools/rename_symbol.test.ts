@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { renameSymbol, analyzeModuleSource } from '../../src/tools/rename_symbol';
+import { renameSymbol, analyzeModuleSource, analyzeGoSource } from '../../src/tools/rename_symbol';
 
 function mkProj(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
@@ -475,6 +475,142 @@ describe('renameSymbol - 跨根别名 importer（兄弟项目用自身别名引�
     expect(use).toContain('return tally(1);');
     // 结果显示跨根别名 importer 被命中
     expect(r.importers!.some((i) => i.file === '../B/src/use.ts')).toBe(true);
+    rmForce(dir);
+  });
+});
+
+describe('analyzeGoSource - Go 包级符号解析', () => {
+  it('收集 function/type 定义偏移 + 同文件裸引用偏移', async () => {
+    const src = [
+      'package svc',
+      '',
+      'func Target(x int) int {',
+      '\treturn x + 1',
+      '}',
+      '',
+      'func helper() int {',
+      '\treturn Target(1)',
+      '}',
+      '',
+      'type Target2 struct {',
+      '\tV int',
+      '}',
+    ].join('\n');
+    const m = await analyzeGoSource(src);
+    expect(m).not.toBeNull();
+    expect(m!.rootKinds.get('Target')).toBe('function');
+    expect(m!.rootKinds.get('Target2')).toBe('type');
+    // helper 内的 Target(1) 是引用
+    expect(m!.refs.get('Target')!.length).toBe(1);
+    // 定义偏移
+    expect(src.slice(m!.rootOffsets.get('Target')!, m!.rootOffsets.get('Target')! + 6)).toBe('Target');
+  });
+});
+
+describe('renameSymbol - Go 跨文件改名', () => {
+  it('包级函数：定义 + 同文件引用 + 同目录 .go 引用一起改', async () => {
+    const dir = mkProj({
+      'src/def.go': [
+        'package svc',
+        '',
+        'func Compute(a int) int {',
+        '\treturn a * 2',
+        '}',
+        '',
+        'func internal() int {',
+        '\treturn Compute(1)',
+        '}',
+      ].join('\n'),
+      'src/use.go': [
+        'package svc',
+        '',
+        'func Run() int {',
+        '\treturn Compute(3)',
+        '}',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.go', symbol: 'Compute', to: 'Tally' });
+    expect(r.ok).toBe(true);
+
+    const def = readFileSync(path.join(dir, 'src/def.go'), 'utf-8');
+    expect(def).toContain('func Tally(a int) int');
+    expect(def).toContain('return Tally(1)'); // internal 引用改
+    expect(def).not.toContain('func Compute');
+
+    const use = readFileSync(path.join(dir, 'src/use.go'), 'utf-8');
+    expect(use).toContain('return Tally(3)'); // 同包其它文件引用改
+
+    // 改写了 2 个文件
+    expect(r.filesWritten).toBe(2);
+    expect(r.importers!.some((i) => i.file === 'src/use.go')).toBe(true);
+    rmForce(dir);
+  });
+
+  it('type 符号：type_identifier 定义 + 引用一起改', async () => {
+    const dir = mkProj({
+      'src/def.go': [
+        'package svc',
+        'type Worker struct { Name string }',
+        'func New() Worker { return Worker{} }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.go', symbol: 'Worker', to: 'Employee' });
+    expect(r.ok).toBe(true);
+    const def = readFileSync(path.join(dir, 'src/def.go'), 'utf-8');
+    expect(def).toContain('type Employee struct');
+    expect(def).toContain('func New() Employee { return Employee{} }');
+    rmForce(dir);
+  });
+
+  it('撞名（同包其它文件已定义 to）→ 原子阻断，定义文件不变', async () => {
+    const dir = mkProj({
+      'src/def.go': 'package svc\nfunc Compute(a int) int { return a }\n',
+      'src/other.go': 'package svc\nfunc Tally() int { return 1 }\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.go', symbol: 'Compute', to: 'Tally' });
+    expect(r.ok).toBe(false);
+    expect(r.blocked!.some((b) => b.includes('Tally'))).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/def.go'), 'utf-8')).toContain('func Compute');
+    rmForce(dir);
+  });
+
+  it('非包级符号（未定义）→ 拒绝', async () => {
+    const dir = mkProj({
+      'src/def.go': 'package svc\nfunc Compute() int { return 1 }\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.go', symbol: 'Nope', to: 'X' });
+    expect(r.ok).toBe(false);
+    expect(r.blocked![0]).toContain('包级定义');
+    rmForce(dir);
+  });
+
+  it('dry_run=true → 不落盘，返回 dryRun + ops', async () => {
+    const dir = mkProj({
+      'src/def.go': 'package svc\nfunc Compute(a int) int { return a }\nfunc use() int { return Compute(1) }\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.go', symbol: 'Compute', to: 'Tally', dry_run: true });
+    expect(r.ok).toBe(true);
+    expect(r.dryRun).toBe(true);
+    expect(r.filesWritten).toBe(0);
+    expect(readFileSync(path.join(dir, 'src/def.go'), 'utf-8')).toContain('func Compute');
+    // 定义 + 引用至少 2 处 ops
+    expect(r.definition!.ops!.length).toBeGreaterThanOrEqual(2);
+    expect(r.definition!.ops!.every((o) => o.old === 'Compute' && o.new === 'Tally')).toBe(true);
+    rmForce(dir);
+  });
+
+  it('非 .go 文件不引入 Go 分支，仍按原 TS 语义（含作用于内符号入 TS 判断）', async () => {
+    // 回归冒烟：确认 defExt 不是 .go 时走原 TS 分支逻辑（compute 改名）
+    const dir = mkProj({
+      'src/def.ts': 'export function compute(a: number) { return a; }\n',
+      'src/a.ts': "import { compute } from './def';\nexport function run() { return compute(3); }\n",
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function tally');
+    expect(readFileSync(path.join(dir, 'src/a.ts'), 'utf-8')).toContain('return tally(3);');
     rmForce(dir);
   });
 });

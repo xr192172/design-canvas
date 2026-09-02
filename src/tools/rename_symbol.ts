@@ -21,7 +21,7 @@
  *     class/enum 值类型双栖，identifier 与 type_identifier 都改。
  *   - 原子性：任一阻断（新名撞名、星号转发、目标不是模块级符号）→ 全部不落盘，返回理由。
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
@@ -414,6 +414,204 @@ export async function analyzeModuleSource(src: string, filePath = 'file.ts'): Pr
 }
 
 // ─────────────────────────────────────────────
+// Go 包级符号改名支持（方向二 · 先做 Go，最小可用）
+// ─────────────────────────────────────────────
+// Go 语义（与 TS 差异大，独立分支，不混入 analyzeModuleSource）：
+//   - 包级符号（function / type / const / var）在**同包内直接可见**，无 import 远程名概念
+//   - 改名需覆盖：定义处 + 同包所有裸标识符引用（不含局部遮蔽——Go 无模块局部遮蔽陷阱概化，
+//     body 内同名局部变量不处理，宁漏不误）
+//   - 跨目录同包罕见，本版只覆盖**同目录 .go 文件**（Go 惯例 package=目录）
+// 本解析只取「定义偏移 + 裸引用标识符偏移」，不建 import 图（跨包 pkg.Sym 引用需 Go 包路径
+// import 图，工作量大，留后；本版先交付同包改名这一 90% 场景）。
+
+export interface GoModuleAnalysis {
+  /** 包级定义名 → 声明 identifier/type_identifier 字节偏移 */
+  rootOffsets: Map<string, number>;
+  /** 包级定义名 → kind */
+  rootKinds: Map<string, string>;
+  /** 引用到该包级符号的裸标识符偏移（不含定义处本身） */
+  refs: Map<string, number[]>;
+  /** 定义的符号集合（去重，供改名时确定当前文件是否定义） */
+  defined: Set<string>;
+}
+
+const GO_DEF_NODE_TYPES = new Set(['function_declaration', 'type_spec', 'const_spec', 'var_spec']);
+
+export async function analyzeGoSource(src: string): Promise<GoModuleAnalysis | null> {
+  const parser = await getParser('.go', findLanguageByExt('.go')!);
+  if (!parser) return null;
+  let root: N;
+  try {
+    root = (parseContent(parser as Parameters<typeof parseContent>[0], src) as unknown as { rootNode: N }).rootNode;
+  } catch {
+    return null;
+  }
+  const rootOffsets = new Map<string, number>();
+  const rootKinds = new Map<string, string>();
+  const refs = new Map<string, number[]>();
+  const defined = new Set<string>();
+
+  const add = (map: Map<string, number[]>, name: string, offset: number): void => {
+    let a = map.get(name);
+    if (!a) {
+      a = [];
+      map.set(name, a);
+    }
+    a.push(offset);
+  };
+
+  // 第一阶段：收集包级定义（可能出现在引用之后，需先扫完整棵）
+  const collectDefs = (node: N, depth = 0): void => {
+    if (depth > 1000) return;
+    // 方法（method_declaration 的接收者）整体跳过——字段/方法改名是另一语义
+    if (node.type === 'method_declaration') return;
+    if (GO_DEF_NODE_TYPES.has(node.type)) {
+      const dir = node.childForFieldName('name');
+      if (dir && (dir.type === 'identifier' || dir.type === 'type_identifier')) {
+        const name = dir.text;
+        if (!rootOffsets.has(name)) {
+          rootOffsets.set(name, dir.startIndex);
+          rootKinds.set(name, node.type === 'function_declaration' ? 'function' : node.type === 'type_spec' ? 'type' : 'const');
+          defined.add(name);
+        }
+      }
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) collectDefs(c, depth + 1);
+    }
+  };
+
+  // 第二阶段：收集裸标识符引用（仅对已定义过的符号；跳过定义处 name 节点）
+  const collectRefs = (node: N, depth = 0): void => {
+    if (depth > 1000) return;
+    const t = node.type;
+    // 定义节点：跳过其 name 字段节点（定义处不是引用），其余子树继续
+    if (GO_DEF_NODE_TYPES.has(t)) {
+      const nameNode = node.childForFieldName('name');
+      const nameStart = nameNode ? nameNode.startIndex : -1;
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (c && c.startIndex !== nameStart) collectRefs(c, depth + 1);
+      }
+      return;
+    }
+    if (t === 'identifier' || t === 'type_identifier') {
+      const name = node.text;
+      add(refs, name, node.startIndex);
+      return;
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) collectRefs(c, depth + 1);
+    }
+  };
+
+  collectDefs(root, 0);
+  collectRefs(root, 0);
+  return { rootOffsets, rootKinds, refs, defined };
+}
+
+// ─────────────────────────────────────────────
+// Go 跨文件改名执行器回调（供 renameSymbol Go 分支调用）
+// ─────────────────────────────────────────────
+export async function renameGoSymbol(args: {
+  file: string; // 定义文件绝对路径
+  symbol: string;
+  to: string;
+  dryRun: boolean;
+  resolvedRoot: string;
+  blocked: string[];
+}): Promise<RenameSymbolResult> {
+  const { file, symbol, to, dryRun, resolvedRoot } = args;
+  const blocked = args.blocked.slice();
+
+  // 基础校验（与 TS 分支一致）
+  if (!/^[A-Za-z_][\w$]*$/.test(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名非法：' + to] };
+  if (symbol === to) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名与旧名相同：' + symbol] };
+
+  const defSrc = readFileSync(file, 'utf-8');
+  const def = await analyzeGoSource(defSrc);
+  const defKind = def?.rootKinds.get(symbol);
+  if (!def || !defKind) return { ok: false, symbol, to, filesWritten: 0, blocked: [`"${symbol}" 不是该 Go 文件的包级定义`] };
+  if (def.rootOffsets.has(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`定义文件已存在同名包级符号 "${to}"`] };
+
+  // 扫描同目录 .go 文件（Go 惯例 package=目录；跨目录同包罕见，本版不覆盖）
+  const dir = path.dirname(file);
+  let goFiles: string[] = [];
+  try {
+    goFiles = readdirSync(dir).filter((f) => f.endsWith('.go'));
+  } catch {
+    /* 目录读取失败 → 仅定义文件自身 */
+  }
+
+  // 汇总各文件的编辑（偏移逆序应用）
+  const editsByFile = new Map<string, { src: string; edits: Array<{ pos: number; len: number; text: string }> }>();
+
+  // 定义文件：定义处 + 同文件引用
+  const defEdits: Array<{ pos: number; len: number; text: string }> = [{ pos: def.rootOffsets.get(symbol)!, len: symbol.length, text: to }];
+  for (const off of def.refs.get(symbol) ?? []) defEdits.push({ pos: off, len: symbol.length, text: to });
+  editsByFile.set(file, { src: defSrc, edits: defEdits });
+
+  // 同包其它 .go 文件的裸引用（同包直接可见）
+  for (const f of goFiles) {
+    const abs = path.join(dir, f);
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    let src: string;
+    try {
+      src = readFileSync(abs, 'utf-8');
+    } catch {
+      continue;
+    }
+    const m = await analyzeGoSource(src);
+    if (!m) continue;
+    // 撞名：同包其它文件已定义 to（无论是否引用旧名，都构成同包符号冲突）
+    if (m.defined.has(to)) {
+      blocked.push(`${f} 已定义同名 "${to}"`);
+      continue;
+    }
+    // 同包其它文件：裸引用（不要求该文件定义 symbol——同包直接可见）
+    const refs = m.refs.get(symbol) ?? [];
+    if (refs.length === 0) continue;
+    editsByFile.set(abs, {
+      src,
+      edits: refs.map((off) => ({ pos: off, len: symbol.length, text: to })),
+    });
+  }
+
+  // 原子性：任一撞名 → 全部不落盘
+  if (blocked.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked };
+
+  // 落盘
+  let filesWritten = 0;
+  const ordered: RenameSymbolFileInfo[] = [];
+  for (const [abs, { src, edits }] of editsByFile) {
+    const out = applyEdits(src, edits);
+    if (out !== src && !dryRun) {
+      writeFileSync(abs, out, 'utf-8');
+      filesWritten++;
+    }
+    ordered.push({
+      file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
+      edits: edits.length,
+      note: path.resolve(abs) === path.resolve(file) ? '定义+同文件引用（Go）' : '同包引用（Go）',
+      ops: toOps(src, edits),
+    });
+  }
+
+  const definition = ordered.find((o) => path.resolve(path.join(resolvedRoot, o.file)) === path.resolve(file)) ?? ordered[0];
+  return {
+    ok: true,
+    symbol,
+    to,
+    dryRun: dryRun || undefined,
+    definition,
+    importers: ordered.filter((o) => o !== definition),
+    filesWritten,
+  };
+}
+
+// ─────────────────────────────────────────────
 // 符号种类 → 需改写的引用节点类型
 // ─────────────────────────────────────────────
 function kindNodeTypes(kind: string): Set<NodeType> {
@@ -570,6 +768,12 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   const aliasCfg = loadAliasConfig(resolvedRoot);
 
   const defExt = path.extname(defAbs);
+
+  // ── Go 分支：包级符号跨文件改名（同包直接可见，无 import 远程名）──
+  if (defExt === '.go') {
+    return renameGoSymbol({ file: defAbs, symbol, to, dryRun, resolvedRoot, blocked });
+  }
+
   if (!TS_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS 系（${defExt}），跨文件改名暂只支持 TS/JS 模块级符号`] };
 
   const defSrc = readFileSync(defAbs, 'utf-8');

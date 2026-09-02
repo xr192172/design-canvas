@@ -45,20 +45,22 @@ declareCapability({
   },
 });
 
-/** 符号改名：仅实现 TS 家族（TS_EXTS 中文名解析 + import/reexport 边） */
+/** 符号改名：TS 家族全量；Go 支持同包级符号改名（2026-09 新增） */
 declareCapability({
   id: 'rename_symbol',
   label: '符号改名（作用域解析 + 跨文件 import 边）',
-  desc: '当前只实现 TS 家族（typescript/tsx/javascript/jsx 及其扩展）；Go/Python 走别的路子',
+  desc: 'TS 家族（作用域解析 + import/reexport 边）全量；Go 支持同包级符号改名（定义+同文件引用+同目录引用+撞名阻断）；Python 未接',
   default: 'unimplemented',
   overrides: {
     typescript: 'full_ast',
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    go: 'partial_ast',
   },
   notes: {
-    go: 'Go 改名走 refactor_pipeline / rename_file 等其他线',
+    typescript: '值/类型双栖 + import 边 + 别名 + 局部遮蔽',
+    go: '同包 function/type/const 改名（定义+同文件引用+同目录引用）；跨包 pkg.Sym 引用未接 → partial',
     python: 'Python 改名尚未接 rename_symbol',
   },
 });
