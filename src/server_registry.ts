@@ -66,6 +66,7 @@ import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
 import { captureBaseline, verifyBaseline, baselinePathFor } from './behavior/index.js';
 import { analyzeHealth } from './health/index.js';
 import { renameFile } from './tools/rename_file.js';
+import { renameFiles } from './tools/rename_files.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
@@ -1499,6 +1500,50 @@ const TOOL_DEFS: ToolDef[] = [
       ];
       for (const p of r.previews) parts.push(fmt(p.item, p.result).replace(/\n/g, '\n\t'));
       appendLiterals(parts, r);
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'rename_files',
+    title: 'Batch file renames with import-reference rewrites (whole-batch dry-run first)',
+    description:
+      '文件批量改名/移动：一次调用对多个文件重命名/移动并联动全仓 import 引用改写（对标脚本效率，消除"70 文件改名=70 次调用"的粒度问题）。' +
+      '输入 renames=[{from,to}]（from/to 相对 project_dir 或绝对路径）。' +
+      '先对所有条目按原始文件态 dry_run 算影响面；任一条被阻断（源缺失 / 目标已存在 / 命中冻结行）→ 整体不落盘，返回预览报告。' +
+      '全部可落盘时才逐条落盘（复用 rename_file 的原子语义：先复制→改写引用→删源+重索引，失败可回滚）。' +
+      'apply 阶段串行，前面改动使后续条目被阻断时立即中止，如实报告已应用条数。' +
+      '冻结行保护 / 生成物识别：逐条内部走 rename_file，天然继承（body 文件不套 / importer 命中冻结行 → 该条阻断）。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根（可选；缺省按第一条 from 自动定位，兜底 cwd）'),
+      renames: z
+        .array(z.object({ from: z.string().describe('源文件：相对 project_dir 或绝对路径'), to: z.string().describe('目标文件：相对 project_dir 或绝对路径') }))
+        .describe('待批量改名的文件条目'),
+      dry_run: z.boolean().optional().describe('true=只算全部 dry-run 影响面不落盘（默认：先整体校验，全通过才落盘）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await renameFiles({
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        renames: (a.renames as Array<{ from: string; to: string }>).map((x) => ({ from: String(x.from), to: String(x.to) })),
+        dry_run: a.dry_run === true,
+      });
+      const fmt = (p: { from: string; to: string }, res?: { references: Array<{ file: string; fromSource: string; toSource: string }> }): string => {
+        const lines = [`  - ${p.from} → ${p.to}`];
+        if (res?.references) {
+          for (const ref of res.references) lines.push(`\t改 ${ref.file}：${ref.fromSource} → ${ref.toSource}`);
+        }
+        return lines.join('\n');
+      };
+      if (!r.ok) {
+        const parts = [`批量文件改名被阻断（${r.dryRun ? '整体未落盘' : '部分已应用后中止'}）：`];
+        parts.push(`\t${(r.blocked || []).join('\n\t')}`);
+        parts.push('\tdry-run 各条状态：');
+        for (const p of r.previews) parts.push(`\t  [${p.ok ? '可落盘' : '被阻断'}] ${fmt(p, p.result)}`.replace(/\n/g, '\n\t  '));
+        return { message: parts.join('\n'), data: r };
+      }
+      const parts = [
+        r.dryRun ? `[批量文件改名 dry-run 预览·未落盘] 共 ${r.previews.length} 条` : `批量文件改名完成：${r.previews.length} 条，联动改写引用 ${r.filesWritten} 处`,
+      ];
+      for (const p of r.previews) parts.push(fmt(p, p.result).replace(/\n/g, '\n\t'));
       return { message: parts.join('\n'), data: r };
     }),
   },

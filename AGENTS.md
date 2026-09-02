@@ -18,6 +18,7 @@
 | 批量改多个符号                   | `rename_symbols`                                                    | 先整体 dry-run，全部可落盘才落                                                    |
 | 改**对外契约名 / MCP 工具名**    | `rename_symbols report_literals=true`                               | 扫旧名 snake 字面量清单，按 kind 分治(契约/历史/文档/测试/代码)；契约变更才跟文档 |
 | 改文件名并联动全仓 import        | `rename_file`                                                       | 防文件悬空                                                                        |
+| 批量改多个文件名                 | `rename_files`                                                      | 整体先 dry-run，全部可落盘才落                                                    |
 | 单文件局部变量/形参批量改名      | `rename_many`                                                       | 作用域隔离                                                                        |
 | 改一段代码（函数体/range）       | `edit_code`                                                         | 按符号/行号定位改写                                                               |
 | 理解一串代码/结构                | `explore_code`                                                      | 只读、即时答案                                                                    |
@@ -44,6 +45,7 @@
 | 改一个模块级符号（函数/const/class/interface/type/enum） | `rename_symbol`  |
 | 批量改多个模块级符号                                     | `rename_symbols` |
 | 改文件名并联动全仓 import 引用                           | `rename_file`    |
+| 批量改多个文件路径                                       | `rename_files`   |
 | 单文件内局部变量/形参批量改名                            | `rename_many`    |
 
 **硬性流程（每次改名都执行）：**
