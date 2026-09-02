@@ -1374,8 +1374,8 @@ const TOOL_DEFS: ToolDef[] = [
     name: 'rename_symbols',
     title: 'Batch cross-file module-level symbol renames with structured-diff preview',
     description:
-      '跨文件符号改名（单条或多条，统一入口）：对「模块级导出符号」改名（对标脚本效率，带结构化 diff 预览/验证）。' +
-      '单一符号改名也用它——renames 传 1 条即可（收敛掉原 rename_symbol 工具）。' +
+      '跨文件符号改名（单条或批量统一入口）：对「模块级导出符号」改名，对标脚本效率并带结构化 diff 预览/验证。' +
+      '支持单条或批量——renames 传 1 条即单符号改名（原独立的 rename_symbol 单条目工具已并入本入口）。' +
       '输入 renames=[{file,symbol,to,rename_file_if_matching?}]。' +
       '先对所有条目按原始文件态 dry_run 算结构化 diff（每处 old→new，可验证）；任一条被阻断（撞名/星号转发/非模块级符号）→ 整体不落盘，返回预览报告。' +
       '全部可落盘时才逐条落盘并返回每条 preview(含 applied 的实际 diff)。apply 阶段若前面改动使后续条目被阻断，立即中止并如实报告已应用条数。' +
@@ -1454,8 +1454,8 @@ const TOOL_DEFS: ToolDef[] = [
     name: 'rename_files',
     title: 'Batch file renames with import-reference rewrites (whole-batch dry-run first)',
     description:
-      '文件改名/移动（单条或多条，统一入口）并联动全仓 import 引用改写（对标脚本效率，消除"70 文件改名=70 次调用"的粒度问题）。' +
-      '单一文件改名也用它——renames 传 1 条即可（收敛掉原 rename_file 工具）。' +
+      '文件改名/移动（单条或批量统一入口）并联动全仓 import 引用改写，对标脚本效率（消除"70 文件改名=70 次调用"的粒度问题）。' +
+      '支持单条或批量——renames 传 1 条即单文件改名（原独立的 rename_file 单条目工具已并入本入口）。' +
       '输入 renames=[{from,to}]（from/to 相对 project_dir 或绝对路径）。' +
       '先对所有条目按原始文件态 dry_run 算影响面；任一条被阻断（源缺失 / 目标已存在 / 命中冻结行）→ 整体不落盘，返回预览报告。' +
       '全部可落盘时才逐条落盘（复用 rename_file 的原子语义：先复制→改写引用→删源+重索引，失败可回滚）。' +

@@ -8,7 +8,7 @@
  * 在 MCP client 配置中：
  *   { "mcpServers": { "design-canvas": { "command": "node", "args": ["/path/to/dist/server.js"] } } }
  *
- * 工具统一由 server_registry 注册：13 个主工具（旧工具名别名已于 2026-08-17 全部移除）。
+ * 工具统一由 server_registry 注册为 MCP tools（数量与分组见 README「核心能力」表；旧工具名别名已移除）。
  */
 
 import path from 'node:path';
@@ -61,7 +61,12 @@ const server = new McpServer(
       '修改用 edit_code（符号级替换：文件+函数名+新函数体，AST 定位防改错行/改错函数，编辑后自动重建索引）；' +
       'Grep/Glob 仅作 fallback（DSL 未绑定的文件才全文搜索），Edit 工具仅作 edit_code 不适用场景的兜底。' +
       '绑定新鲜度由 edit_code（编辑即更新）/ import_project（全量）/ explore_code(action=watch)（增量）维护。' +
-      '\n\n增量模式让你逐步完善设计，避免每次重写整个 JSON。所有修改自动保存到 .design-canvas/features/。',
+      '\n\n增量模式让你逐步完善设计，避免每次重写整个 JSON。所有修改自动保存到 .design-canvas/features/。' +
+      '\n\n能力不止于设计层，本 MCP 还提供：代码理解与索引（import_project / explore_code / find_references）、' +
+      '确定性改造与重构（edit_code / rename_symbols / rename_files / remove_dead_imports / refactor_pipeline / diff_views）、' +
+      '代码积木收割与质检（harvest_* / extract_contracts / slim_brick / search_bricks / assemble_bricks）、' +
+      '运行时观测与契约对账（observe_instrument / observe_judge / observe_log / reconcile_*）、' +
+      '影响分析与诊断闭环（impact_analysis / diagnose / refactor_judge / code_health）。完整分组见 README「核心能力」表。',
   },
 );
 
