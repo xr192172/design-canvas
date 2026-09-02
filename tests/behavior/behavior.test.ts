@@ -295,7 +295,11 @@ describe('behavior: node 家族 harness 真跑（夹具 simple.ts）', () => {
     expect(langOfFile('x.ts')).toBe('node');
     expect(langOfFile('x.js')).toBe('node');
     expect(langOfFile('x.cjs')).toBe('node');
-    expect(() => langOfFile('x.go')).toThrow(/不支持的脚本语言/);
+    expect(langOfFile('x.go')).toBe('go');
+    expect(langOfFile('x.java')).toBe('java');
+    expect(langOfFile('x.cs')).toBe('csharp');
+    expect(langOfFile('x.c')).toBe('c');
+    expect(() => langOfFile('x.rb')).toThrow(/不支持的脚本语言/);
   });
 });
 
@@ -340,6 +344,62 @@ describe('behavior: node 端到端 capture → 改代码 → verify', () => {
     const r = runHarness(spec);
     expect(r.error).toBeDefined();
     expect(r.error).toContain('跨文件 import');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('behavior Go harness（工具链 go 存在才跑）', () => {
+  const goAvailable = (() => {
+    try {
+      return require('node:child_process').spawnSync('go', ['version'], { stdio: 'pipe', windowsHide: true }).status === 0;
+    } catch {
+      return false;
+    }
+  })();
+
+  it('langOfFile: .go → go', () => {
+    expect(langOfFile('a.go')).toBe('go');
+  });
+
+  it.skipIf(!goAvailable)('runHarness 反射调用顶层 Go 函数，返回正确', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-beh-go-test-'));
+    fs.writeFileSync(path.join(dir, 'calc.go'), 'package util\n\nfunc Add(a, b int) int { return a + b }\n', 'utf-8');
+    const spec = { project_dir: dir, file: 'calc.go', function: 'Add', cases: cases([['one', [1, 2]], ['two', [3, 4]]]) };
+    const run = runHarness(spec);
+    expect(run.error).toBeUndefined();
+    expect(run.results.map((r) => r.ret)).toEqual(['3', '7']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('behavior Java / C# harness（工具链存在于本地才跑真跑用例）', () => {
+  const hasCmd = (cmd: string): boolean => {
+    try {
+      return require('node:child_process').spawnSync(cmd, ['--version'], { stdio: 'pipe', windowsHide: true }).status === 0;
+    } catch {
+      return false;
+    }
+  };
+  const jvm = hasCmd('javac');
+  const dotnet = hasCmd('dotnet');
+
+  it.skipIf(!jvm)('Java：反射调用 static 方法，返回正确', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-beh-java-test-'));
+    fs.writeFileSync(path.join(dir, 'Calc.java'), 'public class Calc { public static int add(int a, int b) { return a + b; } }\n', 'utf-8');
+    const spec = { project_dir: dir, file: 'Calc.java', function: 'add', cases: cases([['one', [1, 2]], ['two', [3, 4]]]) };
+    const run = runHarness(spec);
+    expect(run.error).toBeUndefined();
+    expect(run.results.map((r) => r.ret)).toEqual(['3', '7']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.skipIf(!dotnet)('C#：反射调用 static 方法，返回正确', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-beh-cs-test-'));
+    fs.writeFileSync(path.join(dir, 'Calc.cs'), 'public class Calc { public static int Add(int a, int b) { return a + b; } }\n', 'utf-8');
+    const spec = { project_dir: dir, file: 'Calc.cs', function: 'Add', cases: cases([['one', [1, 2]], ['two', [3, 4]]]) };
+    const run = runHarness(spec);
+    expect(run.error).toBeUndefined();
+    expect(run.results.map((r) => r.ret)).toEqual(['3', '7']);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
