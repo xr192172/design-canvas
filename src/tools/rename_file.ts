@@ -22,7 +22,9 @@ import { parseAstRoot, type SyntaxNodeLike } from './ts_kernel/kernel.js';
 import { resolveImportTarget, syncFile, removeFile } from '../db/symbols.js';
 import { getProjectCacheDb, closeProjectCacheDb } from '../db/db.js';
 
-const SOURCE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
+// 扫描范围内源码扩展名：TS 系全量 + Python（相对导入语义与 TS 同构，复用同一相对路径重算逻辑）。
+// Go 的 import 是模块包路径（非相对文件路径），移动单文件不改变途径名 → 不纳入扫描。
+const SOURCE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.py']);
 
 function walkProjectFiles(dir: string, out: string[]): void {
   let entries: fs.Dirent[];
@@ -94,6 +96,59 @@ function newSpecifier(importerRel: string, oldSource: string, newRelNoExt: strin
   return rel || '.';
 }
 
+/**
+ * Python 相对导入解析：
+ *   `from .foo import x` → 当前文件目录下的 foo.py
+ *   `from ..src.foo import x` → 上一级目录下的 src/foo.py（前导点数量 = 向上爬的层数）
+ *   `from . import x` → 当前文件目录这个包本身（__init__.py）
+ * 返回值是项目内相对文件路径（含 .py 尾缀），解析不到返回 null。
+ */
+function resolvePythonTarget(projectRoot: string, fromRel: string, source: string): string | null {
+  let dots = 0;
+  while (dots < source.length && source[dots] === '.') dots++;
+  const rest = source.slice(dots); // ''（纯包）或 'a.b.c'
+  let baseDir = path.posix.dirname(fromRel);
+  // 前导点数：`from .x` 停在当前包目录；`from ..x` 上溯 1 层 → 爬升 = dots - 1
+  for (let i = 1; i < dots; i++) {
+    const up = path.posix.dirname(baseDir);
+    if (up === baseDir) return null; // 已到项目根仍要上溯 → 逃逸，拒绝
+    baseDir = up;
+  }
+  let base: string;
+  if (rest) base = path.posix.join(baseDir, rest.split('.').join('/'));
+  else base = baseDir; // from . / from .. → 目录（包）本身
+  const candidates = rest
+    ? [base + '.py', `${base}/__init__.py`, `${base}/index.py`]
+    : [`${base}/__init__.py`, `${base}/index.py`];
+  for (const c of candidates) {
+    if (c.startsWith('..')) continue; // 不允许逃逸项目根
+    if (fs.existsSync(path.join(projectRoot, c))) return c;
+  }
+  return null;
+}
+
+/**
+ * Python 相对导入新规范字：把移动后的文件相对位置转成前导点形式。
+ *   同目录（src→src/bar.py 引 foo）    ：  .bar
+ *   上一级目录（src/entry 引 sub/bar）  ：  ..sub.bar
+ *   再上一级（sub/bar 引 src/helper）   ：  ..src.helper
+ * 规律：从引者所在目录到目标路径的相对跳数 up 决定前导点 = up + 1。
+ */
+function newPySpecifier(importerRel: string, newRelNoExt: string): string {
+  const dir = path.posix.dirname(importerRel);
+  let rel = path.posix.relative(dir, newRelNoExt).split('\\').join('/');
+  // 拆出向上跳数（..）
+  let up = 0;
+  while (rel.startsWith('../')) {
+    up++;
+    rel = rel.slice(3);
+  }
+  if (rel === '.' || rel === '') return '.'; // 引者自身目录这种退化情况
+  const dots = '.'.repeat(up + 1);
+  const modulePart = rel.split('/').join('.');
+  return dots + modulePart;
+}
+
 /** 提取一个 import 语句源字面量（TS/JS）：返回 { text(含引号), inner, startIndex } 或 null */
 function importSourceLiteral(node: SyntaxNodeLike): { startIndex: number; text: string; inner: string } | null {
   const lit = stringLiteral(node.childForFieldName('source'));
@@ -147,6 +202,38 @@ function collectImportLiterals(node: SyntaxNodeLike, out: Array<{ node: SyntaxNo
   }
 }
 
+/** Python 相对导入字面量：收集 `from .mod import a` / `from . import b` 的模块路径部分（.mod / .） */
+function collectPythonImportLiterals(node: SyntaxNodeLike, out: Array<{ node: SyntaxNodeLike; lit: { startIndex: number; text: string; inner: string } | null }>, depth = 0): void {
+  if (depth > 300) return;
+  if (node.type === 'import_from_statement') {
+    // 从文本定位 `from X` 的模块路径（relative_import = .mod / .；非相对则 dotted_name）
+    const m = node.text.match(/^\s*from\s+([\w.]+)/);
+    const modText = m ? m[1] : null;
+    if (modText && modText.startsWith('.')) {
+      // 模块路径字节偏移 = 节点起始 + "from " 长度
+      const relIdx = 5; // "from " 长度
+      const inner = modText;
+      if (node.startIndex != null) {
+        out.push({
+          node,
+          lit: { startIndex: node.startIndex + relIdx, text: inner, inner },
+        });
+      }
+      // 后续仍有子节点（import 名），但不再往下找
+      return;
+    }
+    // 非相对 from（from pkg import）→ 包路径，移动单文件不改变 → 忽略
+    return;
+  }
+  if (node.type === 'import_statement') {
+    return; // import pkg / import a.b → 包路径，忽略
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i);
+    if (c) collectPythonImportLiterals(c, out, depth + 1);
+  }
+}
+
 export async function renameFile(input: RenameFileInput): Promise<RenameFileResult> {
   const projectRoot = path.resolve(input.project_dir);
   const toAbs = path.isAbsolute(input.to) ? path.resolve(input.to) : path.resolve(projectRoot, input.to);
@@ -194,27 +281,29 @@ export async function renameFile(input: RenameFileInput): Promise<RenameFileResu
     }
     const parsed = await parseAstRoot(importerAbs, content);
     if (!parsed) continue;
+    const isPy = parsed.langName === 'python';
     const lits: Array<{ node: SyntaxNodeLike; lit: { startIndex: number; text: string; inner: string } | null }> = [];
-    collectImportLiterals(parsed.root, lits);
+    if (isPy) collectPythonImportLiterals(parsed.root, lits);
+    else collectImportLiterals(parsed.root, lits);
     for (const { lit } of lits) {
       if (!lit) continue;
       if (isMoved) {
         // 被移动文件：只重锚定相对导入到原解析目标（新位置→同一文件）
         if (!lit.inner.startsWith('.')) continue;
-        const targetRel = resolveImportTarget(projectRoot, importerRel, lit.inner);
+        const targetRel = isPy ? resolvePythonTarget(projectRoot, importerRel, lit.inner) : resolveImportTarget(projectRoot, importerRel, lit.inner);
         if (!targetRel || targetRel === fromRel) continue;
         const targetNoExt = targetRel.replace(/\.[^.]+$/, '');
-        const toSource = newSpecifier(toRel, lit.inner, targetNoExt);
+        const toSource = isPy ? newPySpecifier(toRel, targetNoExt) : newSpecifier(toRel, lit.inner, targetNoExt);
         if (lit.inner === toSource) continue;
-        ownEdits.push({ pos: lit.startIndex, len: lit.text.length, quote: lit.text[0], toSource });
+        ownEdits.push({ pos: lit.startIndex, len: lit.text.length, quote: isPy ? '' : lit.text[0], toSource });
         continue;
       }
-      const targetRel = resolveImportTarget(projectRoot, importerRel, lit.inner);
+      const targetRel = isPy ? resolvePythonTarget(projectRoot, importerRel, lit.inner) : resolveImportTarget(projectRoot, importerRel, lit.inner);
       if (targetRel !== fromRel) continue; // 不是指向被移动文件 → 不碰
       // 生成新规范字，保留老引用扩展名风格
-      const toSource = newSpecifier(importerRel, lit.inner, toNoExt);
+      const toSource = isPy ? newPySpecifier(importerRel, toNoExt) : newSpecifier(importerRel, lit.inner, toNoExt);
       if (lit.inner === toSource) continue; // 改完没变化（如原地同目录同核）→ 跳过
-      const rec: RefEdit = { importerRel, importerAbs, source: lit.inner, toSource, pos: lit.startIndex, len: lit.text.length, quote: lit.text[0] };
+      const rec: RefEdit = { importerRel, importerAbs, source: lit.inner, toSource, pos: lit.startIndex, len: lit.text.length, quote: isPy ? '' : lit.text[0] };
       edits.push(rec);
       if (!byImporter.has(importerRel)) byImporter.set(importerRel, { importerAbs, items: [] });
       byImporter.get(importerRel)!.items.push(rec);

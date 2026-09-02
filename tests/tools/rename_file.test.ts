@@ -129,6 +129,55 @@ describe('renameFile - 真实重命名', () => {
   });
 });
 
+describe('renameFile - Python 相对导入（同构复用，不做语言专属轮子）', () => {
+  it('跨目录移动 .py：改写 from .x 引用 + 自身相对导入重锚定', async () => {
+    const dir = mkProj({
+      'src/foo.py': 'from .helper import h\ndef a():\n    return 1\n',
+      'src/helper.py': 'h = 1\n',
+      'src/entry.py': 'from .foo import a\n',
+      'src/other.py': 'x = 2\n',
+      'lib/consumer.py': 'from ..src.foo import a\n',
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.py', to: 'sub/bar.py' });
+      expect(r.ok).toBe(true);
+      expect(r.moved).toBe(true);
+      expect(existsSync(path.join(dir, 'src/foo.py'))).toBe(false);
+      expect(existsSync(path.join(dir, 'sub/bar.py'))).toBe(true);
+      // entry 同目录 src/ → 上到根再进 sub → ..sub.bar
+      expect(readFileSync(path.join(dir, 'src/entry.py'), 'utf-8')).toContain('from ..sub.bar import a');
+      // lib/consumer 从 lib 上到根再进 sub → ..sub.bar
+      expect(readFileSync(path.join(dir, 'lib/consumer.py'), 'utf-8')).toContain('from ..sub.bar import a');
+      // 被移动文件自身 from .helper → 从 sub 上到根再进 src → ..src.helper
+      expect(readFileSync(path.join(dir, 'sub/bar.py'), 'utf-8')).toContain('from ..src.helper import h');
+      // 无关文件未动
+      expect(readFileSync(path.join(dir, 'src/other.py'), 'utf-8')).toBe('x = 2\n');
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('同目录改名：from .foo → from .bar', async () => {
+    const dir = mkProj({
+      'src/foo.py': 'def a():\n    return 1\n',
+      'src/entry.py': 'from .foo import a\n',
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.py', to: 'src/bar.py' });
+      expect(r.ok).toBe(true);
+      expect(r.moved).toBe(true);
+      expect(r.references[0].toSource).toBe('.bar');
+      expect(readFileSync(path.join(dir, 'src/entry.py'), 'utf-8')).toContain('from .bar import a');
+      expect(existsSync(path.join(dir, 'src/bar.py'))).toBe(true);
+      expect(existsSync(path.join(dir, 'src/foo.py'))).toBe(false);
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('renameFile - 原子化执行修复（回归保障）', () => {
   // 修复说明：原实现第 3 步先 fs.renameSync(from→to)，再遍历改写引用、重索引。
   // 任何中途异常（磁盘满/权限/IO/索引写失败）都会导致「源文件已走、引用仍指向旧路径、
