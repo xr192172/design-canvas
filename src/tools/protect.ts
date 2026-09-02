@@ -61,6 +61,20 @@ export function loadRenameProtect(root: string): RenameProtectConfig | null {
   }
 }
 
+/** 解析 .design-canvas.json 的 rename.generated 段（生成物文件 glob，改名应改源头而非它）；空/非法 → [] */
+export function loadRenameGenerated(root: string): string[] {
+  try {
+    const p = path.join(root, '.design-canvas.json');
+    if (!fs.existsSync(p)) return [];
+    const j = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    const g = j?.rename?.generated;
+    if (!Array.isArray(g)) return [];
+    return g.filter((x: unknown): x is string => typeof x === 'string' && x.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 interface EditIn {
   pos: number;
   len: number;
@@ -85,6 +99,8 @@ export interface ProtectGuard {
    * 文件不受规则覆盖 / 不在标记行 → false。
    */
   isFrozen(absFile: string, src: string, pos: number): boolean;
+  /** 生成物判定：absFile 命中 rename.generated 的 glob（自动生成/构建自愈，改名应改源头而非它）→ true */
+  isGeneratedFile(absFile: string): boolean;
 }
 
 export function createProtectGuard(root: string): ProtectGuard {
@@ -94,6 +110,9 @@ export function createProtectGuard(root: string): ProtectGuard {
     ig.add(r.globs);
     return { globs: r.globs, markers: r.markers, ig };
   });
+  const generated = loadRenameGenerated(root);
+  const generatedIg = generated.length > 0 ? ignore() : null;
+  if (generatedIg) generatedIg.add(generated);
 
   const ruleForFile = (rel: string): CompiledRule | null => {
     if (rel === '' || rel.startsWith('../')) return null;
@@ -154,6 +173,12 @@ export function createProtectGuard(root: string): ProtectGuard {
       const end = li + 1 < starts.length ? starts[li + 1] : src.length;
       const lineText = src.slice(starts[li], end);
       return rule.markers.some((m) => lineText.includes(m));
+    },
+    isGeneratedFile(absFile) {
+      if (!generatedIg) return false;
+      const rel = path.relative(root, absFile).replace(/\\/g, '/');
+      if (rel === '' || rel.startsWith('../')) return false;
+      return generatedIg.ignores(rel);
     },
   };
 }

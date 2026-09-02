@@ -21,8 +21,8 @@ import { createProtectGuard } from './protect.js';
 /** 字面量命中的类别：contract=对外工具注册名(破坏契约需人审)；history=tool-convergence 历史记录(保留原貌)；docs=文档；test=测试断言；code=源码字符串 */
 export type LiteralMatchKind = 'contract' | 'history' | 'docs' | 'test' | 'code';
 
-/** 单条字面量的改名决策：apply=可自动替换；review=契约需人审；preserve=历史保留；frozen=冻结行跳过 */
-export type LiteralDecision = 'apply' | 'review' | 'preserve' | 'frozen';
+/** 单条字面量的改名决策：apply=可自动替换；review=契约需人审；preserve=历史保留；frozen=冻结行跳过；generated=生成物不落盘 */
+export type LiteralDecision = 'apply' | 'review' | 'preserve' | 'frozen' | 'generated';
 
 /** 单个字面量命中的原始信息（扫描产出，不含决策） */
 export interface RawLiteralMatch {
@@ -266,8 +266,9 @@ export function scanLiteralOccurrences(
 
 // ──────────────── 字面量改名决策 + 落盘（补全闭环） ────────────────
 
-/** 单个字面量命中 → 改名决策：contract 契约需人审；history 历史保留；冻结行跳过；其余可自动替换 */
-function decideLiteral(kind: LiteralMatchKind, frozen: boolean): LiteralDecision {
+/** 单个字面量命中 → 改名决策：生成物不落盘；contract 契约需人审；history 历史保留；冻结行跳过；其余可自动替换 */
+function decideLiteral(kind: LiteralMatchKind, frozen: boolean, isGenerated: boolean): LiteralDecision {
+  if (isGenerated) return 'generated';
   if (kind === 'contract') return 'review';
   if (kind === 'history') return 'preserve';
   if (frozen) return 'frozen';
@@ -276,12 +277,12 @@ function decideLiteral(kind: LiteralMatchKind, frozen: boolean): LiteralDecision
 
 /**
  * 构建字面量改名计划：对每个 renames 条目，扫其蛇形旧名的全部命中，并为每处算决策与替换名。
- * @param guard 冻结行保护守卫（可空）；为空则无冻结判定。
+ * @param guard 冻结行保护守卫（可空）；为空则无冻结/生成物判定。
  */
 export function buildLiteralPlan(
   rootDir: string,
   renames: RenameSymbolsItem[],
-  guard?: { isFrozen(absFile: string, src: string, pos: number): boolean } | null,
+  guard?: { isFrozen(absFile: string, src: string, pos: number): boolean; isGeneratedFile(absFile: string): boolean } | null,
 ): RenameSymbolsResult['literals'] {
   const needles = [...new Set(renames.map((i) => camelToSnake(i.symbol)).filter(Boolean))];
   const scanned = scanLiteralOccurrences(rootDir, needles);
@@ -304,7 +305,8 @@ export function buildLiteralPlan(
     const hit = scanned.find((s) => s.needle === needle);
     const matches = (hit ? hit.matches : []).map((m) => {
       const frozen = guard ? guard.isFrozen(m.file, contentOf(m.file), m.pos) : false;
-      return { ...m, decision: decideLiteral(m.kind, frozen), old: needle, new: toSnake };
+      const isGen = guard ? guard.isGeneratedFile(m.file) : false;
+      return { ...m, decision: decideLiteral(m.kind, frozen, isGen), old: needle, new: toSnake };
     });
     return { index, item, needle, toSnake, matches };
   });

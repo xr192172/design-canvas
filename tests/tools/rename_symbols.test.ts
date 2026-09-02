@@ -300,4 +300,28 @@ describe('renameSymbols - apply_literals（补全字面量感知改名闭环）'
     expect(r.literalFilesWritten).toBe(2); // README + use.test
     rmForce(dir);
   });
+
+  it('生成物识别：命中 rename.generated → decision=generated，不写盘（改源头而非生成物）', async () => {
+    const dir = mkProj(
+      renderFiles({
+        '.design-canvas.json': JSON.stringify({ rename: { generated: ['AGENTS.md'] } }),
+        'AGENTS.md': '请用 render_dsl（触发点表，自动生成）。\n',
+      }),
+    );
+    const r = await renameSymbols({
+      project_dir: dir,
+      renames: [{ file: 'src/render.ts', symbol: 'renderDsl', to: 'renderDesign' }],
+      apply_literals: true,
+    });
+    expect(r.ok).toBe(true);
+    const l = r.literals!.find((x) => x.needle === 'render_dsl')!;
+    const agents = l.matches.find((m) => m.file.endsWith('AGENTS.md'))!;
+    expect(agents).toBeDefined();
+    // 标注为 AGENTS（agents 是 docs 类↓但按生成物处理）→ generated 不落盘
+    expect(agents.decision).toBe('generated');
+    // 生成物未被改写；README（docs，非生成物）照常替换
+    expect(readFileSync(path.join(dir, 'AGENTS.md'), 'utf-8')).toContain('render_dsl');
+    expect(readFileSync(path.join(dir, 'README.md'), 'utf-8')).toContain('render_design');
+    rmForce(dir);
+  });
 });

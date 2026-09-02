@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createProtectGuard, loadRenameProtect } from '../../src/tools/protect';
+import { createProtectGuard, loadRenameProtect, loadRenameGenerated } from '../../src/tools/protect';
 
 function mkRoot(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'prot-'));
@@ -125,6 +125,29 @@ describe('createProtectGuard（连接决策）', () => {
       const guard = createProtectGuard(root);
       const r = guard.scan(path.join(root, 'a.ts'), 'import x from "y";', [{ pos: 0, len: 1, text: 'z' }]);
       expect(r.blocked).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('rename.generated（生成物识别）', () => {
+  it('loadRenameGenerated 解析 rename.generated glob；无配置 → []', () => {
+    const root = cfgFrom({ rename: { generated: ['AGENTS.md', 'dist/**'] } });
+    try {
+      expect(loadRenameGenerated(root)).toEqual(['AGENTS.md', 'dist/**']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('isGeneratedFile：命中生成物 glob → true；未命中 → false', () => {
+    const root = cfgFrom({ rename: { generated: ['AGENTS.md', 'bin/**'] } });
+    try {
+      const guard = createProtectGuard(root);
+      expect(guard.isGeneratedFile(path.join(root, 'AGENTS.md'))).toBe(true);
+      expect(guard.isGeneratedFile(path.join(root, 'bin/gen.txt'))).toBe(true);
+      expect(guard.isGeneratedFile(path.join(root, 'src/a.ts'))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
