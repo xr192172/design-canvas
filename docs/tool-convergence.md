@@ -237,8 +237,6 @@
 
    - **watch 容错（fs.watch error → 自动重建）**：`watch_project` 每个 FSWatcher 挂 `'error'` 处理——watch 崩溃不再以未捕获异常拖垮 server（配合 lifecycle），而是汇报 + 关坏句柄 + 延迟自动重建（指数退避、成功重置），reconcile 继续兜底保鲜。
 
-   - **事件冲刷 max-wait 拦风暴**：尾随 debounce 加 `MAX_FLUSH_WAIT_MS`（2s）强制上限——持续事件风暴（git checkout / 构建删除重建）下不再因 timer 被不断重置而「永不触发 + pending 无限积压」，距上次冲刷超过阈值即立即冲刷（`decideFlushDelay` 纯函数，已测）。
-
 2. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`）。
 
 3. **输出可直接消费** —— ✅ **已实施**：`rename_symbol` 返回结构化 diff（`ops: [{pos,len,old,new}]` 可重放验证），新增 `dry_run=true`。MCP handler 渲染每处 `old→new`。
