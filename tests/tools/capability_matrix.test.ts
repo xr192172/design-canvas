@@ -113,10 +113,11 @@ describe('capability_matrix', () => {
     expect(pm.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
     expect(pm.cells.find((c) => c.lang === 'java')!.level).toBe('regex_fallback'); // 未点名语言 → default
     expect(pm.gaps.some((g) => g.lang === 'java')).toBe(true);
-    // contract_gate / extract_contracts：js 家族已补齐（低垂果实），python 仍缺口
+    // contract_gate：js 家族已补齐（低垂果实），python 也已接本族分支
     const cg = rows.find((r) => r.decl.id === 'contract_gate')!;
     expect(cg.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
-    expect(cg.gaps.some((g) => g.lang === 'python')).toBe(true);
+    expect(cg.cells.find((c) => c.lang === 'python')!.level).toBe('full_ast');
+    expect(cg.gaps.some((g) => g.lang === 'python')).toBe(false);
     const ec = rows.find((r) => r.decl.id === 'extract_contracts')!;
     expect(ec.cells.find((c) => c.lang === 'javascript')!.level).toBe('full_ast');
     _resetRegistry();

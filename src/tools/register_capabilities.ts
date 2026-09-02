@@ -45,11 +45,11 @@ declareCapability({
   },
 });
 
-/** 符号改名：TS 家族全量；Go/Python 支持模块级符号 + 跨模块引用（2026-09 新增） */
+/** 符号改名：TS 家族全量；Go/Python/C#/Java 支持模块级符号 + 跨文件引用 */
 declareCapability({
   id: 'rename_symbol',
   label: '符号改名（作用域解析 + 跨文件 import 边）',
-  desc: 'TS 家族（作用域解析 + import/reexport 边）全量；Go 同包 + 跨包 pkg.Sym；Python 模块级 + 跨模块 X.sym；C# 未接',
+  desc: 'TS 家族（作用域解析 + import/reexport 边）全量；Go 同包+跨包 pkg.Sym；Python 模块级+跨模块 X.sym；C#/Java 命名空间级类型跨文件（同包裸引用+跨包限定引用）；C/C++ def+头文件声明+#include 调用点联动',
   default: 'unimplemented',
   overrides: {
     typescript: 'full_ast',
@@ -58,19 +58,25 @@ declareCapability({
     jsx: 'full_ast',
     go: 'full_ast',
     python: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
   },
   notes: {
     typescript: '值/类型双栖 + import 边 + 别名 + 局部遮蔽',
     go: '同包 function/type/const + 跨包 pkg.Sym 引用（经 import 本地名判连，前缀隔离不误改）',
     python: '模块级 function/class + 同模块裸引用 + 跨模块 X.sym 引用（import 本地名判连）',
+    java: '顶层 class/interface/enum/record + 同包裸引用 + 跨包 pkg.Type 限定引用（scoped_type_identifier）',
+    c_sharp: '顶层 class/interface/struct/enum/record + 同命名空间裸引用 + 跨命名空间 Name.Type 限定引用（qualified_name）',
+    c: '函数/类型定义 + 原型声明(头文件) + `#include` 该头文件的调用点裸引用联动',
   },
 });
 
-/** 契约对账闸门：go 分支 + JS/TS 家族（非 go 一律走 TS 逻辑，JS 是 TS 子集语法兼容） */
+/** 契约对账闸门：go / python / java / cs / c / JS 家族各走本族分支 */
 declareCapability({
   id: 'contract_gate',
   label: '契约对账闸门（重构后裸标识符定义源检查）',
-  desc: 'go 单独分支；ts/tsx/js/jsx/mjs/cjs 走同一套 TS 逻辑（语法兼容）；python/其他语言未纳入',
+  desc: 'go/python/java/cs/c 各自分支；ts/tsx/js/jsx/mjs/cjs 走同一套 TS 逻辑（语法兼容）',
   default: 'unimplemented',
   overrides: {
     go: 'full_ast',
@@ -78,14 +84,23 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    python: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
+  },
+  notes: {
+    java: 'import 末段/同包类型/方法形参为定义源；System 等内建白名单',
+    c_sharp: 'using 末段/别名/同命名空间类型/方法形参为定义源；System 等内建白名单',
+    c: '全局函数/struct/typedef/全局变量/形参为定义源（struct 成员访问左侧不误报）',
   },
 });
 
-/** 契约提取（签名/env 对账）：go 分支 + 非 go 一律走 TS 逻辑 */
+/** 契约提取（签名/env 对账）：go / python / JS 家族各走本族；其余回退 TS 逻辑 */
 declareCapability({
   id: 'extract_contracts',
   label: '契约提取（签名 + 环境符号）',
-  desc: 'go 单独分支；非 go（含 js 家族）走同一套 TS 提取逻辑；python 语法差异大未专门适配',
+  desc: 'go 单独分支；非 go(含 js 家族)走 TS 提取逻辑；python 走本族分支（shape 注解属性 + env/config + effect 候选）',
   default: 'partial_ast',
   overrides: {
     go: 'full_ast',
@@ -93,7 +108,10 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
-    python: 'unimplemented',
+    python: 'full_ast',
+  },
+  notes: {
+    python: 'shapes 注解属性 + reads_config(PY_ENV) + writes/holds/emits 候选（PY 正则）',
   },
 });
 
@@ -105,12 +123,14 @@ declareCapability({
 declareCapability({
   id: 'version_upgrade_detection',
   label: '版本升级契约差检测（扫描 + 特性/废弃API）',
-  desc: 'version_upgrade 线 detect 内核；go/java/node/python 四适配器均按方言实现工具链扫描、特性命中与废弃 API 检测',
+  desc: 'version_upgrade 线 detect 内核；go/java/node/python/csharp/c 六适配器均按方言实现工具链扫描、特性命中与废弃 API 检测',
   default: 'unimplemented',
   overrides: {
     go: 'full_ast',
     java: 'full_ast',
     python: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
     typescript: 'full_ast',
     tsx: 'full_ast',
     javascript: 'full_ast',
@@ -119,6 +139,8 @@ declareCapability({
     go: 'go adapter：go.mod / 依赖特性扫描',
     java: 'java adapter：JDK 特性 + 废弃 API',
     python: 'python adapter：版本边界特性',
+    c_sharp: 'csharp adapter：global.json SDK / Directory.Build.props LangVersion·TargetFramework + C# 语言版本特性/废弃 API',
+    c: 'c adapter：Makefile/CMakeLists -std=cXX / CMAKE_C_STANDARD + C 标准特性/废弃 API',
     typescript: 'node adapter：ts/package.json 特性（统称 node 家族）',
     javascript: '经 node adapter 同一路径',
   },
@@ -137,10 +159,16 @@ declareCapability({
     jsx: 'full_ast',
     go: 'full_ast',
     python: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
   },
   notes: {
     go: '跨文件前缀调用 `pkg.Symbol` 经 import bindings 精确连边，重名不漏（2026-09 升级）',
     python: 'import 绑定 + from-import 支持；裸名仍全局唯一匹配',
+    java: '经 ts_kernel parseFileFull 通用调用边/限定引用',
+    c_sharp: '经 ts_kernel 通用调用边（invocation_expression）',
+    c: '经 ts_kernel include/调用边（import_nodes+call_expression 新补）',
   },
 });
 
@@ -157,6 +185,9 @@ declareCapability({
     jsx: 'full_ast',
     go: 'full_ast',
     python: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
   },
 });
 
@@ -173,6 +204,9 @@ declareCapability({
     javascript: 'full_ast',
     jsx: 'full_ast',
     python: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
   },
 });
 
@@ -180,7 +214,7 @@ declareCapability({
 declareCapability({
   id: 'behavior_baseline',
   label: '行为基线（契约→金丝雀测试对比）',
-  desc: 'python 顶层 exec 整文件 / node 家族 transpileModule 转 CJS 整文件 require；样例输入跑一次记录快照(capture)，改后跑一次对比(verify)→判定跑得对不对',
+  desc: 'python 顶层 exec 整文件 / node 家族 transpileModule 转 CJS 整文件 require；Go/Java/C# 反射 harness、C 类型化调用 harness（go run/javac+java/dotnet run/cc 编译，缺工具链报不可用）；样例输入跑一次记录快照(capture)，改后跑一次对比(verify)→判定跑得对不对',
   default: 'unimplemented',
   overrides: {
     python: 'full_ast',
@@ -188,11 +222,19 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    go: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
   },
   notes: {
     python: '解释器直跑（顶层 exec 整文件，自包含函数）',
     typescript: 'node 家族：transpileModule → CJS require（Set/Map 排序化 repr）',
     javascript: '经 node 家族同一 harness',
+    go: '反射+go run 临时模块；自包含、基本类型参/返',
+    java: '反射+javac 临时包；静态方法按名反射调用，基本类型参数强转',
+    c_sharp: '反射+dotnet run 临时工程；静态方法按名反射调用',
+    c: '类型化调用 harness：源码正则推断参数类型→生成 main 逐 case 调用→cc/gcc 编译运行（缺工具链报不可用；代码生成纯函数已单测）',
   },
 });
 
@@ -207,12 +249,18 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    java: 'full_ast',
+    c_sharp: 'full_ast',
+    c: 'full_ast',
     python: 'partial_ast',
     go: 'partial_ast',
   },
   notes: {
     typescript: '复杂度=AST 分支节点计数；未使用 import=AST 绑定+使用集比对；未使用导出/孤儿/分层=导入+调用边反查',
     javascript: '经 TS 家族同一解析路径',
+    java: '复杂度(正则回退)+未使用 import(AST 绑定: import_declaration)+未使用导出/孤儿/分层(导入+调用边反查)',
+    c_sharp: '复杂度+未使用导出/孤儿/分层(导入+调用边反查)；unused_import 不查（using 是命名空间导入，语义同 include，非 per-name）',
+    c: '复杂度+未使用导出/孤儿/分层(导入+调用边反查)；unused_import 不查（include 是 include-guard 语义，同 Go）',
     python: '复杂度/未使用 import 已 AST 化；未使用导出/孤儿/分层仍受"导出名唯一"匹配限制（重名不建边）→ partial',
     go: '复杂度已 AST 化，未使用 import 不查（编译器兜底）；未使用导出/孤儿/分层同上限制 → partial',
   },
