@@ -232,7 +232,9 @@
    - **检测 + 闸门**：`src/tools/stale_check.ts` 按文件精确判「src/ 手写 ts 比 dist 产物新/缺产物」；CI（ci.yml）stale 即失败；`run_tests` 前置自检本服务 dist 是否 stale，过期先提示重建——把"静默咬人"变显式。
 
    - **自动重编（dev 循环）**：`scripts/dev.mjs`（`npm run dev`）监听 src/ 手写 .ts/.tsx，变更（轮询 mtime，跨平台确定）自动 `tsc` 重编，成功/失败都打印、失败自动待恢复，杜绝"忘了重跑 build"根因。诚实边界：长驻 MCP server 需重启才能加载新 dist，本循环只保证 dist 不 STALE。
+
    - **进程级稳定性兜底（lifecycle）**：`src/lifecycle.ts` + `server.ts` 入口——unhandledRejection 保持服务（Node v15+ 默认会崩进程，长驻 server 掉线头号元凶）、uncaughtException 清理（关 watch 句柄 + 关项目 SQLite）后再退出、SIGINT/SIGTERM 优雅收尾，防句柄/SQLite 锁泄漏（Windows EBUSY 根因）。逻辑可注入依赖、可测（`tests/lifecycle.test.ts`）。
+   - **watch 容错（fs.watch error → 自动重建）**：`watch_project` 每个 FSWatcher 挂 `'error'` 处理——watch 崩溃不再以未捕获异常拖垮 server（配合 lifecycle），而是汇报 + 关坏句柄 + 延迟自动重建（指数退避、成功重置），reconcile 继续兜底保鲜。
 
 2. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`）。
 

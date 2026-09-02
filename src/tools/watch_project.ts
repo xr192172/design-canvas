@@ -315,20 +315,63 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
 
   let watcher: fs.FSWatcher | null = null;
   const subWatchers: fs.FSWatcher[] = [];
-  try {
-    watcher = fs.watch(root, { recursive: true }, (_event, filename) => enqueue(filename));
-  } catch {
-    // 旧平台不支持 recursive：降级为非递归 + 手动注册子目录
-    watcher = null;
-    for (const dir of walkDirs(root)) {
-      try {
-        const w = fs.watch(dir, (_event, filename) => enqueue(filename));
-        subWatchers.push(w);
-      } catch {
-        /* 忽略不可监听目录 */
-      }
+  let restartTimer: NodeJS.Timeout | null = null;
+  let restartDelay = 1000;
+  const MAX_RESTART_DELAY = 30_000;
+
+  /** 关闭全部 fs.watch 句柄（递归 + 非递归降级 both） */
+  const tearDownWatchers = (): void => {
+    if (watcher) {
+      try { watcher.close(); } catch { /* 已损坏 */ }
+      watcher = null;
     }
-  }
+    for (const w of subWatchers) {
+      try { w.close(); } catch { /* 已损坏 */ }
+    }
+    subWatchers.length = 0;
+  };
+
+  /**
+   * fs.watch 的 'error' 处理（运行稳定性：防止 watch 崩溃以未捕获异常拖垮整个长驻 server，
+   * 或 watcher 静默停摆）。做法：汇报 onError → 关掉坏句柄 → 延迟自动重建（指数退避，
+   * 成功即重置；根目录长期消失时不忙转，由 reconcile 兜底保鲜）。
+   */
+  const handleWatcherError = (err: unknown): void => {
+    if (closed) return;
+    if (onError) onError(err instanceof Error ? err : new Error(String(err)));
+    tearDownWatchers();
+    if (restartTimer) clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      startWatcher();
+    }, restartDelay);
+    restartDelay = Math.min(restartDelay * 2, MAX_RESTART_DELAY);
+  };
+
+  /** 创建 fs.watch（recursive 首选，旧平台降级为子目录逐个监听）；每个句柄都挂 error 处理 */
+  const startWatcher = (): void => {
+    if (closed) return;
+    try {
+      const w = fs.watch(root, { recursive: true }, (_event, filename) => enqueue(filename));
+      w.on('error', handleWatcherError);
+      watcher = w;
+      restartDelay = 1000; // 成功重建 → 退避重置
+    } catch {
+      // 旧平台不支持 recursive：降级为非递归 + 手动注册子目录
+      watcher = null;
+      for (const dir of walkDirs(root)) {
+        try {
+          const w = fs.watch(dir, (_event, filename) => enqueue(filename));
+          w.on('error', handleWatcherError);
+          subWatchers.push(w);
+        } catch {
+          /* 忽略不可监听目录 */
+        }
+      }
+      restartDelay = 1000;
+    }
+  };
+  startWatcher();
 
   // 定期 reconcile 兜底（低频，防漏事件）
   if (reconcileMs > 0) {
@@ -341,10 +384,9 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
       if (timer) clearTimeout(timer);
       if (reconcileTimer) clearInterval(reconcileTimer);
       reconcileTimer = null;
-      if (watcher) watcher.close();
-      watcher = null;
-      for (const w of subWatchers) w.close();
-      subWatchers.length = 0;
+      if (restartTimer) clearTimeout(restartTimer);
+      restartTimer = null;
+      tearDownWatchers();
     },
     status(): { watching: boolean; project_root: string } {
       return { watching: !closed, project_root: root };
