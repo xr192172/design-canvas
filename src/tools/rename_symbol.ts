@@ -709,6 +709,511 @@ export async function analyzePythonSource(src: string): Promise<GoModuleAnalysis
 }
 
 // ─────────────────────────────────────────────
+// C# / Java 命名空间级符号改名（方向二 · C#/Java）
+// ─────────────────────────────────────────────
+// 语义（与 Python 的"模块=命名空间"同构，但跨文件限定引用形态不同）：
+//   - 顶层类型（class/interface/struct/enum/record）是"模块级符号"，同名同包/同命名空间内直接可见
+//   - 跨文件引用：同包/同命名空间 → 裸名；跨包 → `Qualified.Name`（scoped_type_identifier / qualified_name）
+// 本分析复用 GoModuleAnalysis 结构：
+//   rootOffsets/refs/defined → 顶层类型 + 同文件裸引用
+//   imports      → package/namespace 声明 + import/using（首段/末段做同模块判定）
+//   selections   → `X.sym` 限定引用（key=限定符末段，field=符号名）
+function makeNamespaceAnalyzer(opts: {
+  ext: '.java' | '.cs';
+  typeNodes: string[];
+  idType: string;
+}) {
+  return async function analyze(src: string): Promise<GoModuleAnalysis | null> {
+    const parser = await getParser(opts.ext, findLanguageByExt(opts.ext)!);
+    if (!parser) return null;
+    let root: N;
+    try {
+      root = (parseContent(parser as Parameters<typeof parseContent>[0], src) as unknown as { rootNode: N }).rootNode;
+    } catch {
+      return null;
+    }
+    const isJava = opts.ext === '.java';
+    const typeNodes = new Set(opts.typeNodes);
+    const rootOffsets = new Map<string, number>();
+    const rootKinds = new Map<string, string>();
+    const refs = new Map<string, number[]>();
+    const defined = new Set<string>();
+    const imports: Array<{ alias: string; path: string }> = [];
+    const selections = new Map<string, Array<{ field: string; fieldOffset: number }>>();
+    const add = (m: Map<string, number[]>, name: string, offset: number): void => {
+      let a = m.get(name);
+      if (!a) {
+        a = [];
+        m.set(name, a);
+      }
+      a.push(offset);
+    };
+
+    // 顶层类型定义：parent 为 compilation_unit（Java）或 declaration_list@namespace/root（C#）
+    const isModuleScope = (p: N | null, gp: N | null): boolean => {
+      if (!p) return false;
+      if (p.type === 'compilation_unit' || p.type === 'program') return true;
+      if (p.type === 'declaration_list') {
+        return !gp || gp.type === 'namespace_declaration' || gp.type === 'compilation_unit' || gp.type === 'program';
+      }
+      return false;
+    };
+    const collectDefs = (n: N, parent: N | null, gp: N | null, depth = 0): void => {
+      if (depth > 1000) return;
+      if (typeNodes.has(n.type) && isModuleScope(parent, gp)) {
+        const ni = nameInfo(n);
+        if (ni && n.type !== 'method_declaration' && n.type !== 'property_declaration' && !rootOffsets.has(ni.text)) {
+          rootOffsets.set(ni.text, ni.offset);
+          rootKinds.set(ni.text, n.type);
+          defined.add(ni.text);
+        }
+        return;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) collectDefs(c, n, parent, depth + 1);
+      }
+    };
+
+    // module 名 = package/namespace 路径（末段做同模块判定）；imports 记 package/namespace + import/using
+    const collectModuleAndImports = (n: N, depth = 0): void => {
+      if (depth > 1000) return;
+      const t = n.type;
+      if (isJava && t === 'package_declaration') {
+        // 取 package 后的 scoped_identifier 全文本
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (c && (c.type === 'scoped_identifier' || c.type === 'identifier')) {
+            imports.push({ alias: c.text.split('.').filter(Boolean).pop() ?? '', path: c.text });
+            return;
+          }
+        }
+        return;
+      }
+      if (isJava && t === 'import_declaration') {
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (c && (c.type === 'scoped_identifier' || c.type === 'identifier')) {
+            imports.push({ alias: c.text.split('.').filter(Boolean).pop() ?? '', path: c.text });
+            return;
+          }
+        }
+        return;
+      }
+      if (!isJava && t === 'namespace_declaration') {
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (c && (c.type === 'qualified_name' || c.type === 'identifier')) {
+            imports.push({ alias: c.text.split('.').filter(Boolean).pop() ?? '', path: c.text });
+            break;
+          }
+        }
+        return;
+      }
+      if (!isJava && t === 'using_directive') {
+        for (let i = 0; i < n.childCount; i++) {
+          const c = n.child(i);
+          if (c) {
+            const seg = c.text.split('.').filter(Boolean).pop() ?? '';
+            if (seg && /^[A-Za-z_][\w$]*$/.test(seg)) imports.push({ alias: seg, path: c.text });
+            break;
+          }
+        }
+        return;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) collectModuleAndImports(c, depth + 1);
+      }
+    };
+
+    // 裸引用（同文件/同模块的裸名引用）+ 限定引用 `X.sym`（key=限定符末段）
+    const collectRefs = (n: N, depth = 0): void => {
+      if (depth > 1000) return;
+      const t = n.type;
+      // 限定引用：Java scoped_type_identifier/scoped_identifier 末段带 name 字段；C# qualified_name
+      if ((!isJava && t === 'qualified_name') || (isJava && (t === 'scoped_type_identifier' || t === 'scoped_identifier'))) {
+        let nameField = n.childForFieldName('name');
+        // scoped_type_identifier 无 name 字段 → 回退取最后一个 identifier/type_identifier 子节点
+        if (!nameField) {
+          for (let i = n.childCount - 1; i >= 0; i--) {
+            const c = n.child(i);
+            if (c && (c.type === 'identifier' || c.type === 'type_identifier')) {
+              nameField = c;
+              break;
+            }
+          }
+        }
+        if (nameField && (nameField.type === 'identifier' || nameField.type === 'type_identifier')) {
+          // 限定符 = 除末段外的文本（去末段名字）
+          let scopeText = '';
+          for (let i = 0; i < n.childCount; i++) {
+            const c = n.child(i);
+            if (c && c !== nameField) scopeText += c.text;
+          }
+          if (scopeText.includes('.') || (scopeText && /^[A-Za-z_][\w$]*\./.test(n.text))) {
+            const last = scopeText.split('.').filter(Boolean).pop()?.replace(/[^\w$]/g, '') ?? '';
+            if (last) {
+              let a = selections.get(last);
+              if (!a) {
+                a = [];
+                selections.set(last, a);
+              }
+              a.push({ field: nameField.text, fieldOffset: nameField.startIndex });
+            }
+          }
+        }
+        return; // 不深入（限定符是链式，叶子在下一层 qualified_name 已覆盖）
+      }
+      if (t === opts.idType || t === 'type_identifier') {
+        add(refs, n.text, n.startIndex);
+        return;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) collectRefs(c, depth + 1);
+      }
+    };
+
+    collectDefs(root, null, null, 0);
+    collectModuleAndImports(root, 0);
+    collectRefs(root, 0);
+
+    // 去掉定义处名字节点在 refs 里的记录（定义不是引用）
+    for (const off of [...refs.values()].flat()) {
+      for (const [, o] of rootOffsets) {
+        if (o === undefined) continue;
+      }
+    }
+    // refs 去重
+    for (const [name, arr] of refs) refs.set(name, [...new Set(arr)]);
+    return { rootOffsets, rootKinds, refs, defined, imports, selections };
+  };
+}
+
+export const analyzeCSharpSource = makeNamespaceAnalyzer({
+  ext: '.cs',
+  typeNodes: ['class_declaration', 'interface_declaration', 'struct_declaration', 'enum_declaration', 'record_declaration'],
+  idType: 'identifier',
+});
+
+export const analyzeJavaSource = makeNamespaceAnalyzer({
+  ext: '.java',
+  typeNodes: ['class_declaration', 'interface_declaration', 'enum_declaration', 'record_declaration', 'annotation_type_declaration'],
+  idType: 'identifier',
+});
+
+/** 递归收集项目根下指定扩展名文件 */
+function collectFilesByExt(root: string, ext: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    const walkDir = (d: string): void => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, e.name);
+        if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') walkDir(full);
+        else if (e.isFile() && e.name.endsWith(ext)) out.add(full);
+      }
+    };
+    walkDir(root);
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+/**
+ * C#/Java 命名空间级符号跨文件改名执行器（复用 Python 的原子扫描骨架）。
+ * 逻辑：
+ *   - def 文件：定义处 + 同文件裸引用
+ *   - 同模块文件（package/namespace 路径相等）→ 裸引用
+ *   - 跨模块文件 → `X.sym` 限定引用（qualifier 末段 == def 模块末段）
+ *   - 冻结行保护 + 原子性（任一阻断 → 整体不落盘）
+ */
+export async function renameNamespaceSymbol(args: {
+  file: string;
+  symbol: string;
+  to: string;
+  dryRun: boolean;
+  resolvedRoot: string;
+  blocked: string[];
+  ext: '.java' | '.cs';
+}): Promise<RenameSymbolResult> {
+  const { file, symbol, to, dryRun, resolvedRoot } = args;
+  const blocked = args.blocked.slice();
+  const isJava = args.ext === '.java';
+  const analyze = isJava ? analyzeJavaSource : analyzeCSharpSource;
+
+  if (!/^[A-Za-z_][\w$]*$/.test(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名非法：' + to] };
+  if (symbol === to) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名与旧名相同：' + symbol] };
+
+  const defSrc = readFileSync(file, 'utf-8');
+  const def = await analyze(defSrc);
+  const defKind = def?.rootKinds.get(symbol);
+  if (!def || !defKind) return { ok: false, symbol, to, filesWritten: 0, blocked: [`"${symbol}" 不是该文件的命名空间级类型定义`] };
+  if (def.rootOffsets.has(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`定义文件已存在同名类型 "${to}"`] };
+
+  // def 模块 = package/namespace 路径（正则在源码直取，跨模块限定引用匹配用）
+  const moduleOf = (src: string): string => {
+    if (isJava) {
+      const m = src.match(/^\s*package\s+([\w.]+)/m);
+      return m ? m[1] : '';
+    }
+    const m = src.match(/\bnamespace\s+([\w.]+)/);
+    return m ? m[1] : '';
+  };
+  const defMod = moduleOf(defSrc);
+
+  // def 文件：定义处 + 同文件裸引用
+  const defEdits: Array<{ pos: number; len: number; text: string }> = [{ pos: def.rootOffsets.get(symbol)!, len: symbol.length, text: to }];
+  for (const off of def.refs.get(symbol) ?? []) defEdits.push({ pos: off, len: symbol.length, text: to });
+
+  const editsByFile = new Map<string, { src: string; edits: Array<{ pos: number; len: number; text: string }> }>();
+  editsByFile.set(file, { src: defSrc, edits: defEdits });
+
+  const all = collectFilesByExt(resolvedRoot, args.ext);
+  for (const abs of all) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    let src: string;
+    try {
+      src = readFileSync(abs, 'utf-8');
+    } catch {
+      continue;
+    }
+    const m = await analyze(src);
+    if (!m) continue;
+    const fileEdits: Array<{ pos: number; len: number; text: string }> = [];
+    const fileMod = moduleOf(src);
+    if (fileMod && defMod && fileMod === defMod) {
+      // 同模块：裸引用
+      for (const off of m.refs.get(symbol) ?? []) fileEdits.push({ pos: off, len: symbol.length, text: to });
+    } else if (defMod) {
+      // 跨模块：限定引用（qualifier 末段 == def 模块末段）
+      const defLast = defMod.split('.').filter(Boolean).pop() ?? defMod;
+      for (const [opKey, selRefs] of m.selections) {
+        if (opKey !== defLast) continue;
+        for (const s of selRefs) if (s.field === symbol) fileEdits.push({ pos: s.fieldOffset, len: symbol.length, text: to });
+      }
+    }
+    if (fileEdits.length) editsByFile.set(abs, { src, edits: fileEdits });
+  }
+
+  // 冻结行保护（原子）+ 原子落盘
+  const guard = createProtectGuard(resolvedRoot);
+  for (const [abs, entry] of editsByFile) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    const g = guard.scan(abs, entry.src, entry.edits);
+    if (g.blocked) blocked.push(`${path.relative(resolvedRoot, abs).replace(/\\/g, '/')} 的引用命中保护标记行，需解除保护或人工处理后再改名：${g.protectedLines.join(' | ')}`);
+  }
+  if (blocked.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked };
+
+  let filesWritten = 0;
+  const ordered: RenameSymbolFileInfo[] = [];
+  for (const [abs, { src, edits }] of editsByFile) {
+    const out = applyEdits(src, edits);
+    if (out !== src && !dryRun) {
+      writeFileSync(abs, out, 'utf-8');
+      filesWritten++;
+    }
+    const isDef = path.resolve(abs) === path.resolve(file);
+    ordered.push({
+      file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
+      edits: edits.length,
+      note: isDef ? `定义+同文件引用（${args.ext === '.java' ? 'Java' : 'C#'}）` : path.dirname(abs) === path.dirname(file) ? '同包引用' : '跨包限定引用',
+      ops: toOps(src, edits),
+    });
+  }
+
+  const definition = ordered[0];
+  return { ok: true, symbol, to, dryRun: dryRun || undefined, definition, importers: ordered.filter((o) => o !== definition), filesWritten };
+}
+
+// ─────────────────────────────────────────────
+// C/C++ 符号改名（方向二 · C）
+// ─────────────────────────────────────────────
+// C 无命名空间，靠头文件 + 文本链接：函数/宏可被任何 `#include` 该头文件的文件引用。
+// 本分析复用 GoModuleAnalysis：
+//   rootOffsets/refs/defined → 函数/结构体/枚举定义 + 原型声明 + 同文件引用
+//   imports      → `#include`（alias=去扩展头文件名，供"包含该头"判定）
+// 执行器：def 文件 + 所有"已定义该符号"文件（原型/定义）+ 所有 `#include` def 头文件的文件 → 裸引用联动。
+export async function analyzeCLanguage(src: string): Promise<GoModuleAnalysis | null> {
+  const parser = await getParser('.c', findLanguageByExt('.c')!);
+  if (!parser) return null;
+  let root: N;
+  try {
+    root = (parseContent(parser as Parameters<typeof parseContent>[0], src) as unknown as { rootNode: N }).rootNode;
+  } catch {
+    return null;
+  }
+  const rootOffsets = new Map<string, number>();
+  const rootKinds = new Map<string, string>();
+  const refs = new Map<string, number[]>();
+  const defined = new Set<string>();
+  const imports: Array<{ alias: string; path: string }> = [];
+  const selections = new Map<string, Array<{ field: string; fieldOffset: number }>>();
+  const add = (m: Map<string, number[]>, name: string, offset: number): void => {
+    let a = m.get(name);
+    if (!a) {
+      a = [];
+      m.set(name, a);
+    }
+    a.push(offset);
+  };
+  // 找 function_declarator 的 declarator 标识符 = 函数名
+  const fnNameOf = (fnode: N): { text: string; offset: number } | null => {
+    const st: N[] = [fnode];
+    while (st.length) {
+      const n = st.pop()!;
+      if (n.type === 'function_declarator') {
+        const nm = n.childForFieldName('declarator');
+        if (nm && nm.type === 'identifier') return { text: nm.text, offset: nm.startIndex };
+        continue;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) st.push(c);
+      }
+    }
+    return null;
+  };
+  const defOffsetByIdent = new Map<number, string>();
+  const collectDefs = (n: N, depth = 0): void => {
+    if (depth > 2000) return;
+    const t = n.type;
+    if (t === 'function_definition' || t === 'declaration') {
+      const nm = fnNameOf(n);
+      if (nm && !rootOffsets.has(nm.text)) {
+        rootOffsets.set(nm.text, nm.offset);
+        rootKinds.set(nm.text, t === 'function_definition' ? 'function' : 'decl');
+        defined.add(nm.text);
+        defOffsetByIdent.set(nm.offset, nm.text);
+        return; // 函数体内部引用交给独立 refs 遍历；此处不深入（避免 def 名被当引用）
+      }
+      // declaration 可能含多 declarator；若有函数名已记，仍遍历其它声明子节点
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) collectDefs(c, depth + 1);
+    }
+  };
+  const collectRefs = (n: N, depth = 0): void => {
+    if (depth > 2000) return;
+    if (n.type === 'identifier') {
+      const off = n.startIndex;
+      if (!defOffsetByIdent.has(off)) add(refs, n.text, off);
+      return;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) collectRefs(c, depth + 1);
+    }
+  };
+  const collectIncludes = (n: N, depth = 0): void => {
+    if (depth > 500) return;
+    const m = /^\s*#\s*include\s*[<"]([^>"]+)[>"]/.exec(n.text);
+    if (m) {
+      const p = m[1];
+      imports.push({ alias: path.posix.basename(p).replace(/\.[^.]+$/, ''), path: p });
+      return;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) collectIncludes(c, depth + 1);
+    }
+  };
+  collectDefs(root, 0);
+  collectRefs(root, 0);
+  collectIncludes(root, 0);
+  return { rootOffsets, rootKinds, refs, defined, imports, selections };
+}
+
+export async function renameCSymbol(args: {
+  file: string;
+  symbol: string;
+  to: string;
+  dryRun: boolean;
+  resolvedRoot: string;
+  blocked: string[];
+}): Promise<RenameSymbolResult> {
+  const { file, symbol, to, dryRun, resolvedRoot } = args;
+  const blocked = args.blocked.slice();
+  if (!/^[A-Za-z_]\w*$/.test(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名非法：' + to] };
+  if (symbol === to) return { ok: false, symbol, to, filesWritten: 0, blocked: ['新名与旧名相同：' + symbol] };
+
+  const defSrc = readFileSync(file, 'utf-8');
+  const def = await analyzeCLanguage(defSrc);
+  const defKind = def?.rootKinds.get(symbol);
+  if (!def || !defKind) return { ok: false, symbol, to, filesWritten: 0, blocked: [`"${symbol}" 不是该 C/C++ 文件的函数/类型定义`] };
+  if (def.rootOffsets.has(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`定义文件已存在同名符号 "${to}"`] };
+
+  // def 头标识：def 文件去扩展名 → 其它文件 `#include` 该基础名即联动
+  const defBase = path.posix.basename(file.replace(/\\/g, '/')).replace(/\.\w+$/, '');
+
+  // def 文件：定义处（可能 = 原型，去重）+ 同文件引用
+  const defEdits: Array<{ pos: number; len: number; text: string }> = [{ pos: def.rootOffsets.get(symbol)!, len: symbol.length, text: to }];
+  for (const off of def.refs.get(symbol) ?? []) defEdits.push({ pos: off, len: symbol.length, text: to });
+
+  const editsByFile = new Map<string, { src: string; edits: Array<{ pos: number; len: number; text: string }> }>();
+  editsByFile.set(file, { src: defSrc, edits: defEdits });
+
+  const all = collectFilesByExt(resolvedRoot, '.c');
+  const allH = collectFilesByExt(resolvedRoot, '.h');
+  for (const abs of new Set([...all, ...allH])) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    let src: string;
+    try {
+      src = readFileSync(abs, 'utf-8');
+    } catch {
+      continue;
+    }
+    const m = await analyzeCLanguage(src);
+    if (!m) continue;
+    const fileEdits: Array<{ pos: number; len: number; text: string }> = [];
+    if (m.defined.has(symbol)) {
+      // 原型/定义文件（如头文件的函数声明）→ 定义名 + 同文件裸引用联动
+      const defOff = m.rootOffsets.get(symbol);
+      if (defOff !== undefined) fileEdits.push({ pos: defOff, len: symbol.length, text: to });
+      for (const off of m.refs.get(symbol) ?? []) fileEdits.push({ pos: off, len: symbol.length, text: to });
+    } else if (m.imports.some((i) => i.alias === defBase)) {
+      // `#include` def 头文件 → 裸引用联动（调用点）
+      for (const off of m.refs.get(symbol) ?? []) fileEdits.push({ pos: off, len: symbol.length, text: to });
+    }
+    if (fileEdits.length) editsByFile.set(abs, { src, edits: fileEdits });
+  }
+
+  // 冻结行保护（原子）+ 原子落盘
+  const guard = createProtectGuard(resolvedRoot);
+  for (const [abs, entry] of editsByFile) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    const g = guard.scan(abs, entry.src, entry.edits);
+    if (g.blocked) blocked.push(`${path.relative(resolvedRoot, abs).replace(/\\/g, '/')} 的引用命中保护标记行，需解除保护或人工处理后再改名：${g.protectedLines.join(' | ')}`);
+  }
+  if (blocked.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked };
+
+  let filesWritten = 0;
+  const ordered: RenameSymbolFileInfo[] = [];
+  for (const [abs, { src, edits }] of editsByFile) {
+    const out = applyEdits(src, edits);
+    if (out !== src && !dryRun) {
+      writeFileSync(abs, out, 'utf-8');
+      filesWritten++;
+    }
+    const isDef = path.resolve(abs) === path.resolve(file);
+    ordered.push({
+      file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
+      edits: edits.length,
+      note: isDef ? '定义+同文件引用（C/C++）' : mDefNote(abs, defBase, edits.length) || '引用（C/C++）',
+      ops: toOps(src, edits),
+    });
+  }
+  function mDefNote(abs: string, base: string, n: number): string | undefined {
+    return n > 0 ? (path.posix.basename(abs).endsWith('.h') ? '头文件声明（C/C++）' : '调用点引用（C/C++）') : undefined;
+  }
+
+  const definition = ordered[0];
+  return { ok: true, symbol, to, dryRun: dryRun || undefined, definition, importers: ordered.filter((o) => o !== definition), filesWritten };
+}
+
+// ─────────────────────────────────────────────
 // Python 跨文件改名执行器（复用 Go 的扫描骨架，入口在 renameSymbol .py 分支）
 // ─────────────────────────────────────────────
 export async function renamePythonSymbol(args: {
@@ -1130,6 +1635,17 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   // ── Python 分支：模块级符号跨文件改名（同模块可见 + 跨模块 X.sym）──
   if (defExt === '.py') {
     return renamePythonSymbol({ file: defAbs, symbol, to, dryRun, resolvedRoot, blocked });
+  }
+  // ── C# / Java 分支：命名空间级类型跨文件改名（同包裸引用 + 跨包限定引用）──
+  if (defExt === '.cs') {
+    return renameNamespaceSymbol({ file: defAbs, symbol, to, dryRun, resolvedRoot, blocked, ext: '.cs' });
+  }
+  if (defExt === '.java') {
+    return renameNamespaceSymbol({ file: defAbs, symbol, to, dryRun, resolvedRoot, blocked, ext: '.java' });
+  }
+  // ── C/C++ 分支：函数/类型改名（def + 头文件声明 + #include 调用点裸引用联动）──
+  if (defExt === '.c' || defExt === '.h') {
+    return renameCSymbol({ file: defAbs, symbol, to, dryRun, resolvedRoot, blocked });
   }
 
   if (!TS_EXTS.has(defExt)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`文件非 TS 系（${defExt}），跨文件改名暂只支持 TS/JS 模块级符号`] };

@@ -841,3 +841,80 @@ describe('renameSymbol - 冻结行保护（管理员自配 .design-canvas.json�
     }
   });
 });
+
+describe('renameSymbol - Java 命名空间级类型改名', () => {
+  it('同包另一文件裸引用 `Foo` + 本文件定义 → 一起改为 Bar', async () => {
+    const dir = mkProj({
+      'src/com/acme/Foo.java': 'package com.acme;\npublic class Foo {\n  public int add(int a,int b){ return a+b; }\n}\n',
+      'src/com/acme/Use.java': 'package com.acme;\npublic class Use {\n  Foo f = new Foo();\n}\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/com/acme/Foo.java', symbol: 'Foo', to: 'Bar' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/com/acme/Foo.java'), 'utf-8')).toContain('public class Bar');
+    expect(readFileSync(path.join(dir, 'src/com/acme/Use.java'), 'utf-8')).toContain('Bar f = new Bar();');
+    expect(r.importers!.some((i) => i.file.endsWith('Use.java'))).toBe(true);
+    rmForce(dir);
+  });
+
+  it('跨包 `com.acme.Foo` 限定引用 → field 改，限定符不动', async () => {
+    const dir = mkProj({
+      'src/com/acme/Foo.java': 'package com.acme;\npublic class Foo { public int add(int a,int b){ return a+b; } }\n',
+      'src/app/Main.java': 'package app;\nimport com.acme.Foo;\npublic class Main {\n  void run() { com.acme.Foo f = new com.acme.Foo(); }\n}\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/com/acme/Foo.java', symbol: 'Foo', to: 'Bar' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/app/Main.java'), 'utf-8')).toContain('com.acme.Bar f = new com.acme.Bar();');
+    rmForce(dir);
+  });
+});
+
+describe('renameSymbol - C# 命名空间级类型改名', () => {
+  it('同命名空间另一文件裸引用 `User` + 定义文件 → 一起改为 Account', async () => {
+    const dir = mkProj({
+      'src/User.cs': 'namespace Acme.App\n{\n  public class User { public string Name { get; set; } = ""; }\n}\n',
+      'src/Service.cs': 'namespace Acme.App\n{\n  public class Service\n  {\n    User u = new User();\n  }\n}\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/User.cs', symbol: 'User', to: 'Account' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/User.cs'), 'utf-8')).toContain('public class Account');
+    expect(readFileSync(path.join(dir, 'src/Service.cs'), 'utf-8')).toContain('Account u = new Account();');
+    rmForce(dir);
+  });
+
+  it('跨命名空间 `Acme.App.User` 限定引用 → field 改，限定符不动', async () => {
+    const dir = mkProj({
+      'src/User.cs': 'namespace Acme.App\n{\n  public class User { }\n}\n',
+      'src/Program.cs': 'using System;\nnamespace App\n{\n  class Program\n  {\n    static Acme.App.User Make() { return new Acme.App.User(); }\n  }\n}\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/User.cs', symbol: 'User', to: 'Account' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/Program.cs'), 'utf-8')).toContain('new Acme.App.Account()');
+    rmForce(dir);
+  });
+});
+
+describe('renameSymbol - C/C++ 头文件联动改名', () => {
+  it('def .c + .h 原型 + `#include` 该头的调用点 → 全部改为新名', async () => {
+    const dir = mkProj({
+      'src/math.h': '#ifndef MATH_H\n#define MATH_H\nint add(int a, int b);\n#endif\n',
+      'src/math.c': '#include "math.h"\nint add(int a, int b) { return a + b; }\n',
+      'src/app.c': '#include "math.h"\nint main() { return add(1, 2); }\nint unused_local = add(3, 4);\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'src/math.c', symbol: 'add', to: 'sum' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'src/math.c'), 'utf-8')).toContain('int sum(int a, int b)');
+    expect(readFileSync(path.join(dir, 'src/math.h'), 'utf-8')).toContain('int sum(int a, int b);');
+    expect(readFileSync(path.join(dir, 'src/app.c'), 'utf-8')).toContain('return sum(1, 2);');
+    expect(readFileSync(path.join(dir, 'src/app.c'), 'utf-8')).toContain('int unused_local = sum(3, 4);');
+    expect(r.importers!.some((i) => i.file.endsWith('app.c'))).toBe(true);
+    rmForce(dir);
+  });
+
+  it('未定义符号 → 拒绝', async () => {
+    const dir = mkProj({ 'a.c': 'int main(){ return other(1); }\n' });
+    const r = await renameSymbol({ project_dir: dir, file: 'a.c', symbol: 'nope', to: 'x' });
+    expect(r.ok).toBe(false);
+    expect(r.blocked![0]).toContain('不是该 C/C++');
+    rmForce(dir);
+  });
+});
