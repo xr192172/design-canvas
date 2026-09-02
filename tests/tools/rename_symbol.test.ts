@@ -613,4 +613,77 @@ describe('renameSymbol - Go 跨文件改名', () => {
     expect(readFileSync(path.join(dir, 'src/a.ts'), 'utf-8')).toContain('return tally(3);');
     rmForce(dir);
   });
+
+  it('跨包引用：主包 `corepkg.Process` → `corepkg.Tally`（前缀不动，field 改）', async () => {
+    const dir = mkProj({
+      'corepkg/corepkg.go': [
+        'package corepkg',
+        'func Process(x int) int { return x }',
+      ].join('\n'),
+      'main/main.go': [
+        'package main',
+        '',
+        'import "corepkg"',
+        '',
+        'func run() int {',
+        '  return corepkg.Process(1)',
+        '}',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'corepkg/corepkg.go', symbol: 'Process', to: 'Tally' });
+    expect(r.ok).toBe(true);
+
+    // 定义文件改名
+    expect(readFileSync(path.join(dir, 'corepkg/corepkg.go'), 'utf-8')).toContain('func Tally(x int) int');
+    // 引包方跨包引用：pkg.Process → pkg.Tally
+    const main = readFileSync(path.join(dir, 'main/main.go'), 'utf-8');
+    expect(main).toContain('return corepkg.Tally(1)');
+    expect(r.importers!.some((i) => i.file === 'main/main.go')).toBe(true);
+    rmForce(dir);
+  });
+
+  it('跨包带别名：`corepkg "corepkg"` 别名 import → 仍按本地名判连，field 改', async () => {
+    const dir = mkProj({
+      'corepkg/corepkg.go': 'package corepkg\nfunc Process(x int) int { return x }\n',
+      'main/main.go': [
+        'package main',
+        '',
+        'import corepkg "corepkg"',
+        '',
+        'func run() int { return corepkg.Process(1) }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'corepkg/corepkg.go', symbol: 'Process', to: 'Tally' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'main/main.go'), 'utf-8')).toContain('return corepkg.Tally(1)');
+    rmForce(dir);
+  });
+
+  it('无关联包（未 import 定义包）→ 引包方跨包引用不动（隔离不误改）', async () => {
+    const dir = mkProj({
+      'corepkg/corepkg.go': 'package corepkg\nfunc Process(x int) int { return x }\n',
+      // otherpkg 包有自己的 Process，且没 import corepkg → 不应被波及
+      'otherpkg/otherpkg.go': 'package otherpkg\nfunc Process(x int) int { return x }\n',
+      'main/main.go': [
+        'package main',
+        '',
+        'import "otherpkg"',
+        '',
+        'func run() int { return otherpkg.Process(1) }',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'corepkg/corepkg.go', symbol: 'Process', to: 'Tally' });
+    expect(r.ok).toBe(true);
+    // corepkg 自身改
+    expect(readFileSync(path.join(dir, 'corepkg/corepkg.go'), 'utf-8')).toContain('func Tally');
+    // main.go 引用的是 otherpkg.Process，不是 corepkg → 不动
+    const main = readFileSync(path.join(dir, 'main/main.go'), 'utf-8');
+    expect(main).toContain('return otherpkg.Process(1)');
+    // 没有 import corepkg 的引包方被改写
+    expect(r.importers!.filter((i) => i.file.endsWith('main.go'))).toEqual([]);
+    rmForce(dir);
+  });
 });

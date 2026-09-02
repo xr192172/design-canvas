@@ -433,6 +433,10 @@ export interface GoModuleAnalysis {
   refs: Map<string, number[]>;
   /** 定义的符号集合（去重，供改名时确定当前文件是否定义） */
   defined: Set<string>;
+  /** import：本地名（别名或路径末段）→ 包路径（引包方跨包引用判定用） */
+  imports: Array<{ alias: string; path: string }>;
+  /** 选择器引用：`pkg.Symbol` 的 operand → field 引用偏移列表（跨包 pkg.Sym 改名用） */
+  selections: Map<string, Array<{ field: string; fieldOffset: number }>>;
 }
 
 const GO_DEF_NODE_TYPES = new Set(['function_declaration', 'type_spec', 'const_spec', 'var_spec']);
@@ -450,6 +454,8 @@ export async function analyzeGoSource(src: string): Promise<GoModuleAnalysis | n
   const rootKinds = new Map<string, string>();
   const refs = new Map<string, number[]>();
   const defined = new Set<string>();
+  const imports: Array<{ alias: string; path: string }> = [];
+  const selections = new Map<string, Array<{ field: string; fieldOffset: number }>>();
 
   const add = (map: Map<string, number[]>, name: string, offset: number): void => {
     let a = map.get(name);
@@ -458,6 +464,49 @@ export async function analyzeGoSource(src: string): Promise<GoModuleAnalysis | n
       map.set(name, a);
     }
     a.push(offset);
+  };
+
+  // 收集 import（import_declaration → import_spec）：本地名 + 路径
+  const collectImports = (node: N, depth = 0): void => {
+    if (depth > 1000) return;
+    if (node.type === 'import_spec') {
+      const pathNode = node.childForFieldName('path');
+      const pth = pathNode ? stripQuotes(pathNode.text) : '';
+      if (!pth) return;
+      // 别名：import_spec 的 name 字段（`alias "path"`）；无别名 → 默认 = 路径末段 package 名
+      const aliasNode = node.childForFieldName('name');
+      const alias = aliasNode ? aliasNode.text : pth.split('/').filter(Boolean).pop() ?? pth;
+      imports.push({ alias, path: pth });
+      return; // import_spec 内无嵌套 import
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) collectImports(c, depth + 1);
+    }
+  };
+
+  // 收集跨包选择器引用：`pkg.Symbol`（operand 是包 import 本地名 → 记录 field）
+  const collectSelections = (node: N, depth = 0): void => {
+    if (depth > 1000) return;
+    const t = node.type;
+    if (t === 'selector_expression') {
+      const operand = node.childForFieldName('operand');
+      const field = node.childForFieldName('field');
+      if (operand && field && (operand.type === 'identifier' || operand.type === 'type_identifier')) {
+        let a = selections.get(operand.text);
+        if (!a) {
+          a = [];
+          selections.set(operand.text, a);
+        }
+        a.push({ field: field.text, fieldOffset: field.startIndex });
+      }
+      // 不再深入——selector 内部无嵌套 selector（field 是叶子）
+      return;
+    }
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c) collectSelections(c, depth + 1);
+    }
   };
 
   // 第一阶段：收集包级定义（可能出现在引用之后，需先扫完整棵）
@@ -509,7 +558,9 @@ export async function analyzeGoSource(src: string): Promise<GoModuleAnalysis | n
 
   collectDefs(root, 0);
   collectRefs(root, 0);
-  return { rootOffsets, rootKinds, refs, defined };
+  collectImports(root, 0);
+  collectSelections(root, 0);
+  return { rootOffsets, rootKinds, refs, defined, imports, selections };
 }
 
 // ─────────────────────────────────────────────
@@ -536,13 +587,30 @@ export async function renameGoSymbol(args: {
   if (!def || !defKind) return { ok: false, symbol, to, filesWritten: 0, blocked: [`"${symbol}" 不是该 Go 文件的包级定义`] };
   if (def.rootOffsets.has(to)) return { ok: false, symbol, to, filesWritten: 0, blocked: [`定义文件已存在同名包级符号 "${to}"`] };
 
-  // 扫描同目录 .go 文件（Go 惯例 package=目录；跨目录同包罕见，本版不覆盖）
+  // 定义包名 = 定义文件所在目录名（Go 惯例 package=目录）
+  const defDirName = path.posix.basename(path.posix.dirname(file.replace(/\\/g, '/')));
+
+  // 全部候选 .go 文件：定义目录（同包）+ 项目根下任一目录（可能的引包方）
+  const candidateGoFiles = new Set<string>();
   const dir = path.dirname(file);
-  let goFiles: string[] = [];
   try {
-    goFiles = readdirSync(dir).filter((f) => f.endsWith('.go'));
+    for (const f of readdirSync(dir).filter((f) => f.endsWith('.go'))) candidateGoFiles.add(path.join(dir, f));
   } catch {
     /* 目录读取失败 → 仅定义文件自身 */
+  }
+  // 项目根下递归收集所有 .go（引包方可在任意目录）
+  try {
+    const rootAbs = resolvedRoot;
+    const walkDir = (d: string): void => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, e.name);
+        if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') walkDir(full);
+        else if (e.isFile() && e.name.endsWith('.go')) candidateGoFiles.add(full);
+      }
+    };
+    walkDir(rootAbs);
+  } catch {
+    /* 根扫描失败 → 只用同目录 */
   }
 
   // 汇总各文件的编辑（偏移逆序应用）
@@ -553,9 +621,8 @@ export async function renameGoSymbol(args: {
   for (const off of def.refs.get(symbol) ?? []) defEdits.push({ pos: off, len: symbol.length, text: to });
   editsByFile.set(file, { src: defSrc, edits: defEdits });
 
-  // 同包其它 .go 文件的裸引用（同包直接可见）
-  for (const f of goFiles) {
-    const abs = path.join(dir, f);
+  // 遍历候选：同包文件改裸引用；引包方改跨包 `pkg.Old` 引用
+  for (const abs of candidateGoFiles) {
     if (path.resolve(abs) === path.resolve(file)) continue;
     let src: string;
     try {
@@ -565,18 +632,38 @@ export async function renameGoSymbol(args: {
     }
     const m = await analyzeGoSource(src);
     if (!m) continue;
+
+    const isSameDir = path.dirname(abs) === dir;
     // 撞名：同包其它文件已定义 to（无论是否引用旧名，都构成同包符号冲突）
-    if (m.defined.has(to)) {
-      blocked.push(`${f} 已定义同名 "${to}"`);
+    if (isSameDir && m.defined.has(to)) {
+      blocked.push(`${path.basename(abs)} 已定义同名 "${to}"`);
       continue;
     }
-    // 同包其它文件：裸引用（不要求该文件定义 symbol——同包直接可见）
-    const refs = m.refs.get(symbol) ?? [];
-    if (refs.length === 0) continue;
-    editsByFile.set(abs, {
-      src,
-      edits: refs.map((off) => ({ pos: off, len: symbol.length, text: to })),
-    });
+
+    const fileEdits: Array<{ pos: number; len: number; text: string }> = [];
+
+    if (isSameDir) {
+      // 同包：裸引用直接改
+      for (const off of m.refs.get(symbol) ?? []) fileEdits.push({ pos: off, len: symbol.length, text: to });
+    } else {
+      // 引包方：判断其 import 是否连到定义包，改 `pkg.Old` 选择器的 field
+      const importsDefPkg = m.imports.some(
+        (imp) => path.posix.basename(imp.path.replace(/\\/g, '/')) === defDirName || imp.path === defDirName,
+      );
+      if (importsDefPkg) {
+        for (const [operand, selRefs] of m.selections) {
+          // operand 必须是对应 import 的本地名
+          const operandIsImport = m.imports.some((imp) => imp.alias === operand && path.posix.basename(imp.path.replace(/\\/g, '/')) === defDirName);
+          if (!operandIsImport) continue;
+          for (const s of selRefs) {
+            if (s.field === symbol) fileEdits.push({ pos: s.fieldOffset, len: symbol.length, text: to });
+          }
+        }
+      }
+      // 引包方不会撞定义包符号（跨包），无需撞名检查
+    }
+
+    if (fileEdits.length > 0) editsByFile.set(abs, { src, edits: fileEdits });
   }
 
   // 原子性：任一撞名 → 全部不落盘
@@ -591,10 +678,11 @@ export async function renameGoSymbol(args: {
       writeFileSync(abs, out, 'utf-8');
       filesWritten++;
     }
+    const isDef = path.resolve(abs) === path.resolve(file);
     ordered.push({
       file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
       edits: edits.length,
-      note: path.resolve(abs) === path.resolve(file) ? '定义+同文件引用（Go）' : '同包引用（Go）',
+      note: isDef ? '定义+同文件引用（Go）' : path.dirname(abs) === dir ? '同包引用（Go）' : '跨包引用（Go）',
       ops: toOps(src, edits),
     });
   }
