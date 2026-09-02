@@ -767,3 +767,80 @@ export function getIndexStats(db: Database): IndexStats {
   const last = db.prepare('SELECT MAX(indexed_at) m FROM files').get() as { m: number | null };
   return { files: files.c, nodes: nodes.c, edges: edges.c, last_indexed_at: last.m };
 }
+
+// ─────────────────────────────────────────────────────────────
+// expandClosure 索引快速路径：反查 API
+// ─────────────────────────────────────────────────────────────
+
+/** 索引是否有任何已索引文件（空库/未建索引 → 快路径不可用） */
+export function hasAnyIndexedFiles(db: Database): boolean {
+  const row = db.prepare('SELECT 1 x FROM files LIMIT 1').get() as { x: number } | undefined;
+  return !!row;
+}
+
+/** 文件是否已在索引中（cache.db 快路径：未索引文件需回退解析） */
+export function isFileIndexed(db: Database, relPath: string): boolean {
+  const row = db.prepare('SELECT 1 x FROM files WHERE path = ?').get(relPath) as { x: number } | undefined;
+  return !!row;
+}
+
+/**
+ * TS/JS 相对导入出边：文件 f 直接 import 了哪些目标文件（已解析为项目内 relPath）。
+ * 来源 edges(kind='import')——syncFile 时对 relative import 建的已解析边。
+ * Go/Python 包导入不在本查询里（包路径未建边，走 getRawImportsOfFile + 现场 resolve）。
+ */
+export function getResolvedImportTargets(db: Database, relPath: string): string[] {
+  const rows = db
+    .prepare("SELECT target FROM edges WHERE source = ? AND kind = 'import'")
+    .all(relPath);
+  return (rows as Array<{ target: string }>).map((r) => r.target);
+}
+
+/**
+ * TS/JS 相对导入入边：哪些已索引文件直接 import 了文件 relPath。
+ * 来源 edges(kind='import')——只覆盖 TS/JS 相对导入场景（Go/Python
+ * 包导入走 findFilesImportingAnySource 按原始 source 串反查）。
+ */
+export function getResolvedImportSources(db: Database, relPath: string): string[] {
+  const rows = db
+    .prepare("SELECT source FROM edges WHERE target = ? AND kind = 'import'")
+    .all(relPath);
+  return (rows as Array<{ source: string }>).map((r) => r.source);
+}
+
+/**
+ * 读文件的原始 import 记录（imports 表；覆盖相对 + 包导入全部种类）。
+ * 与 getFileParse().imports 等价，但不读符号表——快路径只做闭包不关心符号，
+ * 走本条更轻量。TS `import type` (type_only=1) 运行时擦除，闭包不算边。
+ */
+export function getRawImportsOfFile(
+  db: Database,
+  relPath: string,
+): Array<{ source: string; kind: 'relative' | 'package'; type_only: boolean; line: number }> {
+  const rows = db
+    .prepare('SELECT source, kind, type_only, line FROM imports WHERE file_path = ? ORDER BY line')
+    .all(relPath);
+  return (rows as Array<{ source: string; kind: 'relative' | 'package'; type_only: number; line: number }>)
+    .map((r) => ({ source: r.source, kind: r.kind, type_only: r.type_only === 1, line: r.line }));
+}
+
+/**
+ * 按原始 import.source 串反查：哪些已索引文件 import 了任一给定 source。
+ * 用于 Go 包路径 / Python 点分模块的「反向引用」查询（这些语言的包导入
+ * 不在 edges(kind='import') 建边，但 source 字符串完整存在于 imports 表）。
+ *
+ * 例（Go）：seed 属包 `github.com/x/agent-shell/internal/context`，
+ * 传 sources=[该包路径] → 返回所有 `import "github.com/x/agent-shell/internal/context"`
+ * 的文件（即 seed 的跨文件调用方）。
+ *
+ * 支持精确匹配 IN (...)：Go/Python 包导入本身就是精确串，无需 LIKE。
+ * TS `import type` 的行不影响闭包（闭包语义是「运行时/编译期都连」，
+ * 但保守起见本查询仍返回，调用方可按 type_only 再过滤——闭包多收比漏收好）。
+ */
+export function findFilesImportingAnySource(db: Database, sources: string[]): string[] {
+  if (sources.length === 0) return [];
+  const placeholders = sources.map(() => '?').join(',');
+  const stmt = db.prepare(`SELECT DISTINCT file_path FROM imports WHERE source IN (${placeholders})`);
+  const rows = stmt.all(...sources);
+  return (rows as Array<{ file_path: string }>).map((r) => r.file_path);
+}

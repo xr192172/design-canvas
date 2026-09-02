@@ -28,6 +28,15 @@ import { homedir } from 'node:os';
 import { analyzeModuleSource } from './rename_symbol.js';
 import { parseFileFull, isSupported, type ParsedImport } from './ts_kernel/index.js';
 import { readGoModules, type GoModule } from './import_project.js';
+import { getProjectCacheDb, closeProjectCacheDb, type Database } from '../db/db.js';
+import {
+  toRelPath,
+  hasAnyIndexedFiles,
+  isFileIndexed,
+  getResolvedImportSources,
+  getRawImportsOfFile,
+  findFilesImportingAnySource,
+} from '../db/symbols.js';
 
 /** 本地源扩展名（闭包只收这些；与 rename_symbol/rename_file 的 TS_EXTS 对齐） */
 const SRC_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue', '.java']);
@@ -529,6 +538,276 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
   return out;
 }
 
+// ─────────────────────────────────────────────────────────────
+// expandClosure 索引快速路径（② cache.db 反查子图 + ④ 无索引回退全扫）
+// ─────────────────────────────────────────────────────────────
+
+/** TS/JS 本地源扩展名（快路径 BFS 的 import dispatch 用） */
+const CLOSURE_TS_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
+
+/**
+ * 取同目录的兄弟索引文件 relPath（包共享可见性：Go/Python/Java 同目录文件无需
+ * import 即可互相引用；TS/JS 也常用同目录相对 import，保守兜底 alias 反向查询）。
+ * 返回值包含 seedRel 自身。
+ */
+function sameDirIndexedFiles(db: Database, seedRel: string): string[] {
+  const dir = path.posix.dirname(seedRel);
+  const likePrefix = dir === '.' ? '' : dir + '/';
+  // 同目录：path = seedRel（自身），或 path LIKE <dir>/% 且下一段不含 '/'
+  //（即一层子节点 = 同目录的其他文件）。用 posix dirname 过滤实现精确匹配。
+  const rows = db
+    .prepare(likePrefix ? "SELECT path FROM files WHERE path LIKE ?" : "SELECT path FROM files WHERE path NOT LIKE '%/%'")
+    .all(...(likePrefix ? [likePrefix + '%'] : [])) as Array<{ path: string }>;
+  const out: string[] = [];
+  for (const r of rows) {
+    if (path.posix.dirname(r.path) === dir) out.push(r.path);
+  }
+  return out;
+}
+
+/**
+ * 计算「哪些 import.source 字符串会让引用者解析到本文件」。
+ * 用于跨语言（Go/Python/Java）的包导入反向查询：把本文件翻译成它对外的
+ * 包导入串，再用 imports 表 IN 查询反抓所有引用它的文件。
+ *
+ * TS 别名反向太复杂（alias paths 是多对多映射，精确反解成本高），
+ * TS 反向主要靠 edges(kind='import') 入边 + 同目录兄弟兜底——本条
+ * 仅覆盖 package 导入型语言。
+ */
+function candidatePkgImportSources(
+  fAbs: string,
+  relPath: string,
+  ext: string,
+  root: string,
+  goModules: GoModule[],
+): string[] {
+  const dirRel = path.posix.dirname(relPath);
+  switch (ext) {
+    case '.go': {
+      // Go：每个 go.mod {module=github.com/x/y, dir=root} → 包导入 = module + '/' + dirRel
+      const out: string[] = [];
+      for (const gm of goModules) {
+        const base = gm.module;
+        if (dirRel === '.') out.push(base);
+        else out.push(base + '/' + dirRel);
+        // gm.dir 非空时补带 gm.dir 前缀版本
+        if (gm.dir && gm.dir !== '.') {
+          if (dirRel === '.') out.push(base); // module 本身就是顶层包
+          else out.push(base + '/' + dirRel);
+        }
+      }
+      return [...new Set(out)];
+    }
+    case '.py': {
+      // Python：点分模块路径（pkg.sub.mod）+ 同目录相对变体（.mod + 上一级..pkg.mod）
+      const dottedBase = relPath.slice(0, -ext.length).split('/').join('.');
+      const dottedDir = dirRel === '.' ? '' : dirRel.split('/').join('.');
+      const fileStem = path.posix.basename(relPath, ext);
+      const cand = new Set<string>();
+      cand.add(dottedBase);                         // pkg.sub.mod
+      if (fileStem !== '__init__') {
+        if (dottedDir) cand.add(dottedDir);          // pkg.sub（包级 import → 目录下 __init__ 导入本模块内容）
+        cand.add('.' + fileStem);                    // .mod（同目录相对）
+        if (dottedDir) cand.add('..' + dottedDir.split('.').slice(-1)[0] + '.' + fileStem); // 近似上一级相对
+      } else {
+        cand.add(dottedDir || '.');                  // __init__ 的引用 = import 包自身
+      }
+      return [...cand];
+    }
+    case '.java': {
+      // Java：全限定包路径（com.foo.Bar 类 → 文件 com/foo/Bar.java 对应 import com.foo.* / com.foo.Bar）
+      const dotted = dirRel === '.' ? '' : dirRel.split('/').join('.');
+      const fileStem = path.posix.basename(relPath, ext);
+      if (!dotted) return [fileStem];
+      return [dotted + '.' + fileStem, dotted + '.*'];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * 对一个文件做 import 现场解析（仅当该文件不在 cache.db 索引中时触发；
+ * 典型如 findExternalImporters 扫到的跨根兄弟项目文件，或 watch 新文件尚未索引）。
+ * 与原 drain 的单文件解析一致，但抽成纯函数复用。
+ */
+async function expandOneFileOnTheFly(
+  f: string,
+  aliasCfg: AliasConfig | null,
+  ctx: LangResolveCtx,
+): Promise<string[]> {
+  const ext = path.extname(f);
+  const out: string[] = [];
+  if (CLOSURE_TS_EXTS.has(ext)) {
+    let mod: Awaited<ReturnType<typeof analyzeModuleSource>> | null = null;
+    try {
+      mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
+    } catch { /* ignore */ }
+    if (!mod) return out;
+    for (const e of mod.imports) {
+      if (!e.source) continue;
+      let real: string | null = null;
+      if (e.source.startsWith('.')) real = realResolveImport(f, e.source);
+      else if (aliasCfg) real = resolveAliasedImport(e.source, aliasCfg);
+      if (real) out.push(real);
+    }
+  } else if (isSupported(ext)) {
+    let content: string;
+    try { content = fs.readFileSync(f, 'utf-8'); } catch { return out; }
+    let parsed: Awaited<ReturnType<typeof parseFileFull>> | null = null;
+    try { parsed = await parseFileFull(f, content); } catch { /* ignore */ }
+    if (!parsed) return out;
+    for (const e of parsed.imports) {
+      const real = resolveLangImport(f, e, ctx);
+      if (real) out.push(real);
+    }
+  }
+  return out;
+}
+
+/**
+ * 索引快速路径：从 seed 沿 cache.db 的 import 边双向 BFS，只取依赖子图。
+ * 成功返回闭包文件列表；任何前置不满足（项目无 cache.db / seed 未索引 /
+ * 打开 DB 异常）返回 null → expandClosure 回退原现场全扫逻辑。
+ *
+ * 快路径覆盖（与原全扫等价的来源）：
+ *  1) 种子文件（必含）
+ *  2) 同目录兄弟文件（包共享可见性；TS alias 反向保守兜底）
+ *  3) 正向：索引里每个文件的 import 原始记录 → resolve 到本地文件（TS 相对+别名，
+ *     Go/Python 包路径）——与原 drain 用完全相同的 resolve 分派，结果一致。
+ *  4) 反向 TS/JS 相对导入：edges(kind='import') 按 target 反查 source。
+ *  5) 反向 Go/Python/Java 包导入：candidatePkgImportSources → imports 表反查。
+ *  6) findExternalImporters（跨 git 根兄弟项目引用）—— 不在单一项目 cache.db
+ *     覆盖范围，仍沿用原函数做一次有界邻域扫描（兄弟数通常 ≤ NEIGHBOR_LIMIT）。
+ */
+async function tryIndexedExpandClosure(
+  seedAbs: string,
+  root: string,
+  aliasCfg: AliasConfig | null,
+): Promise<string[] | null> {
+  // 存在性预检：避免 getProjectCacheDb() 在无索引的项目里把空 cache.db 创建出来（否则 Windows 上会持有 EBUSY 锁，
+  // 导致 temp 目录测试的 rmSync 抛错，且无意义消耗一次池连接）。
+  const dbFile = path.join(root, '.design-canvas', 'cache.db');
+  if (!fs.existsSync(dbFile)) return null;
+
+  let db: Database | null = null;
+  try {
+    db = getProjectCacheDb(root);
+  } catch {
+    return null; // DB 打不开（权限 / 不可写 / 未 import_project）→ 回退
+  }
+  if (!hasAnyIndexedFiles(db)) {
+    closeProjectCacheDb(root); // 空索引，释放句柄；下次 import_project 后再池化
+    return null;
+  }
+
+  const seedRel = toRelPath(root, seedAbs);
+  if (!isFileIndexed(db, seedRel)) {
+    closeProjectCacheDb(root); // seed 未入索引（增量更新间隙 / 只建了部分）→ 不锚定，回退并释放
+    return null;
+  }
+
+  const goModules = readGoModules(root);
+  const langCtx: LangResolveCtx = { root, goModules };
+  const included = new Map<string, boolean>(); // abs → 是否已扩边（true=已处理）
+  const queue: string[] = [];
+  const addAbs = (a: string) => {
+    if (!isLocalSource(a)) return;
+    if (!included.has(a)) {
+      included.set(a, false);
+      queue.push(a);
+    }
+  };
+
+  // 1) seed 必含
+  addAbs(seedAbs);
+
+  // 2) 同目录兄弟（包共享可见性 + TS alias 反向保守兜底）
+  for (const sibRel of sameDirIndexedFiles(db, seedRel)) {
+    addAbs(path.resolve(root, sibRel));
+  }
+
+  // 3)+4)+5) 双向 BFS 扩边
+  let head = 0;
+  while (head < queue.length) {
+    const f = queue[head++];
+    if (included.get(f)) continue; // 已扩过
+    included.set(f, true);
+    const fRel = toRelPath(root, f);
+    const ext = path.extname(f);
+    const indexed = isFileIndexed(db, fRel);
+
+    // ── 正向：f 引用了谁 → 扩入
+    if (indexed) {
+      // 缓存路径：读 imports 表 + 按语言分派 resolve（零文件读、零 AST）
+      const cached = getRawImportsOfFile(db, fRel);
+      for (const imp of cached) {
+        if (imp.type_only) continue; // TS import type：运行时擦除、不算边
+        let real: string | null = null;
+        if (CLOSURE_TS_EXTS.has(ext)) {
+          if (imp.source.startsWith('.')) {
+            real = realResolveImport(f, imp.source);
+          } else if (aliasCfg) {
+            real = resolveAliasedImport(imp.source, aliasCfg);
+          }
+        } else {
+          // 跨语言（Go/Python/Java/...）
+          const pi: ParsedImport = {
+            source: imp.source,
+            kind: imp.kind,
+            type_only: imp.type_only,
+            line: imp.line,
+          };
+          real = resolveLangImport(f, pi, langCtx);
+        }
+        if (real) addAbs(real);
+      }
+    } else {
+      // 未索引文件（典型：跨根 findExternalImporters 扩入的兄弟项目文件）
+      // → 现场读+解析一次（这类文件极少，不等于全扫）
+      for (const real of await expandOneFileOnTheFly(f, aliasCfg, langCtx)) {
+        addAbs(real);
+      }
+    }
+
+    // ── 反向：谁引用了 f → 扩入
+    if (indexed) {
+      // 4) TS/JS 相对导入入边（edges 表，已解析）
+      for (const srcRel of getResolvedImportSources(db, fRel)) {
+        addAbs(path.resolve(root, srcRel));
+      }
+      // 5) Go/Python/Java 包导入反向：按候选包串查 imports 表
+      const cands = candidatePkgImportSources(f, fRel, ext, root, goModules);
+      if (cands.length > 0) {
+        for (const impRel of findFilesImportingAnySource(db!, cands)) {
+          addAbs(path.resolve(root, impRel));
+        }
+      }
+    }
+    // 未索引文件的反向：没法用索引反查，但这些是跨根兄弟项目文件，
+    // findExternalImporters 本身就从兄弟项目方向找到了"它们引用了 seed"，
+    // 再找"它们的反向引用"属于极端边角，本轮不扩（宁可少不可错）。
+  }
+
+  // 6) 邻域 importer 有界扫描（跨 git 根引用 seed → 扩入，并 BFS 其 import 边）
+  //    本步复用原 findExternalImporters——它是 O(兄弟项目数 × walk + import 解析)，
+  //    但 NEIGHBOR_LIMIT=20 有界，且 seed 的邻域项目集合本身就很小（通常 0-2 个），
+  //    不会回到 O(root)。
+  const externalImporters = await findExternalImporters(seedAbs, root);
+  for (const extAbs of externalImporters) addAbs(extAbs);
+  // 对新加的邻域文件再跑一轮扩边（它们的依赖也要入闭包，与原逻辑一致）
+  while (head < queue.length) {
+    const f = queue[head++];
+    if (included.get(f)) continue;
+    included.set(f, true);
+    for (const real of await expandOneFileOnTheFly(f, aliasCfg, langCtx)) {
+      addAbs(real);
+    }
+  }
+
+  return [...included.keys()];
+}
+
 /**
  * 动态闭包边界：给定种子文件 + 初始项目根，返回自包含的本地源文件集合。
  *  - 初始 = 项目根内全部本地源（importer 方向全覆盖：谁引用 seed 不漏）
@@ -538,12 +817,24 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
  *    覆盖跨 git 根引用，如 dsl-workbench 引用 design-canvas）
  *  - 跨 git 根引用也被纳入（不依赖单一 project_dir 的物理边界）
  *  - alias 可省略：缺省时按 root 的 tsconfig 自动加载；传 null 显式禁用别名解析
+ *
+ * 2026-09 新增：cache.db 索引快速路径（交接文档 ②+④）。
+ *  - 有可用 cache.db（import_project / watcher 已建索引）→ 走反查子图 BFS：
+ *    从 seed 沿 import 边只扩实际相连文件，从 O(root) 降到 O(relevant)；
+ *    仍做邻域 findExternalImporters 有界扫描（跨 git 根引用不进单项目 cache）。
+ *  - 无索引/索引不可用/seed 未索引 → 完全保留原"现场全扫"逻辑（零前置免摩擦）。
  */
 export async function expandClosure(seedFile: string, root: string, alias?: AliasConfig | null): Promise<string[]> {
   const aliasCfg = alias === undefined ? loadAliasConfig(root) : alias;
+  const seedAbs = path.resolve(seedFile);
+
+  // ② 索引反查快路径：有 cache.db 且 seed 已索引 → 子图 BFS
+  const fast = await tryIndexedExpandClosure(seedAbs, root, aliasCfg);
+  if (fast) return fast;
+
+  // ④ 兜底：无索引时保留原现场全扫（零前置、免摩擦）
   const included = new Map<string, boolean>(); // absPath → 是否已解析其 imports
   const queue: string[] = [];
-  const seedAbs = path.resolve(seedFile);
 
   // 初始：项目根内全部本地源 + 种子文件（种子可能不在根内，如跨根引用起点）
   const rootFiles: string[] = [];
@@ -561,7 +852,6 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
 
   // BFS 扩展（阶段 1：根内 + importee 方向；阶段 3：邻域 importer 扩入后再扩其 import 边）
   let head = 0;
-  const TS_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
   const goModules = readGoModules(root); // 多语言 Go 包解析（一次）
   const drain = async (): Promise<void> => {
     while (head < queue.length) {
@@ -570,13 +860,13 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
       included.set(f, true);
       const ext = path.extname(f);
       let edges: Array<string | null> = [];
-      if (TS_EXTS.has(ext)) {
+      if (CLOSURE_TS_EXTS.has(ext)) {
         // TS 系：analyzeModuleSource → import 边（相对/别名）
         let mod: Awaited<ReturnType<typeof analyzeModuleSource>>;
         try {
           mod = await analyzeModuleSource(fs.readFileSync(f, 'utf-8'), f);
         } catch {
-          mod = null;
+          mod = null as any;
         }
         if (!mod) continue;
         for (const e of mod.imports) {
