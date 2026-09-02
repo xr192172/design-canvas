@@ -20,6 +20,9 @@ import { watchProjectTool } from './tools/watch_project_tool.js';
 import { listFeatures, getDSL } from './storage.js';
 import { resolveCanvasNoteTargets, renderCanvasNotesDigest } from './tools/derive_mind_map.js';
 import { listProjectDocs } from './tools/project_docs.js';
+import { installLifecycle } from './lifecycle.js';
+import { closeAllActiveWatches } from './tools/watch_project_tool.js';
+import { closeAllProjectCacheDbs } from './db/db.js';
 
 const SERVER_NAME = 'design-canvas';
 const SERVER_VERSION = '0.1.3';
@@ -208,6 +211,18 @@ async function runAutoWatchHook(): Promise<void> {
 // 启动
 // ─────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
+  // 长驻 server 稳定性兜底：未捕获 rejection 保持服务（不崩）· uncaughtException 清理后退 ·
+  // SIGINT/SIGTERM 优雅关 watch 句柄 + SQLite 再退（防句柄/锁泄漏导致的 EBUSY）
+  installLifecycle({
+    cleanup: () => {
+      closeAllActiveWatches();
+      closeAllProjectCacheDbs();
+    },
+    log: (msg) => console.error(msg),
+    exit: (code) => process.exit(code),
+    keepAliveOnRejection: true,
+  });
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[${SERVER_NAME} v${SERVER_VERSION}] MCP server started (stdio)`);

@@ -219,7 +219,7 @@
 
 - **纯查询**：`get_dsl` / `explore_code` / `consistency_check`（低前置、只读、即时答案）
 
-- **单点确定性操作**：`rename_symbols` / `rename_files`（单条或批量统一入口，带联动改名后实用度↑）
+- **单点确定性操作**：`rename_symbol`（带联动改名后实用度↑）
 
 - **差异化场景**：活文档同步、契约回填、运行时观测（observe）——写代码时不主动想，但项目健康需要
 
@@ -232,6 +232,7 @@
    - **检测 + 闸门**：`src/tools/stale_check.ts` 按文件精确判「src/ 手写 ts 比 dist 产物新/缺产物」；CI（ci.yml）stale 即失败；`run_tests` 前置自检本服务 dist 是否 stale，过期先提示重建——把"静默咬人"变显式。
 
    - **自动重编（dev 循环）**：`scripts/dev.mjs`（`npm run dev`）监听 src/ 手写 .ts/.tsx，变更（轮询 mtime，跨平台确定）自动 `tsc` 重编，成功/失败都打印、失败自动待恢复，杜绝"忘了重跑 build"根因。诚实边界：长驻 MCP server 需重启才能加载新 dist，本循环只保证 dist 不 STALE。
+   - **进程级稳定性兜底（lifecycle）**：`src/lifecycle.ts` + `server.ts` 入口——unhandledRejection 保持服务（Node v15+ 默认会崩进程，长驻 server 掉线头号元凶）、uncaughtException 清理（关 watch 句柄 + 关项目 SQLite）后再退出、SIGINT/SIGTERM 优雅收尾，防句柄/SQLite 锁泄漏（Windows EBUSY 根因）。逻辑可注入依赖、可测（`tests/lifecycle.test.ts`）。
 
 2. **消除前置状态** —— ✅ **已实施**：`rename_symbol` 的 `project_dir` 变可选，自动定位项目根（git 根→manifest→文件目录，嵌套 git 安全）并按依赖闭包扩展边界。实现于 `src/tools/project_root.ts`（`resolveProjectRoot`/`expandClosure`/`realResolveImport`/`loadAliasConfig`/`resolveAliasedImport`）。
 
@@ -298,7 +299,7 @@
 
 ### 改进建议 → 已落地（2026-09）
 
-- ✅ **冻结行保护**：`rename_symbols`（TS/Go/Python 符号）/`rename_files`（文件）支持管理员自配 `.design-canvas.json` 的 `rename.protect` 规则（gitignore glob + 行 marker）；命中则整笔原子阻断，绝不改写冻结行，主体文件不套。使用见 `docs/rename-protection.md`。
+- ✅ **冻结行保护**：`rename_symbol`（TS/Go/Python）/`rename_file` 支持管理员自配 `.design-canvas.json` 的 `rename.protect` 规则（gitignore glob + 行 marker）；命中则整笔原子阻断，绝不改写冻结行，主体文件不套。使用见 `docs/rename-protection.md`。
 
 - ✅ **字面量感知改名**：`rename_symbols report_literals=true` 扫描旧符号 snake 变体在项目文本的字面量命中，返回清单（只报告不改）。**闭环已补（2026-09）**：`apply_literals=true` 自动替换 decision=apply 的字面量（code/docs/test）为蛇形新名，并按 kind 分层——contract(注册名)需人审、history(历史记录)保留、冻结行(.design-canvas.json protect)跳过，均不写盘，决策明细随结果返回供复核。
 
