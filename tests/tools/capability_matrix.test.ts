@@ -100,7 +100,10 @@ describe('capability_matrix', () => {
     _resetRegistry();
     await import('../../src/tools/register_capabilities');
     const ids = allCapabilities().map((c) => c.id);
-    for (const expectId of ['ast_parse_skeleton', 'package_migration', 'rename_symbol', 'contract_gate', 'extract_contracts']) {
+    for (const expectId of [
+      'ast_parse_skeleton', 'package_migration', 'rename_symbol', 'contract_gate', 'extract_contracts',
+      'version_upgrade_detection', 'impact_analysis', 'cross_repo_symbol_index', 'hybrid_precheck', 'behavior_baseline', 'code_health',
+    ]) {
       expect(ids).toContain(expectId);
     }
     const rows = diagnoseCapabilities(['go', 'python', 'java', 'typescript', 'javascript', 'tsx']);
