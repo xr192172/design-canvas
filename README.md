@@ -105,7 +105,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 ## MCP 工具参考
 
-共注册 **51 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
+共注册 **49 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
 
 ### 主工具（8 个）
 
@@ -163,10 +163,8 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | --------------------- | ------------------------------------------ |
 | `edit_code`           | 符号级代码编辑（replace / insert / delete / range） |
 | `rename_many`         | 批量重命名局部变量（作用域隔离）                           |
-| `rename_symbol`       | 跨文件模块级符号重命名                                |
-| `rename_symbols`      | 批量跨文件符号重命名（整体先 dry-run）                    |
-| `rename_file`         | 文件级重命名 + import 引用改写                       |
-| `rename_files`        | 批量文件重命名（整体先 dry-run）                      |
+| `rename_symbols`      | 批量跨文件符号重命名（单条或批量统一入口，整体先 dry-run）       |
+| `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）          |
 | `remove_dead_imports` | 移除失效 import                                |
 | `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移）                      |
 | `suggest_renames`     | 为短名 / 无意义变量建议语义化名字                         |

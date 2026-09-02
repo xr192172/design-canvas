@@ -54,7 +54,6 @@ import type { HarvestFromUrlInput } from './tools/harvest_from_url.js';
 import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
-import { renameSymbol } from './tools/rename_symbol.js';
 import { renameSymbols } from './tools/rename_symbols.js';
 import { findReferences } from './tools/find_references.js';
 import { runTests } from './tools/run_tests.js';
@@ -65,7 +64,6 @@ import { compareProjects } from './cross_repo/index.js';
 import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
 import { captureBaseline, verifyBaseline, baselinePathFor } from './behavior/index.js';
 import { analyzeHealth } from './health/index.js';
-import { renameFile } from './tools/rename_file.js';
 import { renameFiles } from './tools/rename_files.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1373,62 +1371,11 @@ const TOOL_DEFS: ToolDef[] = [
     }),
   },
   {
-    name: 'rename_symbol',
-    title: 'Cross-file module-level symbol rename',
-    description:
-      '跨文件符号级改名：把改一个模块级导出符号从单文件局部变量升级为跨文件安全改名。' +
-      '在定义文件上发起（file 必须是该符号的声明文件），改：定义名 + 同文件内对该符号的所有引用（含 export 列表）' +
-      '+ 所有 import 该符号的文件里的 import 子句远程名与无别名使用点。' +
-      '支持 function/const/class/interface/type/enum 模块级符号；class/enum 值+类型双栖都改，interface/type 只改类型引用。' +
-      '安全性：import 别名使用点不动；被局部遮蔽处不改；任一 importer 撞名或遇到 export * 星号转发 → 原子阻断、全部不落盘。' +
-      'rename_file_if_matching=true（可选，默认 false）：当符号是文件主导出（文件名=符号名，如 UserService.ts 的 UserService 类）时，' +
-      '符号改名成功后自动联动把文件也改名（含全仓 import 引用改写）。不改默认行为，纯增量。' +
-      'dry_run=true（可选，默认 false）：只算结构化 diff（每个文件每处 old→new 编辑）不落盘，供预览验证。' +
-      'project_dir 可省略：缺省时自动定位项目根（git 根→manifest→文件目录），并按依赖闭包扩展边界（含跨 git 根引用）。',
-    inputSchema: {
-      project_dir: z.string().optional().describe('目标项目根目录（可选；缺省自动定位：git 根→manifest→file 目录）'),
-      file: z.string().describe('定义符号的文件（绝对路径；或相对 cwd 路径）'),
-      symbol: z.string().describe('旧符号名（模块级声明名/被 import 的远程名）'),
-      to: z.string().describe('新符号名（必须为合法标识符 /^[A-Za-z_$][\\w$]*$/）'),
-      rename_file_if_matching: z.boolean().optional().describe('true=符号是文件主导出（文件名=符号名）时，联动把文件改名（默认 false）'),
-      dry_run: z.boolean().optional().describe('true=只算结构化 diff 不落盘（dry-run 预览，默认 false）'),
-    },
-    handler: wrap(async (a) => {
-      const { file, symbol, to } = a;
-      const r = await renameSymbol({
-        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
-        file: String(file),
-        symbol: String(symbol),
-        to: String(to),
-        rename_file_if_matching: a.rename_file_if_matching === true,
-        dry_run: a.dry_run === true,
-      });
-      if (!r.ok) {
-        return { message: `跨文件改名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
-      }
-      const fmtFile = (f: { file: string; edits: number; note: string; ops?: { old: string; new: string }[] }): string => {
-        const base = `  - ${f.file}（${f.edits} 处，${f.note}）`;
-        const pairs = f.ops && f.ops.length ? [...new Map(f.ops.map((o) => [`${o.old} → ${o.new}`, true])).keys()] : [];
-        return pairs.length ? `${base}：${pairs.join('，')}` : base;
-      };
-      const parts = [r.dryRun ? `[dry-run 预览·未落盘] 跨文件改名：${r.symbol} → ${r.to}` : `跨文件改名完成：${r.symbol} → ${r.to}`];
-      if (r.fileRenamed) parts.push(`\t${r.dryRun ? '计划联动' : '文件联动'}改名：${r.fileRenamed}`);
-      if (r.fileRenameBlocked) parts.push(`\t⚠ 文件联动未执行：${r.fileRenameBlocked.join('；')}`);
-      if (r.definition) parts.push(fmtFile(r.definition));
-      if (r.importers && r.importers.length > 0) {
-        parts.push(`\t影响 ${r.importers.length} 个导入文件：`);
-        for (const i of r.importers) parts.push(fmtFile(i));
-      } else {
-        parts.push('\t无其它文件引用该符号');
-      }
-      return { message: parts.join('\n'), data: r };
-    }),
-  },
-  {
     name: 'rename_symbols',
     title: 'Batch cross-file module-level symbol renames with structured-diff preview',
     description:
-      '跨文件符号批量改名：一次调用对多个「模块级导出符号」批量改名（对标脚本效率，但带结构化 diff 预览/验证）。' +
+      '跨文件符号改名（单条或多条，统一入口）：对「模块级导出符号」改名（对标脚本效率，带结构化 diff 预览/验证）。' +
+      '单一符号改名也用它——renames 传 1 条即可（收敛掉原 rename_symbol 工具）。' +
       '输入 renames=[{file,symbol,to,rename_file_if_matching?}]。' +
       '先对所有条目按原始文件态 dry_run 算结构化 diff（每处 old→new，可验证）；任一条被阻断（撞名/星号转发/非模块级符号）→ 整体不落盘，返回预览报告。' +
       '全部可落盘时才逐条落盘并返回每条 preview(含 applied 的实际 diff)。apply 阶段若前面改动使后续条目被阻断，立即中止并如实报告已应用条数。' +
@@ -1507,7 +1454,8 @@ const TOOL_DEFS: ToolDef[] = [
     name: 'rename_files',
     title: 'Batch file renames with import-reference rewrites (whole-batch dry-run first)',
     description:
-      '文件批量改名/移动：一次调用对多个文件重命名/移动并联动全仓 import 引用改写（对标脚本效率，消除"70 文件改名=70 次调用"的粒度问题）。' +
+      '文件改名/移动（单条或多条，统一入口）并联动全仓 import 引用改写（对标脚本效率，消除"70 文件改名=70 次调用"的粒度问题）。' +
+      '单一文件改名也用它——renames 传 1 条即可（收敛掉原 rename_file 工具）。' +
       '输入 renames=[{from,to}]（from/to 相对 project_dir 或绝对路径）。' +
       '先对所有条目按原始文件态 dry_run 算影响面；任一条被阻断（源缺失 / 目标已存在 / 命中冻结行）→ 整体不落盘，返回预览报告。' +
       '全部可落盘时才逐条落盘（复用 rename_file 的原子语义：先复制→改写引用→删源+重索引，失败可回滚）。' +
@@ -1922,38 +1870,6 @@ const TOOL_DEFS: ToolDef[] = [
         if (firstMsg) parts.push(`\t  ${firstMsg.trim()}`);
       }
       if (r.failures.length > 20) parts.push(`\t… 还有 ${r.failures.length - 20} 个失败（详见 outputFile）`);
-      return { message: parts.join('\n'), data: r };
-    }),
-  },
-  {
-    name: 'rename_file',
-    title: 'File-level rename with import reference rewrite (防文件悬空)',
-    description:
-      '文件级智能重命名：把改一个文件的名字/路径做成全仓一致的安全操作。' +
-      '过程=算影响面(干跑只报告) → 迁移文件 → 自动改写全项目解析到该文件的 import/require 源字面量 + 重索引。' +
-      '安全：只改相对导入且确实解析到被移动文件的引用，注释/字符串/无关引用不碰；目标已存在或源缺失 → 原子阻断不落盘。' +
-      'dry_run=true 时只返回将被改写的引用清单，不迁移、不改写、不重索引。' +
-      '文件若是目录桶(index.ts)，会提示语义变化风险需复核。',
-    inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（用于解析 from/to 为绝对路径）'),
-      from: z.string().describe('源文件（相对 project_dir 或绝对路径）'),
-      to: z.string().describe('目标文件（相对 project_dir 或绝对路径）'),
-      dry_run: z.boolean().optional().describe('true = 只算影响面（不迁移/不改写/不重索引）'),
-    },
-    handler: wrap(async (a) => {
-      const { project_dir, from, to, dry_run } = a;
-      const r = await renameFile({ project_dir: String(project_dir), from: String(from), to: String(to), dry_run: !!dry_run });
-      if (!r.ok) {
-        return { message: `文件重命名被阻断：\n- ${(r.blocked || []).join('\n- ')}`, data: r };
-      }
-      const parts = [r.dryRun ? `[干跑] 计划把 ${r.fromRel} → ${r.toRel}` : `文件重命名完成：${r.fromRel} → ${r.toRel}`];
-      if (r.moved) parts.push(`\t已 fs 迁移 + 重索引`);
-      if (r.editCount === 0) parts.push('\t无其它文件引用该文件路径');
-      else {
-        parts.push(`\t改写 ${r.editCount} 处 import/require 引用：`);
-        for (const f of r.references) parts.push(`\t  - ${f.file}  ${f.fromSource} → ${f.toSource}`);
-      }
-      if (r.pending && r.pending.length > 0) for (const p of r.pending) parts.push(`\t⚠ ${p}`);
       return { message: parts.join('\n'), data: r };
     }),
   },

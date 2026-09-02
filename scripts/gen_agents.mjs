@@ -28,10 +28,10 @@ const OUT = path.join(ROOT, 'AGENTS.md');
 const TRIGGER_ROWS = [
   ['开发前先看 / 画活文档', '`get_dsl` / `render_design` / `edit_dsl` / `manage_feature`', '开工前对齐设计，避免方向性错误'],
   ['日常维护（补节点/改描述/加标注）', '`edit_dsl weight=routine`', '轻量写路径：跳过 L4 证据回溯，仍留 L1-L3 防空话；改架构/契约等重改用 normal 全链'],
-  ['改一个模块级符号名', '`rename_symbol`', '自动定根+闭包+跨语言，先 dry_run 看 diff'],
+  ['改一个模块级符号名', '`rename_symbols`', '单条或批量统一入口（renames=[…]），自动定根+闭包+跨语言，先 dry_run 看 diff'],
   ['批量改多个符号', '`rename_symbols`', '先整体 dry-run，全部可落盘才落'],
   ['改**对外契约名 / MCP 工具名**', '`rename_symbols report_literals=true`', '扫旧名 snake 字面量清单，按 kind 分治(契约/历史/文档/测试/代码)；契约变更才跟文档'],
-  ['改文件名并联动全仓 import', '`rename_file`', '防文件悬空'],
+  ['改文件名并联动全仓 import', '`rename_files`', '单条或批量统一入口（renames=[…]），防文件悬空'],
   ['批量改多个文件名', '`rename_files`', '整体先 dry-run，全部可落盘才落'],
   ['单文件局部变量/形参批量改名', '`rename_many`', '作用域隔离'],
   ['改一段代码（函数体/range）', '`edit_code`', '按符号/行号定位改写'],
@@ -52,9 +52,9 @@ const TRIGGER_ROWS = [
 
 // 改名场景表（静态，不随 build 频率变）
 const RENAME_ROWS = [
-  ['改一个模块级符号（函数/const/class/interface/type/enum）', '`rename_symbol`'],
+  ['改一个模块级符号（函数/const/class/interface/type/enum）', '`rename_symbols`'],
   ['批量改多个模块级符号', '`rename_symbols`'],
-  ['改文件名并联动全仓 import 引用', '`rename_file`'],
+  ['改文件名并联动全仓 import 引用', '`rename_files`'],
   ['批量改多个文件路径', '`rename_files`'],
   ['单文件内局部变量/形参批量改名', '`rename_many`'],
 ];
@@ -109,9 +109,9 @@ ${renameTable}
 
 1. 先传 \`dry_run=true\` 看结构化 diff（返回每个受影响文件的 \`ops[{old,new}]\`）。
 2. 核对 diff 符合预期后，再去掉 \`dry_run\` 落盘。
-3. 改名面向「文件主导出」时（文件名 = 符号名），\`rename_symbol\` 加
+3. 改名面向「文件主导出」时（文件名 = 符号名），\`rename_symbols\` 的条目加
    \`rename_file_if_matching=true\` 联动改名文件。
-4. 批量改名用 \`rename_symbols\`（先整体 dry-run 校验，全部可落盘才落盘）。
+4. 符号/文件改名统一走 \`rename_symbols\` / \`rename_files\`（单条或批量皆可；先整体 dry-run 校验，全部可落盘才落盘）。
 
 **例外（可绕过工具直接手改）：**
 
