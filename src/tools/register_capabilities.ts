@@ -45,11 +45,11 @@ declareCapability({
   },
 });
 
-/** 符号改名：TS 家族全量；Go 支持同包 + 跨包引用（2026-09 新增） */
+/** 符号改名：TS 家族全量；Go/Python 支持模块级符号 + 跨模块引用（2026-09 新增） */
 declareCapability({
   id: 'rename_symbol',
   label: '符号改名（作用域解析 + 跨文件 import 边）',
-  desc: 'TS 家族（作用域解析 + import/reexport 边）全量；Go 同包级符号 + 跨包 `pkg.Sym` 引用（前缀不动，field 改）；Python 未接',
+  desc: 'TS 家族（作用域解析 + import/reexport 边）全量；Go 同包 + 跨包 pkg.Sym；Python 模块级 + 跨模块 X.sym；C# 未接',
   default: 'unimplemented',
   overrides: {
     typescript: 'full_ast',
@@ -57,11 +57,12 @@ declareCapability({
     javascript: 'full_ast',
     jsx: 'full_ast',
     go: 'full_ast',
+    python: 'full_ast',
   },
   notes: {
     typescript: '值/类型双栖 + import 边 + 别名 + 局部遮蔽',
     go: '同包 function/type/const + 跨包 pkg.Sym 引用（经 import 本地名判连，前缀隔离不误改）',
-    python: 'Python 改名尚未接 rename_symbol',
+    python: '模块级 function/class + 同模块裸引用 + 跨模块 X.sym 引用（import 本地名判连）',
   },
 });
 

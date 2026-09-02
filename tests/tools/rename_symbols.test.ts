@@ -107,15 +107,15 @@ describe('renameSymbols - 批量跨文件符号改名', () => {
   it('任一条目被阻断 → 整体不落盘，返回预览报告', async () => {
     const dir = mkProj({
       'src/a.ts': 'export function alpha(a: number) { return a; }\n',
-      'src/c.py': 'def c():\n    pass\n',
+      'src/c.java': 'public class C { public static void c() {} }\n',
       'src/use.ts': "import { alpha } from './a';\nexport function run() { return alpha(1); }\n",
     });
-    // 第二个条目指向非 TS 文件 → 被阻断
+    // 第二个条目指向 rename_symbol 未支持扩展（Java） → 被阻断
     const r = await renameSymbols({
       project_dir: dir,
       renames: [
         { file: 'src/a.ts', symbol: 'alpha', to: 'aleph' },
-        { file: 'src/c.py', symbol: 'c', to: 'd' },
+        { file: 'src/c.java', symbol: 'c', to: 'd' },
       ],
     });
     expect(r.ok).toBe(false);

@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { renameSymbol, analyzeModuleSource, analyzeGoSource } from '../../src/tools/rename_symbol';
+import { renameSymbol, analyzeModuleSource, analyzeGoSource, analyzePythonSource } from '../../src/tools/rename_symbol';
 
 function mkProj(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'rs-'));
@@ -684,6 +684,109 @@ describe('renameSymbol - Go 跨文件改名', () => {
     expect(main).toContain('return otherpkg.Process(1)');
     // 没有 import corepkg 的引包方被改写
     expect(r.importers!.filter((i) => i.file.endsWith('main.go'))).toEqual([]);
+    rmForce(dir);
+  });
+});
+
+describe('analyzePythonSource - Python 模块级符号解析', () => {
+  it('收集模块级 function/class 定义偏移 + 裸引用偏移（跳过方法/嵌套）', async () => {
+    const src = [
+      'def compute(x):',
+      '    return x * 2',
+      '',
+      'class Worker:',
+      '    def __init__(self):',
+      '        pass',
+      '',
+      'def helper():',
+      '    return compute(1)',
+    ].join('\n');
+    const m = await analyzePythonSource(src);
+    expect(m).not.toBeNull();
+    expect(m!.rootKinds.get('compute')).toBe('function');
+    expect(m!.rootKinds.get('Worker')).toBe('class');
+    // __init__ 是类方法，不是模块级定义
+    expect(m!.rootKinds.has('__init__')).toBe(false);
+    // helper 内的 compute(1) 是裸引用（同模块）
+    expect(m!.refs.get('compute')).toBeDefined();
+    // 定义偏移精确命中 compute
+    const off = m!.rootOffsets.get('compute')!;
+    expect(src.slice(off, off + 7)).toBe('compute');
+  });
+});
+
+describe('renameSymbol - Python 跨文件改名', () => {
+  it('模块级函数：定义 + 同模块引用一起改', async () => {
+    const dir = mkProj({
+      'util.py': [
+        'def compute(x):',
+        '    return x * 2',
+        '',
+        'def internal():',
+        '    return compute(1)',
+      ].join('\n'),
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'util.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    const out = readFileSync(path.join(dir, 'util.py'), 'utf-8');
+    expect(out).toContain('def tally(x):');
+    expect(out).toContain('return tally(1)');
+    expect(out).not.toContain('def compute');
+    expect(r.filesWritten).toBe(1);
+    rmForce(dir);
+  });
+
+  it('跨模块 `import util` + `util.compute` → `util.tally`（前缀不动，field 改）', async () => {
+    const dir = mkProj({
+      'util.py': 'def compute(x):\n    return x\n',
+      'main.py': 'import util\n\ndef run():\n    return util.compute(3)\n',
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'util.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    // 定义文件
+    expect(readFileSync(path.join(dir, 'util.py'), 'utf-8')).toContain('def tally(x):');
+    // 引包方跨模块引用
+    expect(readFileSync(path.join(dir, 'main.py'), 'utf-8')).toContain('return util.tally(3)');
+    expect(r.importers!.some((i) => i.file === 'main.py')).toBe(true);
+    rmForce(dir);
+  });
+
+  it('无关联跨模块（import 其它模块的同名函数）→ 引包方不动（隔离不误改）', async () => {
+    const dir = mkProj({
+      'util.py': 'def compute(x):\n    return x\n',
+      'other.py': 'def compute(x):\n    return x\n',
+      'main.py': 'import other\n\ndef run():\n    return other.compute(3)\n',
+    });
+
+    const r = await renameSymbol({ project_dir: dir, file: 'util.py', symbol: 'compute', to: 'tally' });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(path.join(dir, 'util.py'), 'utf-8')).toContain('def tally');
+    // main.py 引用的是 other.compute，不是 util → 不动
+    expect(readFileSync(path.join(dir, 'main.py'), 'utf-8')).toContain('return other.compute(3)');
+    expect(r.importers!.filter((i) => i.file.endsWith('main.py'))).toEqual([]);
+    rmForce(dir);
+  });
+
+  it('非模块级符号（未定义）→ 拒绝', async () => {
+    const dir = mkProj({ 'util.py': 'def compute():\n    pass\n' });
+    const r = await renameSymbol({ project_dir: dir, file: 'util.py', symbol: 'Nope', to: 'X' });
+    expect(r.ok).toBe(false);
+    expect(r.blocked![0]).toContain('模块级定义');
+    rmForce(dir);
+  });
+
+  it('dry_run=true → 不落盘，返回 ops', async () => {
+    const dir = mkProj({
+      'util.py': 'def compute(x):\n    return x\n\ndef use():\n    return compute(1)\n',
+    });
+    const r = await renameSymbol({ project_dir: dir, file: 'util.py', symbol: 'compute', to: 'tally', dry_run: true });
+    expect(r.ok).toBe(true);
+    expect(r.dryRun).toBe(true);
+    expect(r.filesWritten).toBe(0);
+    expect(readFileSync(path.join(dir, 'util.py'), 'utf-8')).toContain('def compute');
+    expect(r.definition!.ops!.some((o) => o.old === 'compute' && o.new === 'tally')).toBe(true);
     rmForce(dir);
   });
 });
