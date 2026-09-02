@@ -31,7 +31,7 @@ function readArg(name: string): string | undefined {
 const has = (name: string): boolean => process.argv.includes(name);
 
 /** 解析 --change a.ts 与 --change a.ts::sym 两种形态 */
-function changePoints(): ImpactChangePoint[] {
+export function changePoints(): ImpactChangePoint[] {
   const out: ImpactChangePoint[] = [];
   let i = process.argv.indexOf('--change');
   while (i >= 0 && i + 1 < process.argv.length) {
@@ -54,7 +54,7 @@ function riskMark(r: string): string {
   return r === 'high' ? '⚠' : r === 'medium' ? '·' : ' ';
 }
 
-async function renderReport(root: string, cps: ImpactChangePoint[], maxDepth: number): Promise<{ text: string; data: unknown }> {
+export async function renderReport(root: string, cps: ImpactChangePoint[], maxDepth: number): Promise<{ text: string; data: unknown }> {
   const r = await analyzeImpact(root, cps, maxDepth === Number.POSITIVE_INFINITY ? {} : { maxDepth });
   const lines: string[] = [];
     lines.push(`影响面报告 · ${root}`);
@@ -74,7 +74,7 @@ async function renderReport(root: string, cps: ImpactChangePoint[], maxDepth: nu
     return { text: lines.join('\n'), data: r };
 }
 
-async function renderHubs(root: string, top: number): Promise<{ text: string; data: unknown }> {
+export async function renderHubs(root: string, top: number): Promise<{ text: string; data: unknown }> {
   const h = await analyzeHubs(root, top);
   const lines: string[] = [];
   lines.push(`风险热区盘点 · ${root}（${h.fileCount} 文件 / ${h.edgeCount} 依赖边）`);
@@ -107,7 +107,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  console.error(`[impact] 失败: ${(e as Error).message}`);
-  process.exit(1);
-});
+// 直接执行才跑 main（被测试 import 时仅暴露 render/changePoints）
+if (process.argv[1] && /impact_cli\.(js|ts)$/.test(process.argv[1])) {
+  main().catch((e) => {
+    console.error(`[impact] 失败: ${(e as Error).message}`);
+    process.exit(1);
+  });
+}

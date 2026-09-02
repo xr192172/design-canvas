@@ -18,11 +18,16 @@ function readArg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-function loadCases(): BehaviorCase[] {
+/** 解析金丝雀样例输入（argv 依赖注入，缺省取 process.argv，便于测试注入假 argv） */
+export function loadCases(argv: string[] = process.argv): BehaviorCase[] {
+  const readArg = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
   const inline = readArg('--cases');
   if (inline) {
     const arr = JSON.parse(inline) as unknown[];
-    if (!Array.isArray(arr) || arr.length === 0) throw new Error('--cases 需为非空 JSON 数组 [{name,args,kwargs?}]');
+    if (!Array.isArray(arr) || arr.length === 0) throw new Error('--cases 需为非空 JSON 数组（[{name,args,kwargs?}]）');
     return arr.map((c) => {
       const o = c as Record<string, unknown>;
       return { name: String(o.name), args: Array.isArray(o.args) ? o.args : [], kwargs: o.kwargs as Record<string, unknown> | undefined };
@@ -105,4 +110,7 @@ function main(): void {
   process.exit(1);
 }
 
-main();
+// 直接执行才跑 main（被测试 import 时仅导出 loadCases）
+if (process.argv[1] && /behavior_cli\.(js|ts)$/.test(process.argv[1])) {
+  main();
+}

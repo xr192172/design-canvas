@@ -14,6 +14,11 @@ const VERDICT_LABEL: Record<HybridVerdict, string> = {
   blocked: '必须先解决符号冲突',
 };
 
+const fmtSym = (defs: Array<{ file: string; signature: string }>): string =>
+  defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
+
+export { VERDICT_LABEL, fmtSym };
+
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : undefined;
@@ -80,10 +85,10 @@ async function main(): Promise<void> {
   }
 }
 
-const fmtSym = (defs: Array<{ file: string; signature: string }>): string =>
-  defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
-
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// 直接执行才跑 main（被测试 import 时仅暴露 VERDICT_LABEL/fmtSym）
+if (process.argv[1] && /hybrid_cli\.(js|ts)$/.test(process.argv[1])) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
