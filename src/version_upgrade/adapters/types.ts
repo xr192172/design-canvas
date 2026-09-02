@@ -20,7 +20,7 @@
 import type { VerifyCommand } from '../../tools/verify_refactor.js';
 
 /** 语言代号（新增语言在此扩展） */
-export type ToolName = 'java' | 'node' | 'go' | 'python';
+export type ToolName = 'java' | 'node' | 'go' | 'python' | 'csharp' | 'c';
 
 /** 解析后的版本结构 */
 export interface VersionInfo {

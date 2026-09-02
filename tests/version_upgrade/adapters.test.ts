@@ -23,6 +23,8 @@ import {
 import { pythonAdapter } from '../../src/version_upgrade/adapters/python';
 import { javaAdapter } from '../../src/version_upgrade/adapters/java';
 import { nodeAdapter } from '../../src/version_upgrade/adapters/node';
+import { csharpAdapter } from '../../src/version_upgrade/adapters/csharp';
+import { cAdapter } from '../../src/version_upgrade/adapters/c';
 import { scanToolchainDeclarations, versionSatisfies } from '../../src/version_upgrade/toolchain';
 import { scanFeatureHits } from '../../src/version_upgrade/features';
 import { scanRemovedApis } from '../../src/version_upgrade/removed';
@@ -52,14 +54,18 @@ function write(dir: string, rel: string, content: string): void {
 }
 
 describe('registry', () => {
-  it('注册了 Java / Go / Node / Python 四个适配器', () => {
-    expect(adapters.map((a) => a.lang).sort()).toEqual(['go', 'java', 'node', 'python']);
+  it('注册了 Java / Go / Node / Python / C# / C 六个适配器', () => {
+    expect(adapters.map((a) => a.lang).sort()).toEqual(['c', 'csharp', 'go', 'java', 'node', 'python']);
   });
 
   it('adapterForLang / adapterForExt 按代号与扩展名命中', () => {
     expect(adapterForLang('python')).toBe(pythonAdapter);
     expect(adapterForExt('.py')).toBe(pythonAdapter);
     expect(adapterForExt('java')).toBe(javaAdapter);
+    expect(adapterForLang('csharp')).toBeDefined();
+    expect(adapterForExt('.cs')).toBeDefined();
+    expect(adapterForLang('c')).toBeDefined();
+    expect(adapterForExt('.c')).toBeDefined();
     expect(adapterForExt('.cpp')).toBeUndefined();
   });
 
@@ -255,5 +261,67 @@ describe('nodeAdapter 动态闸（运行时探针真跑）', () => {
     const items = await run(appDir, 'bad.ts', src);
     expect(items[0].status).toBe('fail');
     expect(items[0].detail).toContain('转译失败');
+  });
+});
+
+describe('csharpAdapter', () => {
+  it('global.json SDK version → 声明', () => {
+    const root = tempRoot();
+    write(root, 'global.json', '{ "sdk": { "version": "8.0.100" } }\n');
+    const d = csharpAdapter.parseDeclarationFile(path.join(root, 'global.json'));
+    expect(d).toHaveLength(1);
+    expect(d[0].declaredVersion).toBe('8.0');
+    expect(d[0].source).toBe('global.json');
+  });
+
+  it('Directory.Build.props 的 <LangVersion>12</LangVersion> → 声明 12', () => {
+    const root = tempRoot();
+    write(root, 'Directory.Build.props', '<Project><PropertyGroup><LangVersion>12</LangVersion></PropertyGroup></Project>\n');
+    const d = csharpAdapter.parseDeclarationFile(path.join(root, 'Directory.Build.props'));
+    expect(d[0].declaredVersion).toBe('12');
+  });
+
+  it('featureBoundary / parseVersion：C#12 → 12；版本低时 record/init 报超标', () => {
+    const src = 'public record Point(int X);\npublic class A { public string N { get; init; } }\n';
+    const hits = scanFeatureHits([{ path: 'a.cs', content: src }], 8);
+    const names = hits.map((h) => h.feature).sort();
+    expect(names).toContain('record 记录类');
+    expect(names).toContain('init 访问器');
+    // 边界 12 → 无超标
+    expect(scanFeatureHits([{ path: 'a.cs', content: src }], 12)).toEqual([]);
+  });
+
+  it('BinaryFormatter 在 C#8 报废弃', () => {
+    const hits = scanRemovedApis([{ path: 'a.cs', content: 'var bf = new BinaryFormatter();\n' }], 8);
+    expect(hits.map((h) => h.api)).toContain('BinaryFormatter');
+  });
+});
+
+describe('cAdapter', () => {
+  it('Makefile `-std=c11` → 声明 11', () => {
+    const root = tempRoot();
+    write(root, 'Makefile', 'CFLAGS = -Wall -std=c11 -O2\n');
+    const d = cAdapter.parseDeclarationFile(path.join(root, 'Makefile'));
+    expect(d).toHaveLength(1);
+    expect(d[0].declaredVersion).toBe('11');
+  });
+
+  it('CMakeLists `CMAKE_C_STANDARD 17` → 声明 17', () => {
+    const root = tempRoot();
+    write(root, 'CMakeLists.txt', 'set(CMAKE_C_STANDARD 17)\n');
+    const d = cAdapter.parseDeclarationFile(path.join(root, 'CMakeLists.txt'));
+    expect(d[0].declaredVersion).toBe('17');
+  });
+
+  it('C 标准边界：声明 11 时 _Generic 不报；声明 10 时 _Generic 报超标', () => {
+    const src = '#define TYPE(x) _Generic((x), int: 1, default: 0)\n';
+    expect(scanFeatureHits([{ path: 'a.c', content: src }], 11)).toEqual([]);
+    const hits = scanFeatureHits([{ path: 'a.c', content: src }], 10);
+    expect(hits.map((h) => h.feature)).toContain('_Generic 泛型选择');
+  });
+
+  it('gets 在 C11+ 报移除', () => {
+    const hits = scanRemovedApis([{ path: 'a.c', content: 'gets(buf);\n' }], 11);
+    expect(hits.map((h) => h.api)).toContain('gets（已被移除）');
   });
 });
