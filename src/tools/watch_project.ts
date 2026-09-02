@@ -54,6 +54,19 @@ export function shouldSyncRel(rel: string): boolean {
   return true;
 }
 
+/** 事件冲刷触发的最长等待（ms）：尾随 debounce 的强制上限，防持续事件流下永不触发/无限积压 */
+export const MAX_FLUSH_WAIT_MS = 2000;
+
+/**
+ * 事件冲刷触发策略（运行稳定性）：尾随 debounce（窗口内合并），但若距上次实际冲刷已
+ * 超过 maxWaitMs，则立即冲刷（延时 0）——否则在持续事件风暴下 timer 被不断重置，
+ * flush 永不触发、pending 无限累积（内存涨 + cache 永不同步）。返回本次冲刷延时 ms。
+ */
+export function decideFlushDelay(lastFlushAt: number, windowMs: number, maxWaitMs: number, now: number): number {
+  if (lastFlushAt <= 0 || now - lastFlushAt < maxWaitMs) return windowMs;
+  return 0;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 单事件处理（纯逻辑，测试直接调用）
 // ─────────────────────────────────────────────────────────────
@@ -258,17 +271,21 @@ export function watchProject(opts: WatchProjectOptions): WatchHandle {
   let reconciling = false;
   let reconcileAgain = false;
   let closed = false;
+  /** 上次实际冲刷时刻（ms），max-wait 拦风暴积压用 */
+  let lastFlushAt = 0;
 
   const scheduleFlush = (): void => {
     if (timer) clearTimeout(timer);
+    const delay = decideFlushDelay(lastFlushAt, debounceMs, MAX_FLUSH_WAIT_MS, Date.now());
     timer = setTimeout(() => {
       timer = null;
       void doFlush();
-    }, debounceMs);
+    }, delay);
   };
 
   const doFlush = async (): Promise<void> => {
     if (closed || pending.size === 0) return;
+    lastFlushAt = Date.now();
     const rels = [...pending];
     pending.clear();
     try {

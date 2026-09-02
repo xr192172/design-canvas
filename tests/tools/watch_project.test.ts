@@ -14,7 +14,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { importProject } from '../../src/tools/import_project';
 import { openDb } from '../../src/db/db';
 import { getIndexStats } from '../../src/db/symbols';
-import { handleWatchEvent, flushBatch, shouldSyncRel, reconcileProject, watchProject } from '../../src/tools/watch_project';
+import { handleWatchEvent, flushBatch, shouldSyncRel, reconcileProject, watchProject, decideFlushDelay, MAX_FLUSH_WAIT_MS } from '../../src/tools/watch_project';
 
 const roots: string[] = [];
 
@@ -208,5 +208,22 @@ describe('watchProject stop 清理', () => {
     handle.stop();
     expect(handle.status().watching).toBe(false);
     db.close();
+  });
+});
+
+describe('decideFlushDelay（max-wait 拦风暴积压）', () => {
+  const W = 150; // 窗口
+  const M = 2000; // 最大等待
+  it('窗口内合并（距上次冲刷 < maxWait → 尾随窗口）', () => {
+    expect(decideFlushDelay(1000, W, M, 1100)).toBe(W);
+  });
+  it('距上次冲刷超过 maxWait → 立即冲刷（防尾随 debounce 永不触发）', () => {
+    expect(decideFlushDelay(1000, W, M, 1000 + 2001) < W).toBe(true);
+  });
+  it('lastFlushAt 未初始化（0）→ 走窗口（首个事件不用立即）', () => {
+    expect(decideFlushDelay(0, W, M, Date.now())).toBe(W);
+  });
+  it('MAX_FLUSH_WAIT_MS 为正，可触发立即分支', () => {
+    expect(MAX_FLUSH_WAIT_MS).toBeGreaterThan(0);
   });
 });
