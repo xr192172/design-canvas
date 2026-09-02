@@ -59,6 +59,12 @@ import { renameSymbols } from './tools/rename_symbols.js';
 import { findReferences } from './tools/find_references.js';
 import { runTests } from './tools/run_tests.js';
 import { checkStaleBuild, formatStaleText } from './tools/stale_check.js';
+import { analyzeImpact, analyzeHubs } from './impact/index.js';
+import type { ImpactChangePoint } from './impact/index.js';
+import { compareProjects } from './cross_repo/index.js';
+import { precheckHybrid, VERDICT_LABEL } from './hybrid/index.js';
+import { captureBaseline, verifyBaseline, baselinePathFor } from './behavior/index.js';
+import { analyzeHealth } from './health/index.js';
 import { renameFile } from './tools/rename_file.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
@@ -1582,6 +1588,251 @@ const TOOL_DEFS: ToolDef[] = [
       return { message: parts.join('\n'), data: r };
     }),
   },
+  {
+    name: 'impact_analysis',
+    title: 'Impact analysis - pre-change risk closure report',
+    description:
+      '影响面分析（改前风险闭包报告）：从变更点（文件 + 可选顶层导出符号）沿 import/调用/类型引用依赖图做反向可达闭包，' +
+      '输出直接/间接受影响文件、引用证据与风险排序——回答"我要改这里，会炸哪里"。' +
+      'change_points=[{file, symbol?}] 支持改整个文件或只改某个符号；解析不到符号消费方时保守降级为整文件闭包（fell_back）。' +
+      'hubs=true 时切换为热区盘点模式（无变更点）：全项目按"被直接依赖数"排序，找出改哪些文件风险最高。' +
+      '风险启发式：受影响文件自身的波及半径 × 距离；depth=1 的直接消费方附带引用证据行。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      change_points: z
+        .array(z.object({ file: z.string().describe('相对 project_dir 的源码文件路径'), symbol: z.string().optional().describe('可选：顶层导出符号名') }))
+        .optional()
+        .describe('变更点列表；hubs 模式可省略'),
+      hubs: z.boolean().optional().describe('true = 热区盘点模式（不传 change_points）'),
+      top: z.number().optional().describe('热区只列前 N（默认 10）'),
+      max_depth: z.number().optional().describe('闭包最大距离（默认不限）'),
+    },
+    handler: wrap(async (a) => {
+      const root = String(a.project_dir);
+      if (a.hubs) {
+        const h = await analyzeHubs(root, typeof a.top === 'number' ? a.top : 10);
+        const lines = [`风险热区盘点 · ${root}（${h.fileCount} 文件 / ${h.edgeCount} 依赖边）`, '按"被直接依赖数"排序 —— 改这些文件会炸最多下游', ''];
+        for (const f of h.files) lines.push(`${f.risk === 'high' ? '⚠' : f.risk === 'medium' ? '·' : ' '} [${f.risk}] ${f.file}  被 ${f.dependents} 个文件依赖 / 依赖 ${f.dependencies} 个文件`);
+        return { message: lines.join('\n'), data: h };
+      }
+      const cps: ImpactChangePoint[] = Array.isArray(a.change_points)
+        ? (a.change_points as Array<{ file: string; symbol?: string }>).map((c) => ({ file: c.file, symbol: c.symbol }))
+        : [];
+      const r = await analyzeImpact(root, cps, typeof a.max_depth === 'number' ? { maxDepth: a.max_depth } : {});
+      const lines = [
+        `影响面报告 · ${root}`,
+        `变更点 ${r.changePoints.length} 个，受影响文件 ${r.total} 个（直接 ${r.direct}，高风险 ${r.high_risk}）`,
+      ];
+      if (r.fell_back) lines.push('⚠ 存在符号级消费方解析失败 → 已保守降级为"改整个文件"的闭包');
+      if (r.missing.length > 0) lines.push(`⚠ 未定位到变更点：${r.missing.join(', ')}`);
+      lines.push('');
+      if (r.files.length === 0) lines.push('（零波及：该变更点没有任何文件依赖链）');
+      for (const f of r.files) {
+        lines.push(`${f.risk === 'high' ? '⚠' : f.risk === 'medium' ? '·' : ' '} [${f.risk}] ${f.file}  (depth=${f.depth}, 被${f.dep_count}个文件依赖)`);
+        for (const s of f.sites) lines.push(`      ${s.kind.padEnd(9)} L${s.line}  ${s.detail}`);
+      }
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'cross_repo_symbol_index',
+    title: 'Cross-repo symbol index - two-project conflict & migration scope',
+    description:
+      '跨项目符号索引（杂交前"会不会撞名"）：对两个项目根各建顶层符号集合，再求交/求差。' +
+      '①冲突清单（同名不同签 = 真冲突，杂交前需改名/错位，附两侧定义文件与签名）；' +
+      '②双胞胎（同名同签 = 语义重复，可去重一个）；' +
+      '③迁移范围 aOnly/bOnly（只在一方的顶层符号 = 搬到对侧不撞名的安全候选）。' +
+      '是 rename_symbol / package_migration / impact_analysis 跨项目版与 hybrid_precheck 的符号层地基。' +
+      '顶层符号 = 所有模块级符号（未显式 export 的也计入，保守超集）。',
+    inputSchema: {
+      project_dir_a: z.string().describe('项目 A 根目录（绝对路径）'),
+      project_dir_b: z.string().describe('项目 B 根目录（绝对路径）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await compareProjects(String(a.project_dir_a), String(a.project_dir_b));
+      const fmtSym = (defs: Array<{ file: string; signature: string }>) => defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
+      const lines = [
+        `跨项目符号索引 · ${r.aRoot} ↔ ${r.bRoot}`,
+        `A：${r.aFiles} 文件 / ${r.aSymbols} 顶层符号     B：${r.bFiles} 文件 / ${r.bSymbols} 顶层符号`,
+        '',
+        `■ 冲突 ${r.conflicts.length}（同名不同签，杂交前需改名/错位）`,
+      ];
+      for (const c of r.conflicts) {
+        lines.push(`  ! ${c.name}`, `      A: ${fmtSym(c.a)}`, `      B: ${fmtSym(c.b)}`);
+      }
+      if (r.conflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 双胞胎 ${r.duplicates.length}（同名同签，可去重一个）`);
+      for (const c of r.duplicates) lines.push(`  = ${c.name}   A: ${c.a[0].file} ↔ B: ${c.b[0].file}`);
+      if (r.duplicates.length === 0) lines.push('  （无）');
+      lines.push('', `■ 迁移范围：A→B 候选 ${r.aOnly.length} 个`);
+      if (r.aOnly.length > 0) lines.push(`  ${r.aOnly.join(', ')}`);
+      lines.push('', `■ 迁移范围：B→A 候选 ${r.bOnly.length} 个`);
+      if (r.bOnly.length > 0) lines.push(`  ${r.bOnly.join(', ')}`);
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'hybrid_precheck',
+    title: 'Hybrid precheck - three-dimension fusion feasibility report',
+    description:
+      '项目杂交预检（两个项目能不能融合）：站在 cross_repo_symbol_index 之上做三维体检。' +
+      '①符号冲突（同名不同签 = 真冲突，杂交后互相遮蔽，需改名/错位）；' +
+      '②功能重叠（同名同签双胞胎 = 语义重复，可去重一个）；' +
+      '③依赖冲突（读两仓根级 manifest package.json/go.mod/pyproject.toml/requirements.txt，同名依赖版本范围不一致）。' +
+      '输出 verdict：ok 可直接融合 / fix 处理后融合 / blocked 必须先解决符号冲突，附理由清单。' +
+      'v1 边界：依赖冲突按版本范围字符串不等判定（^18 vs ~18 也报，宁多报不漏报）；manifest 只读根级。',
+    inputSchema: {
+      project_dir_a: z.string().describe('项目 A 根目录（绝对路径）'),
+      project_dir_b: z.string().describe('项目 B 根目录（绝对路径）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await precheckHybrid(String(a.project_dir_a), String(a.project_dir_b));
+      const fmtSym = (defs: Array<{ file: string; signature: string }>) => defs.map((d) => `${d.file}  ${d.signature}`).join(' ; ');
+      const lines = [
+        `项目杂交预检 · ${r.aRoot} ↔ ${r.bRoot}`,
+        `判定：${VERDICT_LABEL[r.verdict]}（${r.verdict}）`,
+        ...r.reasons.map((x) => `  · ${x}`),
+        '',
+        `■ 符号冲突 ${r.symbolConflicts.length}（同名不同签，杂交前需改名/错位）`,
+      ];
+      for (const c of r.symbolConflicts) {
+        lines.push(`  ! ${c.name}`, `      A: ${fmtSym(c.a)}`, `      B: ${fmtSym(c.b)}`);
+      }
+      if (r.symbolConflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 功能重叠 ${r.symbolDuplicates.length}（同名同签双胞胎，可去重一个）`);
+      for (const c of r.symbolDuplicates) lines.push(`  = ${c.name}   A: ${c.a[0].file} ↔ B: ${c.b[0].file}`);
+      if (r.symbolDuplicates.length === 0) lines.push('  （无）');
+      lines.push('', `■ 依赖版本冲突 ${r.deps.conflicts.length}`);
+      for (const c of r.deps.conflicts) lines.push(`  ! ${c.name}   ${c.version}   [${c.source}]`);
+      if (r.deps.conflicts.length === 0) lines.push('  （无）');
+      lines.push('', `■ 依赖共享 ${r.deps.shared.length} / 仅A ${r.deps.aOnly.length} / 仅B ${r.deps.bOnly.length}`);
+      if (r.deps.shared.length > 0) lines.push(`  共享: ${r.deps.shared.map((d) => d.name).join(', ')}`);
+      if (r.deps.aOnly.length > 0) lines.push(`  仅A: ${r.deps.aOnly.map((d) => d.name).join(', ')}`);
+      if (r.deps.bOnly.length > 0) lines.push(`  仅B: ${r.deps.bOnly.map((d) => d.name).join(', ')}`);
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'behavior_baseline',
+    title: 'Behavior baseline - canary test capture/verify diff',
+    description:
+      '行为基线（金丝雀测试对比）：对目标 Python 函数用样例输入跑一次记录行为快照（capture），' +
+      '改代码后再跑一次对比（verify）——回答"跑得对不对"（动态闸只答"跑得动不炸"，补不了行为级变化）。' +
+      'action=capture：生成 harness（顶层 exec 目标文件 + 规范化 repr 返回值 + stdout 痕迹 + 函数源码快照），' +
+      '存基线到 <project_dir>/.design-canvas/behavior/<file>__<func>.json（baseline 参数可覆盖路径）。' +
+      'action=verify：读基线 + 对当前磁盘再跑同一份 harness，逐 case 对齐对比 → verdict same/diff（进程级失败 → error）。' +
+      'v1 边界：仅 Python；目标函数须自包含（顶层 exec 整文件，模块级常量/其它函数可用；跨文件 import 与 import 副作用不支持）；' +
+      '返回值对比 = 规范化 repr（set 排序化）；样例输入由 cases 显式提供（capture 必需），不自动生成。',
+    inputSchema: {
+      action: z.enum(['capture', 'verify']).describe('capture=记录行为基线；verify=对比当前行为与基线'),
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      file: z.string().describe('相对 project_dir 的目标文件（.py / .ts / .tsx / .js / .jsx / .mjs / .cjs）'),
+      function: z.string().describe('目标顶层函数名'),
+      cases: z
+        .array(z.object({ name: z.string(), args: z.array(z.unknown()).optional(), kwargs: z.record(z.string(), z.unknown()).optional() }))
+        .optional()
+        .describe('capture 必需：金丝雀样例输入（verify 忽略，复用基线里的 cases）'),
+      baseline: z.string().optional().describe('基线 JSON 路径覆盖（缺省 <project_dir>/.design-canvas/behavior/<file>__<func>.json）'),
+    },
+    handler: wrap(async (a) => {
+      const spec = {
+        project_dir: String(a.project_dir),
+        file: String(a.file),
+        function: String(a.function),
+        cases: Array.isArray(a.cases)
+          ? (a.cases as Array<Record<string, unknown>>).map((c) => ({
+              name: String(c.name),
+              args: Array.isArray(c.args) ? (c.args as unknown[]) : [],
+              kwargs: c.kwargs as Record<string, unknown> | undefined,
+            }))
+          : [],
+      };
+      const bp = a.baseline ? String(a.baseline) : baselinePathFor(String(a.project_dir), String(a.file), String(a.function));
+
+      if (a.action === 'capture') {
+        const b = captureBaseline(spec, bp);
+        const lines = [
+          `行为基线已记录 · ${b.spec.function} @ ${b.spec.file}`,
+          `基线：${b.baseline_path}（文件哈希 ${b.file_hash}）`,
+          `${b.results.length} 个 case：`,
+          ...b.results.map((r) => `  ${r.case} = ${r.ok ? r.ret : `✗ ${r.error}`}`),
+          '',
+          '函数源码快照：',
+          ...(b.source || '(unavailable)').split('\n').map((l) => `  ${l}`),
+        ];
+        return { message: lines.join('\n'), data: b };
+      }
+
+      const v = verifyBaseline(spec, bp);
+      const lines = [
+        `行为基线对比 · ${v.diff.verdict === 'same' ? '✔ 一致' : v.diff.verdict === 'diff' ? '✗ 有差异' : '⚠ 无法对比'}`,
+        v.diff.message,
+        `基线文件哈希 ${v.baseline.file_hash} → 当前 ${v.run.file_hash}`,
+        '',
+      ];
+      for (const d of v.diff.details) {
+        if (d.status === 'same') {
+          lines.push(`  = ${d.case}  same`);
+          continue;
+        }
+        lines.push(`  ! ${d.case}`);
+        if (d.case === '(stdout)') {
+          lines.push(`    改前 stdout: ${JSON.stringify(d.before)}`);
+          lines.push(`    改后 stdout: ${JSON.stringify(d.after)}`);
+        } else {
+          if (d.before !== undefined) lines.push(`    改前 ret: ${d.before}`);
+          if (d.after !== undefined) lines.push(`    改后 ret: ${d.after}`);
+          if (d.before_error !== undefined) lines.push(`    改前 error: ${d.before_error}`);
+          if (d.after_error !== undefined) lines.push(`    改后 error: ${d.after_error}`);
+        }
+      }
+      return { message: lines.join('\n'), data: v };
+    }),
+  },
+  {
+    name: 'code_health',
+    title: 'Code health - dead code / complexity / layer violation',
+    description:
+      '代码健康度（选材体检）：对 project_dir 全项目做三层体检，输出健康分 + 问题清单。' +
+      '三维度：①死代码——未使用导出（复用调用边/类型引用边反查，外部消费者不可见一律标 info 不自动删）、' +
+      '未使用 import（TS/JS/Python/Java 命名导入）、孤儿文件（无任何项目内消费者的非胶水文件）；' +
+      '②复杂度——顶层函数/方法圈复杂度启发式（剥注释后数分支，默认阈值 10，超阈值标 warn）；' +
+      '③分层违规——依赖方向向上（契约→积木/胶水、积木→胶水）标 error。' +
+      '守护"积木/契约/胶水"三分层哲学，是项目杂交选材的评分依据。' +
+      '输出：score(0-100)/grade(A-D)/summary + issues 逐条(file/line/symbol/message/evidence) + complexity Top 清单。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（绝对路径）'),
+      complexity_threshold: z.number().int().optional().describe('圈复杂度阈值（默认 10）'),
+      top: z.number().int().optional().describe('复杂度清单最多列多少个（默认 10）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await analyzeHealth(String(a.project_dir), {
+        complexityThreshold: a.complexity_threshold == null ? undefined : Number(a.complexity_threshold),
+        top: a.top == null ? undefined : Number(a.top),
+      });
+      const sevMark: Record<string, string> = { error: '✗', warn: '!', info: '·' };
+      const lines = [
+        `代码健康度 · ${r.root}`,
+        `${r.fileCount} 个文件 → 健康分 ${r.score}（${r.grade}）`,
+        `分层：胶水 ${r.layers.glue} / 积木 ${r.layers.brick} / 契约 ${r.layers.contract} / 违规 ${r.layers.violations}`,
+        r.summary,
+        '',
+        '—— 问题清单 ——',
+      ];
+      if (r.issues.length === 0) lines.push('（无问题）');
+      for (const i of r.issues) {
+        const loc = `${i.file}${i.line ? `:${i.line}` : ''}${i.symbol ? ` ${i.symbol}` : ''}`;
+        lines.push(`${sevMark[i.severity]} [${i.kind}] ${loc}`);
+        lines.push(`      ${i.message}`);
+      }
+      if (r.complexity.length > 0) {
+        lines.push('', `—— 最高复杂度 Top ${r.complexity.length} ——`);
+        for (const c of r.complexity) lines.push(`  ${c.complexity}  ${c.file}:${c.line}  ${c.symbol}`);
+      }
+      return { message: lines.join('\n'), data: r };
+    }),
+  },
+
   {
     name: 'run_tests',
     title: 'Run tests and return structured failures',
