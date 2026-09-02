@@ -39,7 +39,7 @@ import {
 } from '../db/symbols.js';
 
 /** 本地源扩展名（闭包只收这些；与 rename_symbol/rename_file 的 TS_EXTS 对齐） */
-const SRC_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue', '.java']);
+const SRC_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue', '.java', '.cs', '.c', '.h']);
 
 /** 跳过的目录名（闭包扫描绝不进入） */
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', '.svn', '.hg', 'vendor', 'target', 'out', 'output', '.next', '.nuxt', '__pycache__', '.venv', 'venv']);
@@ -124,7 +124,7 @@ export function walkProjectFiles(dir: string, out: string[]): void {
 export function resolveToFile(p: string): string | null {
   if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
   if (!path.extname(p)) {
-    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue']) {
+    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.go', '.py', '.vue', '.java', '.cs', '.c', '.h']) {
       const cand = p + ext;
       if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
     }
@@ -211,6 +211,19 @@ function resolvePythonImport(absFile: string, imp: ParsedImport, ctx: LangResolv
   return null;
 }
 
+/** C/C++：`#include "sub/foo.h"` / `#include <core/foo.h>` → 剥尖括号/引号，importer 目录 → 工程根逐级试 */
+function resolveClangImport(absFile: string, imp: ParsedImport, ctx: LangResolveCtx): string | null {
+  const rel = resolveRelative(absFile, imp);
+  if (rel) return rel;
+  const raw = imp.source.trim().replace(/^[<"]/, '').replace(/[>"]$/, '');
+  if (!raw) return null;
+  for (const base of [path.dirname(absFile), ctx.root]) {
+    const hit = resolveToFile(path.resolve(base, raw));
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /** 通用兜底：把 import 字符串按 `::`/`.`/`/` 分隔符归一化为路径，从 importer 目录/工程根逐级落盘 */
 function resolveGenericLangImport(absFile: string, imp: ParsedImport): string | null {
   const rel = resolveRelative(absFile, imp);
@@ -237,6 +250,8 @@ const LANG_RESOLVERS: Record<string, (absFile: string, imp: ParsedImport, ctx: L
   '.rs': resolveRustImport,
   '.cs': resolveCsImport,
   '.php': resolvePhpImport,
+  '.c': resolveClangImport,
+  '.h': resolveClangImport,
   // 其它语言不注册 → 走 resolveGenericLangImport 通用兜底
 };
 

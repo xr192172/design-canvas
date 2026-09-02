@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   parseFile,
+  parseFileFull,
   isSupported,
   listSupportedLanguages,
   listSupportedExtensions,
@@ -181,6 +182,23 @@ function run() { return 1; }
   it('语法有错的文件不抛异常，返回空或部分结果', async () => {
     const symbols = await parseFile('a.go', 'func broken( {');
     expect(Array.isArray(symbols)).toBe(true);
+  });
+});
+
+describe('ts_kernel parseFileFull - C / C#  依赖边提取（impact/cross_repo 地基）', () => {
+  it('C `#include` → import 边；`foo()` → call 边；函数名 → symbol', async () => {
+    const pf = await parseFileFull('a.c', '#include "math.h"\nint add(int a,int b){ return a+b; }\nint main(){ return add(1,2); }\n');
+    expect(pf.imports.some((i) => i.source === 'math.h')).toBe(true);
+    expect(pf.calls.some((c) => c.callee === 'add')).toBe(true);
+    expect(pf.symbols.map((s) => s.name)).toContain('add');
+    expect(pf.symbols.map((s) => s.name)).toContain('main');
+  });
+
+  it('C# `using` → import 边；`Foo()` 调用 → call 边；class → symbol', async () => {
+    const pf = await parseFileFull('a.cs', 'using System.Collections.Generic;\nnamespace App { public class User { public int Go(){ return this.N(); } private int N(){ return 1; } } }\n');
+    expect(pf.imports.some((i) => i.source.includes('System.Collections'))).toBe(true);
+    expect(pf.calls.some((c) => c.callee === 'N')).toBe(true);
+    expect(pf.symbols.map((s) => s.name)).toContain('User');
   });
 });
 

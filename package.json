@@ -76,6 +76,7 @@
     "zod": "^3.25.0 || ^4.0.0"
   },
   "optionalDependencies": {
+    "tree-sitter-c": "^0.21.0",
     "tree-sitter-c-sharp": "^0.21.3",
     "tree-sitter-go": "^0.21.2",
     "tree-sitter-java": "^0.23.5",

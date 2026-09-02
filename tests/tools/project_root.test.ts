@@ -22,6 +22,7 @@ import {
   loadAliasConfig,
   resolveAliasedImport,
   findExternalImporters,
+  resolveLangImport,
 } from '../../src/tools/project_root';
 import { syncFile, syncProject, toRelPath, hasAnyIndexedFiles, pruneDeletedFiles } from '../../src/db/symbols';
 import { getProjectCacheDb, closeProjectCacheDb } from '../../src/db/db';
@@ -570,5 +571,44 @@ describe('expandClosure 索引快速路径 - ②+④ 行为', () => {
     expect(s.has(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'))).toBe(true);
     closeProjectCacheDb(root);
     rmForce(dir);
+  });
+
+  describe('C / C# 进入 AST 闭包与 import 解析（能力矩阵地基）', () => {
+    it('根内 .cs / .c / .h 文件被闭包根扫描收集（SRC_EXTS 扩展）', async () => {
+      const dir = mkProj({
+        'package.json': '{ "name": "cpproj" }\n',
+        'src/main.c': '#include "core/util.h"\nint main() { return helper(); }\n',
+        'src/core/util.h': 'int helper(void);\n',
+        'src/calc.cs': 'namespace Calc { public class Util { public static int Add(int a,int b){ return a+b; } } }\n',
+        'src/notes.txt': 'not source\n',
+      });
+      const files = await expandClosure(path.join(dir, 'src/main.c'), dir);
+      const s = normSet(files);
+      expect(s.has(path.join(dir, 'src/main.c').replace(/\\/g, '/'))).toBe(true);
+      expect(s.has(path.join(dir, 'src/core/util.h').replace(/\\/g, '/'))).toBe(true);
+      expect(s.has(path.join(dir, 'src/calc.cs').replace(/\\/g, '/'))).toBe(true);
+      expect(s.has(path.join(dir, 'src/notes.txt').replace(/\\/g, '/'))).toBe(false); // 非源文件不进闭包
+      closeProjectCacheDb(dir);
+      rmForce(dir);
+    });
+
+    it('C `#include` 与 C# `using` 均能解析到项目内本地文件', async () => {
+      const dir = mkProj({
+        'math.c': '#include "core/vec.h"\nice.\n',
+        'core/vec.h': '#pragma once\nstruct vec { int x; };\n',
+        'shape.cs': 'using Core.Geom;\n',
+        'Core/Geom.cs': 'namespace Core.Geom { public class Box {} }\n',
+        'go.mod': 'module fake\n',
+      });
+      const ctx = { root: dir, goModules: [] };
+      // C：#include "core/vec.h"（c importer 自身必须存在，路径解析不依赖文件存在但构造真实）
+      const cRes = resolveLangImport(path.join(dir, 'math.c'), { source: 'core/vec.h', kind: 'package', line: 1 }, ctx as never);
+      expect(cRes?.replace(/\\/g, '/')).toBe(path.join(dir, 'core/vec.h').replace(/\\/g, '/'));
+      // C#：using Core.Geom → 点分命名空间，.cs resolver 点到 Core/Geom.cs
+      const csRes = resolveLangImport(path.join(dir, 'shape.cs'), { source: 'Core.Geom', kind: 'package', line: 1 }, ctx as never);
+      expect(csRes?.replace(/\\/g, '/')).toBe(path.join(dir, 'Core/Geom.cs').replace(/\\/g, '/'));
+      closeProjectCacheDb(dir);
+      rmForce(dir);
+    });
   });
 });

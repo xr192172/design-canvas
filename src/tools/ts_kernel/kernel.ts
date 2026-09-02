@@ -165,6 +165,14 @@ function extractName(node: SyntaxNodeLike, fieldMap: LanguageEntry['field_map'])
       if (isValidIdentifier(text)) return text;
     }
   }
+  // C/C++：function_definition/declaration 的函数名在 function_declarator 的 declarator 字段（无 name 字段）
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child && child.type === 'function_declarator') {
+      const d = child.childForFieldName('declarator');
+      if (d && d.type === 'identifier' && isValidIdentifier(d.text)) return d.text;
+    }
+  }
   return '';
 }
 
@@ -458,6 +466,14 @@ export const LANG_ADAPTERS: Record<string, LangImportAdapter> = {
       if (eq >= 0) t = t.slice(eq + 1).trim(); // using Alias = X; → 绑定 Alias
       else t = t.split('.').pop() || t; // using System.X → X
       return t ? [t.replace(/[\s]/g, '')] : [];
+    },
+  },
+  c: {
+    callNode: 'call_expression',
+    // `#include "math.h"` / `#include <stdio.h>` → 头文件路径
+    extractImportSources(node) {
+      const m = /^\s*#\s*include\s*[<"]([^>"]+)[>"]/.exec(node.text);
+      return m ? [m[1]] : [];
     },
   },
   php: {
