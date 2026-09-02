@@ -31,8 +31,13 @@ jobs:
           go-version: "stable"
       - name: 安装依赖
         run: npm ci
-      - name: 类型检查 + 构建（tsc + gen bundle，先生成 dist 供 import dist 的测试用）
+      # 质量闸门（防 skip hook / 纯本地校验漏网）：build 后跑，因契约闸门需 dist 的 ts_kernel
+      - name: 类型检查 + 构建（tsc + gen bundle）
         run: npm run build
+      - name: STALE BUILD 自检（build 后应无 stale；有则说明产物与源码不一致）
+        run: node --input-type=module -e "import('./dist/src/tools/stale_check.js').then(async m=>{const r=m.checkStaleBuild(process.cwd());console.log('scanned '+r.scanned+' stale '+r.stale);if(r.stale){console.log(m.formatStaleText(r));process.exit(1)}})"
+      - name: 契约变更闸门（新增/改名残留未同步文档 → 阻断）
+        run: node scripts/contract_docs_gate.mjs
       - name: 单元测试（vitest）
         run: npm test
 
