@@ -289,6 +289,8 @@
 
 ### 改进建议 → 已落地（2026-09）
 
+- ✅ **冻结行保护**：`rename_symbol`（TS/Go/Python）/`rename_file` 支持管理员自配 `.design-canvas.json` 的 `rename.protect` 规则（gitignore glob + 行 marker）；命中则整笔原子阻断，绝不改写冻结行，主体文件不套。使用见 `docs/rename-protection.md`。
+
 - ✅ **字面量感知改名**：`rename_symbols report_literals=true` 扫描旧符号 snake 变体在项目文本的字面量命中，返回清单（只报告不改）。
 
 - ✅ **注册名白名单**：命中按 `kind` 分类——`server_registry` 的 `name:`→`contract`（对外契约，清单醒目标「破坏契约需人审」），tool-convergence/docs→`history`/`docs`（保留原貌）、tests→`test`、其余→`code`；agent 据清单区分「改 / 保留 / 契约谨慎」。

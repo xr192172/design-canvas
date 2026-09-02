@@ -790,3 +790,54 @@ describe('renameSymbol - Python 跨文件改名', () => {
     rmForce(dir);
   });
 });
+
+describe('renameSymbol - 冻结行保护（管理员自配 .design-canvas.json）', () => {
+  const cfg = {
+    rename: { protect: [{ globs: ['src/archive.*'], markers: ['判定'] }] },
+  };
+
+  it('importer 命中冻结行 → 原子阻断，无任何文件被改', async () => {
+    const dir = mkProj({
+      '.design-canvas.json': JSON.stringify(cfg),
+      'src/def.ts': [
+        'export function compute(a: number): number {',
+        '  return a * 2;',
+        '}',
+      ].join('\n'),
+      // archive 的 import 落在含「判定」标记的行 → 冻结（否则改名会让 archive 悬空）
+      'src/archive.ts': "import { compute } from './def'; // 判定：历史判定，勿改\nconst frozen = compute(1);\n",
+      'src/live.ts': [
+        "import { compute } from './def';",
+        'export function run() { return compute(3); }',
+      ].join('\n'),
+    });
+
+    try {
+      const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally' });
+      expect(r.ok).toBe(false);
+      expect(r.filesWritten).toBe(0);
+      expect(r.blocked!.some((b) => b.includes('命中保护标记行'))).toBe(true);
+      // 原子：全部文件一行未改
+      expect(readFileSync(path.join(dir, 'src/def.ts'), 'utf-8')).toContain('export function compute(');
+      expect(readFileSync(path.join(dir, 'src/archive.ts'), 'utf-8')).toContain('const frozen = compute(1);');
+      expect(readFileSync(path.join(dir, 'src/live.ts'), 'utf-8')).toContain('return compute(3);');
+    } finally {
+      rmForce(dir);
+    }
+  });
+
+  it('未命中的 rename 完全不受保护影响', async () => {
+    const dir = mkProj({
+      '.design-canvas.json': JSON.stringify({ rename: { protect: [{ globs: ['src/frozen/**'], markers: ['判定'] }] } }),
+      'src/def.ts': 'export function compute(a: number): number {\n  return a * 2;\n}\n',
+      'src/live.ts': "import { compute } from './def';\nexport function run() { return compute(3); }\n",
+    });
+    try {
+      const r = await renameSymbol({ project_dir: dir, file: 'src/def.ts', symbol: 'compute', to: 'tally' });
+      expect(r.ok).toBe(true);
+      expect(readFileSync(path.join(dir, 'src/live.ts'), 'utf-8')).toContain('return tally(3);');
+    } finally {
+      rmForce(dir);
+    }
+  });
+});

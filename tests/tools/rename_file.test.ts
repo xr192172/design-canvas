@@ -178,6 +178,54 @@ describe('renameFile - Python 相对导入（同构复用，不做语言专属�
   });
 });
 
+describe('renameFile - 冻结行保护（管理员自配 .design-canvas.json）', () => {
+  it('受保护 importer 命中冻结行 → 整笔原子阻断，不落盘', async () => {
+    const dir = mkProj({
+      '.design-canvas.json': JSON.stringify({
+        rename: { protect: [{ globs: ['src/entry.*'], markers: ['判定', '结论'] }] },
+      }),
+      'src/foo.ts': FOO,
+      // entry 的 import 落在含「判定」标记的行 → 该引用被冻结
+      'src/entry.ts': "import { a } from './foo'; // 判定：历史引用，勿改\nconst u = a;\n",
+      'src/util.ts': "const m = require('./foo');\n", // 未匹配保护
+      'src/other.ts': 'export const y = 2;\n',
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.ts', to: 'src/bar.ts' });
+      expect(r.ok).toBe(false);
+      expect(r.moved).toBe(false);
+      // 原子：没有一个文件被改、源未迁、目标未建
+      expect(existsSync(path.join(dir, 'src/foo.ts'))).toBe(true);
+      expect(existsSync(path.join(dir, 'src/bar.ts'))).toBe(false);
+      expect(readFileSync(path.join(dir, 'src/entry.ts'), 'utf-8')).toContain("from './foo'");
+      expect(readFileSync(path.join(dir, 'src/util.ts'), 'utf-8')).toContain("require('./foo')");
+      expect(r.blocked!.some((b) => b.includes('命中保护标记行'))).toBe(true);
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('未命中的 rename 完全不受保护影响', async () => {
+    const dir = mkProj({
+      '.design-canvas.json': JSON.stringify({
+        rename: { protect: [{ globs: ['src/frozen/**'], markers: ['判定'] }] },
+      }),
+      'src/foo.ts': FOO,
+      'src/entry.ts': "import { a } from './foo';\n",
+    });
+    try {
+      const r = await renameFile({ project_dir: dir, from: 'src/foo.ts', to: 'src/bar.ts' });
+      expect(r.ok).toBe(true);
+      expect(r.moved).toBe(true);
+      expect(readFileSync(path.join(dir, 'src/entry.ts'), 'utf-8')).toContain("from './bar'");
+    } finally {
+      closeProjectCacheDb(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('renameFile - 原子化执行修复（回归保障）', () => {
   // 修复说明：原实现第 3 步先 fs.renameSync(from→to)，再遍历改写引用、重索引。
   // 任何中途异常（磁盘满/权限/IO/索引写失败）都会导致「源文件已走、引用仍指向旧路径、

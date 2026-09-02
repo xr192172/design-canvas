@@ -28,6 +28,7 @@ import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
 import { renameFile } from './rename_file.js';
 import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, type AliasConfig } from './project_root.js';
+import { createProtectGuard } from './protect.js';
 
 // ─────────────────────────────────────────────
 // 最小 tree-sitter 节点面（同 Kernel）
@@ -778,6 +779,16 @@ export async function renamePythonSymbol(args: {
     if (fileEdits.length > 0) editsByFile.set(abs, { src, edits: fileEdits });
   }
 
+  // 冻结行保护（原子）：importer 的引用改写若会落在保护文件的标记行 → 阻断；定义文件不套。
+  const guard = createProtectGuard(resolvedRoot);
+  const protectedBlocks: string[] = [];
+  for (const [abs, entry] of editsByFile) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    const g = guard.scan(abs, entry.src, entry.edits);
+    if (g.blocked) protectedBlocks.push(`${path.relative(resolvedRoot, abs).replace(/\\/g, '/')} 的引用命中保护标记行，需解除保护或人工处理后再改名：${g.protectedLines.join(' | ')}`);
+  }
+  if (protectedBlocks.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked: protectedBlocks };
+
   // 落盘
   let filesWritten = 0;
   const ordered: RenameSymbolFileInfo[] = [];
@@ -788,10 +799,11 @@ export async function renamePythonSymbol(args: {
       filesWritten++;
     }
     const isDef = path.resolve(abs) === path.resolve(file);
+    const note = isDef ? '定义+同模块引用（Python）' : '跨模块引用（Python）';
     ordered.push({
       file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
       edits: edits.length,
-      note: isDef ? '定义+同模块引用（Python）' : '跨模块引用（Python）',
+      note,
       ops: toOps(src, edits),
     });
   }
@@ -911,7 +923,15 @@ export async function renameGoSymbol(args: {
     if (fileEdits.length > 0) editsByFile.set(abs, { src, edits: fileEdits });
   }
 
-  // 原子性：任一撞名 → 全部不落盘
+  // 冻结行保护（原子）：importer 的引用改写若会落在保护文件的标记行 → 阻断；定义文件不套。
+  const guard = createProtectGuard(resolvedRoot);
+  for (const [abs, entry] of editsByFile) {
+    if (path.resolve(abs) === path.resolve(file)) continue;
+    const g = guard.scan(abs, entry.src, entry.edits);
+    if (g.blocked) blocked.push(`${path.relative(resolvedRoot, abs).replace(/\\/g, '/')} 的引用命中保护标记行，需解除保护或人工处理后再改名：${g.protectedLines.join(' | ')}`);
+  }
+
+  // 原子性：任一撞名/保护 → 全部不落盘
   if (blocked.length > 0) return { ok: false, symbol, to, filesWritten: 0, blocked };
 
   // 落盘
@@ -924,10 +944,11 @@ export async function renameGoSymbol(args: {
       filesWritten++;
     }
     const isDef = path.resolve(abs) === path.resolve(file);
+    const note = isDef ? '定义+同文件引用（Go）' : path.dirname(abs) === dir ? '同包引用（Go）' : '跨包引用（Go）';
     ordered.push({
       file: (path.relative(resolvedRoot, abs) || abs).replace(/\\/g, '/'),
       edits: edits.length,
-      note: isDef ? '定义+同文件引用（Go）' : path.dirname(abs) === dir ? '同包引用（Go）' : '跨包引用（Go）',
+      note,
       ops: toOps(src, edits),
     });
   }
@@ -1208,6 +1229,16 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     }
 
     if (touched) importerEdits.set(f, { edits: fileEdits, note: note || 'import', src });
+  }
+
+  // 冻结行保护（原子）：importer 的引用改写若会落在保护文件的标记行 → 阻断。
+  // 定义文件是操作对象本身，不套；只挡"其它文件"——否则要么半改、要么跳过某 importer
+  // 仍让它处动，都会破坏跨文件改名的原子性。
+  const guard = createProtectGuard(resolvedRoot);
+  for (const [f, entry] of importerEdits) {
+    if (path.resolve(f) === defAbs) continue;
+    const g = guard.scan(f, entry.src, entry.edits);
+    if (g.blocked) blocked.push(`${path.relative(resolvedRoot, f).replace(/\\/g, '/')} 的引用命中保护标记行，需解除保护或人工处理后再改名：${g.protectedLines.join(' | ')}`);
   }
 
   // 原子性：任一阻断 → 全部不落盘

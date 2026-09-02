@@ -21,6 +21,7 @@ import { readdirSync } from 'node:fs';
 import { parseAstRoot, type SyntaxNodeLike } from './ts_kernel/kernel.js';
 import { resolveImportTarget, syncFile, removeFile } from '../db/symbols.js';
 import { getProjectCacheDb, closeProjectCacheDb } from '../db/db.js';
+import { createProtectGuard } from './protect.js';
 
 // 扫描范围内源码扩展名：TS 系全量 + Python（相对导入语义与 TS 同构，复用同一相对路径重算逻辑）。
 // Go 的 import 是模块包路径（非相对文件路径），移动单文件不改变途径名 → 不纳入扫描。
@@ -264,9 +265,9 @@ export async function renameFile(input: RenameFileInput): Promise<RenameFileResu
   walkProjectFiles(projectRoot, files);
 
   // 2) 逐个文件扫描：import 源字面量 → 解析到 fromRel 即为一处待改写引用
-  const edits: RefEdit[] = [];
   const pending: string[] = [];
   const byImporter = new Map<string, { importerAbs: string; items: RefEdit[] }>();
+  const guard = createProtectGuard(projectRoot);
   // 被移动文件自身的相对导入需按新位置重锚定（指向同样的绝对目标，否则移入新目录会悬空）
   const ownEdits: Array<{ pos: number; len: number; quote: string; toSource: string }> = [];
 
@@ -304,19 +305,38 @@ export async function renameFile(input: RenameFileInput): Promise<RenameFileResu
       const toSource = isPy ? newPySpecifier(importerRel, toNoExt) : newSpecifier(importerRel, lit.inner, toNoExt);
       if (lit.inner === toSource) continue; // 改完没变化（如原地同目录同核）→ 跳过
       const rec: RefEdit = { importerRel, importerAbs, source: lit.inner, toSource, pos: lit.startIndex, len: lit.text.length, quote: isPy ? '' : lit.text[0] };
-      edits.push(rec);
       if (!byImporter.has(importerRel)) byImporter.set(importerRel, { importerAbs, items: [] });
       byImporter.get(importerRel)!.items.push(rec);
     }
   }
+
+  const filteredEdits = [...byImporter.values()].flatMap((im) => im.items);
+  const editCount = filteredEdits.length;
+  const references = filteredEdits.map((e) => ({ file: e.importerRel, fromSource: e.source, toSource: e.toSource }));
 
   // 目录桶（index/mod）的引用 → 注明语义变化风险
   if (/\/index\.(ts|tsx|js|jsx)$/.test(fromRel)) {
     pending.push(`被移动文件是目录桶 ${fromRel}——原引用可能用 ./dirname 形式，语义已变，请重点复核`);
   }
 
-  const editCount = edits.length;
-  const references = edits.map((e) => ({ file: e.importerRel, fromSource: e.source, toSource: e.toSource }));
+  // 冻结行保护（原子）：若某 importer 的引用改写会落在保护文件的标记行 → 整笔软阻断，
+  // 不产生"跳过某个引用仍让它处移动"的半成状态。主体文件（被移动文件）不套。
+  for (const importer of byImporter.values()) {
+    if (importer.items.length === 0) continue;
+    let src = '';
+    try {
+      src = fs.readFileSync(importer.importerAbs, 'utf-8');
+    } catch {
+      continue;
+    }
+    const g = guard.scan(importer.importerAbs, src, importer.items.map((r) => ({ pos: r.pos, len: r.len, text: r.toSource })));
+    if (g.blocked) {
+      blocked.push(`质疑：${importer.items[0].importerRel} 的引用命中保护标记行，需解除保护或人工处理后再移动：${g.protectedLines.join(' | ')}`);
+    }
+  }
+  if (blocked.length > 0) {
+    return { ok: false, dryRun, fromRel, toRel, moved: false, references, editCount, pending, blocked };
+  }
 
   if (dryRun) {
     return { ok: true, dryRun, fromRel, toRel, moved: false, references, editCount, pending };
