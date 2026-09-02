@@ -4,3 +4,7 @@
 node "$(git rev-parse --show-toplevel)/scripts/gen_agents.mjs" --silent && git add AGENTS.md
 # 契约变更闸门（方向二）：新增 MCP 工具名但未同步文档 → 阻断提交。
 node "$(git rev-parse --show-toplevel)/scripts/contract_docs_gate.mjs"
+# README 工具数自愈：共注册 N 个 MCP 工具 → server_registry 真实数（防文档漂移）。
+node "$(git rev-parse --show-toplevel)/scripts/readme_tools_gate.mjs" && git add README.md
+# 能力矩阵漂移闸门：实现已触达某语言但声明漏登记（warn）→ 阻断；语义待决（info）仅提示。
+node "$(git rev-parse --show-toplevel)/scripts/capability_scan.mjs" --check

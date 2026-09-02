@@ -38,6 +38,10 @@ jobs:
         run: node --input-type=module -e "import('./dist/src/tools/stale_check.js').then(async m=>{const r=m.checkStaleBuild(process.cwd());console.log('scanned '+r.scanned+' stale '+r.stale);if(r.stale){console.log(m.formatStaleText(r));process.exit(1)}})"
       - name: 契约变更闸门（新增/改名残留未同步文档 → 阻断）
         run: node scripts/contract_docs_gate.mjs
+      - name: README 工具数自检（共注册 N 个 == server_registry 真实数）
+        run: node scripts/readme_tools_gate.mjs --check
+      - name: 能力矩阵漂移闸门（实现触达语言但声明漏登记 → 阻断）
+        run: node scripts/capability_scan.mjs --check
       - name: 单元测试（vitest）
         run: npm test
 

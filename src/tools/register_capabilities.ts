@@ -198,9 +198,13 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    python: 'partial_ast',
+    go: 'partial_ast',
   },
   notes: {
-    typescript: '复杂度=AST 分支节点计数；未使用 import=AST 绑定+使用集比对',
+    typescript: '复杂度=AST 分支节点计数；未使用 import=AST 绑定+使用集比对；未使用导出/孤儿/分层=导入+调用边反查',
     javascript: '经 TS 家族同一解析路径',
+    python: '复杂度/未使用 import 已 AST 化；未使用导出/孤儿/分层仍受"导出名唯一"匹配限制（重名不建边）→ partial',
+    go: '复杂度已 AST 化，未使用 import 不查（编译器兜底）；未使用导出/孤儿/分层同上限制 → partial',
   },
 });

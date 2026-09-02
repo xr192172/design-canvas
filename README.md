@@ -105,7 +105,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 ## MCP 工具参考
 
-共注册 **42 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
+共注册 **50 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
 
 ### 主工具（8 个）
 
@@ -129,6 +129,8 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `import_project` | 导入代码项目为 DSL（支持本地绝对路径与浏览器上传，遵循 `.gitignore` 过滤） |
 | `diff_views`     | 对比设计视图与 live 代码快照                              |
 | `render_brickwork` | 渲染依赖驱动的功能社区工作台（积木化预览）                          |
+| `find_references`  | 查符号/字段引用（引用视角：改前看波及面），只读                 |
+| `detect_drift`     | 对照代码变更，检查设计是否过时 / 欠实现                       |
 
 **积木体系**
 
@@ -143,6 +145,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `assemble_bricks`   | 用箱装积木拼装新项目                      |
 | `slim_brick`        | 将 Go 积木瘦身为派生积木（编译器式死码剪枝）        |
 | `narrate_step`      | 将流水线步骤叙述为受治理的叙述积木               |
+| `harvest_decisions` | 从项目记录反向采集设计决策                    |
 
 **运行时验证（Observe）**
 
@@ -152,6 +155,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `observe_log`        | 按文件查询运行时日志                   |
 | `observe_judge`      | 批量裁决运行时事件                    |
 | `reconcile_chain`       | 将宿主链与其真实运行事件对账               |
+| `run_tests`             | 跑测试返回结构化失败定位（filter 定向 / 全量）    |
 
 **确定性改造**
 
@@ -160,6 +164,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `edit_code`           | 符号级代码编辑（replace / insert / delete / range） |
 | `rename_many`         | 批量重命名局部变量（作用域隔离）                           |
 | `rename_symbol`       | 跨文件模块级符号重命名                                |
+| `rename_symbols`      | 批量跨文件符号重命名（整体先 dry-run）                    |
 | `rename_file`         | 文件级重命名 + import 引用改写                       |
 | `remove_dead_imports` | 移除失效 import                                |
 | `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移）                      |
@@ -178,6 +183,9 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | 工具             | 用途                                                |
 | -------------- | ------------------------------------------------- |
 | `canvas_notes` | 画布批注统一入口（read=读成语义工单 / mark=更新状态 / decide=LLM 决策） |
+| `archive_node` | 归档 DSL 节点（快照）                              |
+| `list_archive` | 列出归档节点                                    |
+| `sync_contracts` | 以 server_registry schema 为源，回填 DSL 契约        |
 
 **LLM 网关**
 
@@ -190,6 +198,16 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | 工具                  | 用途                       |
 | ------------------- | ------------------------ |
 | `read_project_docs` | 读取项目 `docs/` 目录下的文档清单与正文 |
+
+**迁移与评估**
+
+| 工具                            | 用途                                          |
+| ----------------------------- | ------------------------------------------- |
+| `impact_analysis`             | 改前风险闭包报告：变更点→反向可达闭包，输出受影响文件与风险排序（`hubs=true` 热区盘点） |
+| `cross_repo_symbol_index`     | 跨项目符号索引：两仓顶层符号求交=冲突/双胞胎、求差=迁移范围           |
+| `hybrid_precheck`             | 项目杂交预检：符号冲突 + 依赖版本冲突 + 功能重叠 → verdict ok/fix/blocked |
+| `behavior_baseline`           | 行为基线：金丝雀 harness 跑样例记录快照，改后对比验证「跑得对不对」       |
+| `code_health`                 | 代码健康度：死代码 / 圈复杂度 / 分层违规 → 健康分 + 问题清单         |
 
 ### `view` 参数
 
