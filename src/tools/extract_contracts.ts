@@ -196,13 +196,21 @@ const TS_FIELD_RE = /^[\s]*(?:public\s+|private\s+|protected\s+|readonly\s+|stat
 const GO_FIELD_RE = /^[\t ]*([A-Z]\w*)\s+([\w\[\]\*\.\{\}"' ]+?)[\t ]*(?:\/\/.*)?$/;
 /** Go interface 方法行：Name(args) rets */
 const GO_METHOD_RE = /^[\t ]*(\w+)\s*\(([^)]*)\)\s*(.*)$/;
+/** Python 类体注解属性行：name: Type  （方法行 def ... 自然不匹配） */
+const PY_FIELD_RE = /^[\s]*([a-zA-Z_]\w*)\s*:\s*([^=#\n]+)/;
+
+/** 语言判定：files.language 存短名（go/py），兜底认完整名/扩展名 */
+function isPyLang(language: string): boolean {
+  return language === 'py' || language === 'python' || language === '.py';
+}
 
 function parseShapeFields(lines: string[], language: string, kind: string): ShapeField[] {
   const fields: ShapeField[] = [];
   const isGo = language === 'go';
+  const isPy = isPyLang(language);
   for (const raw of lines) {
     const line = raw.replace(/\r$/, '');
-    if (!line.trim() || line.trim().startsWith('//') || line.trim().startsWith('*') || line.trim().startsWith('/*')) continue;
+    if (!line.trim() || line.trim().startsWith('//') || line.trim().startsWith('#') || line.trim().startsWith('*') || line.trim().startsWith('/*')) continue;
     if (isGo) {
       if (kind === 'interface') {
         const m = GO_METHOD_RE.exec(line);
@@ -216,6 +224,14 @@ function parseShapeFields(lines: string[], language: string, kind: string): Shap
       const m = GO_FIELD_RE.exec(line);
       if (m && !/^(type|struct|interface|package|import|func)$/.test(m[1])) {
         fields.push({ name: m[1], type: m[2].trim(), required: true });
+      }
+    } else if (isPy) {
+      // Python 类属性：注解属性（name: Type）；跳过方法（def ...）
+      if (line.trim().startsWith('def ')) continue;
+      const m = PY_FIELD_RE.exec(line);
+      if (m && m[1] !== 'self' && m[1] !== 'cls') {
+        const type = m[2].replace(/#.*$/, '').trim();
+        if (type) fields.push({ name: m[1], type, required: true });
       }
     } else {
       const m = TS_FIELD_RE.exec(line);
@@ -250,7 +266,7 @@ function extractShapes(db: Database, root: string, langOf: Map<string, string>):
     }
     const span = lines.slice(r.start_line - 1, r.end_line);
     if (span.length === 0) continue;
-    const language = langOf.get(r.file_path) ?? (r.file_path.endsWith('.go') ? 'go' : 'ts');
+    const language = langOf.get(r.file_path) ?? (r.file_path.endsWith('.go') ? 'go' : r.file_path.endsWith('.py') ? 'python' : 'ts');
     const fields = parseShapeFields(span, language, r.kind);
     const shape: ShapeSchema = {
       name: r.name,
@@ -275,10 +291,15 @@ const TS_ENV_RES = [
   /\bprocess\.env\.([A-Za-z_][A-Za-z0-9_]*)/g,
   /\bprocess\.env\[\s*['"]([^'"]+)['"]\s*\]/g,
 ];
+const PY_ENV_RES = [
+  /\bos\.(?:environ|getenv)\.?get\(\s*['"]([^'"]+)['"]/g,
+  /\bos\.environ\[\s*['"]([^'"]+)['"]\s*\]/g,
+  /\bos\.getenv\(\s*['"]([^'"]+)['"]/g,
+];
 
 function scanConfigKeys(source: string, language: string): string[] {
   const keys = new Set<string>();
-  const res = language === 'go' ? GO_ENV_RES : TS_ENV_RES;
+  const res = language === 'go' ? GO_ENV_RES : isPyLang(language) ? PY_ENV_RES : TS_ENV_RES;
   for (const re of res) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -312,6 +333,13 @@ function collectModuleVars(source: string, language: string): Set<string> {
         ? /^\s+([A-Za-z_]\w*)\s*(?:=[^=]|[\w\[\]\*\.])/.exec(line) // 块内：Name T / Name = init
         : /^var\s+([A-Za-z_]\w*)\s*(?:=[^=]|[\w\[\]\*\.])/.exec(line); // 顶层：var Name T / var Name = init
       if (m && !/^(type|func|package|import)$/.test(m[1])) names.add(m[1]);
+    }
+  } else if (isPyLang(language)) {
+    // 模块级赋值（列 0 无缩进 = 模块作用域）：NAME = ... （排除 import/def/class/from 行）
+    for (const raw of source.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      const m = /^([A-Za-z_]\w*)\s*=(?!=)/.exec(line);
+      if (m && !/^(import|from|def|class|if|elif|else|for|while|with|try|except|return|pass|raise|yield|global|nonlocal)$/.test(m[1])) names.add(m[1]);
     }
   } else {
     for (const raw of source.split('\n')) {
@@ -381,6 +409,19 @@ const TS_HOLD_RES: Array<{ re: RegExp; make: (m: RegExpExecArray) => EffectTarge
   // exec 加 (?<!\.)：排除 db.exec / regexp.exec 等方法调用（真实项目踩过：db.ts 的 SQL exec 误报）
   { re: /(?<!\.)\bexec\s*\(|\b(?:spawn|execFile|fork)\s*\(/g, make: () => ({ target: 'subprocess', op: 'acquire', origin: 'ast' }) },
 ];
+/** Python 文件写/删：open("x","w|a")、Path.write_*、os.remove/rmdir/shutil.rmtree */
+const PY_FILE_WRITE_RES: Array<{ re: RegExp; op: EffectTarget['op'] }> = [
+  { re: /\bopen\(\s*(?:['"]([^'"]+)['"]|([\w.]+))\s*,\s*(?:['"])(?:w|a|wb|ab)/g, op: 'write' },
+  { re: /\bPath\(\s*(?:['"]([^'"]+)['"]|([\w.]+))\s*\)\s*\.\s*write_(?:text|bytes)\(/g, op: 'write' },
+  { re: /\bos\.(?:remove|unlink|rmdir|rename)\s*\(\s*(?:['"]([^'"]+)['"]|([\w.]+))/g, op: 'delete' },
+];
+/** Python 资源占用：socket.listen/bind、http.server、threading 定时、subprocess */
+const PY_HOLD_RES: Array<{ re: RegExp; make: (m: RegExpExecArray) => EffectTarget }> = [
+  { re: /\.(?:bind|listen)\(\s*\(?['"]?([\w:.\-]+)/g, make: (m) => ({ target: `listen:${m[1] ?? ''}`.trim().replace(/:$/, ''), op: 'acquire', origin: 'ast' }) },
+  { re: /\bHTTPServer\s*\(/g, make: () => ({ target: 'listen:http', op: 'acquire', origin: 'ast' }) },
+  { re: /\bthreading\.(?:Thread|Timer)\s*\(/g, make: () => ({ target: 'thread', op: 'acquire', origin: 'ast' }) },
+  { re: /\b(?:subprocess|os\.system)\s*\(/g, make: () => ({ target: 'subprocess', op: 'acquire', origin: 'ast' }) },
+];
 
 /** chan send / 事件发送。Go 逐行处理：含 `= <-` 的行是 receive，跳过 */
 const GO_CHAN_KEYWORDS = new Set([
@@ -421,6 +462,17 @@ function scanTsEmits(source: string): string[] {
   return [...out];
 }
 
+/** Python 事件发送：pubsub 的 .emit/.publish、asyncio.Event / queue.put 的语义发送 */
+function scanPyEmits(source: string): string[] {
+  const out = new Set<string>();
+  for (const re of [/\.emit\(\s*(?:['"])([\w: -]+)/g, /\.publish\(\s*(?:['"])([\w: -]+)/g, /\bbroadcast\((\w+)/g]) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) out.add(`event:${m[1]}`);
+  }
+  return [...out];
+}
+
 interface EffectCandidates {
   writes: EffectTarget[];
   holds: EffectTarget[];
@@ -430,8 +482,9 @@ interface EffectCandidates {
 /** effects 候选扫描总入口（每类上限 20 防大文件爆表；详情在 DSL 契约里） */
 function scanEffectCandidates(source: string, language: string): EffectCandidates {
   const isGo = language === 'go';
+  const isPy = isPyLang(language);
   const writes = scanVarWrites(source, collectModuleVars(source, language));
-  for (const { re, op } of isGo ? GO_FILE_WRITE_RES : TS_FILE_WRITE_RES) {
+  for (const { re, op } of isGo ? GO_FILE_WRITE_RES : isPy ? PY_FILE_WRITE_RES : TS_FILE_WRITE_RES) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) {
@@ -442,14 +495,14 @@ function scanEffectCandidates(source: string, language: string): EffectCandidate
   const dedupWrites = [...new Map(writes.map((w) => [`${w.op}:${w.target}`, w])).values()].slice(0, 20);
 
   const holds: EffectTarget[] = [];
-  for (const { re, make } of isGo ? GO_HOLD_RES : TS_HOLD_RES) {
+  for (const { re, make } of isGo ? GO_HOLD_RES : isPy ? PY_HOLD_RES : TS_HOLD_RES) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(source)) !== null) holds.push(make(m));
   }
   const dedupHolds = [...new Map(holds.map((h) => [h.target, h])).values()].slice(0, 20);
 
-  const emits = (isGo ? scanGoEmits(source) : scanTsEmits(source)).slice(0, 20);
+  const emits = (isGo ? scanGoEmits(source) : isPy ? scanPyEmits(source) : scanTsEmits(source)).slice(0, 20);
   return { writes: dedupWrites, holds: dedupHolds, emits };
 }
 

@@ -26,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type Lang = 'go' | 'ts';
+export type Lang = 'go' | 'ts' | 'py' | 'java' | 'cs' | 'c';
 
 export interface UndefinedRef {
   /** 相对 cwd 的路径（POSIX 分隔符） */
@@ -70,7 +70,7 @@ export interface ScanContractsOptions {
 
 // ── 常量 ─────────────────────────────────────────────
 
-const SRC_EXT = ['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+const SRC_EXT = ['.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.java', '.cs', '.c', '.h'];
 
 const EXCLUDE_DIRS = new Set(['node_modules', '.git', 'vendor', 'dist', 'build', '.output', '.next', '.cache']);
 
@@ -100,12 +100,62 @@ const GO_RESERVED = new Set([
   'default', 'case', 'chan', 'struct', 'interface', 'map', 'nil', 'true', 'false',
 ]);
 
+/** Python 关键字（`. 左侧不可能代表"对象引用"） */
+const PY_RESERVED = new Set([
+  'if', 'elif', 'else', 'for', 'while', 'def', 'class', 'return', 'import', 'from',
+  'as', 'in', 'is', 'not', 'and', 'or', 'pass', 'break', 'continue', 'with', 'try',
+  'except', 'finally', 'raise', 'yield', 'lambda', 'del', 'global', 'nonlocal',
+  'assert', 'async', 'await', 'None', 'True', 'False',
+]);
+
+/** Python 常用内建（避免把 str./list./Exception 等误判成未定义对象） */
+const PY_GLOBALS = new Set([
+  'str', 'int', 'float', 'bool', 'list', 'dict', 'set', 'tuple', 'frozenset',
+  'object', 'type', 'bytes', 'bytearray', 'complex', 'Exception', 'ValueError',
+  'TypeError', 'KeyError', 'AttributeError', 'RuntimeError', 'IndexError', 'NameError',
+  'print', 'len', 'range', 'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed',
+  'sum', 'min', 'max', 'abs', 'round', 'pow', 'divmod', 'all', 'any', 'next', 'iter',
+  'repr', 'format', 'hash', 'id', 'input', 'open', 'super', 'self', 'cls', 'isinstance',
+  'issubclass', 'callable', 'hasattr', 'getattr', 'setattr', 'delattr', 'vars', 'dir',
+]);
+
+/** Java 关键字（`. 左侧不可能代表"接收者/包引用"） */
+const JAVA_RESERVED = new Set([
+  'if', 'for', 'while', 'switch', 'return', 'new', 'class', 'interface', 'enum',
+  'extends', 'implements', 'import', 'package', 'public', 'private', 'protected',
+  'static', 'final', 'abstract', 'synchronized', 'native', 'throws', 'throw',
+  'try', 'catch', 'finally', 'void', 'int', 'long', 'double', 'float', 'boolean',
+  'char', 'byte', 'short', 'true', 'false', 'null', 'this', 'super', 'instanceof',
+]);
+
+/** C# 关键字 */
+const CS_RESERVED = new Set([
+  'if', 'for', 'while', 'switch', 'return', 'new', 'class', 'interface', 'struct',
+  'enum', 'namespace', 'using', 'public', 'private', 'protected', 'internal',
+  'static', 'readonly', 'const', 'abstract', 'virtual', 'override', 'async',
+  'await', 'void', 'int', 'long', 'double', 'float', 'bool', 'char', 'byte',
+  'short', 'true', 'false', 'null', 'this', 'base', 'is', 'as', 'typeof', 'throw',
+  'try', 'catch', 'finally', 'var', 'string', 'object', 'out', 'ref', 'in',
+]);
+
+/** C 关键字（`. 左侧是 struct 变量/typedef 名，关键字绝不可能） */
+const C_RESERVED = new Set([
+  'if', 'for', 'while', 'switch', 'return', 'break', 'continue', 'case', 'default',
+  'struct', 'union', 'enum', 'typedef', 'sizeof', 'void', 'int', 'long', 'short',
+  'char', 'float', 'double', 'unsigned', 'signed', 'const', 'volatile', 'static',
+  'extern', 'register', 'do', 'else', 'goto', 'auto', 'NULL', 'true', 'false',
+]);
+
 // ── 语言判定 ─────────────────────────────────────────
 
 function langOfFile(rel: string): Lang | null {
   if (rel.endsWith('.go')) return 'go';
   // JS 家族：语法是 TS 子集，走同一套 ts 分支（collectSymbols/collectReferences 的 TS 逻辑对纯 JS 兼容）
   if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(rel)) return 'ts';
+  if (/\.(py)$/.test(rel)) return 'py';
+  if (/\.(java)$/.test(rel)) return 'java';
+  if (/\.(cs)$/.test(rel)) return 'cs';
+  if (/\.(c|h)$/.test(rel)) return 'c';
   return null;
 }
 
@@ -227,7 +277,12 @@ function stripStrings(s: string, lang: Lang): string {
 // ── 单一文件符号分析 ─────────────────────────────
 
 function langSkipSet(lang: Lang): Set<string> {
-  return lang === 'go' ? GO_RESERVED : SKIP_LHS;
+  if (lang === 'go') return GO_RESERVED;
+  if (lang === 'py') return PY_RESERVED;
+  if (lang === 'java') return JAVA_RESERVED;
+  if (lang === 'cs') return CS_RESERVED;
+  if (lang === 'c') return C_RESERVED;
+  return SKIP_LHS;
 }
 
 interface FileSymbols {
@@ -265,6 +320,90 @@ function collectSymbols(text: string, lang: Lang): FileSymbols {
         if (pm[1] && !GO_RESERVED.has(pm[1])) locals.add(pm[1]);
       }
     }
+  } else if (lang === 'py') {
+    // 顶层声明：def / class / 模块级常量（^NAME = ，大写约定）
+    for (const m of text.matchAll(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*class\s+([A-Za-z_]\w*)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^([A-Z][A-Z0-9_]*)\s*=/gm)) declared.add(m[1]);
+    // import a.b[ as c] / from x import a[ as b]（别名取 as 右值或末段）
+    for (const m of text.matchAll(/^\s*import\s+([\w.]+)(?:\s+as\s+([A-Za-z_]\w*))?/gm)) {
+      aliases.add((m[2] || m[1].split('.').pop() || '').trim());
+    }
+    for (const m of text.matchAll(/^\s*from\s+[\w.]+\s+import\s+(?:\(([^)]*)\)|(.+))/gm)) {
+      for (const nm of (m[1] || m[2] || '').split(',').map((s) => s.trim())) {
+        if (!nm) continue;
+        const asM = nm.match(/^([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)/);
+        aliases.add(asM ? asM[2] : nm.replace(/[*()]/g, ''));
+      }
+    }
+    // 局部名（文件级并集，"宁可多收不漏收"）：self/cls、赋值左值、for 变量、def 形参
+    locals.add('self');
+    locals.add('cls');
+    for (const m of text.matchAll(/([A-Za-z_]\w*)\s*=/gm)) locals.add(m[1]);
+    for (const m of text.matchAll(/\bfor\s+([A-Za-z_]\w*)/gm)) locals.add(m[1]);
+    for (const m of text.matchAll(/\bwith\s+[^:]*?\bas\s+([A-Za-z_]\w*)/gm)) locals.add(m[1]);
+    for (const m of text.matchAll(/^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*\(([^)]*)\)/gm)) {
+      for (const pm of (m[1] || '').split(',')) {
+        const pn = pm.trim().split(':')[0].split('=')[0].trim();
+        if (/^[A-Za-z_]\w*$/.test(pn)) locals.add(pn);
+      }
+    }
+  } else if (lang === 'java') {
+    // Java 顶层类型 + 顶层方法；import 末段 = 别名；方法形参 = 局部
+    for (const m of text.matchAll(/^\s*(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp|synchronized|native|transient|volatile|default|\s)*\s*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*import\s+static\s+([\w.]+(?:\.\*)?)\s*;/gm)) {
+      const last = m[1].replace(/\.\*$/, '').split('.').pop() ?? '';
+      if (last) aliases.add(last);
+    }
+    for (const m of text.matchAll(/^\s*import\s+([\w.]+(?:\.\*)?)\s*;/gm)) {
+      const last = m[1].replace(/\.\*$/, '').split('.').pop() ?? '';
+      if (last && /^[A-Za-z_]/.test(last)) aliases.add(last);
+    }
+    for (const m of text.matchAll(/^\s*(?:public|protected|private|static|final|synchronized|native|abstract|default|\s)*\s*[\w<>,.\[\] ]+\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:throws[^;]*)?\{/gm)) {
+      locals.add(m[1]); // 方法名不入 locals 也无妨（declare 语义）
+      for (const pm of (m[2] || '').split(',')) {
+        const pn = pm.trim().split(/\s+/).pop()?.split('[')[0] ?? '';
+        if (/^[A-Za-z_]\w*$/.test(pn)) locals.add(pn);
+      }
+    }
+    // Java 局部变量声明：Foo f = ... / Foo f; → f 入 locals
+    for (const m of text.matchAll(/^\s*[\w<>,.\[\] ]+\s+([A-Za-z_]\w*)\s*(?:=|\s*;)/gm)) {
+      if (/^[A-Za-z_]\w*$/.test(m[1])) locals.add(m[1]);
+    }
+  } else if (lang === 'cs') {
+    // C# 顶层类型；using 末段/别名；方法形参
+    for (const m of text.matchAll(/^\s*(?:public|internal|private|protected|abstract|sealed|static|partial|readonly|record|\s)*\s*(?:class|interface|struct|enum|record)\s+([A-Za-z_]\w*)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*using\s+static\s+([\w.]+)\s*;/gm)) {
+      const last = m[1].split('.').pop() ?? '';
+      if (last) aliases.add(last);
+    }
+    for (const m of text.matchAll(/^\s*using\s+([\w.]+)\s*(?:=\s*([\w.]+))?\s*;/gm)) {
+      const bind = m[2] || (m[1].split('.').pop() ?? '');
+      if (bind && /^[A-Za-z_]/.test(bind)) aliases.add(bind);
+    }
+    for (const m of text.matchAll(/^\s*(?:public|internal|private|protected|static|async|virtual|override|abstract|sealed|partial|readonly|extern|unsafe|\s)*\s*[\w<>,.\[\]? ]+\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:=>|where|\{)/gm)) {
+      for (const pm of (m[2] || '').split(',')) {
+        let pn = pm.trim();
+        pn = pn.split('=')[0].trim(); // 默认值
+        pn = pn.replace(/^(out|ref|in|params|this|scoped)\s+/, '').trim();
+        const p = pn.split(/\s+/).pop()?.split('[')[0] ?? '';
+        if (/^[A-Za-z_]\w*$/.test(p)) locals.add(p);
+      }
+    }
+    locals.add('this');
+    locals.add('base');
+  } else if (lang === 'c') {
+    // C 全局函数/结构/typedef + 全局变量；形参 = 局部
+    for (const m of text.matchAll(/^\s*(?:extern|static|inline)\s+[^;{}]+?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:;|\{)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*(?:typedef\s+)?struct\s+([A-Za-z_]\w*)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*typedef\s+[^;{}]+?\b([A-Za-z_]\w*)\s*;/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/^\s*(?:extern|static|const|volatile|unsigned|signed|register)\s+[\w\s*]+?\b([A-Za-z_]\w*)\s*(?:=|;)/gm)) declared.add(m[1]);
+    for (const m of text.matchAll(/\b(?:[A-Za-z_]\w*\s*\*?\s+)?([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{/gm)) {
+      for (const pm of (m[2] || '').split(',')) {
+        const p = pm.trim().split(/\s+/).pop()?.replace(/^\*+/, '') ?? '';
+        if (/^[A-Za-z_]\w*$/.test(p)) locals.add(p);
+      }
+    }
   } else {
     // TS 顶层声明
     for (const m of text.matchAll(/^\s*(?:export\s+default\s+|export\s+|default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)/gm)) {
@@ -297,6 +436,9 @@ function collectReferences(text: string, lang: Lang): Array<{ line: number; iden
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    // Java/C# 的 import/package/using 行（如 com.acme.Foo）不是"使用点"——整行跳过
+    if (lang === 'java' && /^\s*(import|package)\s/.test(line)) continue;
+    if (lang === 'cs' && /^\s*(using|namespace)\s/.test(line)) continue;
     for (const m of line.matchAll(/([A-Za-z_][\w]*)\s*\./g)) {
       const ident = m[1];
       if (skip.has(ident)) continue;
@@ -320,6 +462,10 @@ function scanOne(cwd: string, abs: string, lang: Lang): FileScan {
   const { declared, aliases, locals } = collectSymbols(cleaned.text, lang);
   const combined = new Set<string>([...declared, ...aliases, ...locals]);
   if (lang === 'ts') for (const g of TS_GLOBALS) combined.add(g);
+  if (lang === 'py') for (const g of PY_GLOBALS) combined.add(g);
+  // Java/C#：内置命名空间/常用类型（System./java.* 段不会误判）；C 无内建对象引用（struct 变量已入 declared/locals）
+  if (lang === 'java') for (const g of ['System', 'String', 'Math', 'Integer', 'Double', 'Boolean', 'Long', 'Object', 'Class', 'Thread', 'Runtime', 'ProcessBuilder']) combined.add(g);
+  if (lang === 'cs') for (const g of ['System', 'String', 'Console', 'Math', 'Convert', 'Environment', 'DateTime', 'Guid', 'Object', 'Type', 'Exception', 'Array', 'List', 'Dictionary']) combined.add(g);
 
   const refs = collectReferences(cleaned.text, lang);
   const undefinedRefs: UndefinedRef[] = [];

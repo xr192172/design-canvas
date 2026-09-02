@@ -345,3 +345,47 @@ describe('extract_contracts effects 候选（origin=ast）', () => {
     expect(c.effects.emits.filter((e) => e.startsWith('chan:'))).toHaveLength(1);
   });
 });
+
+// ── Python 契约提取 ──────────────────────────────────────────────
+// 结构：src/model.py（User 注解属性类 + 读 os.environ）→ src/main.py（入口，import User）
+async function makePyProject(): Promise<string> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pycontract-'));
+  roots.push(root);
+  put(
+    root,
+    'src/model.py',
+    'import os\n\nclass User:\n    name: str = ""\n    age: int = 0\n\n    def greet(self):\n        return os.environ["GREET_TMPL"].format(name=self.name)\n',
+  );
+  put(
+    root,
+    'src/main.py',
+    'import os\nfrom model import User\n\ndef run():\n    u = User()\n    u.age = 1\n    return u.greet()\n',
+  );
+  const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+  await importProject({ project_dir: root, cache_db: db });
+  db.close();
+  return root;
+}
+
+describe('extract_contracts / Python', () => {
+  it('reads_config：os.environ 键提取', async () => {
+    const root = await makePyProject();
+    const r = extractContracts({ project_dir: root });
+    const model = r.files.find((f) => f.path === 'src/model.py')!;
+    expect(model.reads_config).toContain('GREET_TMPL');
+  });
+
+  it('shapes：注解属性(name: Type)解析，def 方法行不误入', async () => {
+    const feature = 'py_contract_shape';
+    const root = await makePyProject();
+    makeFeatureDsl(feature, [{ id: 'p1', path: 'src/model.py', responsibility: '模型' }]);
+    extractContracts({ project_dir: root, feature });
+    const dsl = getDSL(feature)!;
+    const c = dsl.semantic.files.find((f) => f.path === 'src/model.py')!.contract!;
+    const user = c.shapes.exposes.find((s) => s.name === 'User');
+    expect(user).toBeDefined();
+    expect(user!.fields.some((f) => f.name === 'name')).toBe(true);
+    expect(user!.fields.some((f) => f.name === 'age')).toBe(true);
+    expect(user!.fields.some((f) => f.name === 'greet')).toBe(false);
+  });
+});
