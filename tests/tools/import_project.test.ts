@@ -501,4 +501,59 @@ describe('import_project', () => {
       expect(dsl.geometry.nodes.some((n) => n.id.startsWith('brick_'))).toBe(false);
     });
   });
+
+  it('局部闭包/辅助函数不进 DSL 契约面（is_closure 过滤，避免 diff 冲突假阳性）', async () => {
+    // Go 文件含：真公共 API（Export/Public）+ 顶层闭包变量（internalHook）+ 函数体内嵌套 helper（innerHelper）
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'import-closure-'));
+    try {
+      fs.mkdirSync(path.join(root, 'svc'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, 'go.mod'),
+        'module example.com/demo\n\ngo 1.21\n',
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(root, 'svc/svc.go'),
+        [
+          'package svc',
+          '',
+          '// 顶层闭包变量：局部辅助，非对外契约',
+          'var internalHook = func(x int) int { return x }',
+          '',
+          'func PublicAdd(a, b int) int {',
+          '\t// 函数体内嵌套 helper：局部辅助函数',
+          '\tinnerHelper := func(n int) int { return n + 1 }',
+          '\t_ = innerHelper',
+          '\treturn a + b',
+          '}',
+          '',
+          'func Export() string { return "ok" }',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      await importProject({ project_dir: root, feature: 'closure_demo' });
+      const dsl = getLiveFeature('closure_demo');
+      const svcFile = dsl!.semantic!.files.find((f) => f.path.endsWith('svc.go'));
+
+      // 契约面 = 顶层真实 API：PublicAdd / Export（且不计为闭包过滤掉）
+      const apis = (svcFile?.expected_apis ?? []).map((a) => a.signature);
+      // internalHook（顶层闭包 var）与 innerHelper（函数体内 helper）都不该进契约面
+      expect(apis.filter((s) => s.includes('internalHook') || s.includes('innerHelper'))).toEqual([]);
+      expect(apis.some((s) => s.includes('PublicAdd'))).toBe(true);
+      expect(apis.some((s) => s.includes('Export'))).toBe(true);
+
+      // 语义符号面：同样不含闭包（非函数符号不走 apis）
+      const syms = (svcFile?.symbols ?? []).map((s) => s.name);
+      expect(syms).not.toContain('internalHook');
+      expect(syms).not.toContain('innerHelper');
+    } finally {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch {
+        /* Windows 文件占用，留给 OS 清理 */
+      }
+    }
+  });
 });

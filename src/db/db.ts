@@ -29,7 +29,7 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */
 export function getDbFile(): string {
@@ -61,11 +61,14 @@ export function openDb(dbFile: string = getDbFile()): Database {
   // v4 增列：files.norm_hash + symbol_diffs.norm_from/norm_to（文件级归一化全文 hash，
   // 捕捉符号提取覆盖不到的变更——常量值/字符串/顶层表达式）
   // v5 增列：imports.type_only（TS `import type` 运行时擦除——依赖图/闭包不算边）
+  // v8 增列：nodes.is_closure（局部闭包/辅助函数标记——不进 DSL 契约面；旧库此列缺失，
+  //   注释符号误进契约面导致 diff 冲突假阳性）
   for (const ddl of [
     'ALTER TABLE files ADD COLUMN norm_hash TEXT',
     "ALTER TABLE symbol_diffs ADD COLUMN norm_from TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE symbol_diffs ADD COLUMN norm_to TEXT NOT NULL DEFAULT ''",
     'ALTER TABLE imports ADD COLUMN type_only INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE nodes ADD COLUMN is_closure INTEGER NOT NULL DEFAULT 0',
   ]) {
     try {
       db.exec(ddl);
@@ -81,7 +84,7 @@ export function openDb(dbFile: string = getDbFile()): Database {
   }
   db.prepare(
     'INSERT OR IGNORE INTO schema_versions(version, applied_at, description) VALUES (?, ?, ?)',
-  ).run(SCHEMA_VERSION, Date.now(), 'v7: 嵌套符号 qualified_name 全链化（类方法体内嵌套符号 prepare.run → NodeSqliteAdapter.prepare.run，与 calls/type_refs 提取器对齐——qn 漂移曾致 FK 炸库整文件丢符号；清库重解析）');
+  ).run(SCHEMA_VERSION, Date.now(), 'v8: 局部闭包/辅助函数标记 is_closure——不进 DSL 契约面（消除 diff 冲突假阳性），仍保留供搜索/引用；旧库无该列语义，清库重解析');
   return db;
 }
 

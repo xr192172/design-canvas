@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     signature TEXT,
     docstring TEXT,          -- 预留：kernel 暂未提取，列先占住
     sym_hash TEXT,           -- v3：符号 span 归一化 hash（去注释/空白）——符号级 diff 依据
+    is_closure INTEGER NOT NULL DEFAULT 0,  -- v8: 局部闭包/辅助函数标记——不进 DSL 契约面，但仍保留供搜索/引用
     updated_at INTEGER NOT NULL
 );
 

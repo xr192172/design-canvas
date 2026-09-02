@@ -1144,11 +1144,20 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
   let symbolsFound = 0;
   let cacheStats: { hits: number; reparsed: number; failed: number } | undefined;
 
+  /** 局部闭包/辅助函数判定：kernel 已打 is_closure 标记（CachedSymbol.is_closure 为 0/1，ParsedSymbol.is_closure 为 boolean）。 */
+  function isClosureSymbol(s: { is_closure?: boolean | number | null }): boolean {
+    return Boolean(s.is_closure);
+  }
+
   /** 两条路径共用的收录逻辑：50 上限截断 + 分离非函数符号 + 计数 + 登记 */
-  const ingest = (rel: string, syms: Array<{ kind: string; name: string; signature: string | null; start_line: number; end_line: number }>, imps: ParsedImport[]): void => {
+  const ingest = (rel: string, syms: Array<{ kind: string; name: string; signature: string | null; start_line: number; end_line: number; is_closure?: boolean | number | null }>, imps: ParsedImport[]): void => {
     const funcApis: ExpectedApi[] = [];
     const nonFuncSymbols: Symbol[] = [];
     for (const s of syms) {
+      // 局部闭包/辅助函数（is_closure）不进设计契约面：它们是函数体内的内部 helper /
+      // 顶层绑闭包的辅助变量，不是对外 API。留着会让 diff 把"，局部符号漂移"误判成冲突。
+      // 但 cache.db 里仍保留该符号（供搜索/引用）。
+      if (isClosureSymbol(s)) continue;
       if (s.kind === 'function' || s.kind === 'method') {
         // 每文件 API 上限 50，超出记注（防止巨型生成文件撑爆 DSL）
         if (funcApis.length < 50) {

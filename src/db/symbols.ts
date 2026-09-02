@@ -281,8 +281,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; kind: string; line: number; col: number | null; metadata: string | null }>;
     db.prepare("DELETE FROM nodes WHERE file_path = ? AND kind != 'file'").run(rel);
     const insNode = db.prepare(
-      `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, sym_hash, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+      `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, sym_hash, is_closure, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
     );
     const seenIds = new Set<string>();
     parsed.symbols.forEach((s, i) => {
@@ -291,7 +291,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       seenIds.add(id);
       insNode.run(
         id, s.kind, s.name, s.qualified_name, rel, ext,
-        s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, symHashList[i], now,
+        s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, symHashList[i], s.is_closure ? 1 : 0, now,
       );
     });
 
@@ -703,6 +703,8 @@ export interface CachedSymbol {
   start_line: number;
   end_line: number;
   signature: string | null;
+  /** 0/1：局部闭包/辅助函数（不进 DSL 契约面，仍保留供搜索/引用） */
+  is_closure?: number;
 }
 
 export interface CachedImport {
@@ -731,7 +733,7 @@ export function getFileParse(db: Database, relPath: string): CachedFileParse | n
   if (!fileNode) return null;
   const symbols = db
     .prepare(
-      `SELECT kind, name, qualified_name, start_line, end_line, signature
+      `SELECT kind, name, qualified_name, start_line, end_line, signature, is_closure
        FROM nodes WHERE file_path = ? AND kind != 'file'
        ORDER BY start_line, id`,
     )

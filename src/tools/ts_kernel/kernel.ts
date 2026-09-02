@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tree-sitter Kernel
  *
  * 统一接口：parseFile(path, content) → ParsedSymbol[]
@@ -34,6 +34,14 @@ export interface ParsedSymbol {
   qualified_name: string;
   signature: string;
   parent?: string;
+  /**
+   * 局部闭包/辅助函数标记：不是设计契约面（不进 DSL 的 apis/symbols），
+   * 但仍是合法符号（保留在 cache.db 供搜索/引用/重命名）。
+   * 触发条件：
+   *   - 函数体内嵌套的 function/method（enclosing 是函数作用域），或
+   *   - 顶层 const/var 绑定裸闭包值（Go `var x = func(){}`、Python `x = lambda`）。
+   */
+  is_closure?: boolean;
 }
 
 /** import 依赖（用于 import_project 的跨文件边推导） */
@@ -217,7 +225,8 @@ function traverseAndExtract(
   lang: LanguageEntry,
   symbols: ParsedSymbol[],
   parent: string | undefined,
-  depth: number = 0
+  depth: number = 0,
+  enclosingIsFunction: boolean = false,
 ): void {
   if (depth > 100) return; // 防止无限递归
 
@@ -242,6 +251,10 @@ function traverseAndExtract(
         // 值摘要（≤60 字符，单行化）：wrap(async (a) => {...}) → “wrap(async (a) => {…”
         const rawValue = (valueNode?.text ?? '').replace(/\s+/g, ' ');
         const valueBrief = rawValue.length > 60 ? rawValue.slice(0, 57) + '…' : rawValue;
+        // 局部闭包检测：Go 顶层 `var x = func(){}` / Python 顶层 `x = lambda` 是内部辅助，
+        // 不是设计契约（TS/JS 顶层 handler const 不标——它们是主体结构，须保留在契约面）。
+        const vt = valueNode?.type;
+        const isClosureLit = (lang.name === 'go' && vt === 'func_literal') || (lang.name === 'python' && vt === 'lambda');
         symbols.push({
           name: nameNode.text,
           kind: 'const',
@@ -250,6 +263,7 @@ function traverseAndExtract(
           qualified_name: nameNode.text,
           signature: `const ${nameNode.text} = ${valueBrief}`,
           parent: undefined,
+          is_closure: isClosureLit ? true : undefined,
         });
       }
     }
@@ -270,6 +284,9 @@ function traverseAndExtract(
         if (receiverMatch) symbolParent = receiverMatch[1];
       }
       const qn = parent ? `${parent}.${name}` : name;
+      // 局部闭包标记：当前 node 位于「函数作用域」内（上层是 function/method）→ 内部辅助函数，
+      // 非设计契约。类型作用域（顶层/类内）不标——方法与顶层函数仍是契约。
+      const isClosureSymbol = enclosingIsFunction;
       symbols.push({
         name,
         kind,
@@ -278,23 +295,27 @@ function traverseAndExtract(
         qualified_name: qn,
         signature,
         parent: symbolParent,
+        is_closure: isClosureSymbol ? true : undefined,
       });
 
+      // body 子级的作用域类型：
+      //   - function/method 的 body → 进入函数作用域（内嵌辅助函数标闭包）
+      //   - class/interface/type/struct 的 body → 类型作用域（方法仍是契约）
+      const bodyIsFunction = kind === 'function' || kind === 'method';
+      const bodyIsType = kind === 'class' || kind === 'interface' || kind === 'type';
+      const childScope: boolean = bodyIsFunction ? true : bodyIsType ? false : enclosingIsFunction;
+      const recBody = (child: SyntaxNodeLike | null) => {
+        if (child) traverseAndExtract(child, lang, symbols, qn, depth + 1, childScope);
+      };
       // 进入 body 继续提取（找方法/嵌套类）
       const body = node.childForFieldName('body') || node.childForFieldName('suite');
       if (body) {
-        for (let i = 0; i < body.childCount; i++) {
-          const child = body.child(i);
-          if (child) traverseAndExtract(child, lang, symbols, qn, depth + 1);
-        }
+        for (let i = 0; i < body.childCount; i++) recBody(body.child(i));
         return;
       }
       // 兜底：直接遍历子节点（如 Python class 的 body 可能不是标准 body 字段）
       if (node.type === 'class_definition' || node.type === 'class_declaration') {
-        for (let i = 0; i < node.childCount; i++) {
-          const child = node.child(i);
-          if (child) traverseAndExtract(child, lang, symbols, qn, depth + 1);
-        }
+        for (let i = 0; i < node.childCount; i++) recBody(node.child(i));
         return;
       }
     }
@@ -302,7 +323,7 @@ function traverseAndExtract(
 
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
-    if (child) traverseAndExtract(child, lang, symbols, parent, depth + 1);
+    if (child) traverseAndExtract(child, lang, symbols, parent, depth + 1, enclosingIsFunction);
   }
 }
 
