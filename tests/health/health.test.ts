@@ -153,3 +153,11 @@ describe('health: 夹具整体体检', () => {
     expect(r.counts.high_complexity).toBe(0);
   });
 });
+
+describe('health: Java 未使用 import（AST 绑定）', () => {
+  it('Java 用了 Foo 未用 Bar → 只报 Bar', async () => {
+    const src = 'package p;\nimport com.acme.Foo;\nimport com.acme.Bar;\nclass A { Foo f; }\n';
+    const unused = await unusedImportsIn('a.java', src);
+    expect(unused.map((u) => u.name)).toEqual(['Bar']);
+  });
+});

@@ -326,8 +326,34 @@ function collectImportBinds(root: SyntaxNodeLike, lang: string): AstImportBind[]
       }
     };
     walk(root);
+  } else if (lang === 'java') {
+    // Java：import com.acme.Foo; / import static org.x.Bar;
+    const walk = (n: SyntaxNodeLike): void => {
+      if (n.type === 'import_declaration') {
+        const line = n.startPosition.row + 1;
+        const body = n.text.replace(/^\s*import\s+static\s+/, '');
+        const m = body.match(/^\s*import\s+([\w.]+(?:\.[\w]+)*)\s*;/);
+        if (m) {
+          const segs = m[1].split('.');
+          const bind = segs[segs.length - 1] || '';
+          if (isValidBindName(bind)) binds.push({ line, module: m[1], name: bind, startIndex: nameNodeStart(n, bind) });
+        }
+        return;
+      }
+      for (let i = 0; i < n.childCount; i++) {
+        const c = n.child(i);
+        if (c) walk(c);
+      }
+    };
+    walk(root);
   }
   return binds;
+}
+
+/** 在 import 节点文本中定位绑定标识符的字节偏移（import 声明在行首，字节≈文本 index） */
+function nameNodeStart(node: SyntaxNodeLike, name: string): number {
+  const i = node.text.indexOf(name);
+  return i >= 0 ? (node.startIndex ?? 0) + i : node.startIndex ?? 0;
 }
 
 /** 提取"命名 import"（AST；语言无解析器时回退正则） */
@@ -351,6 +377,9 @@ export async function unusedImportsIn(filePath: string, source: string): Promise
   const bindingRanges = new Set(binds.map((b) => b.startIndex));
   const used = new Set<string>();
   const walk = (n: SyntaxNodeLike): void => {
+    // import/using 子树内部不是"使用点"（命名空间段如 System.IO 会误当成使用）——
+    // 绑定名使用情况由"其它位置的引用"判定，绑定自身已按 startIndex 排除
+    if (n.type === 'import_statement' || n.type === 'import_declaration' || n.type === 'import_from_statement' || n.type === 'using_directive') return;
     if (n.type === 'identifier' || n.type === 'type_identifier') {
       if (!bindingRanges.has(n.startIndex ?? -1)) used.add(n.text);
     }
