@@ -789,7 +789,16 @@ function diffApis(design: ExpectedApi[], live: ExpectedApi[]): ApiDiff[] {
     }
   }
 
-  return result;
+  // 去重：同一 signature 一个输出契约里只应出现一次（keep first）。
+  // 上游 DSL 的 actual_apis 常等于 expected_apis（import_project 落库即如此），
+  // 两视图 diff 传入的入参是 [...expected, ...actual] 的【拼接】→ 同一 API 出现两次，
+  // 若不按 signature 去重，design 循环会为同一 API 产两条 removed/modified → 输出"每符号两遍"。
+  const seen = new Set<string>();
+  return result.filter((r) => {
+    if (seen.has(r.signature)) return false;
+    seen.add(r.signature);
+    return true;
+  });
 }
 
 /**

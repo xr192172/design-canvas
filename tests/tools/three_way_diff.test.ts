@@ -303,4 +303,32 @@ describe('diff 输出卫生：符号去重 + 局部变量噪音过滤', () => {
     // 真实符号 realApi 未变，噪音 r/r2 被滤 → 不应判为 conflict
     expect(tw.state).not.toBe('conflict');
   });
+
+  it('同一 API 同时出现在 expected 与 actual → 变更清单只列一遍（diffApis 去重）', () => {
+    // 模拟 import_project 落库：actual_apis 与 expected_apis 相同（同一 signature 出现两次）
+    const dualFile = (line: number, ln: number): SemanticFile => ({
+      id: 'f_dual',
+      path: 'agent.go',
+      responsibility: '测试',
+      lines: ln,
+      expected_apis: [
+        { signature: 'Agent.Run(...)', line },
+        { signature: 'Agent.executeTools(...)', line: line + 1 },
+      ],
+      actual_apis: [
+        { signature: 'Agent.Run(...)', line },
+        { signature: 'Agent.executeTools(...)', line: line + 1 },
+      ],
+    });
+    const f = track('hp_api_dedup');
+    // design 与 live 行号不同（快照漂移）→ 两 API 都应判 modified；但因 expected/actual 各自重复，
+    // 去重后变更清单里每个 signature 只能出现一次
+    const r = setup(f, { baseline: [], design: [dualFile(100, 200)], live: [dualFile(300, 400)] });
+    const target = r.data.files.find((x) => x.path === 'agent.go');
+    const apis = target?.apis ?? [];
+    const runCount = apis.filter((a) => a.signature.includes('Agent.Run')).length;
+    const execCount = apis.filter((a) => a.signature.includes('Agent.executeTools')).length;
+    expect(runCount).toBeLessThanOrEqual(1);
+    expect(execCount).toBeLessThanOrEqual(1);
+  });
 });
