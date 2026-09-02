@@ -382,7 +382,16 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
         fileChanged(base, liv) ||
         fileDecisionChanged(baseline, live, path, base?.id, liv?.id) ||
         symbolsDecisionChanged(base, liv);
-      const desEqLiv = !fileChanged(des, liv) && !symbolsDecisionChanged(des, liv);
+      // desEqLiv：设计 vs 实现语义一致 → converged 非 conflict。
+      // 用 symbolsSemanticallyEqual 替代 fileChanged 的符号比较：行号偏移（快照时刻差异）
+      // 不是语义冲突；layer + API 仍用原逻辑保持严格。
+      const desEqLiv = symbolsSemanticallyEqual(des?.symbols ?? [], liv?.symbols ?? [])
+        && (des?.layer ?? '') === (liv?.layer ?? '')
+        && diffApis(
+          [...(des?.expected_apis ?? []), ...(des?.actual_apis ?? [])],
+          [...(liv?.expected_apis ?? []), ...(liv?.actual_apis ?? [])],
+        ).length === 0
+        && !symbolsDecisionChanged(des, liv);
 
       let state: ThreeWayState;
       if (designAbsent) {
@@ -507,7 +516,10 @@ export function diffViews(input: DiffViewsInput): DiffViewsResult {
   }
 
   // 有变更时列出详情
-  const changedFiles = fileDiffs.filter((f) => f.change !== 'unchanged');
+  // 三方对比存在时，conflict 文件会在下方"冲突待裁决"段单独列出符号两侧增量，
+  // 此处排除避免同一文件的符号在"变更详情"+"冲突待裁决"重复列举（输出膨胀）。
+  const conflictPaths = baseline ? new Set(threeWay.filter((f) => f.state === 'conflict').map((f) => f.path)) : new Set<string>();
+  const changedFiles = fileDiffs.filter((f) => f.change !== 'unchanged' && !conflictPaths.has(f.path));
   if (changedFiles.length > 0) {
     lines.push('', `  ─ 变更详情 ─`);
     for (const f of changedFiles) {
@@ -674,17 +686,48 @@ function fileChanged(a: SemanticFile | undefined, b: SemanticFile | undefined): 
   return false;
 }
 
+/**
+ * 噪音符号判定：单字母/双字母 const（r/g/b/a/i/id…）——循环计数器、临时变量、
+ * 颜色通道分量等，不是 API 表面。它们的行号随快照时刻漂移即触发假阳性"modified"→
+ * 假阳性 conflict。从 diff 比较中排除，避免 .cjs 脚本内部变量撑爆冲突清单。
+ */
+function isDiffNoiseSymbol(s: Symbol): boolean {
+  return s.kind === 'const' && s.name.length <= 2;
+}
+
+/**
+ * 两符号列表是否语义一致（同名+同类+同签名，忽略行号偏移）。
+ * 快照时刻不同导致的行号漂移（注释增删、上方代码改动）不是语义冲突；
+ * 用于 desEqLiv 判定 → converged 而非 conflict。
+ */
+function symbolsSemanticallyEqual(a: Symbol[], b: Symbol[]): boolean {
+  const fa = a.filter((s) => !isDiffNoiseSymbol(s));
+  const fb = b.filter((s) => !isDiffNoiseSymbol(s));
+  if (fa.length !== fb.length) return false;
+  const key = (s: Symbol) => `${s.name}|${s.kind}|${s.signature ?? ''}`;
+  const sa = new Set(fa.map(key));
+  for (const s of fb) {
+    if (!sa.has(key(s))) return false;
+  }
+  return true;
+}
+
 /** 比较两个符号列表，返回变更列表 */
 function diffSymbols(design: Symbol[], live: Symbol[]): SymbolDiff[] {
+  // 过滤噪音符号（单字母 const 等局部变量）——它们不是 API 表面，
+  // 行号/签名微小差异即造成假阳性冲突
+  const d = design.filter((s) => !isDiffNoiseSymbol(s));
+  const l = live.filter((s) => !isDiffNoiseSymbol(s));
+
   const result: SymbolDiff[] = [];
   const liveByName = new Map<string, Symbol>();
-  for (const s of live) liveByName.set(s.name, s);
+  for (const s of l) liveByName.set(s.name, s);
 
   const designByName = new Map<string, Symbol>();
-  for (const s of design) designByName.set(s.name, s);
+  for (const s of d) designByName.set(s.name, s);
 
   // 找 design 中有的
-  for (const ds of design) {
+  for (const ds of d) {
     const ls = liveByName.get(ds.name);
     if (!ls) {
       result.push({ name: ds.name, kind: ds.kind, change: 'removed', design_line: ds.line, design_signature: ds.signature });
@@ -703,13 +746,21 @@ function diffSymbols(design: Symbol[], live: Symbol[]): SymbolDiff[] {
   }
 
   // 找 live 中新增的
-  for (const ls of live) {
+  for (const ls of l) {
     if (!designByName.has(ls.name)) {
       result.push({ name: ls.name, kind: ls.kind, change: 'added', live_line: ls.line, live_signature: ls.signature });
     }
   }
 
-  return result;
+  // 去重：同一符号名一个输出契约里只应出现一次（keep first）。
+  // 上游 DSL 快照（模块聚合 / 多视图残留）可能把同一符号列两份——行号相同、内容相同，
+  // 若不去重 diff 输出会"每个符号列两遍"，污染变更详情与冲突清单。
+  const seen = new Set<string>();
+  return result.filter((r) => {
+    if (seen.has(r.name)) return false;
+    seen.add(r.name);
+    return true;
+  });
 }
 
 /** 比较两个 API 列表，返回变更列表 */
