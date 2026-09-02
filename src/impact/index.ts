@@ -115,6 +115,33 @@ function resolveImportFile(fromRel: string, source: string, rels: Set<string>, e
   return null;
 }
 
+/**
+ * 解析包路径 import（Go `import "core/pkg"` / Python `import pkg`）到项目内文件。
+ * 方式：把包路径当作相对路径（与 source 文件所在目录无关的绝对型），逐段拼接项目内可能的目录。
+ * 返回匹配的目录下任一同扩展名文件；匹配不到返回 null。
+ * 保守语义：一个候选目录 + 一个文件才接受（目录多文件→无法唯一，宁漏不错）。
+ */
+function resolvePackageImportDir(source: string, rels: Set<string>, exts: string[]): string | null {
+  const seg = source.split('/').filter(Boolean);
+  if (seg.length === 0) return null;
+  // 直接匹配完整包路径目录（Go 通常 import 完整路径）
+  const direct = path.posix.join(...seg);
+  const directCand = [...rels].filter((r) => r === direct || path.posix.dirname(r) === direct);
+  if (directCand.length === 1) return directCand[0];
+  // 回退：匹配"包末段"目录（同目录名项目内常见）
+  const tail = seg[seg.length - 1];
+  const tailCand = [...rels].filter((r) => path.posix.basename(path.posix.dirname(r)) === tail);
+  if (tailCand.length === 1) return tailCand[0];
+  return null;
+}
+
+/** 把 import source 解析到项目内文件：相对走 resolveImportFile，包路径走 resolvePackageImportDir */
+function resolveImportTarget(fromRel: string, source: string, rels: Set<string>, exts: string[]): string | null {
+  const rel = resolveImportFile(fromRel, source, rels, exts);
+  if (rel) return rel;
+  return resolvePackageImportDir(source, rels, exts);
+}
+
 /** 解析并建立全项目依赖图（供影响面 / 风险热区复用） */
 export async function buildImpactGraph(root: string): Promise<GraphResult> {
   const exts = listSupportedExtensions();
@@ -135,6 +162,59 @@ export async function buildImpactGraph(root: string): Promise<GraphResult> {
     }
   }
 
+  // —— 文件绑定索引：每文件「本地可用名 → 目标文件」——
+  // 由 imports[].bindings 构建（Go/Python 提取本地名；TS 系 fill 时给 remoteName）。
+  // 用途：跨文件 `svc.Process` 的 `svc` 前缀 connect 到哪个文件 → 精确锁定调用边，避免全局重名漏连。
+  const fileBindings = new Map<string, Map<string, Set<string>>>();
+  for (const p of parses) {
+    let bm = fileBindings.get(p.rel);
+    if (!bm) {
+      bm = new Map();
+      fileBindings.set(p.rel, bm);
+    }
+    for (const imp of p.parsed.imports) {
+      if (!imp.bindings || imp.bindings.length === 0) continue;
+      const target = resolveImportTarget(p.rel, imp.source, rels, exts);
+      if (!target) continue;
+      for (const b of imp.bindings) {
+        let s = bm.get(b);
+        if (!s) {
+          s = new Set();
+          bm.set(b, s);
+        }
+        s.add(target);
+      }
+    }
+  }
+
+  // 辅助：对 consumer 文件内未解析调用，按「前缀→目标文件」或「全局唯一」找出唯一候选 provider 文件。
+  // 返回 provider 相对路径（命中）或 null。
+  const resolveCallTarget = (
+    consumer: string,
+    expr: string,
+    callee: string,
+    providerOfSymbol: Array<{ rel: string; sym: ParsedSymbol }> | undefined,
+  ): string | null => {
+    const dot = expr.indexOf('.');
+    // 带前缀引用 `svc.Process` → 前缀必须连到某个项目内文件才信任
+    if (dot >= 0) {
+      const prefix = expr.slice(0, dot);
+      const cands = fileBindings.get(consumer)?.get(prefix);
+      if (cands && cands.size === 1) {
+        const prov = [...cands][0];
+        // 目标文件确实导出该 callee → 精确建边
+        if (nameIndex.get(callee)?.some((c) => c.rel === prov)) return prov;
+      }
+      // 前缀解析不到唯一目标 → 不建边（无法确证，宁不漏错）
+      return null;
+    }
+    // 裸标识符 `computeSum`：保底走"全局唯一"（多候选时不建边，防误报）
+    if (providerOfSymbol && providerOfSymbol.length === 1 && providerOfSymbol[0].rel !== consumer) {
+      return providerOfSymbol[0].rel;
+    }
+    return null;
+  };
+
   const edges: EdgeMap = new Map();
   const addEdge = (consumer: string, provider: string, site: ImpactSite): void => {
     let m = edges.get(consumer);
@@ -148,29 +228,31 @@ export async function buildImpactGraph(root: string): Promise<GraphResult> {
   };
 
   for (const p of parses) {
-    // import 边
+    // import 边（相对优先；包路径回退——多语言 import 连到项目内文件）
     for (const imp of p.parsed.imports) {
-      const target = resolveImportFile(p.rel, imp.source, rels, exts);
+      const target = resolveImportTarget(p.rel, imp.source, rels, exts);
       if (!target) continue;
       addEdge(p.rel, target, { kind: 'import', line: imp.line, detail: `import '${imp.source}'`, target_file: target });
     }
-    // 跨文件调用边（按导出名唯一匹配）
+    // 跨文件调用边（符号级：前缀→bindings 精确；裸名→全局唯一保底）
     for (const c of p.parsed.calls) {
       if (c.resolved) continue; // 同文件内，不构成"外部受影响"
-      const cands = (nameIndex.get(c.callee) ?? []).filter((x) => x.rel !== p.rel);
-      if (cands.length !== 1) continue; // 0=外部/内置；>1=重名，保守不建边
-      addEdge(p.rel, cands[0].rel, {
+      const cands = nameIndex.get(c.callee) ?? [];
+      const target = resolveCallTarget(p.rel, c.callee_expr, c.callee, cands);
+      if (!target) continue;
+      const sym = cands.find((x) => x.rel === target)?.sym;
+      addEdge(p.rel, target, {
         kind: 'call',
         line: c.line,
         detail: c.callee_expr,
-        target_symbol: cands[0].sym.qualified_name,
-        target_file: cands[0].rel,
+        target_symbol: sym ? sym.qualified_name : c.callee,
+        target_file: target,
       });
     }
-    // 跨文件类型引用边
+    // 跨文件类型引用边（同样：带包前缀类型与裸类型都按唯一候选建边）
     for (const t of p.parsed.type_refs) {
       if (t.resolved) continue;
-      const cands = (nameIndex.get(t.type_name) ?? []).filter((x) => x.rel !== p.rel && TYPE_KINDS.has(x.sym.kind));
+      const cands = nameIndex.get(t.type_name)?.filter((x) => x.rel !== p.rel && TYPE_KINDS.has(x.sym.kind)) ?? [];
       if (cands.length !== 1) continue;
       addEdge(p.rel, cands[0].rel, {
         kind: 'type_ref',

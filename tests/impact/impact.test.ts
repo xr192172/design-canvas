@@ -21,6 +21,7 @@ import { analyzeImpact, analyzeHubs } from '../../src/impact/index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(here, '..', 'fixtures', 'impact-fixture');
+const goFixtureRoot = path.join(here, '..', 'fixtures', 'impact-go-fixture');
 
 const files = (r: { files: Array<{ file: string }> }) => r.files.map((f) => f.file);
 
@@ -115,5 +116,23 @@ describe('impact: 风险热区盘点', () => {
     expect(h.files[0].dependencies).toBe(2);
     // 所有文件都在盘点里（top=10 > 5）
     expect(h.files.length).toBe(5);
+  });
+});
+
+describe('impact: 跨语言前缀解析（重名不漏连）', () => {
+  // Go 夹具：app/main.go 经包路径 import "corepkg" + `corepkg.Process()` 前缀调用；
+  // corepkg 与 other 包都有 Process → 全局唯一匹配 2 候选本应跳过，前缀解析命中精确 target。
+  it('改 corepkg/corepkg.go：前缀 `corepkg.Process` 仍精确波及 app/main.go（重名不阻断）', async () => {
+    const r = await analyzeImpact(goFixtureRoot, [{ file: 'corepkg/corepkg.go' }]);
+    expect(r.missing).toEqual([]);
+    expect(r.files.map((f) => f.file)).toContain('app/main.go');
+    const app = r.files.find((f) => f.file === 'app/main.go')!;
+    expect(app.sites.some((s) => s.kind === 'call' && s.target_symbol === 'Process')).toBe(true);
+  });
+
+  // 反向冒烟：other 包的 Process 与 corepkg 无调用关系 → 改它不应波及 app（前缀隔离，不串包）
+  it('改 other/other.go：不与 app 相连（前缀包隔离，不误报串包）', async () => {
+    const r = await analyzeImpact(goFixtureRoot, [{ file: 'other/other.go' }]);
+    expect(r.files.map((f) => f.file)).not.toContain('app/main.go');
   });
 });

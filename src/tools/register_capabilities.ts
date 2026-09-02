@@ -132,6 +132,12 @@ declareCapability({
     tsx: 'full_ast',
     javascript: 'full_ast',
     jsx: 'full_ast',
+    go: 'full_ast',
+    python: 'full_ast',
+  },
+  notes: {
+    go: '跨文件前缀调用 `pkg.Symbol` 经 import bindings 精确连边，重名不漏（2026-09 升级）',
+    python: 'import 绑定 + from-import 支持；裸名仍全局唯一匹配',
   },
 });
 
