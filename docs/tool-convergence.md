@@ -293,7 +293,7 @@
 
 - ✅ **字面量感知改名**：`rename_symbols report_literals=true` 扫描旧符号 snake 变体在项目文本的字面量命中，返回清单（只报告不改）。**闭环已补（2026-09）**：`apply_literals=true` 自动替换 decision=apply 的字面量（code/docs/test）为蛇形新名，并按 kind 分层——contract(注册名)需人审、history(历史记录)保留、冻结行(.design-canvas.json protect)跳过，均不写盘，决策明细随结果返回供复核。
 
-- ✅ **生成物识别（源头优先，2026-09）**：`rename.generated`（.design-canvas.json，glob 列表）标记生成物文件（如 AGENTS.md——由 `gen_agents.mjs` 从 TRIGGER_ROWS 生成、构建自愈覆盖）。`rename_symbols apply_literals` 命中生成物 → `decision=generated`，不落盘并提示改源头而非生成物；通用机制（不硬编码本项目文件名），对任意有生成物的项目可用。
+- ✅ **生成物识别（源头优先，2026-09）**：`rename.generated`（.design-canvas.json，glob 列表）标记生成物文件（如 AGENTS.md——由 `gen_agents.mjs` 从 TRIGGER\_ROWS 生成、构建自愈覆盖）。`rename_symbols apply_literals` 命中生成物 → `decision=generated`，不落盘并提示改源头而非生成物；通用机制（不硬编码本项目文件名），对任意有生成物的项目可用。
 
 - ✅ **注册名白名单**：命中按 `kind` 分类——`server_registry` 的 `name:`→`contract`（对外契约，清单醒目标「破坏契约需人审」），tool-convergence/docs→`history`/`docs`（保留原貌）、tests→`test`、其余→`code`；agent 据清单区分「改 / 保留 / 契约谨慎」。
 
