@@ -104,7 +104,33 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **42 MCP tools** are registered, organized into "primary tools + specialized tools": primary tools provide unified entry points, specialized tools each do one job.
+A total of **50 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+
+### Capability navigation (1)
+
+| Tool | Purpose |
+|------|------|
+| `capability_map` | Capability-lane navigation: 6 lanes (design / refactor / observe / harvest / cross / meta) × in-lane tools with when-to-use; the agent layers then enters a concrete tool. High-frequency tools can bypass this navigation |
+
+**Usage examples**
+
+```json
+// 1. No args: return the map of all 6 capability lanes (recommended: locate first)
+{}
+
+// 2. View a single lane (e.g. the refactor/rename lane)
+{ "lane": "refactor" }
+
+// 3. Valid lane values
+{ "lane": "design" }    // design / living docs
+{ "lane": "refactor" }  // refactor / rename
+{ "lane": "observe" }   // observe / verify
+{ "lane": "harvest" }   // contract / closure harvesting
+{ "lane": "cross" }     // cross-repo / hybrid / health
+{ "lane": "meta" }      // meta-info / exploration
+```
+
+> Note: `capability_map` is a read-only navigation with no side effects. The return is a three-level map "lane → in-lane tools → when to use each"; the agent picks a tool from it, then enters the concrete tool. High-frequency tools (`get_dsl` / `edit_dsl` / `explore_code` / `rename_symbols` / `rename_files` / `find_references`) work directly without going through it first.
 
 ### Primary tools (8)
 
@@ -119,7 +145,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | `consistency_check` | Compare expected contracts against actual code; output a consistency report and cross-file invariants (read-only) |
 | `explore_code` | Code understanding entry: semantic search, impact analysis, architecture layering, monolith detection, split suggestions, algorithm/dataflow derivation, simulation replay, etc. |
 
-### Specialized tools (34)
+### Specialized tools (41)
 
 **Code understanding**
 
@@ -128,6 +154,8 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | `import_project` | Import a code project into DSL (local absolute path or browser upload; honors `.gitignore`) |
 | `diff_views` | Diff the design view against the live code snapshot |
 | `render_brickwork` | Render a dependency-driven feature-community workbench (brickified preview) |
+| `find_references` | Query symbol / field references (reference view: see blast radius before changing); read-only |
+| `detect_drift` | Check whether the design is stale / under-implemented against the code change |
 
 **Brick system**
 
@@ -135,6 +163,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 |------|------|
 | `harvest_closure` | Harvest bricks together with their transitive import closure |
 | `harvest_from_url` | Harvest bricks from a git URL / local project into the brick bag |
+| `harvest_decisions` | Reverse-extract design decisions from project records |
 | `extract_contracts` | Extract brick contracts (role / shapes / effects) |
 | `reconcile_effects` | Reconcile effect candidates against runtime observations |
 | `reconcile_brick` | Reconcile brick contracts against runtime observations |
@@ -151,6 +180,7 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | `observe_log` | Query runtime logs per file |
 | `observe_judge` | Batch-judge runtime events |
 | `reconcile_chain` | Reconcile a host chain against its real runtime events |
+| `run_tests` | Run tests and return structured failure localization (filter-targeted / full) |
 
 **Deterministic refactoring**
 
@@ -158,8 +188,8 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 |------|------|
 | `edit_code` | Symbol-level code editing (replace / insert / delete / range) |
 | `rename_many` | Bulk-rename local variables (scope-isolated) |
-| `rename_symbol` | Cross-file module-level symbol renaming |
-| `rename_file` | File-level rename + import reference rewriting |
+| `rename_symbols` | Batch cross-file symbol renaming (single or batch unified entry; whole-run dry-run first) |
+| `rename_files` | Batch file renaming (single or batch unified entry; whole-run dry-run first) |
 | `remove_dead_imports` | Remove stale imports |
 | `refactor_pipeline` | Deterministic refactoring pipeline (dead code cleanup + package migration) |
 | `suggest_renames` | Suggest semantic names for short / meaningless variables |
@@ -177,6 +207,9 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | Tool | Purpose |
 |------|------|
 | `canvas_notes` | Unified canvas-notes entry (read=work orders / mark=status / decide=LLM) |
+| `archive_node` | Archive DSL nodes (snapshot) |
+| `list_archive` | List archived nodes |
+| `sync_contracts` | Backfill DSL contracts using the server_registry schema as source |
 
 **LLM gateway**
 
@@ -189,6 +222,16 @@ A total of **42 MCP tools** are registered, organized into "primary tools + spec
 | Tool | Purpose |
 |------|------|
 | `read_project_docs` | Read the doc list and content under a project's `docs/` directory |
+
+**Migration & assessment**
+
+| Tool | Purpose |
+|------|------|
+| `impact_analysis` | Pre-change risk-closure report: change points → reverse reachable closure, output affected files and risk ranking (`hubs=true` for hot-spot survey) |
+| `cross_repo_symbol_index` | Cross-project symbol index: intersection of top-level symbols = conflicts / twins, difference = migration scope |
+| `hybrid_precheck` | Project hybrid precheck: symbol conflicts + dependency version conflicts + feature overlap → verdict ok / fix / blocked |
+| `behavior_baseline` | Behavior baseline: canary harness runs sample cases and records a snapshot, verify after changes to confirm "does it work" |
+| `code_health` | Code health score: dead code / cyclomatic complexity / layering violations → health score + issue list |
 
 ### The `view` parameter
 
