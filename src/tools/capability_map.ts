@@ -8,7 +8,7 @@
  *
  * 本模块做三件事：
  *   1. 契约：一条能力线 = { id, label, tools, direct }（direct=true 表示可绕过导航直接调用）。
- *   2. 目录：49 个工具按 6 线归档（design / refactor / observe / harvest / cross / meta）。
+ *   2. 目录：50 个工具按 6 线归档（design / refactor / observe / harvest / cross / meta）。
  *   3. 查询：无参返回全景；传 lane 只返回该线。
  *
  * 纯数据 + 纯函数：零副作用、无 IO。testable。
@@ -77,6 +77,7 @@ export const LANES: Lane[] = [
       { name: 'find_similar_names', when: '找相似命名（撞名/歧义排查）' },
       { name: 'refactor_judge', when: '重构后裁判：校验是否符合契约/无回归' },
       { name: 'diff_views', when: '多视图/多版本差异对比' },
+      { name: 'spring_mvc_layering', when: '按 Spring MVC 分层（Java 注解识别 controller/service/repository/entity/config）' },
     ],
   },
   {

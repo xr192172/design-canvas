@@ -15,6 +15,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { capabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
+import { springMvcLayeringHandler } from './tools/spring_mvc_layering.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -2486,6 +2487,24 @@ const TOOL_DEFS: ToolDef[] = [
         .describe('只看指定能力线；省略返回全部 6 线'),
     },
     handler: capabilityMapHandler,
+  },
+  {
+    name: 'spring_mvc_layering',
+    title: '按 Spring MVC 分层（Java 专属）：注解识别分层归属',
+    description:
+      '只读分析（无副作用）：扫 Java 项目，用 tree-sitter-java 从类型声明修饰符子树提取类型级注解' +
+      '（@RestController/@Controller→controller、@Service→service、@Repository/@Mapper→repository、' +
+      '@Entity/@Table→entity、@Configuration/@Component→config），按文件归层并推断项目根包，' +
+      '输出分层归属计划（每文件→层 + 各层文件数 + 目标包路径）。' +
+      '适合重构前先看清代码怎么分层、哪些该归到哪一层；落盘迁移由调用方接驳 runRefactorPipeline 的 package_migration 步骤。',
+    inputSchema: {
+      project_dir: z.string().describe('目标 Java 项目根（绝对路径）'),
+      target_base_package: z
+        .string()
+        .optional()
+        .describe('目标根包（如 com.example.app）；缺省从现有包推断最长共同前缀'),
+    },
+    handler: springMvcLayeringHandler,
   },
 ];
 

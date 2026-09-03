@@ -105,7 +105,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 ## MCP 工具参考
 
-共注册 **50 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
+共注册 **51 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
 
 ### 能力导航（1 个）
 
@@ -233,6 +233,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `hybrid_precheck`             | 项目杂交预检：符号冲突 + 依赖版本冲突 + 功能重叠 → verdict ok/fix/blocked |
 | `behavior_baseline`           | 行为基线：金丝雀 harness 跑样例记录快照，改后对比验证「跑得对不对」       |
 | `code_health`                 | 代码健康度：死代码 / 圈复杂度 / 分层违规 → 健康分 + 问题清单         |
+| `spring_mvc_layering`         | 按 Spring MVC 分层（Java 专属）：类型级注解识别 controller/service/repository/entity/config，输出分层归属计划（只读分析） |
 
 ### `view` 参数
 

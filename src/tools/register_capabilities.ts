@@ -265,3 +265,17 @@ declareCapability({
     go: '复杂度已 AST 化，未使用 import 不查（编译器兜底）；未使用导出/孤儿/分层同上限制 → partial',
   },
 });
+
+/** 按 Spring MVC 分层（Java 专属）：类型级注解识别 controller/service/repository/entity/config */
+declareCapability({
+  id: 'spring_mvc_layering',
+  label: '按 Spring MVC 分层（类型级注解识别）',
+  desc: '扫 Java 源码，从 tree-sitter-java AST 的 class/interface/enum/record 类型声明的 modifiers 子树提取类型级注解（@RestController/@Controller→controller、@Service→service、@Repository/@Mapper→repository、@Entity/@Table→entity、@Configuration/@Component→config），按文件归层 + 推断根包，产出分层归属计划（只读分析，落盘由调用方接驳）',
+  default: 'unimplemented',
+  overrides: {
+    java: 'full_ast',
+  },
+  notes: {
+    java: 'tree-sitter-java 的 class_declaration.modifiers → marker_annotation/annotation → name；package_declaration 提取包名推断根包',
+  },
+});

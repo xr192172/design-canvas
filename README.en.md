@@ -104,7 +104,7 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **50 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+A total of **51 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
 
 ### Capability navigation (1)
 
@@ -232,6 +232,7 @@ A total of **50 MCP tools** are registered, organized into "capability navigatio
 | `hybrid_precheck` | Project hybrid precheck: symbol conflicts + dependency version conflicts + feature overlap → verdict ok / fix / blocked |
 | `behavior_baseline` | Behavior baseline: canary harness runs sample cases and records a snapshot, verify after changes to confirm "does it work" |
 | `code_health` | Code health score: dead code / cyclomatic complexity / layering violations → health score + issue list |
+| `spring_mvc_layering` | Spring MVC layering (Java-only): type-level annotation recognition into controller/service/repository/entity/config, outputs a layered assignment plan (read-only) |
 
 ### The `view` parameter
 

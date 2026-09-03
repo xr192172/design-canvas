@@ -37,7 +37,7 @@ describe('capability_map 目录契约', () => {
 
   it('目录覆盖所有注册工具（无遗漏、无超集）', () => {
     const catalogued = LANES.flatMap((l) => l.tools.map((t) => t.name));
-    expect(catalogued.length).toBe(49);
+    expect(catalogued.length).toBe(50);
     expect(catalogued).toEqual(expect.arrayContaining(regTools.filter((t) => t !== 'capability_map')));
     expect(new Set(catalogued).size).toBe(catalogued.length); // 无跨线重复
   });
