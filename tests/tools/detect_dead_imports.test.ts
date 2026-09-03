@@ -162,4 +162,23 @@ describe('detectDeadImports：目录扫描', () => {
     expect(res.dead.find((c) => c.source === 'lodash')).toBeUndefined();
     expect(res.dead.find((c) => c.source === 'react')).toBeDefined();
   });
+
+  it('跳过 .design-canvas* 快照/备份目录（含 .design-canvas.bak-<ts> 变体）——不把历史快照副本重复计入', () => {
+    const dir = tempRoot();
+    // 真实源里的死 import
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), "import _ from 'lodash';\nexport const a = 1;\n", 'utf-8');
+    // 快照/备份目录：同样的死 import 副本，绝不该被计入
+    for (const snap of ['.design-canvas', '.design-canvas.bak-20260830-122215']) {
+      const snapSrcDir = path.join(dir, snap, 'projects', 'design-canvas', 'src');
+      fs.mkdirSync(snapSrcDir, { recursive: true });
+      fs.writeFileSync(path.join(snapSrcDir, 'a.ts'), "import _ from 'lodash';\nexport const a = 1;\n", 'utf-8');
+    }
+
+    const res = detectDeadImports({ project_dir: dir });
+    expect(res.scanned).toBe(1); // 只算真实 src
+    const lodash = res.dead.find((c) => c.source === 'lodash');
+    expect(lodash).toBeDefined();
+    expect(lodash!.files).toEqual([path.join('src', 'a.ts')]); // 快照副本不被聚合进来
+  });
 });
