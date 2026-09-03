@@ -119,6 +119,24 @@ describe('removeImportsFromSource · TS', () => {
     expect(r.output).toContain("import { ok } from 'live-pkg';");
   });
 
+  it('夹在中间的整条删除：顺带吞掉被删语句后的一个换行，不留空行残留', () => {
+    const src = [
+      "import { keep } from 'live-a';",
+      "import { a } from 'dead-pkg';",
+      "import { ok } from 'live-b';",
+      'export const z = 1;',
+    ].join('\n');
+    const r = removeImportsFromSource(src, 'dead-pkg', 'ts');
+    // 精确：删除后上下 import 紧邻，无空行插缝
+    expect(r.output).toBe(
+      [
+        "import { keep } from 'live-a';",
+        "import { ok } from 'live-b';",
+        'export const z = 1;',
+      ].join('\n'),
+    );
+  });
+
   it('跨行 import（大括号内换行）：整条删除', () => {
     const src = [
       "import {",

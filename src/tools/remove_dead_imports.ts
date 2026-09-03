@@ -169,6 +169,10 @@ function removeTsImports(src: string, target: string): RemoveImportsResult {
   for (const [s, e] of merged) {
     out += src.slice(last, s);
     last = e;
+    // 吞掉被删语句后的一个换行：删除"整条语句"，不留空行残留。
+    // 仅当紧跟其后的正是 `\n` 才吞——行尾注释（后面是 `/`）或 EOF（无换行）不误伤，
+    // 跨行 import/相邻语句（已合并区间）同样安全收敛到"上下紧邻"。
+    if (src[last] === '\n') last++;
   }
   out += src.slice(last);
   return { removed, changed: out !== src, output: out };
