@@ -14,7 +14,7 @@
 
 import { probeDaemon, postWatch, postDsl, fetchAlertsSince } from './client.js';
 import { takeAlerts } from '../tools/alert_inbox.js';
-import { getDSL } from '../storage.js';
+
 import type { WatchProjectToolInput, WatchProjectToolResult } from '../tools/watch_project_tool.js';
 import { watchProjectTool } from '../tools/watch_project_tool.js';
 

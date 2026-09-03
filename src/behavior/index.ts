@@ -32,7 +32,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import ts from 'typescript';
-import { parseAstRoot } from '../tools/ts_kernel/index.js';
+
 
 /** Windows 常只有 python；POSIX 约定 python3（与动态闸 python 适配器一致） */
 const PY = process.platform === 'win32' ? 'python' : 'python3';

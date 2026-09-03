@@ -9,7 +9,6 @@
  * 失败策略：任何一步失败都抛错，由调用方决定是否回退到"未收录"提示，不阻塞前端。
  */
 
-import path from 'node:path';
 import { loadExplainConfig, type ExplainConfig } from './explain_gen.js';
 import { extractJsonObject } from './explain_gen.js';
 

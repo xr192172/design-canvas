@@ -22,7 +22,7 @@ import { deriveMindMap } from './tools/derive_mind_map.js';
 import { queryFeature } from './tools/query_feature.js';
 import { updateFeature } from './tools/update_feature.js';
 import { scaffold } from './tools/scaffold.js';
-import { checkStatus } from './tools/status_tools.js';
+
 import { backfillScaffold } from './tools/backfill.js';
 import { checkConsistency } from './tools/consistency.js';
 import { detectDrift } from './tools/detect_drift.js';

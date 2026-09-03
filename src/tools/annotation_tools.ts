@@ -12,7 +12,6 @@
  *   5. LLM 调用 resolve_annotation 关闭已解决的标注
  */
 
-import type { DesignDSL } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 
 // ─────────────────────────────────────────────────────────────
