@@ -66,7 +66,13 @@ const server = new McpServer(
       '确定性改造与重构（edit_code / rename_symbols / rename_files / remove_dead_imports / refactor_pipeline / diff_views）、' +
       '代码积木收割与质检（harvest_* / extract_contracts / slim_brick / search_bricks / assemble_bricks）、' +
       '运行时观测与契约对账（observe_instrument / observe_judge / observe_log / reconcile_*）、' +
-      '影响分析与诊断闭环（impact_analysis / diagnose / refactor_judge / code_health）。完整分组见 README「核心能力」表。',
+      '影响分析与诊断闭环（impact_analysis / diagnose / refactor_judge / code_health）。完整分组见 README「核心能力」表。' +
+      '\n\n## 能力导航（capability_map）' +
+      '\n- 不确定用哪个工具 → 先调 capability_map 看能力线，再进入具体工具。' +
+      '\n- 高频工具无需导航，直接可用：get_dsl / edit_dsl / explore_code / rename_symbols / rename_files / find_references。' +
+      '\n- 执行类（observe_*/run_tests/behavior_baseline）、采集链（harvest_*）、重量分析（cross_*/code_health）建议先经 capability_map 定位。' +
+      '\n- 前缀语义：observe_=观测、harvest_=采集、reconcile_=对账、rename_=改名、edit_=修改、render_=渲染。' +
+      '\n- 能力线：design 设计/活文档 · refactor 重构/改名 · observe 观测/验证 · harvest 契约/闭包采集 · cross 跨仓/杂交/健康 · meta 元信息/探索。',
   },
 );
 
