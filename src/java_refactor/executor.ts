@@ -41,7 +41,8 @@ export function buildSpringMvcStage(): RefactorStageExecutor {
     limitations: [
       '按类型级注解（@Controller/@Service/@Repository/@Entity/@Configuration）把类迁移到 <base>.<layer> 包',
       '改本文件 package 声明 + 全项目 import FQN（Java 全限定单类 import，非 moduleBase 前缀语义）',
-      '物理移动文件到目标包目录；同包裸引用迁移后需编译验证兜底（未自动补 import 时管线验证失败回滚）',
+      '物理移动文件到目标包目录；同包裸引用（原免 import）自动补 `import <newPkg>.<T>;`，已 import 的走 FQN 改写',
+      '编译验证仍是权威兜底：行内限定引用/重名歧义等边界由 mvn 编译失败回滚如实兜住',
       '撞名（目标文件已存在）/ 无 root 包时跳过该层并如实报告',
     ],
   };

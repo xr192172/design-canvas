@@ -147,6 +147,60 @@ describe('buildSpringMvcLayeringPlan（落盘计划）', () => {
     expect(run.moves ?? []).toHaveLength(0);
     expect(run.absToNew.size).toBe(0);
   });
+
+  it('同包裸引用（无 import）拆包后自动补 import', async () => {
+    const root = tempRoot();
+    // controller 用 UserService 但没 import——原来靠同包免 import；迁移后必须补
+    write(root, PJ(root, 'UserController.java'), [
+      'package com.app;',
+      'import org.springframework.web.bind.annotation.RestController;',
+      '@RestController',
+      'public class UserController {',
+      '  private final UserService svc;',
+      '  public UserController(UserService svc) { this.svc = svc; }',
+      '  public UserService make() { return new UserService(); }',
+      '}',
+    ].join('\n'));
+    write(root, PJ(root, 'UserService.java'), 'package com.app;\n@Service\npublic class UserService {}\n');
+
+    const { run } = await buildSpringMvcLayeringPlan(root, { project_dir: root });
+    const ctrl = run.moves!.find((m) => m.to.endsWith('UserController.java'))!;
+    const ctrlContent = run.absToNew.get(ctrl.to)!;
+    // 补了指向新包的 import
+    expect(ctrlContent).toContain('import com.app.service.UserService;');
+    expect(ctrlContent).toContain('package com.app.controller;');
+  });
+
+  it('迁移文件自身不给自己补 self-import（本文件声明的同名类型跳过）', async () => {
+    const root = tempRoot();
+    // UserService 自身引用自己的类型（如返回类型）不应注入 `import com.app.service.UserService;`
+    write(root, PJ(root, 'UserController.java'), [
+      'package com.app;',
+      'import org.springframework.web.bind.annotation.RestController;',
+      'import com.app.UserService;',
+      '@RestController',
+      'public class UserController {',
+      '  private final UserService svc;',
+      '  public UserService get() { return svc; }',
+      '}',
+    ].join('\n'));
+    write(root, PJ(root, 'UserService.java'), [
+      'package com.app;',
+      'import org.springframework.stereotype.Service;',
+      '@Service',
+      'public class UserService {',
+      '  public UserService self() { return this; }',
+      '}',
+    ].join('\n'));
+
+    const { run } = await buildSpringMvcLayeringPlan(root, { project_dir: root });
+    const svc = run.moves!.find((m) => m.to.endsWith('UserService.java'))!;
+    const svcContent = run.absToNew.get(svc.to)!;
+    // 自身声明的 UserService 不补 import；也不重复该类型 import
+    expect(svcContent).not.toContain('import com.app.service.UserService;');
+    const ctrl = run.moves!.find((m) => m.to.endsWith('UserController.java'))!;
+    expect(run.absToNew.get(ctrl.to)!).toContain('import com.app.service.UserService;'); // 已 import 的走 FQN 改写，不重复
+  });
 });
 
 describe('javaVerifyCommands', () => {

@@ -396,7 +396,8 @@ export async function buildSpringMvcLayeringPlan(proj: string, input: SpringLaye
 }
 
 /**
- * 改写单个 Java 文件：被迁移文件改 package 声明 + 全项目 import FQN 改写。
+ * 改写单个 Java 文件：被迁移文件改 package 声明 + 全项目 import FQN 改写 +
+ * 为"同包裸引用"自动补 import（拆到不同包后原本免 import 的裸引用会失效）。
  * 不牵涉迁移时返回原串（import 无命中、且本文件非迁移目标）。
  */
 async function rewriteJavaFile(
@@ -420,18 +421,97 @@ async function rewriteJavaFile(
   // (b) import FQN 改写（每个文件都扫）
   collectImportEdits(r.root, typeMap, edits);
 
+  // (c) 同包裸引用补 import：本文件用类型位置的裸名指向某 moved 类型、但既没 import 覆盖、
+  //     又不落在该类型新包、也不是本文件自身声明的同名类型 → 注入 `import <newPkg>.<T>;`
+  const info = analyzeJavaRefs(r.root);
+  if (info.typeUses.size > 0 && typeMap.size > 0) {
+    const need: string[] = [];
+    for (const name of info.typeUses) {
+      const entry = typeMap.get(name);
+      if (!entry) continue;
+      if (info.importedTypes.has(name)) continue; // 已 import（collectImportEdits 已把旧→新改好）
+      if (info.ownTypes.has(name)) continue; // 绑定本文件声明的同名类型，非 moved 类型
+      if (info.pkg === entry.newPkg) continue; // 已落位同包，免 import
+      need.push(entry.newFqn);
+    }
+    if (need.length > 0) {
+      // 注入点：最后一个 import 语句结尾；无 import 则 package 声明结尾。
+      const insert = info.lastImportEnd >= 0 ? info.lastImportEnd : info.packageEnd;
+      if (insert >= 0) {
+        const lines = [...new Set(need)].sort();
+        const prefix = info.lastImportEnd >= 0 ? '\n' : '\n\n';
+        edits.push({ start: insert, end: insert, text: prefix + lines.map((fqn) => `import ${fqn};`).join('\n'), guard: '' });
+      }
+    }
+  }
+
   if (edits.length === 0) return src;
   edits.sort((a, b) => b.start - a.start);
   let s = src;
   for (const e of edits) {
     if (e.start < 0 || e.end > s.length || e.start > e.end) continue;
     const cur = s.slice(e.start, e.end);
-    // guard：package 编辑守卫 old_pkg，import 编辑守卫 oldFqn —— 两侧都在节点文本层精确相等才替换
+    // guard：package/import 编辑守卫各自精确文本；insert（start==end，cur 空）直接用空守卫放行
     if (cur === e.guard) {
       s = s.slice(0, e.start) + e.text + s.slice(e.end);
     }
   }
   return s;
+}
+
+/** 一次遍历收集 Java 文件引用的类型位置裸名 / 已 import 类型 / 本文件声明类型 / 包名 / 插入锚点 */
+function analyzeJavaRefs(root: SyntaxNodeLike): {
+  pkg: string;
+  ownTypes: Set<string>;
+  importedTypes: Set<string>;
+  typeUses: Set<string>;
+  lastImportEnd: number;
+  packageEnd: number;
+} {
+  const ownTypes = new Set<string>();
+  const importedTypes = new Set<string>();
+  const typeUses = new Set<string>();
+  let pkg = '';
+  let lastImportEnd = -1;
+  let packageEnd = -1;
+
+  const walk = (n: SyntaxNodeLike, parent: string): void => {
+    const t = n.type;
+    if (t === 'package_declaration') {
+      pkg = packageNameFrom(n);
+      packageEnd = n.endIndex ?? -1;
+      // 不深入 package 内部
+      return;
+    }
+    if (t === 'class_declaration' || t === 'interface_declaration' || t === 'enum_declaration' || t === 'record_declaration') {
+      const name = typeNameFrom(n);
+      if (name) ownTypes.add(name);
+      // 不进入类型体：字段/方法的裸类型引用由 typeUses 单独收（type_identifier 仍会出现在体里），
+      // 但为简单起见直接继续遍历（type_identifier 在任意深度都会被收）。
+    }
+    if (t === 'import_declaration') {
+      const pathNode = importPathNode(n);
+      if (pathNode) importedTypes.add(pathNode.text.split('.').pop()!);
+      lastImportEnd = n.endIndex ?? lastImportEnd;
+      return; // 不深入 import 内部
+    }
+    if (t === 'type_identifier' && parent !== 'scoped_type_identifier') {
+      const text = n.text;
+      if (isValidTypeName(text)) typeUses.add(text);
+      return;
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walk(c, t.toString());
+    }
+  };
+  walk(root, '');
+  return { pkg, ownTypes, importedTypes, typeUses, lastImportEnd, packageEnd };
+}
+
+/** 裸类型名的合法形态（Java 标识符；排除树里偶发出现的占位符） */
+function isValidTypeName(name: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
 }
 
 function findPackageNode(root: SyntaxNodeLike): SyntaxNodeLike | undefined {
