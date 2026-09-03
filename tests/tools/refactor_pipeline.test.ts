@@ -324,6 +324,62 @@ describe('多语言可插拔执行器契约', () => {
   });
 });
 
+describe('runRefactorPipeline 静态复核降级（无权威验证命令）', () => {
+  it('verify:true 但探测不出命令（无 mvn/javac/go/npm 工具链）→ 静态 tree-sitter 复核通过记 not_verifiable，改动保留但如实标注', async () => {
+    const dir = tempRoot();
+    const target = path.join(dir, 'c.ts');
+    fs.writeFileSync(target, 'function g() {\n  return;\n  const ghost = 1;\n}\n', 'utf-8');
+    // 无 package.json / go.mod → defaultVerifyCommands 空；不注入 verifyImpl → 真 runner + 空命令 → 静态降级
+    const res = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { dead_statements: { enabled: true } },
+      verify: true,
+    });
+
+    const stage = res.stages.find((x) => x.id === 'dead_statements');
+    expect(stage?.outcome).toBe('not_verifiable');
+    expect(stage?.detail).toContain('静态'); // 如实标注：非编译级，静态复核通过
+    // 改动依仍落盘（死语句被清），但不再误报为编译级 applied
+    expect(stage?.outcome).not.toBe('applied');
+    expect(fs.readFileSync(target, 'utf-8')).not.toContain('ghost');
+  });
+
+  it('注入自定义语言执行器产出 ts_kernel 无解析器可识别的扩展名 → 静态复核失败回滚，原文件还原', async () => {
+    const dir = tempRoot();
+    // 未知扩展名 .xyz：parseAstRoot 无对应解析器即返回 null → 静态复核拦下
+    const target = path.join(dir, 'x.xyz');
+    fs.writeFileSync(target, 'legacy: ok\n', 'utf-8');
+    const before = fs.readFileSync(target, 'utf-8');
+
+    const lang = new RefactorLangRegistry();
+    lang.register({
+      lang: 'bad',
+      isSourceFile: (rel) => rel.endsWith('.xyz'),
+      detectVerifyCommands: () => [], // 探测不出权威命令 → 走静态复核
+      stages: [
+        {
+          kind: 'dead_imports',
+          label: 'bad write',
+          compute: () => ({ absToNew: new Map([[target, 'definitely broken']]), originals: new Map([[target, before]]) }),
+          limitations: [],
+        },
+      ],
+    });
+
+    const res = await runRefactorPipeline({
+      project_dir: dir,
+      steps: { dead_imports: { enabled: true } },
+      verify: true,
+      langs: lang,
+    });
+
+    const stage = res.stages.find((x) => x.id === 'dead_imports');
+    expect(stage?.outcome).toBe('rolled_back'); // 静态复核拦下 ts_kernel 无法解析的产物
+    expect(res.ok).toBe(false);
+    expect(fs.readFileSync(target, 'utf-8')).toBe(before); // 已还原
+  });
+});
+
 describe('package_migration 步骤（包改名/提级线）', () => {
   it('包改名 + import 引用面重写 + 别名清洗经管线落盘；改后验证失败 → 整体回滚', async () => {
     const dir = tempRoot();

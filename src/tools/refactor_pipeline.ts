@@ -27,6 +27,7 @@ import { flagDeadStatements, applyReachabilityRuns } from './dead_statements.js'
 import { removeImportsFromSource } from './remove_dead_imports.js';
 import { detectDeadImports } from './detect_dead_imports.js';
 import { computeMigrationPlan } from './package_migration.js';
+import { parseAstRoot } from './ts_kernel/index.js';
 import {
   RefactorLangRegistry,
   manifestPresent,
@@ -544,18 +545,8 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
       changedFiles.add(m.to);
     }
 
-    // 不可验证：仍已落盘，但如实标注
-    if (!verifyEnabled) {
-      r.stages.push({
-        id, label, index, outcome: 'not_verifiable',
-        files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
-      });
-      return;
-    }
-
-    const after = run({ cwd, commands });
-    if (after.status === 'fail') {
-      // ── 回滚此步：先逆向移动（to→from），再按原始内容还原 → 回到上一步绿点 ──
+    // 回滚 helper：逆向移动 + 按原始内容还原 + 冲减计数（复用于"改后验证失败"与"静态复核失败"）
+    const rollbackWrites = (): void => {
       for (const m of [...moves].reverse()) {
         if (fs.existsSync(m.to) && !fs.existsSync(m.from)) {
           const fromDir = path.dirname(m.from);
@@ -567,9 +558,43 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
       r.total_files_changed -= Math.max(plan.absToNew.size, moves.length);
       r.total_units_removed -= units;
       r.ok = false;
+    };
+
+    const changedCount = Math.max(plan.absToNew.size, moves.length);
+    // 有无"权威验证"：探测出命令组，或调用方显式给了 verifyImpl（自定验证器=权威）。
+    // 仅当用真实 runner（未注入 verifyImpl）且探测不出命令（缺 mvn/javac/go npm 等工具链）→ 走静态复核降级。
+    const hasAuthoritative = commands.length > 0 || !!opts.verifyImpl;
+
+    // ── 无权威验证：`!verify`（本就只落盘）或 `verify` 开了但命令组空（无工具链）──
+    // 降级：对每个内容改写的文件做 tree-sitter 静态复核——必须仍可解析；失败回滚。
+    if (!verifyEnabled || !hasAuthoritative) {
+      const staticFail = await staticRevalidate(plan.absToNew, proj);
+      if (staticFail) {
+        rollbackWrites();
+        r.stages.push({
+          id, label, index, outcome: 'rolled_back',
+          files_changed: changedCount, units_removed: units,
+          detail: `静态复核失败：${staticFail}`,
+        });
+        return;
+      }
+      r.stages.push({
+        id, label, index, outcome: 'not_verifiable',
+        files_changed: changedCount, units_removed: units,
+        detail: verifyEnabled
+          ? '无权威验证命令（探测不出 mvn/javac/go/npm 等工具链），静态 tree-sitter 复核通过——非编译级保证'
+          : undefined,
+      });
+      return;
+    }
+
+    const after = run({ cwd, commands });
+    if (after.status === 'fail') {
+      // ── 回滚此步：跨权威验证黄 → 回到上一步绿点 ──
+      rollbackWrites();
       r.stages.push({
         id, label, index, outcome: 'rolled_back',
-        files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
+        files_changed: changedCount, units_removed: units,
         detail: after.detail, baseline, after,
       });
       return;
@@ -577,10 +602,22 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
     r.stages.push({
       id, label, index, outcome: 'applied',
-      files_changed: Math.max(plan.absToNew.size, moves.length), units_removed: units,
+      files_changed: changedCount, units_removed: units,
       baseline, after,
     });
   }
+}
+
+/** 静态复核兜底（缺权威编译器的降级验证）：对内容改写的每个文件做 tree-sitter 解析，
+ *  必须仍能解析出根节点；任一失败返回首个失败文件的相对路径，否则 null。
+ *  这是"飞刀"级兜底——只拦"写成了不可解析的垃圾"，不能代替编译/测试。 */
+async function staticRevalidate(absToNew: Map<string, string>, proj: string): Promise<string | null> {
+  for (const abs of absToNew.keys()) {
+    const content = absToNew.get(abs)!;
+    const r = await parseAstRoot(abs, content);
+    if (!r?.root) return `${path.relative(proj, abs) || abs} 无法解析（tree-sitter 静态复核）`;
+  }
+  return null;
 }
 
 function countPlanned(opts: PipelineOptions): number {
