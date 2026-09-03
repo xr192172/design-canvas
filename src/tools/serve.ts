@@ -44,6 +44,7 @@ import { renderWorkbenchPage } from './workbench_page.js';
 import { proposeChange, listChanges, approveChange, rejectChange } from './code_workbench.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
+import { renderArchifyDemo } from './archify_demo.js';
 import { deriveMindMap } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
@@ -782,6 +783,28 @@ async function handleApiReconcileChain(req: http.IncomingMessage, res: http.Serv
       max_steps: typeof max_steps === 'number' ? max_steps : undefined,
     });
     sendJson(res, 200, { success: true, ...r });
+  } catch (e) {
+    sendError(res, 400, (e as Error).message);
+  }
+}
+
+/** POST /api/archify-demo：演示模式投影——把前端 IRView 映射成 Archify IR，
+ *  装配了 Archify（ARCHIFY_ROOT）则 validate+deliver HTML；未装配返回 IR + 说明。
+ *  body: { view: ProjView }。派生只读，不写回编辑真源。 */
+async function handleApiArchifyDemo(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const params = JSON.parse(body.toString('utf-8') || '{}');
+    const view = params.view;
+    if (!view || !Array.isArray(view.nodes)) {
+      sendError(res, 400, '缺参数 "view.nodes"（IRView 至少含 nodes[]）');
+      return;
+    }
+    const archifyRoot = typeof params.archify_root === 'string' ? params.archify_root : undefined;
+    const outDir = typeof params.out_dir === 'string' ? params.out_dir : undefined;
+    const result = renderArchifyDemo({ view, archifyRoot, outDir });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(result));
   } catch (e) {
     sendError(res, 400, (e as Error).message);
   }
@@ -2856,6 +2879,11 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/focus') && method === 'POST') {
       handleApiFocus(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/archify-demo') && method === 'POST') {
+      handleApiArchifyDemo(req, res);
       return;
     }
 
