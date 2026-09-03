@@ -193,8 +193,12 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）                                                                     |
 | `remove_dead_imports` | 移除失效 import                                                                                        |
 | `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移；按项目探测语言并跑语言专属 stage——Java 工程自动触发 Spring MVC 分层迁移、Python 走其死代码清理，落盘/验证/回滚统一闭环） |
-| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字                                                                                 |
+| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字（含混淆/压缩代码的短名还原可读）                                                                |
 | `find_similar_names`  | 检测易混淆相似名并消歧                                                                                        |
+
+> **反混淆边界**：完整"解混淆"是启发/LLM 级的非确定性还原，不适合作为确定性重构管线的
+> 基础工具。可逆的那半（保结构改名）走 `suggest_renames` + `rename_symbols`（可回滚）；
+> 字符串加密/扁平化等不可逆或不可判定的，留给人 / LLM —— 别指望"编译→反汇编"能救可读（可读信息在编译期已丢）。
 
 **诊断与审阅**
 

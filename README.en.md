@@ -194,8 +194,14 @@ A total of **50 MCP tools** are registered, organized into "capability navigatio
 | `refactor_pipeline` | Deterministic refactoring pipeline (dead code cleanup + package
 migration; auto-detects the project language and runs language-specific stages — auto-triggers Spring MVC layering on
 Java projects, Python dead-code cleanup on Python projects; apply / verify / rollback all in one loop) |
-| `suggest_renames` | Suggest semantic names for short / meaningless variables |
+| `suggest_renames` | Suggest semantic names for short / meaningless variables (incl. restoring readable names in obfuscated / minified code) |
 | `find_similar_names` | Detect and disambiguate easily-confused similar names |
+
+> **Deobfuscation boundary**: full deobfuscation is a heuristic / LLM-level non-deterministic
+> restoration, unfit as a base tool of the deterministic refactor pipeline. The reversible half
+> (structure-preserving renaming) goes through `suggest_renames` + `rename_symbols` (rollback-safe);
+> string-encryption / flattening etc. that are irreversible or undecidable stay with humans / LLM —
+> don't expect "compile → disassemble" to restore readability (the readable info is lost at compile time).
 
 **Diagnosis & review**
 
