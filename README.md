@@ -33,7 +33,7 @@ DSL 双层结构是两者的共同根基：
 | ------------ | ----------------------------------------------------------- | ---------------------------------------------------------------- |
 | **数据 / 协议层** | DSL 存取、代码理解、生成/回填/一致性、积木体系、运行时验证、诊断闭环，对外提供 MCP 工具与 HTTP API | 本仓库（MCP server）                                                  |
 | **可视化协作前端**  | 将实时 DSL 渲染为可交互工作台（沙盘、版本对比、问题清单、探针、契约、代码审批）                  | [dsl-workbench](https://github.com/xr192172/dsl-workbench)（独立仓库） |
-| **内置渲染器**    | 无前端环境时的预览兜底，将单张 DSL 渲染为自包含 HTML                             | `render_design`（内置）                                                 |
+| **内置渲染器**    | 无前端环境时的预览兜底，将单张 DSL 渲染为自包含 HTML                             | `render_design`（内置）                                              |
 
 ## 核心能力
 
@@ -41,10 +41,10 @@ DSL 双层结构是两者的共同根基：
 
 | 能力                | 说明                                             | 代表工具                                                                                                              |
 | ----------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **可视化协议层**        | DSL 读写编辑、设计视图与实际代码快照对比、内置渲染兜底                  | `get_dsl` / `edit_dsl` / `manage_feature` / `render_design` / `diff_views`                                           |
+| **可视化协议层**        | DSL 读写编辑、设计视图与实际代码快照对比、内置渲染兜底                  | `get_dsl` / `edit_dsl` / `manage_feature` / `render_design` / `diff_views`                                        |
 | **代码理解**          | 工程导入、语义搜索、影响分析、架构分层、单体拆分、算法/数据流推导              | `import_project` / `explore_code`                                                                                 |
 | **代码积木体系**        | 从任意来源（URL / 本地工程）收割代码为带契约的积木，支持切块、抽契约、瘦身、搜索与拼装 | `harvest_from_url` / `harvest_closure` / `extract_contracts` / `slim_brick` / `search_bricks` / `assemble_bricks` |
-| **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects`                    |
+| **运行时验证**         | 以实际运行观测对账契约与行为基线，形成「验证通过才提交，失败回滚」的防线           | `observe_instrument` / `observe_judge` / `reconcile_chain` / `reconcile_brick` / `reconcile_effects`              |
 | **生成 / 回填 / 一致性** | 从 DSL 生成代码骨架，解析实现回填契约，输出一致性报告                  | `scaffold` / `backfill_scaffold` / `consistency_check`                                                            |
 | **确定性改造（防返工）**    | 符号级代码编辑（绝不匹配错）、批量/跨文件重命名、死代码清理、改前 diff 审批、失败回滚 | `edit_code` / `rename_*` / `refactor_pipeline`                                                                    |
 | **诊断闭环**          | 症状 → 根因 → 修复 → 验证 → 提交（或回退）的完整链路               | `diagnose` / `refactor_judge` / `diagnose-loop`(CLI)                                                              |
@@ -105,12 +105,12 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 ## MCP 工具参考
 
-共注册 **51 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
+共注册 **50 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
 
 ### 能力导航（1 个）
 
-| 工具              | 用途                                                           |
-| ---------------- | ------------------------------------------------------------ |
+| 工具               | 用途                                                                                                  |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
 | `capability_map` | 能力线导航：6 条能力线（design/refactor/observe/harvest/cross/meta）× 线内工具与适用时机，agent 分层定位后进入具体工具；高频工具可绕过导航直接调用 |
 
 **使用示例**
@@ -140,7 +140,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `get_dsl`           | 统一只读入口：DSL / 节点 / 边 / 文件 / 决策 / 批注 / 快照 / 仿真状态 / 差异等查询，支持 `view`（design/live）与过滤参数 |
 | `edit_dsl`          | 统一写入口：`operations[]` 批量增删改、语义绑定、状态更新、标注、审批、自动布局，按序执行、任一失败全量回滚（原子）                  |
 | `manage_feature`    | 功能生命周期管理：create / clone / template / list / delete                                 |
-| `render_design`        | 渲染入口：mindmap / html / svg / markdown，支持 `view` 与输出路径                               |
+| `render_design`     | 渲染入口：mindmap / html / svg / markdown，支持 `view` 与输出路径                               |
 | `scaffold`          | 从 DSL 语义层生成代码骨架（vue / react / html）+ 状态推断                                          |
 | `backfill_scaffold` | 解析实现代码 API 签名回填 actual\_apis，输出差异报告                                                |
 | `consistency_check` | 对比预期契约与实际代码，输出一致性报告与跨文件不变式（只读）                                                     |
@@ -150,13 +150,13 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **代码理解**
 
-| 工具               | 用途                                             |
-| ---------------- | ---------------------------------------------- |
-| `import_project` | 导入代码项目为 DSL（支持本地绝对路径与浏览器上传，遵循 `.gitignore` 过滤） |
-| `diff_views`     | 对比设计视图与 live 代码快照                              |
+| 工具                 | 用途                                             |
+| ------------------ | ---------------------------------------------- |
+| `import_project`   | 导入代码项目为 DSL（支持本地绝对路径与浏览器上传，遵循 `.gitignore` 过滤） |
+| `diff_views`       | 对比设计视图与 live 代码快照                              |
 | `render_brickwork` | 渲染依赖驱动的功能社区工作台（积木化预览）                          |
-| `find_references`  | 查符号/字段引用（引用视角：改前看波及面），只读                 |
-| `detect_drift`     | 对照代码变更，检查设计是否过时 / 欠实现                       |
+| `find_references`  | 查符号/字段引用（引用视角：改前看波及面），只读                       |
+| `detect_drift`     | 对照代码变更，检查设计是否过时 / 欠实现                          |
 
 **积木体系**
 
@@ -171,30 +171,30 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 | `assemble_bricks`   | 用箱装积木拼装新项目                      |
 | `slim_brick`        | 将 Go 积木瘦身为派生积木（编译器式死码剪枝）        |
 | `narrate_step`      | 将流水线步骤叙述为受治理的叙述积木               |
-| `harvest_decisions` | 从项目记录反向采集设计决策                    |
+| `harvest_decisions` | 从项目记录反向采集设计决策                   |
 
 **运行时验证（Observe）**
 
-| 工具                  | 用途                           |
-| ------------------- | ---------------------------- |
+| 工具                   | 用途                           |
+| -------------------- | ---------------------------- |
 | `observe_instrument` | 自动插桩 / 还原 TS 项目，写盘后生成探针台账与统计 |
 | `observe_log`        | 按文件查询运行时日志                   |
 | `observe_judge`      | 批量裁决运行时事件                    |
-| `reconcile_chain`       | 将宿主链与其真实运行事件对账               |
-| `run_tests`             | 跑测试返回结构化失败定位（filter 定向 / 全量）    |
+| `reconcile_chain`    | 将宿主链与其真实运行事件对账               |
+| `run_tests`          | 跑测试返回结构化失败定位（filter 定向 / 全量） |
 
 **确定性改造**
 
-| 工具                    | 用途                                         |
-| --------------------- | ------------------------------------------ |
-| `edit_code`           | 符号级代码编辑（replace / insert / delete / range） |
-| `rename_many`         | 批量重命名局部变量（作用域隔离）                           |
-| `rename_symbols`      | 批量跨文件符号重命名（单条或批量统一入口，整体先 dry-run）       |
-| `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）          |
-| `remove_dead_imports` | 移除失效 import                                |
-| `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移）                      |
-| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字                         |
-| `find_similar_names`  | 检测易混淆相似名并消歧                                |
+| 工具                    | 用途                                                                                                 |
+| --------------------- | -------------------------------------------------------------------------------------------------- |
+| `edit_code`           | 符号级代码编辑（replace / insert / delete / range）                                                         |
+| `rename_many`         | 批量重命名局部变量（作用域隔离）                                                                                   |
+| `rename_symbols`      | 批量跨文件符号重命名（单条或批量统一入口，整体先 dry-run）                                                                  |
+| `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）                                                                     |
+| `remove_dead_imports` | 移除失效 import                                                                                        |
+| `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移；按项目探测语言并跑语言专属 stage——Java 工程自动触发 Spring MVC 分层迁移、Python 走其死代码清理，落盘/验证/回滚统一闭环） |
+| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字                                                                                 |
+| `find_similar_names`  | 检测易混淆相似名并消歧                                                                                        |
 
 **诊断与审阅**
 
@@ -205,12 +205,12 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **画布批注**
 
-| 工具             | 用途                                                |
-| -------------- | ------------------------------------------------- |
-| `canvas_notes` | 画布批注统一入口（read=读成语义工单 / mark=更新状态 / decide=LLM 决策） |
-| `archive_node` | 归档 DSL 节点（快照）                              |
-| `list_archive` | 列出归档节点                                    |
-| `sync_contracts` | 以 server_registry schema 为源，回填 DSL 契约        |
+| 工具               | 用途                                                |
+| ---------------- | ------------------------------------------------- |
+| `canvas_notes`   | 画布批注统一入口（read=读成语义工单 / mark=更新状态 / decide=LLM 决策） |
+| `archive_node`   | 归档 DSL 节点（快照）                                     |
+| `list_archive`   | 列出归档节点                                            |
+| `sync_contracts` | 以 server\_registry schema 为源，回填 DSL 契约            |
 
 **LLM 网关**
 
@@ -226,14 +226,13 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **迁移与评估**
 
-| 工具                            | 用途                                          |
-| ----------------------------- | ------------------------------------------- |
-| `impact_analysis`             | 改前风险闭包报告：变更点→反向可达闭包，输出受影响文件与风险排序（`hubs=true` 热区盘点） |
-| `cross_repo_symbol_index`     | 跨项目符号索引：两仓顶层符号求交=冲突/双胞胎、求差=迁移范围           |
-| `hybrid_precheck`             | 项目杂交预检：符号冲突 + 依赖版本冲突 + 功能重叠 → verdict ok/fix/blocked |
-| `behavior_baseline`           | 行为基线：金丝雀 harness 跑样例记录快照，改后对比验证「跑得对不对」       |
-| `code_health`                 | 代码健康度：死代码 / 圈复杂度 / 分层违规 → 健康分 + 问题清单         |
-| `spring_mvc_layering`         | 按 Spring MVC 分层（Java 专属）：类型级注解识别 controller/service/repository/entity/config，输出分层归属计划（只读分析） |
+| 工具                        | 用途                                                   |
+| ------------------------- | ---------------------------------------------------- |
+| `impact_analysis`         | 改前风险闭包报告：变更点→反向可达闭包，输出受影响文件与风险排序（`hubs=true` 热区盘点）   |
+| `cross_repo_symbol_index` | 跨项目符号索引：两仓顶层符号求交=冲突/双胞胎、求差=迁移范围                      |
+| `hybrid_precheck`         | 项目杂交预检：符号冲突 + 依赖版本冲突 + 功能重叠 → verdict ok/fix/blocked |
+| `behavior_baseline`       | 行为基线：金丝雀 harness 跑样例记录快照，改后对比验证「跑得对不对」               |
+| `code_health`             | 代码健康度：死代码 / 圈复杂度 / 分层违规 → 健康分 + 问题清单                 |
 
 ### `view` 参数
 

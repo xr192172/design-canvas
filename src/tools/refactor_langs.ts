@@ -44,12 +44,13 @@ export interface RefactorStepsCfg {
   dead_imports?: DeadImportsStepCfg;
   dead_statements?: DeadStatementsStepCfg;
   package_migration?: PackageMigrationStepCfg;
+  spring_mvc_layering?: { enabled?: boolean; annotate?: Record<string, unknown> };
 }
 
 // ─────────────────────────────────────────────
 // 契约接口
 // ─────────────────────────────────────────────
-export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_migration';
+export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_migration' | 'spring_mvc_layering';
 
 /** 一次迁移参数：把 `project/<prefix>` 整棵树移动到 `project/<to>`，
  *  顶层源文件的 `package <packageRename.from>` → `package <packageRename.to>`，
@@ -103,6 +104,8 @@ export interface RefactorStageComputeArgs {
   files?: string[];
   dead?: Array<{ source: string; files: string[] }>;
   migrate?: PackageMigrationSpec;
+  /** 自定义动作参数（如 spring_mvc_layering 的 target_base_package / annotation_layers），透传给 compute */
+  annotate?: Record<string, unknown>;
 }
 
 /** 单步执行器：纯计算，绝不落盘。落盘 + 验证 + 回滚全由管线负责。 */

@@ -41,6 +41,7 @@ import {
   type PackageMigrationSpec,
 } from './refactor_langs.js';
 import { pythonExecutor } from './python_refactor/index.js';
+import { javaExecutor } from '../java_refactor/executor.js';
 import type { JudgeIssue } from './refactor_judge.js';
 import { scanContracts, diffContracts, type ContractSnapshot, type ScanContractsOptions, type UndefinedRef } from './contract_gate.js';
 import { checkEmbedSubmissions, type SubmitCheckResult } from './submit_gate.js';
@@ -319,6 +320,9 @@ function buildDefaultLangs(): RefactorLangRegistry {
     manifestPriority: 70,
   });
 
+  // Java。manifest：pom.xml / build.gradle(.kts)；spring_mvc_layering 收敛在此
+  reg.register(javaExecutor);
+
   return reg;
 }
 
@@ -341,6 +345,7 @@ export interface ScheduledStep {
   files?: string[];
   dead?: Array<{ source: string; files: string[] }>;
   migrate?: PackageMigrationSpec;
+  annotate?: Record<string, unknown>;
 }
 
 /**
@@ -370,6 +375,10 @@ export function collectSteps(
         migrate:
           stage.kind === 'package_migration'
             ? (cfg as PackageMigrationStepCfg | undefined)?.migrate
+            : undefined,
+        annotate:
+          stage.kind === 'spring_mvc_layering'
+            ? (cfg as { annotate?: Record<string, unknown> } | undefined)?.annotate
             : undefined,
       });
     }
@@ -472,7 +481,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
 
   for (const [i, s] of stepList.entries()) {
     await runStage(i + 1, s.stage.kind, s.stage.label, s.enabled, () =>
-      s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead, migrate: s.migrate }),
+      s.stage.compute({ project_dir: proj, cwd, files: s.files, dead: s.dead, migrate: s.migrate, annotate: s.annotate }),
     );
   }
 

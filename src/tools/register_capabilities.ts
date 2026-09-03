@@ -266,16 +266,17 @@ declareCapability({
   },
 });
 
-/** 按 Spring MVC 分层（Java 专属）：类型级注解识别 controller/service/repository/entity/config */
+/** 按 Spring MVC 分层（Java 专属，收敛进 Java 重构执行器）：从类型级注解识别 controller/
+ *  service/repository/entity/config，随 refactor 线命中 Java 工程自动触发，落盘/验证/回滚由管线闭环 */
 declareCapability({
   id: 'spring_mvc_layering',
   label: '按 Spring MVC 分层（类型级注解识别）',
-  desc: '扫 Java 源码，从 tree-sitter-java AST 的 class/interface/enum/record 类型声明的 modifiers 子树提取类型级注解（@RestController/@Controller→controller、@Service→service、@Repository/@Mapper→repository、@Entity/@Table→entity、@Configuration/@Component→config），按文件归层 + 推断根包，产出分层归属计划（只读分析，落盘由调用方接驳）',
+  desc: '扫 Java 源码，从 tree-sitter-java AST 的 class/interface/enum/record 类型声明的 modifiers 子树提取类型级注解（@RestController/@Controller→controller、@Service→service、@Repository/@Mapper→repository、@Entity/@Table→entity、@Configuration/@Component→config），按文件归层 + 推断根包，产出迁移计划；作为 javaExecutor 的 stage 收敛进 refactor 管线，物理移动文件 + 改写 package 声明 + 全项目 import FQN，落盘/验证/回滚由管线统一闭环',
   default: 'unimplemented',
   overrides: {
     java: 'full_ast',
   },
   notes: {
-    java: 'tree-sitter-java 的 class_declaration.modifiers → marker_annotation/annotation → name；package_declaration 提取包名推断根包',
+    java: '非独立工具：作为 javaExecutor.stages 的 spring_mvc_layering 随 Java 项目探明自动拾取；tree-sitter-java 的 class_declaration.modifiers → marker_annotation/annotation → name；package_declaration 提取包名推断根包',
   },
 });
