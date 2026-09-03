@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, afterAll } from 'vitest';
-import { detectDeadImports, classifyFileKind } from '../../src/tools/detect_dead_imports';
+import { detectDeadImports, classifyFileKind, enumerateTsSources } from '../../src/tools/detect_dead_imports';
 
 const roots: string[] = [];
 afterAll(() => {
@@ -190,6 +190,33 @@ describe('detectDeadImports：目录扫描', () => {
     expect(classifyFileKind('tests/__fixtures__/data.ts')).toBe('fixture');
     expect(classifyFileKind('tests/foo.test.ts')).toBe('test');
     expect(classifyFileKind('src/svc/real.ts')).toBe('src');
+  });
+
+  it('注释里的 import 字面量不当真实源；URL 字符串不误剥', () => {
+    // docstring / 代码注释里的 `import {..} from 'a'` 示例不是真导入 → 源发现侧应剥离注释
+    const src = [
+      "// 示例：`import { a } from 'a'` shows how",
+      "/* doc: import { b, c } from 'x' */",
+      "const url = 'https://cdn.example.com/p.js';",
+      "import { real } from 'real-pkg';",
+      'export const real = 1;',
+    ].join('\n');
+    const sources = enumerateTsSources(src);
+    expect(sources).not.toContain('a'); // 行注释里的模块名
+    expect(sources).not.toContain('x'); // 块注释里的模块名
+    expect(sources).toContain('real-pkg'); // 真实 import 保留
+  });
+
+  it('文件仅注释里含 import 字面量 → 不报死 import', () => {
+    const dir = tempRoot();
+    // 整个文件唯一的 "import ... from 'a'" 在注释里：源发现剥离后无真实源，不该报死
+    fs.writeFileSync(
+      path.join(dir, 'doc.ts'),
+      ["// `import { a } from 'a'`", 'export const x = 1;'].join('\n'),
+      'utf-8',
+    );
+    const res = detectDeadImports({ project_dir: dir });
+    expect(res.dead.find((c) => c.source === 'a')).toBeUndefined();
   });
 
   it('跳过 .design-canvas* 快照/备份目录（含 .design-canvas.bak-<ts> 变体）——不把历史快照副本重复计入', () => {

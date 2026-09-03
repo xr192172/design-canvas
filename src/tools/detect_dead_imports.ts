@@ -228,8 +228,25 @@ export function detectDeadImports(opts: DetectDeadImportsOptions): DetectDeadImp
   };
 }
 
-/** 枚举 TS/JS 源码里出现的模块说明符（import/require/export-from），去引号。 */
+/** 剥 TS 行注释 + 块注释（保行号/换行数），用于"源发现"侧：注释里的 import 字面量
+ *  （如 docstring `// B import {..} from 'a'`）不该被当成真实模块源。
+ *  先归一化 \r：JS 正则 `.` 不匹配 `\r`，CRLF 文件里 `//` 行注释会剥离失败（`$` 又不能在 \r 前锚定）。
+ *  行注释保护 URL：`://` 前的 `//` 当字符串不剥（https://…）。块注释替换为空白保换行。 */
+function stripTsComments(src: string): string {
+  let out = src.replace(/\r/g, '');
+  out = out.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  out = out
+    .split('\n')
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n');
+  return out;
+}
+
+/** 枚举 TS/JS 源码里出现的模块说明符（import/require/export-from），去引号。
+ *  先剥注释：注释里的 `import ... from 'x'` / `require('x')` 字面量不是真导入，
+ *  不该被当成源（否则 docstring 示例会把 'a'/'x' 之类报成死 import）。 */
 export function enumerateTsSources(src: string): string[] {
+  const scan = stripTsComments(src);
   const out = new Set<string>();
   const mod = (m: RegExpMatchArray): void => {
     const s = m[m.length - 1];
@@ -238,18 +255,18 @@ export function enumerateTsSources(src: string): string[] {
   // 具名/默认/命名空间/副作用 import 与 type import
   const reImport = /import(?:\s+type)?\s+[\s\S]*?from\s*(['"][^'"]+['"])/g;
   let m: RegExpMatchArray | null;
-  while ((m = reImport.exec(src)) !== null) mod(m);
+  while ((m = reImport.exec(scan)) !== null) mod(m);
   // import 'x' 副作用（无 from）
   const reBare = /import\s*(['"])([^'"]+)\1/g;
-  while ((m = reBare.exec(src)) !== null) {
-    if (m.index !== undefined && src.slice(Math.max(0, m.index - 8), m.index).trimEnd().endsWith('from')) continue;
+  while ((m = reBare.exec(scan)) !== null) {
+    if (m.index !== undefined && scan.slice(Math.max(0, m.index - 8), m.index).trimEnd().endsWith('from')) continue;
     out.add(m[2]);
   }
   // export ... from 'x'
   const reExport = /export\s*[\s\S]*?from\s*(['"][^'"]+['"])/g;
-  while ((m = reExport.exec(src)) !== null) mod(m);
+  while ((m = reExport.exec(scan)) !== null) mod(m);
   // require('x')
   const reRequire = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
-  while ((m = reRequire.exec(src)) !== null) out.add(m[2]);
+  while ((m = reRequire.exec(scan)) !== null) out.add(m[2]);
   return [...out];
 }
