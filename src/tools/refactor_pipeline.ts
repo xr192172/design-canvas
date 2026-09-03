@@ -131,6 +131,8 @@ export interface PipelineResult {
   baseline: VerificationOutcome | null;
   /** 初始开启的步骤数（含后续 skipped） */
   planned_steps: number;
+  /** 实际改动过的文件（含移动的 from/to；相对 cwd，正斜杠；排序）——供报表/审计精确到文件 */
+  changed_files: string[];
   /** 提交层自检结果（submitCheck 开启时）；null = 未开启 */
   submit_check?: SubmitCheckResult | null;
 }
@@ -462,6 +464,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
       total_units_removed: 0,
       baseline,
       planned_steps: planned,
+      changed_files: [],
       submit_check: opts.submitCheck ? checkEmbedSubmissions(cwd) : null,
     };
   }
@@ -473,6 +476,7 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     total_units_removed: 0,
     baseline,
     planned_steps: planned,
+    changed_files: [],
     submit_check: opts.submitCheck ? checkEmbedSubmissions(cwd) : null,
   };
 
@@ -495,6 +499,8 @@ export async function runRefactorPipeline(opts: PipelineOptions): Promise<Pipeli
     }));
     opts.onReviewIssues(issues);
   }
+
+  r.changed_files = [...changedFiles].map((abs) => relTo(abs)).sort();
 
   return r;
 
