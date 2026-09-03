@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, afterAll } from 'vitest';
-import { detectDeadImports } from '../../src/tools/detect_dead_imports';
+import { detectDeadImports, classifyFileKind } from '../../src/tools/detect_dead_imports';
 
 const roots: string[] = [];
 afterAll(() => {
@@ -161,6 +161,35 @@ describe('detectDeadImports：目录扫描', () => {
     expect(res.scanned).toBe(1);
     expect(res.dead.find((c) => c.source === 'lodash')).toBeUndefined();
     expect(res.dead.find((c) => c.source === 'react')).toBeDefined();
+  });
+
+  it('来源分类：src/test/fixture 分层，byKind 聚合正确', () => {
+    const dir = tempRoot();
+    // 真实源码里的死 import（可清）
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), "import _ from 'dep-a';\nexport const a = 1;\n", 'utf-8');
+    // 测试文件
+    fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'tests', 'b.test.ts'), "import x from 'dep-b';\nexport const b = 1;\n", 'utf-8');
+    // 夹具目录（字面量模块名，噪音）
+    fs.mkdirSync(path.join(dir, 'tests', 'fixtures'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'tests', 'fixtures', 'sample.ts'), "import y from 'x';\nexport const s = 1;\n", 'utf-8');
+
+    const res = detectDeadImports({ project_dir: dir });
+    // 每个死源对应文件都有来源分类（scan 产出的 rel 用 OS 分隔符）
+    expect(res.fileKind?.[path.join('src', 'a.ts')]).toBe('src');
+    expect(res.fileKind?.[path.join('tests', 'b.test.ts')]).toBe('test');
+    expect(res.fileKind?.[path.join('tests', 'fixtures', 'sample.ts')]).toBe('fixture');
+    // 聚合：src 1、test 1、fixture 1；噪音可一眼识别
+    expect(res.byKind).toEqual({ src: 1, test: 1, fixture: 1, generated: 0, snapshot: 0 });
+  });
+
+  it('classifyFileKind：快照/生成物优先级 + 默认 src', () => {
+    expect(classifyFileKind('.design-canvas/projects/x/a.ts')).toBe('snapshot');
+    expect(classifyFileKind('src/gen/cli.gen.ts')).toBe('generated');
+    expect(classifyFileKind('tests/__fixtures__/data.ts')).toBe('fixture');
+    expect(classifyFileKind('tests/foo.test.ts')).toBe('test');
+    expect(classifyFileKind('src/svc/real.ts')).toBe('src');
   });
 
   it('跳过 .design-canvas* 快照/备份目录（含 .design-canvas.bak-<ts> 变体）——不把历史快照副本重复计入', () => {

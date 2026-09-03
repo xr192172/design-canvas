@@ -51,7 +51,14 @@ export interface DetectDeadImportsResult {
   scanned: number;
   /** 规则说明（供报告） */
   limitations: string[];
+  /** 每个死 import 引用文件的来源分类（相对 project_dir → kind），便于一眼区分"真实源码可清"vs"测试/夹具噪音" */
+  fileKind?: Record<string, FileKind>;
+  /** 死 import 出现次数按来源分类聚合（src/test/fixture/generated/snapshot） */
+  byKind?: Record<FileKind, number>;
 }
+
+/** 死 import 引用的来源分类：真实源码 / 测试 / 生成物 / 测试夹具 / 快照副本 */
+export type FileKind = 'src' | 'test' | 'fixture' | 'generated' | 'snapshot';
 
 const TS_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 const GO_RE = /\.go$/;
@@ -60,6 +67,33 @@ function langOf(rel: string): 'go' | 'ts' | null {
   if (GO_RE.test(rel)) return 'go';
   if (TS_RE.test(rel)) return 'ts';
   return null;
+}
+
+/**
+ * 按路径约定分类死 import 引用来源。
+ * 优先级：快照 > 生成物 > 夹具 > 测试 > 源码（fixture/generated 属"不应真清"的噪音层）。
+ * 纯路径判断，不读文件；对已显式收敛（files）或默认扫描都适用。
+ */
+export function classifyFileKind(rel: string): FileKind {
+  const p = rel.split(/[\\/]/);
+  const base = p[p.length - 1] ?? '';
+  if (p.some((seg) => seg.startsWith('.design-canvas'))) return 'snapshot';
+  if (/\.gen\.(ts|tsx|js|jsx|mjs|cjs|go)$/.test(base) || /\.generated\.|_generated\.go$/.test(base)) return 'generated';
+  if (
+    p.some((seg) => /^(fixtures?|__fixtures__|testdata|golden|snapshots)$/i.test(seg)) ||
+    /\.(fixtures?|_testdata)\./.test(base)
+  ) {
+    return 'fixture';
+  }
+  if (
+    /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(base) ||
+    /_test\.go$/.test(base) ||
+    /[.\\/]test_.+\.go$/.test(base) ||
+    p.includes('__tests__')
+  ) {
+    return 'test';
+  }
+  return 'src';
 }
 
 /** 递归收集项目内 TS/Go 源文件（跳过 node_modules/.git/dist） */
@@ -167,8 +201,15 @@ export function detectDeadImports(opts: DetectDeadImportsOptions): DetectDeadImp
   }
 
   const dead: DeadImportCandidate[] = [];
+  const fileKind: Record<string, FileKind> = {};
+  const byKind: Record<FileKind, number> = { src: 0, test: 0, fixture: 0, generated: 0, snapshot: 0 };
   for (const [source, a] of agg) {
     if (a.files.length === 0) continue;
+    for (const rel of a.files) {
+      const kind = classifyFileKind(rel);
+      fileKind[rel] = kind;
+      byKind[kind] += 1;
+    }
     dead.push({ source, files: a.files.sort(), reason: 'no_reference' });
   }
   dead.sort((x, y) => (x.source < y.source ? -1 : 1));
@@ -176,10 +217,13 @@ export function detectDeadImports(opts: DetectDeadImportsOptions): DetectDeadImp
   return {
     dead,
     scanned: absFiles.length,
+    fileKind,
+    byKind,
     limitations: [
       '文件级自洽判定：某 import 的全部绑定在文件内零引用即报死；注释中的同名出现（TS）会保守多活',
       'Go 空导入/点导入与 TS 副作用导入/re-export 恒活（import 即执行副作用，绝不误删）',
       '判定仅见文件内部，未做跨文件可达性——保守漏报多于误报；删除前请先过验证闭环',
+      '来源分类纯路径判定：fixture/generated/snapshot 多为夹具/产物噪音，真实可清项以 src/test 为主，仍建议逐个过验证',
     ],
   };
 }
