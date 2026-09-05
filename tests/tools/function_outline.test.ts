@@ -84,4 +84,29 @@ describe('queryFunctionOutline', () => {
     const o = queryFunctionOutline(db);
     expect(o.functions).toEqual([]);
   });
+
+  it('按 dir 懒加载过滤：只返回该目录下的函数', () => {
+    fn('cmd/a/main.go#Main', 'function', 'Main', 'cmd/a/main.go', 1, 5);
+    fn('cmd/a/main.go#step', 'function', 'step', 'cmd/a/main.go', 7, 10);
+    fn('cmd/b/other.go#Other', 'function', 'Other', 'cmd/b/other.go', 1, 3);
+    fn('pkg/util.go#Helper', 'function', 'Helper', 'pkg/util.go', 3, 9);
+    fn('hello.go#Top', 'function', 'Top', 'hello.go', 1, 2); // 根目录（无斜杠）
+
+    // dir=cmd/a → 只该目录
+    const a = queryFunctionOutline(db, { dir: 'cmd/a' });
+    expect(a.functions.map((f) => f.name).sort()).toEqual(['Main', 'step']);
+    expect(a.functions.every((f) => f.dir === 'cmd/a')).toBe(true);
+
+    // dir=pkg → 仅 pkg/util.go 里的 Helper
+    const p = queryFunctionOutline(db, { dir: 'pkg' });
+    expect(p.functions.map((f) => f.name)).toEqual(['Helper']);
+
+    // dir=.（根）→ 顶层无斜杠文件
+    const root = queryFunctionOutline(db, { dir: '.' });
+    expect(root.functions.map((f) => f.name)).toEqual(['Top']);
+
+    // 无 dir → 全量
+    const all = queryFunctionOutline(db);
+    expect(all.functions.map((f) => f.name).sort()).toEqual(['Helper', 'Main', 'Other', 'Top', 'step']);
+  });
 });

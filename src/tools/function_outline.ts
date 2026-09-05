@@ -64,8 +64,10 @@ export function resolveFunctionCacheDb(feature?: string, sourceRoot?: string): s
   return candidates.find((p) => p && fs.existsSync(p)) ?? null;
 }
 
-/** 纯函数：从已打开的 db 汇聚函数级大纲。全量返回（不做函数截断——像编译器一样数据完整） */
-export function queryFunctionOutline(db: Database): FunctionOutline {
+/** 纯函数：从已打开的 db 汇聚函数级大纲。全量返回（不做函数截断——像编译器一样数据完整）。
+ *  dir 可选：仅返回该目录下的函数（懒加载按目录查询，避免一次拉全量）。 */
+export function queryFunctionOutline(db: Database, opts: { dir?: string } = {}): FunctionOutline {
+  const dirFilter = opts.dir?.trim() ? opts.dir.trim() : undefined;
 
   // ① 函数/方法符号（排除局部闭包，避免契约面噪音）
   let fnRows: Array<{
@@ -73,13 +75,19 @@ export function queryFunctionOutline(db: Database): FunctionOutline {
     file_path: string; start_line: number; end_line: number; signature: string | null;
   }>;
   try {
+    // dir 过滤在 SQL 层做（目录查询只拉该目录行，省全量扫）——根目录(.) = 无斜杠的顶层文件
+    // 用 ? 占位参数而非字符串拼接（SQLite 双引号当标识符，LIKE 需单引号/参数）
+    const params: Array<string> = [];
+    let extra = '';
+    if (dirFilter === '.') { extra = " AND file_path NOT LIKE '%/%'"; }
+    else if (dirFilter) { extra = ' AND file_path LIKE ?'; params.push(`${dirFilter}/%`); }
     fnRows = db
       .prepare(
         `SELECT id, kind, name, qualified_name, file_path, start_line, end_line, signature
-         FROM nodes WHERE kind IN ('function','method') AND COALESCE(is_closure, 0) = 0
+         FROM nodes WHERE kind IN ('function','method') AND COALESCE(is_closure, 0) = 0${extra}
          ORDER BY file_path, start_line`,
       )
-      .all() as typeof fnRows;
+      .all(...params) as typeof fnRows;
   } catch {
     return { db_file: '', generated_at: Date.now(), functions: [] };
   }
@@ -142,7 +150,8 @@ export function queryFunctionOutline(db: Database): FunctionOutline {
     }
   }
 
-  const fns = [...byId.values()];
+  let fns = [...byId.values()];
+  if (dirFilter) fns = fns.filter((f) => (f.dir && f.dir !== '.' ? f.dir : '.') === dirFilter);
 
   return {
     db_file: '', // 调用方填
@@ -151,34 +160,72 @@ export function queryFunctionOutline(db: Database): FunctionOutline {
   };
 }
 
-/** 按 feature / source_root 定位缓存并输出大纲。无缓存广播退化为空数组（不伪造）。 */
-export function buildFunctionOutline(feature?: string, sourceRoot?: string):
-  { ok: boolean; outline: FunctionOutline; note?: string } {
+/** 目录统计：feature 下所有函数目录 + 各自文件数/函数数（懒加载首屏轻量清单，不含函数体） */
+export function listFunctionDirs(feature?: string, sourceRoot?: string):
+  { ok: boolean; dirs: Array<{ dir: string; files: number; fns: number }>; note?: string } {
+  const res = withCacheDb(feature, sourceRoot, (db): Array<{ dir: string; files: number; fns: number }> => {
+    let rows: Array<{ file_path: string }> = [];
+    try {
+      rows = db
+        .prepare(`SELECT file_path FROM nodes WHERE kind IN ('function','method') AND COALESCE(is_closure, 0) = 0`)
+        .all() as Array<{ file_path: string }>;
+    } catch {
+      return [];
+    }
+    const byDir = new Map<string, { files: Set<string>; fns: number }>();
+    for (const r of rows) {
+      const fp = path.posix.normalize(r.file_path.replace(/\\/g, '/'));
+      const d = fp.includes('/') ? fp.split('/').slice(0, -1).join('/') : '.';
+      if (!byDir.has(d)) byDir.set(d, { files: new Set(), fns: 0 });
+      const b = byDir.get(d)!;
+      b.files.add(fp.split('/').pop() || fp);
+      b.fns += 1;
+    }
+    return [...byDir.entries()]
+      .map(([dir, b]) => ({ dir, files: b.files.size, fns: b.fns }))
+      .sort((a, b) => a.dir.localeCompare(b.dir));
+  });
+  if (!res.ok) return { ok: false, dirs: [], note: res.note };
+  return { ok: true, dirs: res.data };
+}
+
+/** 打开缓存并执行 fn；缓存缺失/打不开时按 note 退化空结果。 */
+function withCacheDb<T>(
+  feature: string | undefined,
+  sourceRoot: string | undefined,
+  fn: (db: Database) => T,
+): { ok: boolean; note?: string; data: T } {
   const dbFile = resolveFunctionCacheDb(feature, sourceRoot);
   if (!dbFile) {
-    return {
-      ok: false,
-      outline: { db_file: '', generated_at: Date.now(), functions: [] },
-      note: '未找到项目缓存（cache.db / import_cache_*.db），请先运行 import_project 建立符号缓存',
-    };
+    return { ok: false, note: '未找到项目缓存（cache.db / import_cache_*.db），请先运行 import_project 建立符号缓存', data: undefined as unknown as T };
   }
   let db;
   try {
     db = openDb(dbFile);
   } catch {
-    return {
-      ok: false,
-      outline: { db_file: '', generated_at: Date.now(), functions: [] },
-      note: `缓存 ${dbFile} 无法打开`,
-    };
+    return { ok: false, note: `缓存 ${dbFile} 无法打开`, data: undefined as unknown as T };
   }
   try {
-    const outline = queryFunctionOutline(db);
-    outline.db_file = dbFile;
-    outline.feature = feature;
-    outline.source_root = sourceRoot;
-    return { ok: true, outline };
+    return { ok: true, data: fn(db) };
   } finally {
     try { db.close(); } catch { /* 已关 */ }
   }
+}
+
+/** 按 feature / source_root 定位缓存并输出大纲。dir 可选：懒加载只查该目录函数。 */
+export function buildFunctionOutline(feature?: string, sourceRoot?: string, opts?: { dir?: string }):
+  { ok: boolean; outline: FunctionOutline; note?: string } {
+  const res = withCacheDb(feature, sourceRoot, (db) => {
+    const outline = queryFunctionOutline(db, { dir: opts?.dir });
+    return outline;
+  });
+  if (!res.ok) {
+    return { ok: false, outline: { db_file: '', generated_at: Date.now(), functions: [] }, note: res.note };
+  }
+  const outline = res.data;
+  const dbFile = resolveFunctionCacheDb(feature, sourceRoot);
+  outline.db_file = dbFile ?? '';
+  outline.feature = feature;
+  outline.source_root = sourceRoot;
+  return { ok: true, outline };
 }

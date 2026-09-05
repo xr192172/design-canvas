@@ -46,7 +46,7 @@ import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { runArchifyPipeline } from './archify_pipeline.js';
 import { adaptIRTree } from './archify_project.js';
-import { buildFunctionOutline } from './function_outline.js';
+import { buildFunctionOutline, listFunctionDirs } from './function_outline.js';
 import { deriveMindMap, buildFileIndex } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
@@ -861,7 +861,15 @@ function handleApiFunctionOutline(req: http.IncomingMessage, res: http.ServerRes
       sendError(res, 400, '缺参数 "feature"（用于定位函数级缓存的 feature 名）');
       return;
     }
-    const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot);
+    const dir = (url.searchParams.get('dir') || '').trim() || undefined;
+    if (!dir) {
+      // 无 dir → 目录清单（懒加载首屏，轻量）
+      const r = listFunctionDirs(feature, sourceRoot);
+      sendJson(res, r.ok ? 200 : 404, r.ok ? { feature, dirs: r.dirs } : { error: r.note ?? '无函数级数据', dirs: [] });
+      return;
+    }
+    // 有 dir → 仅该目录函数（真按目录懒加载，SQL 层过滤）
+    const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { dir });
     sendJson(res, ok ? 200 : 404, ok ? outline : { error: note ?? '无函数级数据', functions: [] });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
