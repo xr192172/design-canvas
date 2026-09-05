@@ -143,54 +143,27 @@ function archBoundaries(sem: SemanticSurface): Array<{ kind: 'region'; label: st
     .filter(([, ids]) => ids.length >= 2)
     .map(([g, ids]) => ({ kind: 'region' as const, label: g, wraps: ids }));
 }
-/** 架构组件：按拓扑分列排布（每列 ≤6 节点纵向叠放，跨列横排）。分列依据：
- *  - 有多个顶层功能分区（groupOf）时按分区成列——各区一列、区内纵排，表达边界归属；
- *  - 分区数 ≤1（无分组 / 平铺文件 / 单链步骤）时退化为按 colOrder 拓扑分列——
- *    链式/星式节点横排成列，边沿列间方向走，避免单列堆叠下 star 边垂直穿节点
- *    （修 architecture/lifecycle 的 edge-through-node）。
- *  列序按拓扑（colOrder 最小值）而非字典序 → 链式/管线节点相邻列，主路径边不横穿中间列。 */
+/** 架构组件：坐标统一按拓扑分列（近正方形网格），groupOf 只用于 archBoundaries 表达边界、不决定坐标。
+ *  拓扑分列按 colOrder 排序后切成列、每列纵排、跨列横排 → 链式/星式边沿列间方向走，
+ *  不穿过中间节点。单分区（无 groupOf）与多分区一致：都按拓扑分列，避免任何分区在
+ *  单行堆叠导致星型边水平穿节点（修 edge-through-node）。 */
 function archPosComponents(sem: SemanticSurface): Record<string, unknown>[] {
-  const byCol = new Map<string, string[]>();
-  for (const n of sem.nodes) {
-    const g = sem.groupOf?.get(n.id) || '其他';
-    if (!byCol.has(g)) byCol.set(g, []);
-    byCol.get(g)!.push(n.id);
-  }
-  const isSinglePartition = byCol.size <= 1;
+  const ordered = [...sem.nodes].sort((a, b) => (sem.colOrder.get(a.id) ?? 0) - (sem.colOrder.get(b.id) ?? 0));
   const pos = new Map<string, [number, number]>();
-  if (isSinglePartition) {
-    // 单分区退化：按拓扑分列，节点横排成「近正方形」网格，边不穿节点
-    const ordered = [...sem.nodes].sort((a, b) => (sem.colOrder.get(a.id) ?? 0) - (sem.colOrder.get(b.id) ?? 0));
-    const n = ordered.length;
-    const cols = Math.max(1, Math.min(6, Math.ceil(Math.sqrt(n))));
-    const rowsPerCol = Math.ceil(n / cols);
-    ordered.forEach((nd, i) => {
-      const ci = Math.floor(i / rowsPerCol);
-      const ri = i % rowsPerCol;
-      pos.set(nd.id, [ci * 250, ri * 120]);
-    });
-  } else {
-    // 多分区：列按组内拓扑最深列最小来排序（越上游越靠左），保证连接边相邻、不穿中间列
-    const cols = [...byCol.keys()].sort(
-      (a, b) => minCol(sem, byCol.get(a)!) - minCol(sem, byCol.get(b)!),
-    );
-    cols.forEach((g, ci) => byCol.get(g)!.forEach((id, ri) => pos.set(id, [ci * 250, ri * 120])));
-  }
+  const n = ordered.length;
+  const cols = Math.max(1, Math.min(6, Math.ceil(Math.sqrt(n))));
+  const rowsPerCol = Math.max(1, Math.ceil(n / cols));
+  ordered.forEach((nd, i) => {
+    const ci = Math.floor(i / rowsPerCol);
+    const ri = i % rowsPerCol;
+    pos.set(nd.id, [ci * 250, ri * 130]);
+  });
   return sem.nodes.map((n) => {
     const c: Record<string, unknown> = { id: n.id, type: n.type, label: n.label, pos: pos.get(n.id) || [0, 0], size: [componentWidth(n.label, n.sublabel), 60] };
     if (n.sublabel) c.sublabel = n.sublabel;
     if (n.tag) c.tag = n.tag;
     return c;
   });
-}
-/** 组内拓扑最浅列号（组内所有节点的 colOrder 最小值；无则退化 0） */
-function minCol(sem: SemanticSurface, ids: string[]): number {
-  let m = Infinity;
-  for (const id of ids) {
-    const c = sem.colOrder.get(id);
-    if (c !== undefined && c < m) m = c;
-  }
-  return Number.isFinite(m) ? m : 0;
 }
 
 // ── sequence ──
