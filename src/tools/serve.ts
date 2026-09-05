@@ -25,6 +25,7 @@ import { judgeGuardLog } from '../observe/judge_guard.js';
 import { importProject } from './import_project.js';
 import { getProjectCacheDb, openDb } from '../db/db.js';
 import { validateDSLJson } from '../dsl/validator.js';
+import { saveAutoSnapshot, pruneSnapshots } from './snapshot.js';
 import { dagLayout, forceLayout, gridAlign } from './dag_layout.js';
 import { scaffold } from './scaffold.js';
 import { checkConsistency } from './consistency.js';
@@ -40,12 +41,12 @@ import { buildDictionaryView, getGlobalDictFile, getProjectDictFile, loadGlobalD
 import { ingestTerm, classifyTerm, generateDictEntry } from './dict_gen.js';
 import { readRegistry, updateArtifact } from './registry.js';
 import { renderDesign } from './render_design.js';
-import { renderWorkbenchPage } from './workbench_page.js';
 import { proposeChange, listChanges, approveChange, rejectChange } from './code_workbench.js';
 import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
-import { renderArchifyDemo } from './archify_demo.js';
-import { deriveMindMap } from './derive_mind_map.js';
+import { runArchifyPipeline } from './archify_pipeline.js';
+import { adaptIRTree } from './archify_project.js';
+import { deriveMindMap, buildFileIndex } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
 import { getMindMapFile } from './derive_mind_map.js';
@@ -53,6 +54,7 @@ import { resolveCanvasNoteTargets, renderCanvasNotesDigest, markCanvasNotesStatu
 import type { MindMap } from '../dsl/mindmap.js';
 import { oplAdd, oplLocate, oplDeclare, oplImplement, oplCheck, oplIntegrate, oplList, oplGet, oplAuto } from './opl.js';
 import { traceExecChain, type TraceStepSpec } from './trace_exec.js';
+import { schemas, RESPONSE_SCHEMA_AT, API_VERSION, type ResponseSchemaKey } from '../api/contract.js';
 import { deriveDetailChain } from './derive_chain.js';
 import { reconcileChain } from './reconcile_chain.js';
 import type { DesignDSL } from '../dsl/types.js';
@@ -130,6 +132,25 @@ function sendError(res: http.ServerResponse, status: number, message: string): v
   sendJson(res, status, { error: message });
 }
 
+/** 契约护栏：给响应平铺 `_api` 版本字段，safeParse 一次；失败仅记日志，护栏不阻断渲染。
+ *  guard 是「昭示」不是「改写」——payload 结构以 zod 单源为准，此处仅在顶层平铺加版本字段。 */
+function guard(
+  res: http.ServerResponse,
+  path: string,
+  schemaKey: ResponseSchemaKey,
+  payload: unknown,
+  status = 200,
+): void {
+  const tagged = { ...(payload as Record<string, unknown>), [RESPONSE_SCHEMA_AT]: API_VERSION };
+  const schema = schemas[schemaKey];
+  const r = schema.safeParse(tagged);
+  if (!r.success) {
+    const detail = r.error.issues.map((i) => `${i.path.join('.') || '(root)'} ${i.message}`).join('; ');
+    console.error(`[contract] ${path} 响应不符契约: ${detail}`);
+  }
+  sendJson(res, status, tagged);
+}
+
 async function handleApiSave(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
@@ -159,7 +180,15 @@ async function handleApiSave(req: http.IncomingMessage, res: http.ServerResponse
       });
       return;
     }
-    sendJson(res, 200, {
+    // 坐标归版本：浏览端保存的坐标已在服务端落盘，随之自动纳管一个带坐标的可回滚版本
+    // （与最近快照几何一致则去重跳过），并裁剪旧快照防堆积。
+    try {
+      const snap = saveAutoSnapshot(result.dsl.feature, '保存');
+      if (snap) pruneSnapshots(result.dsl.feature);
+    } catch {
+      // 纳管失败不阻断保存
+    }
+    guard(res, '/api/save', 'save', {
       success: true,
       message: 'DSL 已保存',
       feature: result.dsl.feature,
@@ -188,7 +217,7 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
   try {
     const featuresDir = path.join(process.cwd(), '.design-canvas', 'features');
     if (!fs.existsSync(featuresDir)) {
-      sendJson(res, 200, { features: [] });
+      guard(res, '/api/features', 'features', { features: [] });
       return;
     }
     const files = fs.readdirSync(featuresDir)
@@ -218,7 +247,7 @@ function handleApiFeatures(_req: http.IncomingMessage, res: http.ServerResponse)
         return []; // 单个 DSL 损坏不影响列表
       }
     }).sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
-    sendJson(res, 200, { features });
+    guard(res, '/api/features', 'features', { features });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -788,23 +817,32 @@ async function handleApiReconcileChain(req: http.IncomingMessage, res: http.Serv
   }
 }
 
-/** POST /api/archify-demo：演示模式投影——把前端 IRView 映射成 Archify IR，
- *  装配了 Archify（ARCHIFY_ROOT）则 validate+deliver HTML；未装配返回 IR + 说明。
- *  body: { view: ProjView }。派生只读，不写回编辑真源。 */
+/** POST /api/archify-demo：演示模式多类型生产——把前端编辑 IR 树适配成数据层契约，
+ *  以 Archify 为内置能力，一次产出 5 类 showcase 图各一张（architecture/workflow/
+ *  sequence/dataflow/lifecycle），每类独立 validate+deliver。派生只读，不写回编辑真源；
+ *  某类型 validate 不达 showcase 时诚实返回诊断，不加自造几何。
+ *  body: { ir: 编辑 IR 树（IRView/IRNode 渲染形状），feature?, archify_root?, out_dir? } */
 async function handleApiArchifyDemo(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const body = await readBody(req);
     const params = JSON.parse(body.toString('utf-8') || '{}');
-    const view = params.view;
-    if (!view || !Array.isArray(view.nodes)) {
-      sendError(res, 400, '缺参数 "view.nodes"（IRView 至少含 nodes[]）');
+    const raw = params.ir;
+    if (!raw || typeof raw.id !== 'string' || !raw.label || !(raw.children || Array.isArray(raw.nodes))) {
+      sendError(res, 400, '缺参数 "ir"（编辑 IR 树，至少含 id/label 且含 children 或 nodes[]）');
       return;
     }
+    // 适配：前端 workbench 的编辑 IR（IRView/IRNode）→ Archify 数据层契约形状（ArchifyTreeNode）
+    const ir = adaptIRTree(raw);
     const archifyRoot = typeof params.archify_root === 'string' ? params.archify_root : undefined;
     const outDir = typeof params.out_dir === 'string' ? params.out_dir : undefined;
-    const result = renderArchifyDemo({ view, archifyRoot, outDir });
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(result));
+    // 真实上下游依赖藏在文件 API 签名里：按 feature 回查项目 DSL，建文件索引供语义提炼
+    let fileIndex;
+    if (typeof params.feature === 'string' && params.feature) {
+      const dsl = getDSL(params.feature);
+      if (dsl) fileIndex = buildFileIndex(dsl);
+    }
+    const result = runArchifyPipeline({ ir, fileIndex, archifyRoot, outDir });
+    guard(res, '/api/archify-demo', 'archify-demo', result);
   } catch (e) {
     sendError(res, 400, (e as Error).message);
   }
@@ -968,7 +1006,7 @@ async function handleApiMindMap(req: http.IncomingMessage, res: http.ServerRespo
       gen_descriptions: params.gen_descriptions === true,
       max_files_per_community: typeof params.max_files_per_community === 'number' ? params.max_files_per_community : 20,
     });
-    sendJson(res, 200, { success: true, ...result, mind_map: result.mind_map });
+    guard(res, '/api/mind-map', 'mind-map', { success: true, ...result, mind_map: result.mind_map });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -990,7 +1028,7 @@ function handleApiMindMapTeachGet(req: http.IncomingMessage, res: http.ServerRes
       return;
     }
     const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    sendJson(res, 200, { success: true, mind_map: mindMap });
+    guard(res, '/api/mind-map-teach', 'mind-map-teach', { success: true, mind_map: mindMap });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1011,7 +1049,7 @@ function handleApiMindMapGet(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
     const mindMap = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    sendJson(res, 200, { success: true, mind_map: mindMap });
+    guard(res, '/api/mind-map', 'mind-map', { success: true, mind_map: mindMap });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -1047,7 +1085,7 @@ async function handleApiOverview(
       return;
     }
     const result = await getOverview({ feature, refresh, refresh_llm: refreshLlm, first_steps: firstSteps });
-    sendJson(res, 200, { success: true, ...result });
+    guard(res, '/api/overview', 'overview', { success: true, ...result });
   } catch (e) {
     // 支持带语义错误码的异常（如 feature 不存在 → 404），其余默认 500
     const status = (e as Error & { status?: number }).status;
@@ -2836,34 +2874,11 @@ export async function startServer(port?: number): Promise<void> {
       return;
     }
 
-    if (url.startsWith('/workbench') && method === 'GET') {
-      // 唯一前端出口：协作画布 + 沙盘反馈 + 右侧代码审批（废弃 Hub/思维导图/独立审批台/teach）
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(renderWorkbenchPage());
-      return;
-    }
-
-    // 已废弃出口 → 归一到唯一出口 /workbench（302 保留旧书签可达，不新增页面代码）
-    const routeToWorkbenchHash = (prefix: string): string | '' => {
-      if (url.startsWith(prefix)) {
-        const feature = decodeURIComponent(url.slice(prefix.length).split('?')[0]).replace(/[/\\]/g, '');
-        return feature ? '/workbench#' + feature : '/workbench';
-      }
-      return '';
-    };
+    // 旧 serve 期自包含前端（/workbench 与旧出口）已撤——前端统一为 dsl-workbench，
+    // 本 serve 只做纯数据/API 引擎，不再渲染自包含 HTML 页面。
     if (url === '/' || url.startsWith('/?')) {
-      res.writeHead(302, { Location: '/workbench' });
-      res.end();
-      return;
-    }
-    const redirectTarget =
-      routeToWorkbenchHash('/project/') ||
-      routeToWorkbenchHash('/mindmap/') ||
-      (/^\/code-workbench/.test(url) ? '/workbench' : '') ||
-      (/^\/(tour\.html|explain\.html)/.test(url) ? '/workbench' : '');
-    if (redirectTarget) {
-      res.writeHead(302, { Location: redirectTarget });
-      res.end();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, frontend: 'dsl-workbench', note: '本 serve 仅提供数据/API；旧自包含前端已移除' }));
       return;
     }
 
@@ -2899,7 +2914,7 @@ export async function startServer(port?: number): Promise<void> {
       console.log(`  - 布局 API: POST /api/layout/dag, POST /api/layout/force, POST /api/layout/grid`);
       console.log(`  - 代码生成 API: POST /api/scaffold`);
       console.log(`  - 一致性检查 API: POST /api/consistency`);
-      console.log(`  - 唯一前端出口（协作画布 + 沙盘反馈 + 代码审批）: GET /workbench`);
+      console.log(`  - 数据/API 引擎（前端统一为 dsl-workbench，不再渲染自包含 HTML）`);
       console.log(`    - 代码审批 API: 列出 /api/code/workbench ｜ 提案 /api/code/propose ｜ 通过 /api/code/approve ｜ 驳回 /api/code/reject`);
       console.log(`    - feature 元数据 API: GET /api/feature-meta`);
       console.log(`  - 变更影响分析 API: POST /api/diff-impact`);

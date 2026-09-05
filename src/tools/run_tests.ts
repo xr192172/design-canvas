@@ -43,6 +43,20 @@ export interface RunTestsResult {
 }
 
 export function runTests(input: { project_dir?: string; filter?: string; timeoutMs?: number }): RunTestsResult {
+  // 防自递归：已在 vitest 测试进程内、又省略 filter 跑全量 → 会再起一个嵌套 vitest 全量套件，
+  // 层层套壳直至超时（stale_build「统一注入」用例逐个调 handler 时就踩到）。测试进程内禁止套全量。
+  if (!input.filter && isInsideVitestWorker()) {
+    return {
+      ok: false,
+      success: false,
+      total: 0,
+      passed: 0,
+      failed: 0,
+      pending: 0,
+      failures: [],
+      error: 'run_tests 已检测到当前在 vitest 进程内：省略 filter 会跑全量套件造成自递归，已拒绝。请显式传 filter 定向回归，或在正常环境（非测试进程）跑全量。',
+    };
+  }
   const cwd = input.project_dir ? path.resolve(input.project_dir) : process.cwd();
   const vitest = path.join(cwd, 'node_modules', 'vitest', 'vitest.mjs');
   // 输出文件放系统临时目录，避免污染项目仓库
@@ -110,4 +124,9 @@ function cleanup(f: string): void {
   } catch {
     /* ignore */
   }
+}
+
+/** 是否运行在 vitest 测试进程内（防 run_tests 自递归跑全量） */
+function isInsideVitestWorker(): boolean {
+  return !!process.env.VITEST || !!process.env.VITEST_WORKER_ID;
 }

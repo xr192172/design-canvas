@@ -2,7 +2,7 @@
  * 节点操作：add_node / update_node / delete_node
  */
 
-import type { DesignDSL, Node, NodeStyle, NodeContent, DiagramStatus, NodeLayer, NodeShapes, NodeDecision, AnimationValueSchema } from '../dsl/types.js';
+import type { DesignDSL, Node, NodeStyle, NodeContent, DiagramStatus, NodeLayer, NodeShapes, NodeDecision, DecisionHistoryEntry, AnimationValueSchema } from '../dsl/types.js';
 import { getDSL, saveDSL } from '../storage.js';
 import type { EditResult } from './edit_result.js';
 
@@ -158,10 +158,41 @@ export interface UpdateNodeInput {
   decision?: NodeDecision | null;
   /** 决策修订说明：随本次 decision 更新记入版本栈（翻案理由/变更点） */
   decision_note?: string;
+  /** 决策作者（谁定的/谁发起的修订）：human / llm / 账号名。缺省不伪造、不主动写 */
+  author?: string;
+}
+
+/**
+ * 决策写入纯函数（缺口①：作者/时间线）。
+ * decision 更新=版本演进：旧版自动压入 decision_history（`at` 时间戳 + 修订 note + 发起人 author），
+ * 新版成为当前生效版，并打 `updated_at`（author 若有则一并打上）。首版（无旧版）不压栈。
+ * return 直接可写回 node.decision / node.decision_history。
+ */
+export function applyDecisionWrite(
+  prevDecision: NodeDecision | undefined,
+  history: DecisionHistoryEntry[] | undefined,
+  next: NodeDecision | null | undefined,
+  opts?: { author?: string; note?: string; now?: string },
+): { decision: NodeDecision | undefined; decision_history: DecisionHistoryEntry[] | undefined } {
+  // 未传 decision 字段：不改
+  if (next === undefined) return { decision: prevDecision, decision_history: history };
+  // null ⇒ 清除
+  if (next === null) return { decision: undefined, decision_history: undefined };
+
+  const now = opts?.now ?? new Date().toISOString();
+  // 新决策：时间戳恒打；author 传入才打（不伪造）
+  const decision: NodeDecision = opts?.author ? { ...next, author: opts.author, updated_at: now } : { ...next, updated_at: now };
+
+  // 旧版存在 → 压栈（首版不压）
+  let decision_history = history;
+  if (prevDecision) {
+    decision_history = [...(history ?? []), { at: now, decision: prevDecision, note: opts?.note, author: opts?.author }];
+  }
+  return { decision, decision_history };
 }
 
 export function updateNode(input: UpdateNodeInput): EditResult {
-  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision, decision_note } = input;
+  const { feature, node_id, label, x, y, width, height, bg, color, border, borderRadius, shape, shadow, opacity, type, description, status, swimlane, content, sub_dsl, layer, host, shapes, attributes, decision, decision_note, author } = input;
 
   const dsl = getDSL(feature);
   if (!dsl) {
@@ -211,22 +242,18 @@ export function updateNode(input: UpdateNodeInput): EditResult {
     if (attributes === null) delete node.attributes;
     else node.attributes = attributes;
   }
-  // decision 更新=版本演进：旧版自动压入 decision_history（时间戳+修订说明），新版成为当前生效版。
-  // 这样决策翻案永不丢历史，query node 可见完整演进链。首版（node 无 decision）不压栈。
+  // decision 更新=版本演进：旧版压入 decision_history，新版成为当前生效版（author/updated_at 由纯函数打）。
   if (decision !== undefined) {
-    if (decision === null) {
+    const { decision: nd, decision_history: nh } = applyDecisionWrite(node.decision, node.decision_history, decision, {
+      author,
+      note: decision_note,
+    });
+    if (nd === undefined) {
       delete node.decision;
       delete node.decision_history;
     } else {
-      if (node.decision) {
-        if (!node.decision_history) node.decision_history = [];
-        node.decision_history.push({
-          at: new Date().toISOString(),
-          decision: node.decision,
-          note: decision_note ?? undefined,
-        });
-      }
-      node.decision = decision;
+      node.decision = nd;
+      if (nh?.length) node.decision_history = nh;
     }
   }
 

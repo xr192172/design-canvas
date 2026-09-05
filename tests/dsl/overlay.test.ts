@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { reconcileOverlay, applyOverlay, buildCandidates, seedOverlayFromDsl, computeFileSignature } from '../../src/dsl/overlay';
+import { reconcileOverlay, applyOverlay, buildCandidates, buildEdgeCandidates, seedOverlayFromDsl, computeFileSignature } from '../../src/dsl/overlay';
 import type { DesignOverlay } from '../../src/dsl/overlay';
 import type { DesignDSL, Node, UserNode } from '../../src/dsl/types';
 
@@ -160,5 +160,105 @@ describe('overlay 增量对账（design DSL 不再随真相刷新丢失设计意
     writeFileSync(file, JSON.stringify(overlay));
     const readBack = JSON.parse(readFileSync(file, 'utf-8'));
     expect(readBack.anchors['file_a'].decision.summary).toBe('决策A');
+  });
+});
+
+describe('overlay 缺口：边级意图(③) / 结构化目标(④) / 决策作者时间线(①)', () => {
+  const edgeBase = (edges: Array<{ id: string; from: string; to: string }>): DesignDSL => ({
+    feature: 'f',
+    geometry: { nodes: [], edges },
+  });
+
+  it('reconcileOverlay 边：id 未变 → 意图原样保留', () => {
+    const old: DesignOverlay = {
+      version: 1, feature: 'f', anchors: {},
+      edges: { e1: { from: 'a', to: 'b', reason: 'A 需要 B 的缓存', boundary: '链路边界' } },
+    };
+    const { overlay } = reconcileOverlay(old, [], [{ id: 'e1', from: 'a', to: 'b' }]);
+    expect(overlay.edges?.['e1']?.reason).toBe('A 需要 B 的缓存');
+    expect(overlay.edges?.['e1']?.orphaned).toBeUndefined();
+  });
+
+  it('reconcileOverlay 边：id 变更但 (from,to) 稳定 → 认亲重挂并记 _migratedFrom', () => {
+    const old: DesignOverlay = {
+      version: 1, feature: 'f', anchors: {},
+      edges: { e1: { from: 'a', to: 'b', reason: '边界依赖' } },
+    };
+    const { overlay } = reconcileOverlay(old, [], [{ id: 'e2', from: 'a', to: 'b' }]);
+    expect(overlay.edges?.['e1']).toBeUndefined();
+    expect(overlay.edges?.['e2']?.reason).toBe('边界依赖');
+    expect(overlay.edges?.['e2']?._migratedFrom).toBe('e1');
+  });
+
+  it('reconcileOverlay 边：真相边消失 → 孤儿暂存，不静默丢；二次 reconcile 不再追溯', () => {
+    const old: DesignOverlay = {
+      version: 1, feature: 'f', anchors: {},
+      edges: { e1: { from: 'a', to: 'b', reason: '依赖理由' } },
+    };
+    let { overlay } = reconcileOverlay(old, [], []); // base 无该边
+    expect(overlay.edges?.['e1']?.orphaned).toBe(true);
+    expect(overlay.edges?.['e1']?.reason).toBe('依赖理由');
+    // 再跑一轮（base 仍无）→ 上轮孤儿只保留不追溯
+    ({ overlay } = reconcileOverlay(overlay, [], []));
+    expect(overlay.edges?.['e1']?.orphaned).toBe(true);
+    expect(overlay.edges?.['e1']?._migratedFrom).toBeUndefined();
+  });
+
+  it('buildEdgeCandidates：从 base.geometry.edges 提取边候选', () => {
+    const cs = buildEdgeCandidates(edgeBase([
+      { id: 'e1', from: 'a', to: 'b' }, { id: 'e2', from: 'b', to: 'c' },
+    ]));
+    expect(cs).toEqual([{ id: 'e1', from: 'a', to: 'b' }, { id: 'e2', from: 'b', to: 'c' }]);
+  });
+
+  it('applyOverlay 边：reason/boundary 写回 base edge.intent；孤儿边不写回', () => {
+    const overlay: DesignOverlay = {
+      version: 1, feature: 'f', anchors: {},
+      edges: {
+        e1: { from: 'a', to: 'b', reason: 'A 依赖 B', boundary: '链路边界' },
+        e2: { from: 'x', to: 'y', reason: '叙事', orphaned: true },
+      },
+    };
+    const merged = applyOverlay(edgeBase([{ id: 'e1', from: 'a', to: 'b' }]), overlay);
+    expect(merged.geometry!.edges![0]?.intent?.reason).toBe('A 依赖 B');
+    expect(merged.geometry!.edges![0]?.intent?.boundary).toBe('链路边界');
+  });
+
+  it('applyOverlay 目标：goals 写进 base meta.goals（供 LLM 读）', () => {
+    const overlay: DesignOverlay = {
+      version: 1, feature: 'f', anchors: {},
+      global: { goals: [{ id: 'g1', title: '统一读端', status: 'active' }] },
+    };
+    const merged = applyOverlay(edgeBase([]), overlay);
+    const meta = (merged as unknown as { meta?: { goals?: unknown[] } }).meta;
+    expect(meta?.goals).toEqual([{ id: 'g1', title: '统一读端', status: 'active' }]);
+  });
+
+  it('seedOverlayFromDsl：捕获 base 的 edge.intent 与 meta.goals（回环不丢）', () => {
+    const dsl: DesignDSL = {
+      feature: 'f',
+      geometry: { nodes: [], edges: [{ id: 'e1', from: 'a', to: 'b', intent: { reason: '既有理由' } }] },
+    } as DesignDSL & { meta?: unknown };
+    (dsl as { meta?: { goals?: unknown[] } }).meta = { goals: [{ id: 'g1', title: '老目标' }] };
+    const ov = seedOverlayFromDsl(dsl);
+    expect(ov.edges?.['e1']?.reason).toBe('既有理由');
+    expect(ov.edges?.['e1']?.from).toBe('a');
+    expect(ov.global?.goals?.[0]?.title).toBe('老目标');
+  });
+
+  it('决策 author/updated_at 经 seed→reconcile→apply 全程保留（① 时间线不丢）', () => {
+    const node: Node = {
+      id: 'file_a', label: 'a.ts', x: 0, y: 0, width: 100, height: 40, type: 'file', description: 'src/a.ts',
+      decision: { summary: '决策', author: 'human', updated_at: '2026-01-01T00:00:00Z' },
+      decision_history: [{ at: '2025-12-01T00:00:00Z', decision: { summary: '旧版', author: 'llm' }, author: 'human' }],
+    };
+    const seeded = seedOverlayFromDsl({ feature: 'f', geometry: { nodes: [node], edges: [] } });
+    const { overlay } = reconcileOverlay(seeded, [{ id: 'file_a', path: 'src/a.ts', kind: 'file', signature: 'sig-v1' }]);
+    expect(overlay.anchors['file_a']?.decision?.author).toBe('human');
+    expect(overlay.anchors['file_a']?.decision?.updated_at).toBe('2026-01-01T00:00:00Z');
+    expect(overlay.anchors['file_a']?.decision_history?.[0]?.author).toBe('human');
+    const merged = applyOverlay({ feature: 'f', geometry: { nodes: [node], edges: [] } }, overlay);
+    expect(merged.geometry.nodes[0]?.decision?.author).toBe('human');
+    expect(merged.geometry.nodes[0]?.decision?.updated_at).toBe('2026-01-01T00:00:00Z');
   });
 });

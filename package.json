@@ -63,7 +63,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "hub": "node scripts/hub.mjs",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "gen:schema": "node scripts/gen_endpoints_schema.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

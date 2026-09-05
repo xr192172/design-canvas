@@ -102,6 +102,51 @@ export function saveSnapshot(input: SaveSnapshotInput): SaveSnapshotResult {
   };
 }
 
+/** 坐标签名：几何布局的事实投影（与布局引擎/渲染无关），坐标未变即视为无新布局 */
+function geometrySignature(dsl: DesignDSL): string {
+  const nodes = dsl.geometry?.nodes ?? [];
+  return nodes.map((n) => `${n.id}:${typeof n.x === 'number' ? Math.round(n.x) : ''}:${typeof n.y === 'number' ? Math.round(n.y) : ''}`).join('|');
+}
+
+/** 读该 feature 最近（最新文件名的）快照的坐标签名；无则返回 null */
+function latestSnapshotGeometrySignature(feature: string): string | null {
+  const dir = getSnapshotsDir(feature);
+  if (!fs.existsSync(dir)) return null;
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  if (!files.length) return null;
+  files.sort();
+  const latest = files[files.length - 1];
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(dir, latest), 'utf-8'));
+    return geometrySignature(data);
+  } catch {
+    return null;
+  }
+}
+
+/** 自动纳管：坐标为布局/坐标变更加服务端版本（去重：与最近快照几何一致则不落盘）。返回 null 表示本次无新布局被记录 */
+export function saveAutoSnapshot(feature: string, reason: string): SaveSnapshotResult | null {
+  const dsl = getDSL(feature);
+  if (!dsl) throw new Error(`feature "${feature}" 不存在`);
+  if (latestSnapshotGeometrySignature(feature) === geometrySignature(dsl)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
+  return saveSnapshot({ feature, label: `auto_${reason}_${stamp}`, description: `自动纳管：${reason}` });
+}
+
+/** 裁剪：该 feature 快照超 max 时删除最旧，返回删除数（按文件名时间戳排序） */
+export function pruneSnapshots(feature: string, max = 20): number {
+  const dir = getSnapshotsDir(feature);
+  if (!fs.existsSync(dir)) return 0;
+  let files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  const overflow = files.length - max;
+  if (overflow <= 0) return 0;
+  const toRemove = files.slice(0, overflow);
+  for (const f of toRemove) {
+    try { fs.unlinkSync(path.join(dir, f)); } catch { /* 忽略单个删除失败 */ }
+  }
+  return toRemove.length;
+}
+
 export interface ListSnapshotsInput {
   feature: string;
 }

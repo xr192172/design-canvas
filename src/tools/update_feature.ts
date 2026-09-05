@@ -24,7 +24,7 @@ import { addExpectedApi, updateExpectedApi, deleteExpectedApi, setNodeSemantic }
 import { updateStatus } from './status_tools.js';
 import { addAnnotationByTool, resolveAnnotation } from './annotation_tools.js';
 import { submitApproval, reviewAnnotation } from './approval.js';
-import { saveSnapshot, rollbackSnapshot, deleteSnapshot } from './snapshot.js';
+import { saveSnapshot, rollbackSnapshot, deleteSnapshot, saveAutoSnapshot, pruneSnapshots } from './snapshot.js';
 import { dagLayout, forceLayout, gridAlign } from './dag_layout.js';
 import { resetSimulation } from './simulation.js';
 import type { DiagramStatus } from '../dsl/types.js';
@@ -292,6 +292,7 @@ function applySnapshotOp(feature: string, op: FeatureOperation): EditResult {
 function applyLayoutOp(feature: string, op: FeatureOperation): EditResult {
   const data = op.data ?? {};
   const algo = data.algo ?? 'dag';
+  let msg: string;
   switch (algo) {
     case 'dag': {
       const r = dagLayout({
@@ -302,7 +303,8 @@ function applyLayoutOp(feature: string, op: FeatureOperation): EditResult {
         width: data.width as number | undefined,
         respect_swimlanes: data.respect_swimlanes as boolean | undefined,
       });
-      return { message: r.message, feature };
+      msg = r.message;
+      break;
     }
     case 'force': {
       const r = forceLayout({
@@ -315,15 +317,26 @@ function applyLayoutOp(feature: string, op: FeatureOperation): EditResult {
         width: data.width as number | undefined,
         height: data.height as number | undefined,
       });
-      return { message: r.message, feature };
+      msg = r.message;
+      break;
     }
     case 'grid': {
       const r = gridAlign({ feature, grid_size: data.grid_size as number | undefined });
-      return { message: r.message, feature };
+      msg = r.message;
+      break;
     }
     default:
       throw new Error(`layout 未知算法: ${algo as string}`);
   }
+  // 布局里程碑：自动布局改写坐标后注册带坐标的服务端版本（坐标未变则去重跳过）
+  try {
+    const snap = saveAutoSnapshot(feature, `布局_${algo as string}`);
+    const pruned = pruneSnapshots(feature);
+    if (snap) msg = `${msg}\n已自动纳管布局版本: ${snap.snapshot_id}${pruned ? `（裁剪旧快照 ${pruned} 个）` : ''}`;
+  } catch {
+    // 快照失败不阻断布局，仅忽略
+  }
+  return { message: msg, feature };
 }
 
 // ─────────────────────────────────────────────────────────────

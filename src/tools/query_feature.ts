@@ -63,7 +63,9 @@ export interface QueryFeatureInput {
     | 'snapshots'
     | 'templates'
     | 'simulation_state'
-    | 'diff';
+    | 'diff'
+    | 'goals'
+    | 'edge_intents';
   /** feature 名（dsl/nodes/edges/node/decisions/files/file/annotations/approvals/approval_history/snapshots/simulation_state 必填；features/templates 忽略；diff 用 feature_a/feature_b） */
   feature?: string;
   /** node：节点 ID */
@@ -425,9 +427,40 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
         lines.push(`  文件职责: ${file.responsibility}`);
       }
 
+      // 决策向上并集（易读分层口径）：本节点自有决策 + 全部后代（host/detail 子节点 + sub_dsl 内节点，递归收集）
+      // 单点所有于稳定叶子，可读层（L1–L3）只投影并集——不复制。
+      const ownDec = node.decision
+        ? [{ summary: node.decision.summary, status: node.decision.status ?? 'active', thread: node.decision.thread }]
+        : [];
+      const descDec: Array<{ id: string; summary: string; status: string; thread?: string }> = [];
+      const queue: Array<unknown> = [];
+      const pushChildren = (cur: unknown) => {
+        const c = cur as { id?: string; sub_dsl?: { geometry?: { nodes?: unknown[] } } };
+        const hostChildren = (dsl.geometry?.nodes ?? []).filter((nh) => nh.host && c.id && nh.host === c.id);
+        for (const ch of hostChildren) { queue.push(ch); }
+        for (const ss of c.sub_dsl?.geometry?.nodes ?? []) { queue.push(ss); }
+      };
+      pushChildren(node);
+      while (queue.length) {
+        const cur = queue.shift() as { decision?: { summary: string; status?: string; thread?: string }; host?: string };
+        if (cur.decision) {
+          descDec.push({ id: (cur as { id?: string }).id ?? '', summary: cur.decision.summary, status: cur.decision.status ?? 'active', thread: cur.decision.thread });
+        }
+        pushChildren(cur);
+      }
+      const decisionsUnion = [...ownDec, ...descDec];
+      if (decisionsUnion.length) {
+        lines.push(`  设计决策·向上并集: 本节点 ${ownDec.length} · 含下层 ${descDec.length}（共 ${decisionsUnion.length}）`);
+      }
+
       return {
         message: [`feature "${dsl.feature}" 节点详情 ${viewTag}`, '', ...lines].join('\n'),
-        data: node,
+        data: {
+          ...node,
+          decisions_own: ownDec,
+          decisions_descendants: descDec,
+          decisions_union: decisionsUnion,
+        },
       };
     }
 
@@ -733,6 +766,34 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
         ...r.diffs.map((d) => `  [${d.type}] ${d.category} ${d.id}${d.field ? ` (${d.field})` : ''}: ${d.description}`),
       ];
       return { message: lines.join('\n'), data: r };
+    }
+
+    // ── 细粒度查询：结构化目标（overlay 全局 goals → base meta.goals）─────
+    case 'goals': {
+      const dsl = loadDSL(input);
+      const goals =
+        ((dsl as unknown as { meta?: { goals?: Array<{ id?: string; title?: string; description?: string; status?: string }> } }).meta?.goals) ??
+        [];
+      if (goals.length === 0) return { message: `feature "${dsl.feature}" 暂无结构化目标`, data: [] };
+      const lines = goals.map(
+        (g, i) => `${i + 1}. [${g.status ?? 'active'}] ${g.title}${g.description ? ' — ' + g.description : ''}`,
+      );
+      return { message: [`feature "${dsl.feature}" 结构化目标 ${goals.length} 条`, '', ...lines].join('\n'), data: goals };
+    }
+
+    // ── 细粒度查询：边级意图（edge.intent 的 reason/boundary，overlay 缺口③的读端）─────
+    case 'edge_intents': {
+      const dsl = loadDSL(input);
+      const edges = (dsl.geometry?.edges ?? []).filter((e) => e.intent && (e.intent.reason || e.intent.boundary));
+      if (edges.length === 0) return { message: `feature "${dsl.feature}" 暂无边级意图`, data: [] };
+      const lines = edges.map(
+        (e, i) =>
+          `${i + 1}. [${e.id}] ${e.from} → ${e.to}: ${e.intent?.reason ?? ''}${e.intent?.boundary ? `（边界: ${e.intent.boundary}）` : ''}`,
+      );
+      return {
+        message: [`feature "${dsl.feature}" 边级意图 ${edges.length} 条`, '', ...lines].join('\n'),
+        data: edges.map((e) => ({ id: e.id, from: e.from, to: e.to, reason: e.intent?.reason, boundary: e.intent?.boundary })),
+      };
     }
 
     default:

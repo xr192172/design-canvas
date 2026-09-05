@@ -1,107 +1,102 @@
 /**
- * archify_project 往返契约测试
+ * archify_project 适配 + 视觉令牌测试
  *
- * 锚定"Archify 是派生演示层、编辑真源在 workbench IR"的分层：
- *   1. 不突变：toArchify 跑完，输入 ProjView 的编辑字段（pins/runtime/gaps/layer/status…）逐字节不变。
- *   2. 身份双射：IRView 节点/边 id 与 Archify components/connections id 一一对应、无缺失无凭空。
- *   3. 保真：label 原样；role 经 roleToType 确定性映射并落在 Archify 色板 type 集合内。
- *   4. 可重开编辑器：fromArchify 还原的节点/边 id 集与原始一致（退出演示能无缝回到编辑器）。
+ * 分层锚定：Archify 已作为内置能力接入（archify_pipeline ⇐ archify_semantics ⇐
+ * archify_mappers），archify_project 只保留「编辑 IR 树 ↔ 数据层契约」的适配与
+ * Archify 视觉令牌。演示层派生只读、绝不写回编辑真源。
  */
 import { describe, it, expect } from 'vitest';
-import {
-  toArchify,
-  fromArchify,
-  roleToType,
-  ARCHIFY_TYPE_COLOR,
-  type ProjView,
-} from '../../src/tools/archify_project';
+import { roleToType, ARCHIFY_TYPE_COLOR, adaptIRTree } from '../../src/tools/archify_project';
 
-function sampleView(): ProjView {
-  return {
-    id: 'v1',
-    label: '能力面',
-    title: 'design-canvas 能力面',
+describe('适配层：编辑 IR 树（IRView/IRNode 渲染形状）→ ArchifyTreeNode（数据层契约形状）', () => {
+  // 模拟前端 workbench 真实编辑真源：根是 IRView，节点带渲染字段，children 是 IRView（可递归）
+  const irView = {
+    id: 'nav:root',
+    label: 'agent-shell',
+    width: 560, height: 210, layout: 'grid', tint: '#3b82f6',
     nodes: [
-      { id: 'client', label: 'MCP Client', role: 'client', type: 'external', sublabel: 'Agent' },
-      { id: 'mcp', label: 'MCP core', role: 'core', type: 'backend' },
-      { id: 'dsl', label: 'DSL', role: 'contract', type: 'contract', tag: '2-way' },
-      { id: 'ts_kernel', label: 'ts_kernel', role: 'core', type: 'backend' },
-      { id: 'render', label: 'render', role: 'renderer', type: 'frontend' },
+      {
+        id: 'nav:intro', label: '介绍卡', role: 'intro', type: 'module', layer: 'main',
+        status: 'info', statusText: '5 个功能', x: 28, y: 32, w: 520, h: 150, hasPos: true,
+        children: {
+          id: 'nav:features', label: '功能介绍', width: 1200, height: 300, layout: 'grid',
+          nodes: [
+            {
+              id: 'nav:feat:0:f1', label: '主程序编排', role: 'feature', type: 'feature',
+              layer: 'main', status: 'info', statusText: '8 个步骤', x: 0, y: 0, w: 240, h: 92, hasPos: false,
+              pins: { in: ['config'], out: ['AstNode'] },
+              children: {
+                id: 'nav:t0_f1:steps', label: '实现路径', layout: 'flow',
+                nodes: [
+                  {
+                    id: 's0', label: '点燃启动开关', role: 'step', type: 'step', layer: 'main',
+                    status: 'info', statusText: '实现步骤', x: 0, y: 0, w: 520, h: 108, hasPos: true,
+                    pins: { in: [], out: ['事件'] },
+                    file: 'main.go',
+                  },
+                  { id: 's1', label: '搭建调度中枢', role: 'step', type: 'step', layer: 'main', status: 'info', statusText: '实现步骤', x: 0, y: 108, w: 520, h: 108, hasPos: true, file: 'main_orchestrator.go' },
+                ],
+                edges: [
+                  { id: 'seq0', from: 's0', to: 's1', label: '顺序承接', kind: 'flow', light: true, active: true },
+                ],
+              },
+            },
+          ],
+          edges: [],
+        },
+      },
     ],
-    edges: [
-      { id: 'e1', from: 'client', to: 'mcp', label: 'MCP call', kind: 'flow' },
-      { id: 'e2', from: 'mcp', to: 'dsl', label: 'read/write', kind: 'flow' },
-      { id: 'e3', from: 'mcp', to: 'ts_kernel', label: 'parse', kind: 'flow' },
-      { id: 'e4', from: 'mcp', to: 'render', label: 'render', kind: 'cross' },
-    ],
+    edges: [],
   };
-}
 
-describe('toArchify 不突变（编辑字段保真）', () => {
-  it('投影只读 id/label/role/sublabel/tag，pins/runtime 等编辑字段原样不动', () => {
-    const view = sampleView();
-    // 给一个编辑字段，验证真源不被污染
-    const before = JSON.stringify(view);
-    toArchify(view, { quality: 'showcase' });
-    expect(JSON.stringify(view)).toBe(before); // 输入逐字节不变 = 演示层绝不写回编辑真源
+  it('IRView 形状 → 根包成 children.nodes/edges；渲染字段（width/height/layout/tint/statusText/panel…）被剥离', () => {
+    const out = adaptIRTree(irView);
+    expect(out.id).toBe('nav:root');
+    expect(out.label).toBe('agent-shell');
+    expect(out).not.toHaveProperty('width');
+    expect(out).not.toHaveProperty('nodes');
+    expect(out.children?.nodes).toHaveLength(1);
+    expect(out.children?.edges).toEqual([]);
+    const intro = out.children!.nodes![0];
+    expect(intro.id).toBe('nav:intro');
+    expect(intro).not.toHaveProperty('x');
+    expect(intro).not.toHaveProperty('statusText');
+    expect(intro).not.toHaveProperty('panel');
+  });
+
+  it('IRNode 形状 → 只搬运契约字段（role/type/file/pins 保真），children(IRView) 递归适配', () => {
+    const out = adaptIRTree(irView);
+    const feat = out.children!.nodes![0].children!.nodes![0];
+    expect(feat).toMatchObject({ id: 'nav:feat:0:f1', label: '主程序编排', role: 'feature', type: 'feature' });
+    expect(feat.pins).toEqual({ in: ['config'], out: ['AstNode'] });
+    expect(feat.children?.nodes).toHaveLength(2);
+    const s0 = feat.children!.nodes![0];
+    expect(s0).toMatchObject({ id: 's0', label: '点燃启动开关', role: 'step', file: 'main.go' });
+    expect(s0.pins).toEqual({ out: ['事件'] });
+    expect(feat.children!.edges).toEqual([
+      { id: 'seq0', from: 's0', to: 's1', label: '顺序承接', kind: 'flow' },
+    ]);
+  });
+
+  it('不突变输入：适配是纯函数，原始编辑 IR 逐字节不变', () => {
+    const before = JSON.stringify(irView);
+    adaptIRTree(irView);
+    expect(JSON.stringify(irView)).toBe(before);
   });
 });
 
-describe('身份双射与保真', () => {
-  it('节点/边 id 与 components/connections 一一对应（无缺失、无凭空）', () => {
-    const view = sampleView();
-    const ar = toArchify(view);
-    expect(ar.schema_version).toBe(1);
-    expect(ar.diagram_type).toBe('architecture');
-    const compIds = ar.components.map((c) => c.id);
-    expect(compIds.sort()).toEqual(view.nodes.map((n) => n.id).sort());
-    const connIds = ar.connections.map((c) => c.id);
-    expect(connIds.sort()).toEqual(view.edges.filter((e) => e.kind !== 'contains').map((e) => e.id).sort());
-    // 连线两端都必须指向存在的节点
-    for (const c of ar.connections) {
-      expect(compIds).toContain(c.from);
-      expect(compIds).toContain(c.to);
-    }
+describe('视觉令牌：role → Archify type 确定性映射且落在色板内', () => {
+  it('service/core → backend、client → external、data/contract → database、queue → messagebus、auth → security、cloud → cloud', () => {
+    expect(roleToType('cloud')).toBe('cloud');
+    expect(roleToType('service')).toBe('backend');
+    expect(roleToType('client')).toBe('external');
+    expect(roleToType('contract')).toBe('database');
+    expect(roleToType('queue')).toBe('messagebus');
+    expect(roleToType('auth')).toBe('security');
   });
-
-  it('label 原样；role→type 确定性且落在 Archify 色板内', () => {
-    const view = sampleView();
-    const ar = toArchify(view);
-    for (const c of ar.components) {
-      const original = view.nodes.find((n) => n.id === c.id)!;
-      expect(c.label).toBe(original.label); // 标签保真
-      expect(c.type).toBe(roleToType(original.role)); // 确定映射
-      expect(ARCHIFY_TYPE_COLOR[c.type]).toBeDefined(); // 视觉语言用 Archify 这一套
-    }
-  });
-
-  it('cross 边 → dashed 变体；contains 边 → 不投影为连接（层级走边界，v1 跳过）', () => {
-    const view = sampleView();
-    const ar = toArchify(view);
-    const e4 = ar.connections.find((c) => c.id === 'e4');
-    expect(e4?.variant).toBe('dashed');
-    const e3 = ar.connections.find((c) => c.id === 'e3');
-    expect(e3?.variant).toBeUndefined(); // flow 普通连线
-  });
-});
-
-describe('可重开编辑器（往返还原 id 集）', () => {
-  it('fromArchify 还原的节点/边 id 集与原始一致 → 退出演示能无缝回到编辑器', () => {
-    const view = sampleView();
-    const ar = toArchify(view);
-    const back = fromArchify(ar);
-    expect(back.nodes.map((n) => n.id).sort()).toEqual(view.nodes.map((n) => n.id).sort());
-    expect(back.edges.map((e) => e.id).sort()).toEqual(
-      view.edges.filter((e) => e.kind !== 'contains').map((e) => e.id).sort(),
-    );
-  });
-
-  it('present→edit→re-present：真源唯一，二次投影 id 稳定（不随坐标漂移）', () => {
-    const view = sampleView();
-    const a1 = toArchify(view);
-    const a2 = toArchify(view, { quality: 'showcase' });
-    expect(a2.components.map((c) => `${c.id}:${c.type}`).sort()).toEqual(
-      a1.components.map((c) => `${c.id}:${c.type}`).sort(),
-    );
+  it('未知 role 落到 backend 兜底，且任何映射结果都在色板内', () => {
+    const t = roleToType('whatever_x');
+    expect(t).toBe('backend');
+    expect(ARCHIFY_TYPE_COLOR[t]).toBeDefined();
   });
 });

@@ -1260,6 +1260,13 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
     }
   }
 
+  // 实测依赖索引：fromRel → [toRel]（回填到 semantic.files[].actual_deps，语义层持有真实 import 事实）
+  const depsByFrom = new Map<string, string[]>();
+  for (const [fr, to] of fileDeps) {
+    if (!depsByFrom.has(fr)) depsByFrom.set(fr, []);
+    depsByFrom.get(fr)!.push(to);
+  }
+
   // ── 3.5 节点 ID 与积木折叠分流（须在 functional_mode / 目录树 / 边聚合前）──
   const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '_');
   const fileNodeId = (rel: string): string => `file_${sanitize(rel)}`;
@@ -1831,6 +1838,8 @@ export async function importProject(input: ImportProjectInput): Promise<ImportPr
         actual_apis: apis,
         symbols: syms.length > 0 ? syms : undefined,
         lines: lineCounts.get(f.rel) ?? 0,
+        // 实测依赖回填：真实 import 的项目内文件相对路径（语义层持有的"实测事实"）
+        ...(depsByFrom.get(f.rel)?.length ? { actual_deps: depsByFrom.get(f.rel)! } : {}),
       });
     }
   }

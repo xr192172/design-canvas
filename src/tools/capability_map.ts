@@ -57,6 +57,7 @@ export const LANES: Lane[] = [
       { name: 'consistency_check', when: '设计 DSL 与代码语义一致性体检' },
       { name: 'detect_drift', when: '检测 DSL 与代码语义漂移' },
       { name: 'import_project', when: '扫描代码项目生成 DSL（文件节点+调用边+符号语义层）' },
+      { name: 'set_design_intent', when: '写设计意图到 overlay：goals（结构化目标/方向）+ edge_intents（A 为何依赖 B / 边界归属），LLM 开发时的意图写入口' },
     ],
   },
   {

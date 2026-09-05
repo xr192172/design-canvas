@@ -66,6 +66,37 @@ export interface OverlayGlobal {
   user_nodes?: UserNode[];
   /** 科普分镜 meta.storyboard */
   storyboard?: unknown;
+  /** 结构化目标/方向（缺口④）：全局性设计意图，LLM 开发时作为方向信号读 */
+  goals?: OverlayGoal[];
+}
+
+/** 结构化目标/方向（缺口④）：全局性设计意图，落库进 base meta.goals */
+export interface OverlayGoal {
+  id: string;
+  title: string;
+  description?: string;
+  /** active=推进中 · done=完成 · parked=暂缓 · dropped=放弃 */
+  status?: 'active' | 'done' | 'parked' | 'dropped';
+}
+
+/** 边级设计意图（缺口③）：A 为何依赖 B / 边界归属，挂 base 边 id 上 */
+export interface OverlayEdgeIntent {
+  /** 源节点 id（对账时用 id→(from,to) 重定向） */
+  from: string;
+  /** 目标节点 id */
+  to: string;
+  /** A 为何依赖 B（关系级意图） */
+  reason?: string;
+  /** 边界归属说明（该依赖跨边界的理由/归属） */
+  boundary?: string;
+  /** 挂在边上的标注 */
+  annotations?: Annotation[];
+  /** 意图存活状态 */
+  status?: 'open' | 'resolved';
+  /** 对账标记：真相面已删该边 → 意图暂存待决（不静默丢） */
+  orphaned?: boolean;
+  /** 迁移自哪个旧边 id（边 id 变更时记录，便于审计） */
+  _migratedFrom?: string;
 }
 
 /** 设计层 overlay 文档 */
@@ -74,6 +105,8 @@ export interface DesignOverlay {
   feature: string;
   /** key = 写入时的节点锚点 id */
   anchors: Record<string, OverlayAnchor>;
+  /** key = base 边的 id；边级意图随 base 再生按 id→(from,to) 对账保留 */
+  edges?: Record<string, OverlayEdgeIntent>;
   global?: OverlayGlobal;
 }
 
@@ -128,10 +161,23 @@ export function buildCandidates(dsl: DesignDSL): AnchorCandidate[] {
   });
 }
 
+/** 边级对账用候选：从 base 提取边的稳定身份（id + from→to 端点） */
+export interface EdgeCandidate {
+  id: string;
+  from: string;
+  to: string;
+}
+
+/** 从一份 base DSL 提取边候选（对旧 overlay.edges 做 id→(from,to) 对账用） */
+export function buildEdgeCandidates(base: DesignDSL): EdgeCandidate[] {
+  return (base.geometry?.edges ?? []).map((e) => ({ id: e.id, from: e.from, to: e.to }));
+}
+
 /** 对账：把旧 overlay 按稳定锚点对齐到新 base 的锚点集 */
 export function reconcileOverlay(
   old: DesignOverlay,
   newCandidates: AnchorCandidate[],
+  newEdgeCandidates?: EdgeCandidate[],
 ): { overlay: DesignOverlay; stats: ReconcileStats } {
   const byPath = new Map<string, AnchorCandidate>();
   const bySig = new Map<string, AnchorCandidate[]>();
@@ -201,7 +247,30 @@ export function reconcileOverlay(
     anchors[target.id] = na;
   }
 
-  return { overlay: { ...old, anchors }, stats };
+  // —— 边级意图对账（缺口③）：按 id→(from,to)→孤儿 对齐旧 edges 到新 base 边 ----
+  let edges: Record<string, OverlayEdgeIntent> | undefined;
+  if (old.edges && Object.keys(old.edges).length > 0) {
+    const newById = new Map((newEdgeCandidates ?? []).map((e) => [e.id, e]));
+    const newByPair = new Map((newEdgeCandidates ?? []).map((e) => [`${e.from}\u0000${e.to}`, e]));
+    const resolved: Record<string, OverlayEdgeIntent> = {};
+    for (const [oldEdgeId, intent] of Object.entries(old.edges)) {
+      let target = newById.get(oldEdgeId);
+      const isOrphaned = intent.orphaned;
+      if (!target) {
+        if (isOrphaned) { resolved[oldEdgeId] = intent; continue; } // 上轮孤儿：本轮只保留，不再追溯
+        // 边 id 变了 → 尝试 (from,to) 认亲（依赖两端稳定则续能识别）
+        target = newByPair.get(`${intent.from}\u0000${intent.to}`);
+      }
+      if (!target) {
+        resolved[oldEdgeId] = { ...intent, orphaned: true }; // 真相面该边已删 → 孤儿暂存
+        continue;
+      }
+      resolved[target.id] = target.id === oldEdgeId ? intent : { ...intent, _migratedFrom: oldEdgeId };
+    }
+    edges = resolved;
+  }
+
+  return { overlay: { ...old, anchors, ...(edges ? { edges } : {}) }, stats };
 }
 
 function mergeById<T extends { id: string }>(list: T[], add: T[]): T[] {
@@ -231,6 +300,16 @@ export function applyOverlay(base: DesignDSL, overlay: DesignOverlay): DesignDSL
   });
   out.geometry = { ...base.geometry!, nodes };
 
+  // —— 边级意图（缺口③）：把 overlay.edges 的 reason/boundary 写回 base 边（id 已对账对齐）——
+  if (overlay.edges && Object.keys(overlay.edges).length > 0) {
+    const edges = (base.geometry?.edges ?? []).map((e) => {
+      const ei = overlay.edges![e.id];
+      if (!ei || ei.orphaned) return e;
+      return { ...e, intent: { reason: ei.reason, boundary: ei.boundary } };
+    });
+    out.geometry = { ...out.geometry, edges };
+  }
+
   // 标注：锚点内 + 全局，按 id 去重合回
   let anns: Annotation[] = out.annotations ?? [];
   for (const a of Object.values(overlay.anchors)) {
@@ -244,9 +323,14 @@ export function applyOverlay(base: DesignDSL, overlay: DesignOverlay): DesignDSL
     if (g.title) out.title = g.title;
     if (g.theme) out.theme = g.theme;
     if (g.user_nodes?.length) out.user_nodes = g.user_nodes;
-    if (g.storyboard !== undefined) {
+    if (g.storyboard !== undefined || g.goals !== undefined) {
       const rec = out as unknown as { meta?: Record<string, unknown> };
-      rec.meta = { ...(rec.meta ?? {}), storyboard: g.storyboard };
+      rec.meta = {
+        ...(rec.meta ?? {}),
+        ...(g.storyboard !== undefined ? { storyboard: g.storyboard } : {}),
+        // 结构化目标（缺口④）：落进 meta.goals 供 LLM 作方向信号读；overlay 显式给了 goals（含空数组清空）就如实写入
+        ...(g.goals !== undefined ? { goals: g.goals } : {}),
+      };
     }
   }
   return out;
@@ -287,13 +371,27 @@ export function seedOverlayFromDsl(dsl: DesignDSL | null): DesignOverlay {
   if (dsl?.title) global.title = dsl.title;
   if (dsl?.theme) global.theme = dsl.theme;
   if (dsl?.user_nodes) global.user_nodes = dsl.user_nodes;
-  const meta = (dsl as unknown as { meta?: { storyboard?: unknown } } | null)?.meta;
+  const meta = (dsl as unknown as { meta?: { storyboard?: unknown; goals?: OverlayGoal[] } } | null)?.meta;
   if (meta?.storyboard) global.storyboard = meta.storyboard;
+  if (meta?.goals && meta.goals.length > 0) global.goals = meta.goals;
+
+  // 边级意图（缺口③）：base 若已带 edge.intent（上一轮 apply 产物）→ 铺回 overlay，保证迁移/回环不掉
+  const edges: Record<string, OverlayEdgeIntent> = {};
+  for (const e of dsl?.geometry?.edges ?? []) {
+    if (!e.intent) continue;
+    edges[e.id] = {
+      from: e.from,
+      to: e.to,
+      reason: e.intent.reason,
+      boundary: e.intent.boundary,
+    };
+  }
 
   return {
     version: 1,
     feature: dsl?.feature ?? '',
     anchors,
+    ...(Object.keys(edges).length ? { edges } : {}),
     global: Object.keys(global).length ? global : undefined,
   };
 }

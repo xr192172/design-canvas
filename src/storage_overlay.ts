@@ -13,7 +13,7 @@ import type {
   DesignOverlay,
   ReconcileStats,
 } from './dsl/overlay.js';
-import { reconcileOverlay, buildCandidates, seedOverlayFromDsl, applyOverlay, statsLine } from './dsl/overlay.js';
+import { reconcileOverlay, buildCandidates, buildEdgeCandidates, seedOverlayFromDsl, applyOverlay, statsLine } from './dsl/overlay.js';
 
 function getOverlayFile(feature: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(feature)) {
@@ -69,7 +69,8 @@ export function mergeDesignLayer(base: DesignDSL): MergeResult {
   }
 
   const candidates = buildCandidates(base);
-  const { overlay, stats } = reconcileOverlay(old, candidates);
+  const edgeCandidates = buildEdgeCandidates(base);
+  const { overlay, stats } = reconcileOverlay(old, candidates, edgeCandidates);
   const file = saveOverlay(overlay);
   const dsl = applyOverlay(base, overlay);
 

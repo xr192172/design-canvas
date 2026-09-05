@@ -33,6 +33,7 @@ import type { ImportProjectInput } from './tools/import_project.js';
 import { manageFeature, MANAGE_ACTIONS } from './tools/manage_feature.js';
 import { diffViews } from './tools/diff_views.js';
 import { archiveNode, listArchive } from './tools/archive_node.js';
+import { setDesignIntent } from './tools/set_design_intent.js';
 import { harvestDecisions } from './tools/harvest_decisions.js';
 import { syncContracts } from './tools/sync_contracts.js';
 import { harvestClosure } from './tools/harvest_closure.js';
@@ -458,6 +459,16 @@ const syncContractsHandler = wrap((a) => {
   return { message: r.message, data: r };
 });
 
+/** set_design_intent：写结构化目标 / 边级意图到设计意图 overlay（缺口①③④ 的写入口） */
+const setDesignIntentHandler = wrapData((a) => {
+  const r = setDesignIntent({
+    feature: a.feature as string,
+    goals: a.goals as never,
+    edge_intents: a.edge_intents as never,
+  });
+  return { message: r.message, data: r };
+});
+
 /** list_archive：列出某 feature 的下线库归档条目 */
 const listArchiveHandler = wrap(async (a) => {
   const r = listArchive({ feature: a.feature as string, live_dir: a.live_dir as string | undefined });
@@ -644,12 +655,13 @@ const TOOL_DEFS: ToolDef[] = [
       'file（单个文件详情，需 file_id，含 expected_apis/actual_apis/deps）/ ' +
       'calls（文件调用关系，需 file_id+project_dir，查 cache.db 入/出调用）/ ' +
       'annotations（标注）/ approvals（审批）/ approval_history（审批历史，需 annotation_id）/ ' +
-      'snapshots（快照）/ templates（模板）/ simulation_state（仿真状态）/ diff（对比，需 feature_a+feature_b）。' +
+      'snapshots（快照）/ templates（模板）/ simulation_state（仿真状态）/ diff（对比，需 feature_a+feature_b）/ ' +
+      'goals（结构化目标，meta.goals）/ edge_intents（边级意图，edge.intent）。' +
       'view: design（默认，活态设计）/ live（实际代码快照，仅 query=dsl/nodes/edges/node/files/file 生效，用于对比设计 vs 代码现状）。',
     inputSchema: {
       query: z
-        .enum(['dsl', 'features', 'nodes', 'edges', 'node', 'decisions', 'files', 'file', 'calls', 'annotations', 'approvals', 'approval_history', 'snapshots', 'templates', 'simulation_state', 'diff'])
-        .describe('查询类型：dsl=完整DSL, features=feature列表, nodes=节点摘要, edges=边摘要, node=节点详情, decisions=决策目录(按功能线分组), files=文件摘要, file=文件详情, calls=调用关系, annotations=标注, approvals=审批, approval_history=审批历史, snapshots=快照, templates=模板, simulation_state=仿真状态, diff=对比'),
+        .enum(['dsl', 'features', 'nodes', 'edges', 'node', 'decisions', 'files', 'file', 'calls', 'annotations', 'approvals', 'approval_history', 'snapshots', 'templates', 'simulation_state', 'diff', 'goals', 'edge_intents'])
+        .describe('查询类型：dsl=完整DSL, features=feature列表, nodes=节点摘要, edges=边摘要, node=节点详情, decisions=决策目录(按功能线分组), files=文件摘要, file=文件详情, calls=调用关系, annotations=标注, approvals=审批, approval_history=审批历史, snapshots=快照, templates=模板, simulation_state=仿真状态, diff=对比, goals=结构化目标(meta.goals), edge_intents=边级意图(edge.intent)'),
       view: z.enum(['design', 'live']).default('design').describe('视图层级：design=设计视图（默认），live=实际代码快照'),
       feature: z.string().optional().describe('feature 名（nodes/edges/node/decisions/files/file/annotations/approvals 等需要）'),
       node_id: z.string().optional().describe('query=node 时：节点 ID'),
@@ -2486,6 +2498,44 @@ const TOOL_DEFS: ToolDef[] = [
         .describe('只看指定能力线；省略返回全部 6 线'),
     },
     handler: capabilityMapHandler,
+  },
+  {
+    name: 'set_design_intent',
+    title: 'Write design intent',
+    description:
+      '写设计意图到意图 overlay（缺口①③④ 的写入口，LLM 开发时即消费方）：' +
+      'goals（结构化目标/方向，全量替换）与 edge_intents（"A 为何依赖 B" 与边界归属，' +
+      '按 base 边 id 或 from+to 匹配挂载）两者均可选、至少传一类。' +
+      '写进 <feature>.overlay.json（意图权威库），随即 apply 回 base 并保存，get_dsl/serve 当下即可读到 ' +
+      '（meta.goals 与 edge.intent），不依赖下一次代码扫描再生。',
+    inputSchema: {
+      feature: z.string().describe('feature 名'),
+      goals: z
+        .array(
+          z.object({
+            id: z.string().optional(),
+            title: z.string().describe('目标一句话'),
+            description: z.string().optional(),
+            status: z.enum(['active', 'done', 'parked', 'dropped']).optional().describe('active=推进中/done=完成/parked=暂缓/dropped=放弃'),
+          }),
+        )
+        .optional()
+        .describe('结构化目标/方向（全量替换；空数组=清空）'),
+      edge_intents: z
+        .array(
+          z.object({
+            id: z.string().optional().describe('目标 base 边 id（优先于 from+to）'),
+            from: z.string().optional().describe('源节点 id（无 id 时用 from+to 定位边）'),
+            to: z.string().optional().describe('目标节点 id'),
+            reason: z.string().optional().describe('A 为何依赖 B'),
+            boundary: z.string().optional().describe('边界归属说明'),
+            status: z.enum(['open', 'resolved']).optional(),
+          }),
+        )
+        .optional()
+        .describe('边级意图：按 base 边 id 或 from+to 匹配挂载 reason/boundary'),
+    },
+    handler: setDesignIntentHandler,
   },
 ];
 

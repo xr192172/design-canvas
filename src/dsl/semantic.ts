@@ -72,6 +72,10 @@ export interface SemanticFile {
   expected_apis?: ExpectedApi[];
   /** 预期依赖路径列表 */
   expected_deps?: string[];
+  /** 实际 import 依赖（真实代码扫描回填）：本文件 import 的项目内文件相对路径。
+   *  语义层持有的"实测事实"——区别于 expected_deps(设计态)；Archify/导图/影响面等消费方读它，
+   *  不必再从几何层/派生现猜。 */
+  actual_deps?: string[];
   /** 预期行为描述 */
   expected_behavior?: string;
   /** 文件实现状态：draft=待实现, in_progress=实现中, done=已完成 */

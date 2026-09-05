@@ -168,6 +168,10 @@ export interface NodeDecision {
   thread?: string;
   /** 自由标签：跨功能线检索（如 "blackbox" "performance"） */
   tags?: string[];
+  /** 谁定的（human / llm / 账号名），人机长期共同演进的「谁」 */
+  author?: string;
+  /** 本次决策最近写入/修订时间（ISO 8601），与 decision_history.at 呼应成时间线 */
+  updated_at?: string;
 }
 
 /** 决策版本栈条目：旧决策 + 压栈时间 + 修订说明 */
@@ -178,6 +182,8 @@ export interface DecisionHistoryEntry {
   decision: NodeDecision;
   /** 本次修订说明（翻案理由/变更点，可空） */
   note?: string;
+  /** 发起本次修订的人（谁用新版取代了旧版）；旧版自身的 author 仍留在 decision.author */
+  author?: string;
 }
 
 /** 边 SVG 样式 */
@@ -202,6 +208,8 @@ export interface Edge {
   arrow?: 'forward' | 'reverse' | 'both' | 'none';
   /** 职责分层：缺省时自动推导——任一端点为深层节点则跟随较深层（detail > error > main） */
   layer?: NodeLayer;
+  /** 设计意图（overlay 落库到 base 的边级意图）：A 为何依赖 B / 边界归属 */
+  intent?: { reason?: string; boundary?: string };
 }
 
 /** 泳道（横向分组） */

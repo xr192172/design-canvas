@@ -1,73 +1,87 @@
 /**
- * archify_project —— IR 视模型 ↔ Archify IR 的投影契约（演示模式用 Archify 渲染）
+ * archify_project —— 编辑 IR 树 ↔ Archify 数据层契约的适配 + 语义令牌（只读，非投影）
  *
- * 定位（与 dsl-workbench 的分工）：
- *   - 唯一作者真源 = workbench 编辑 IR（字段：pins/shapes/runtime/gaps/panel/status/layer/
- *     file/children + 边的 kind/active/light）。编辑永远只写它。
- *   - 演示模式 = 把当前真源【投影】成 Archify IR（components/boundaries/connections/cards/views）。
- *     Archify 是派生、只读、不落盘为真源。
- *   - 视觉语言：沿用 Archify DESIGN 色彩令牌（frontend/backend/database/cloud/security/
- *     messagebus/external），映射确定性、可测。
- *
- * 契约（往返测试锚定，见 tests/tools/archify_project.test.ts）：
- *   - 不可逆改：toArchify 绝不 mutation 输入；编辑字段(pins/runtime/gaps/panel…)只存在于
- *     真源，投影不写回 → 演示→再编辑天然无损（真源没被碰过）。
- *   - 身份双射：IRView 节点/边 id 与 Archify components/connections id 一一对应、稳定可逆；
- *     fromArchify 能还原同一 id 集（供"退出演示重新进入编辑器"）。
- *   - 保真结构：label 原样；role 无常映射到 Archify type（确定性）。
+ * 定位：Archify 已作为内置能力接入（见 archify_pipeline/archify_semantics/archify_mappers），
+ * 本模块只保留输入契约与适配，不承载任何自造布局/投影：
+ *   - ArchifyTreeNode/ArchifyTreeEdge：Archify 面对编辑 IR 树的宽松数据层契约形状；
+ *   - adaptIRTree：把前端 workbench 的编辑真源（IRView/IRNode 渲染形状）显式归一化成契约形状，
+ *     只搬运投影原料字段（id/label/role/type/sublabel/tag/file/pins），剥离渲染字段、绝不写回；
+ *   - ROLE_TYPE / roleToType / ARCHIFY_TYPE_COLOR / ARCHIFY_COLOR_TOKEN：Archify 视觉令牌，
+ *     映射确定性、可测。
  */
 
-// ── ① 编辑真源的最小可投影子集（对齐 dsl-workbench ir/types.ts 的 IRView/IRNode/IREdge） ──
+// ── ① Archify 面对编辑 IR 树的输入契约（数据层宽松形状） ──
 
-/** 编辑态"必须保留"的字段（真源全量；Archify 投影只读这些、绝不改它们） */
-export interface ProjNode {
+export interface ArchifyTreeNode {
   id: string;
   label: string;
-  /** 归一化角色（stage/actor/port/container…）——真源的编辑语义 */
-  role: string;
-  /** 原始 type（保留兜底） */
-  type: string;
-  /** 只读投影采纳：sublabel / tag */
+  role?: string;
+  type?: string;
   sublabel?: string;
   tag?: string;
-  // —— 以下为编辑语义，投影不读不写（演示态不表达），往返由"真源不变"保证 ——
-  layer?: string;
-  status?: string;
+  file?: string;
+  /** 步骤/文件的数据形态（编辑 IR 的 pins 契约投影：吃什么/吐什么）——依赖推导原料 */
   pins?: { in?: string[]; out?: string[] };
-  runtime?: { trace?: unknown[] };
+  children?: { nodes?: ArchifyTreeNode[]; edges?: ArchifyTreeEdge[] };
 }
-export interface ProjEdge {
-  id: string;
+export interface ArchifyTreeEdge {
+  id?: string;
   from: string;
   to: string;
-  label: string;
-  kind: 'flow' | 'contains' | 'cross'; // flow→连线；cross→虚线；contains→边界（v1 跳过）
-  active?: boolean;
-  light?: boolean;
-}
-export interface ProjView {
-  id: string;
-  label: string;
-  title: string;
-  nodes: ProjNode[];
-  edges: ProjEdge[];
+  label?: string;
+  kind?: string;
 }
 
-// ── ② Archify IR（演示目标） ──
-
-export interface ArchifyComponent { id: string; type: string; label: string; sublabel?: string; pos: [number, number]; size: [number, number]; tag?: string }
-export interface ArchifyConnection { id: string; from: string; to: string; label?: string; variant?: 'dashed' | 'emphasis' | 'security' }
-export interface ArchifyBoundary { kind: 'region' | 'security-group'; label: string; wraps: string[] }
-export interface ArchifyCard { dot: string; title: string; items: string[] }
-export interface ArchifyViewDef { id: string; label: string; focus: string[]; note: string }
-export interface ArchifyIR {
-  schema_version: 1;
-  diagram_type: 'architecture';
-  meta: { title: string; output: string; quality_profile: 'standard' | 'showcase'; views: ArchifyViewDef[] };
-  components: ArchifyComponent[];
-  boundaries: ArchifyBoundary[];
-  connections: ArchifyConnection[];
-  cards: ArchifyCard[];
+// ── ② 适配：编辑 IR 树（IRView/IRNode 渲染形状）→ ArchifyTreeNode（数据层契约形状） ──
+// 前端 workbench 的编辑真源是 IRView/IRNode：根视图顶层挂 nodes/edges、节点带
+// x/y/w/h/panel/statusText/layer/status 等渲染语义字段，children 是 IRView（可递归）。
+// 本适配层显式归一化：IRView 是渲染容器，适配时只取其承载的 nodes/edges 落到节点的
+// children 上；IRNode 只搬运契约字段，渲染/编辑字段一律剥离。纯函数、不突变输入；
+// id/label 保持原样（身份双射不漂移）。往返由"真源不变"保证（投影绝不写回）。
+export function adaptIRTree(input: unknown): ArchifyTreeNode {
+  const v = (input ?? {}) as {
+    id?: string; label?: string; nodes?: unknown[]; edges?: unknown[];
+    role?: string; type?: string; sublabel?: string; tag?: string; file?: string;
+    pins?: { in?: string[]; out?: string[] }; children?: unknown;
+  };
+  const id = String(v.id ?? 'view');
+  const label = String(v.label ?? id);
+  if (Array.isArray(v.nodes)) {
+    return { id, label, children: { nodes: v.nodes.map((n) => adaptIRTree(n)), edges: (v.edges ?? []).map(adaptIREdge) } };
+  }
+  const node: ArchifyTreeNode = { id, label };
+  if (v.role) node.role = String(v.role);
+  if (v.type) node.type = String(v.type);
+  if (v.sublabel) node.sublabel = String(v.sublabel);
+  if (v.tag) node.tag = String(v.tag);
+  if (v.file) node.file = String(v.file);
+  const hasIn = !!v.pins?.in?.length;
+  const hasOut = !!v.pins?.out?.length;
+  if (hasIn || hasOut) {
+    node.pins = {
+      ...(hasIn ? { in: v.pins!.in! } : {}),
+      ...(hasOut ? { out: v.pins!.out! } : {}),
+    };
+  }
+  if (v.children) {
+    const view = v.children as { nodes?: unknown[]; edges?: unknown[] };
+    if (Array.isArray(view.nodes)) {
+      node.children = {
+        nodes: view.nodes.map((n) => adaptIRTree(n)),
+        edges: (view.edges ?? []).map(adaptIREdge),
+      };
+    }
+  }
+  return node;
+}
+/** IREdge（kind: flow|contains|cross + stroke/dash/active/light 渲染字段）→ ArchifyTreeEdge（只留投影原料） */
+function adaptIREdge(input: unknown): ArchifyTreeEdge {
+  const e = (input ?? {}) as { id?: string; from?: string; to?: string; label?: string; kind?: string };
+  const edge: ArchifyTreeEdge = { from: String(e.from ?? ''), to: String(e.to ?? '') };
+  if (e.id) edge.id = String(e.id);
+  if (e.label) edge.label = String(e.label);
+  if (e.kind) edge.kind = String(e.kind);
+  return edge;
 }
 
 // ── ③ Archify 视觉令牌（DESIGN.md 角色 → 缺省 type；"视觉语言用 Archify 这一套"） ──
@@ -91,82 +105,4 @@ export const ARCHIFY_COLOR_TOKEN = { canvas: '#020617', mask: '#0F172A', ink: '#
 
 export function roleToType(role: string): string {
   return ROLE_TYPE[role] ?? 'backend';
-}
-
-// ── ④ 投影：IRView → Archify（派生只读；不突变输入） ──
-
-const TYPE_COLUMN: Record<string, number> = {
-  external: 40, frontend: 300, backend: 560, database: 820, cloud: 1080, security: 1080, messagebus: 820,
-};
-
-export function toArchify(view: ProjView, opts?: { quality?: 'standard' | 'showcase'; showLabelOnEdge?: boolean }): ArchifyIR {
-  const q = opts?.quality ?? 'standard';
-  const components: ArchifyComponent[] = [];
-  const layers: Record<string, number> = {};
-  for (const n of view.nodes) {
-    const type = roleToType(n.role);
-    const x = TYPE_COLUMN[type] ?? 400;
-    const row = (layers[x] ?? 0);
-    layers[x] = row + 1;
-    components.push({
-      id: n.id,
-      type,
-      label: n.label,
-      sublabel: n.sublabel,
-      pos: [x, 80 + (row % 3) * 220],
-      size: [150, 60],
-      ...(n.tag ? { tag: n.tag } : {}),
-    });
-  }
-  const connections: ArchifyConnection[] = [];
-  for (const e of view.edges) {
-    if (e.kind === 'contains') continue; // 层级 v1 不入线（未来映射为 boundaries）
-    connections.push({
-      id: e.id,
-      from: e.from,
-      to: e.to,
-      label: e.label,
-      ...(e.kind === 'cross' ? { variant: 'dashed' as const } : {}),
-    });
-  }
-  const focusAll = view.nodes.map((n) => n.id);
-  const boundaries: ArchifyBoundary[] = [
-    { kind: 'region', label: view.label, wraps: focusAll },
-  ];
-  const cards: ArchifyCard[] = [
-    { dot: 'cyan', title: '入口', items: [] },
-    { dot: 'emerald', title: '核心', items: [`${view.nodes.length} 节点 · ${connections.length} 关系（演示投影）`] },
-  ];
-  const views: ArchifyViewDef[] = [
-    { id: 'all', label: '全貌', focus: focusAll, note: '演示模式的 Archify 拓扑' },
-  ];
-  return {
-    schema_version: 1,
-    diagram_type: 'architecture',
-    meta: { title: view.title, output: `${view.id}-archify.html`, quality_profile: q, views },
-    components,
-    boundaries,
-    connections,
-    cards,
-  };
-}
-
-// ── ⑤ 逆向：Archify → 最小 IR（供"退出演示重进编辑器"还原 id 集；编辑字段由真源保存） ──
-
-export interface RecoveredView { id: string; nodes: { id: string; label: string; role: string }[]; edges: { id: string; from: string; to: string }[] }
-
-export function fromArchify(ar: ArchifyIR): RecoveredView {
-  const idByType: Record<string, string> = {};
-  for (const c of ar.components) idByType[c.type] = c.id; // v1 仅用于反向锚定（不强求）
-  return {
-    id: ar.meta.title,
-    nodes: ar.components.map((c) => ({ id: c.id, label: c.label, role: c.type })),
-    edges: ar.connections.map((c) => ({ id: c.id, from: c.from, to: c.to })),
-  };
-}
-
-/** 判断投影是否会触碰编辑字段：toArchify 只读 id/label/role/sublabel/tag——断言它不读也不
- *  需要 pins/runtime 等。此纯函数供契约测试校验"投影不表达≠会丢"的边界说明。 */
-export function projectableFields(): string[] {
-  return ['id', 'label', 'role', 'type', 'sublabel', 'tag'];
 }

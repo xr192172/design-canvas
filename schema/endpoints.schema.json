@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "design-canvas 响应契约（from src/api/contract.ts zod 单源）",
+  "description": "自动生成，请勿手改。来源：design-canvas/src/api/contract.ts；由 scripts/gen_endpoints_schema.mjs 在 npm run gen:schema 时生成。",
+  "definitions": {
+    "features": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "files": {
+                "type": "number"
+              },
+              "nodes": {
+                "type": "number"
+              },
+              "language": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "feature"
+            ],
+            "additionalProperties": {}
+          }
+        }
+      },
+      "required": [
+        "_api",
+        "features"
+      ],
+      "additionalProperties": {}
+    },
+    "save": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        },
+        "message": {
+          "type": "string"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "saved_at": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "_api",
+        "success"
+      ],
+      "additionalProperties": {}
+    },
+    "overview": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        },
+        "feature": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "one_liner": {
+              "type": "string"
+            },
+            "brief": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "one_liner",
+            "brief",
+            "mode"
+          ],
+          "additionalProperties": {}
+        },
+        "mind_map": {},
+        "first_steps": {
+          "type": "array",
+          "items": {}
+        },
+        "generated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "_api",
+        "success"
+      ],
+      "additionalProperties": {}
+    },
+    "mind-map": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        },
+        "mind_map": {}
+      },
+      "required": [
+        "_api",
+        "success",
+        "mind_map"
+      ],
+      "additionalProperties": {}
+    },
+    "mind-map-teach": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        },
+        "mind_map": {}
+      },
+      "required": [
+        "_api",
+        "success",
+        "mind_map"
+      ],
+      "additionalProperties": {}
+    },
+    "archify-demo": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "_api": {
+          "type": "number",
+          "const": 1
+        },
+        "delivered": {
+          "type": "boolean"
+        },
+        "manifest": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "architecture",
+                  "workflow",
+                  "sequence",
+                  "dataflow",
+                  "lifecycle"
+                ]
+              },
+              "delivered": {
+                "type": "boolean"
+              },
+              "htmlPath": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "delivered"
+            ],
+            "additionalProperties": {}
+          }
+        }
+      },
+      "required": [
+        "_api",
+        "delivered",
+        "manifest"
+      ],
+      "additionalProperties": {}
+    }
+  }
+}

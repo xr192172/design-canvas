@@ -96,6 +96,8 @@ export interface FileInfo {
   layer?: string;
   /** 关键函数签名（actual_apis 优先，teach 模式喂给 LLM 的实现材料） */
   apis?: string[];
+  /** 实测依赖（semantic.files[].actual_deps 回填）：本文件 import 的项目内文件相对路径 */
+  actual_deps?: string[];
 }
 
 /** 文件索引：exact（path 精确）+ bySuffix（≥2 段后缀匹配），契约投影的输入 */
@@ -117,6 +119,7 @@ export function buildFileIndex(dsl: DesignDSL): FileIndex {
       status: f.status,
       layer: f.layer,
       apis: (f.actual_apis ?? f.expected_apis ?? []).slice(0, 24).map((a) => a.signature),
+      actual_deps: f.actual_deps, // 语义层实测依赖：Archify 等据此建真实 import 边，不再靠文件签名猜
     };
     exact.set(f.path, info);
     const segs = f.path.split('/');
