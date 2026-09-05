@@ -715,12 +715,12 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       const dsl = loadDSL(input);
       const feature = dsl.feature;
       const sourceRoot = dsl.source_root ?? (input.project_dir as string | undefined);
-      const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { max_functions: 400 });
+      const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot);
 
       if (!ok || outline.functions.length === 0) {
         return {
           message: `feature "${feature}" 暂无函数级大纲${note ? `（${note}）` : ''} ${viewTag}`,
-          data: { functions: [], truncated: outline.truncated ?? false, note: note ?? undefined },
+          data: { functions: [], note: note ?? undefined },
         };
       }
 
@@ -731,7 +731,7 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       const recursive = outline.functions.filter((f) => f.recursive);
 
       const lines: string[] = [
-        `══ feature "${feature}" 函数级大纲 ${viewTag}（${total} 个函数/方法${outline.truncated ? '，已截断' : ''}）══`,
+        `══ feature "${feature}" 函数级大纲 ${viewTag}（${total} 个函数/方法）══`,
         `  db: ${outline.db_file}`,
         '',
         `  ─ 目录分布（${dirs.length} 个目录）─`,

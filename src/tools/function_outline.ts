@@ -40,8 +40,6 @@ export interface FunctionOutline {
   source_root?: string;
   db_file: string;
   generated_at: number;
-  /** 命中 max_functions 截断时置 true（提示收窄目录） */
-  truncated?: boolean;
   functions: FunctionOutlineFn[];
 }
 
@@ -66,12 +64,8 @@ export function resolveFunctionCacheDb(feature?: string, sourceRoot?: string): s
   return candidates.find((p) => p && fs.existsSync(p)) ?? null;
 }
 
-/** 纯函数：从已打开的 db 汇聚函数级大纲 */
-export function queryFunctionOutline(
-  db: Database,
-  opts: { max_functions?: number } = {},
-): FunctionOutline {
-  const max = opts.max_functions ?? 400;
+/** 纯函数：从已打开的 db 汇聚函数级大纲。全量返回（不做函数截断——像编译器一样数据完整） */
+export function queryFunctionOutline(db: Database): FunctionOutline {
 
   // ① 函数/方法符号（排除局部闭包，避免契约面噪音）
   let fnRows: Array<{
@@ -148,20 +142,17 @@ export function queryFunctionOutline(
     }
   }
 
-  let fns = [...byId.values()];
-  const truncated = fns.length > max;
-  if (truncated) fns = fns.slice(0, max);
+  const fns = [...byId.values()];
 
   return {
     db_file: '', // 调用方填
     generated_at: Date.now(),
-    ...(truncated ? { truncated } : {}),
     functions: fns,
   };
 }
 
 /** 按 feature / source_root 定位缓存并输出大纲。无缓存广播退化为空数组（不伪造）。 */
-export function buildFunctionOutline(feature?: string, sourceRoot?: string, opts: { max_functions?: number } = {}):
+export function buildFunctionOutline(feature?: string, sourceRoot?: string):
   { ok: boolean; outline: FunctionOutline; note?: string } {
   const dbFile = resolveFunctionCacheDb(feature, sourceRoot);
   if (!dbFile) {
@@ -182,7 +173,7 @@ export function buildFunctionOutline(feature?: string, sourceRoot?: string, opts
     };
   }
   try {
-    const outline = queryFunctionOutline(db, opts);
+    const outline = queryFunctionOutline(db);
     outline.db_file = dbFile;
     outline.feature = feature;
     outline.source_root = sourceRoot;

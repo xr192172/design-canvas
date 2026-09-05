@@ -861,8 +861,8 @@ function handleApiFunctionOutline(req: http.IncomingMessage, res: http.ServerRes
       sendError(res, 400, '缺参数 "feature"（用于定位函数级缓存的 feature 名）');
       return;
     }
-    const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { max_functions: 400 });
-    sendJson(res, ok ? 200 : 404, ok ? outline : { error: note ?? '无函数级数据', functions: [], truncated: false });
+    const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot);
+    sendJson(res, ok ? 200 : 404, ok ? outline : { error: note ?? '无函数级数据', functions: [] });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }

@@ -73,17 +73,15 @@ describe('queryFunctionOutline', () => {
     expect(o.functions[0].name).toBe('Exported');
   });
 
-  it('max_functions 命中时置 truncated', () => {
+  it('不做截断：全量返回全部函数（像编译器一样数据完整）', () => {
     fn('a.go#A', 'function', 'A', 'a.go', 1, 2);
     fn('b.go#B', 'function', 'B', 'b.go', 1, 2);
-    const o = queryFunctionOutline(db, { max_functions: 1 });
-    expect(o.functions).toHaveLength(1);
-    expect(o.truncated).toBe(true);
+    const o = queryFunctionOutline(db);
+    expect(o.functions.map((f) => f.name).sort()).toEqual(['A', 'B']);
   });
 
   it('空库（无节点）返回空 functions 不炸', () => {
     const o = queryFunctionOutline(db);
     expect(o.functions).toEqual([]);
-    expect(o.truncated).toBeUndefined();
   });
 });
