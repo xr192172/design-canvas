@@ -46,6 +46,7 @@ import { checkMonolith } from './monolith.js';
 import type { FileMonolithReport } from './monolith.js';
 import { runArchifyPipeline } from './archify_pipeline.js';
 import { adaptIRTree } from './archify_project.js';
+import { buildFunctionOutline } from './function_outline.js';
 import { deriveMindMap, buildFileIndex } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
@@ -845,6 +846,25 @@ async function handleApiArchifyDemo(req: http.IncomingMessage, res: http.ServerR
     guard(res, '/api/archify-demo', 'archify-demo', result);
   } catch (e) {
     sendError(res, 400, (e as Error).message);
+  }
+}
+
+/** GET /api/function-outline?feature=<feature>[&project_dir=<root>]：函数级大纲
+ *  （目录 → 文件 → 函数 + 调用/被调用/回环），数据源 = import_cache_<feature>.db 或
+ *  <source_root>/.design-canvas/cache.db。派生只读，不写回任何存储。 */
+function handleApiFunctionOutline(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    const sourceRoot = (url.searchParams.get('project_dir') || '').trim() || undefined;
+    if (!feature) {
+      sendError(res, 400, '缺参数 "feature"（用于定位函数级缓存的 feature 名）');
+      return;
+    }
+    const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { max_functions: 400 });
+    sendJson(res, ok ? 200 : 404, ok ? outline : { error: note ?? '无函数级数据', functions: [], truncated: false });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
   }
 }
 
@@ -2899,6 +2919,11 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/archify-demo') && method === 'POST') {
       handleApiArchifyDemo(req, res);
+      return;
+    }
+
+    if (url.startsWith('/api/function-outline') && method === 'GET') {
+      handleApiFunctionOutline(req, res);
       return;
     }
 

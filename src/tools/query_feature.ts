@@ -44,6 +44,7 @@ import type { Node, Edge } from '../dsl/geometry.js';
 import type { SemanticFile } from '../dsl/semantic.js';
 import { getProjectCacheDb } from '../db/db.js';
 import type { Database } from '../db/db.js';
+import { buildFunctionOutline } from './function_outline.js';
 
 export interface QueryFeatureInput {
   /** 查询类型 */
@@ -57,6 +58,7 @@ export interface QueryFeatureInput {
     | 'files'
     | 'file'
     | 'calls'
+    | 'functions'
     | 'annotations'
     | 'approvals'
     | 'approval_history'
@@ -705,6 +707,48 @@ export function queryFeature(input: QueryFeatureInput): QueryFeatureResult {
       return {
         message: lines.join('\n'),
         data: { incoming, outgoing },
+      };
+    }
+
+    // ── 细粒度查询：函数级大纲（目录 → 文件 → 函数 + 调用/被调用/递归） ──
+    case 'functions': {
+      const dsl = loadDSL(input);
+      const feature = dsl.feature;
+      const sourceRoot = dsl.source_root ?? (input.project_dir as string | undefined);
+      const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { max_functions: 400 });
+
+      if (!ok || outline.functions.length === 0) {
+        return {
+          message: `feature "${feature}" 暂无函数级大纲${note ? `（${note}）` : ''} ${viewTag}`,
+          data: { functions: [], truncated: outline.truncated ?? false, note: note ?? undefined },
+        };
+      }
+
+      const total = outline.functions.length;
+      const byDir = new Map<string, number>();
+      for (const f of outline.functions) byDir.set(f.dir, (byDir.get(f.dir) ?? 0) + 1);
+      const dirs = [...byDir.entries()].sort((a, b) => b[1] - a[1]);
+      const recursive = outline.functions.filter((f) => f.recursive);
+
+      const lines: string[] = [
+        `══ feature "${feature}" 函数级大纲 ${viewTag}（${total} 个函数/方法${outline.truncated ? '，已截断' : ''}）══`,
+        `  db: ${outline.db_file}`,
+        '',
+        `  ─ 目录分布（${dirs.length} 个目录）─`,
+        ...dirs.map(([d, c]) => `    ${d}  ${c} 个`),
+        '',
+        `  ─ 递归函数（自调用）${recursive.length} 个 ─`,
+        ...(recursive.length ? recursive.slice(0, 20).map((f) => `    ${f.file}:${f.start_line} ${f.qualified_name}`) : ['    (无)']),
+        '',
+        '  示例函数（前 10）:',
+        ...outline.functions.slice(0, 10).map(
+          (f) => `    ${f.dir}/${f.name} [${f.kind}] L${f.start_line}-${f.end_line} calls=${f.calls.length} called_by=${f.called_by.length}${f.recursive ? ' 回环' : ''}`,
+        ),
+      ];
+
+      return {
+        message: lines.join('\n'),
+        data: outline,
       };
     }
 
