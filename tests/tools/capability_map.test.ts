@@ -22,7 +22,7 @@ const regTools = [
   'observe_log', 'observe_judge', 'reconcile_chain', 'observe_instrument', 'edit_code',
   'rename_many', 'rename_symbols', 'rename_files', 'find_references', 'impact_analysis',
   'cross_repo_symbol_index', 'hybrid_precheck', 'behavior_baseline', 'code_health', 'run_tests',
-  'remove_dead_imports', 'refactor_pipeline', 'suggest_renames', 'find_similar_names',
+  'remove_dead_imports', 'refactor_pipeline', 'annotate_functions', 'suggest_renames', 'find_similar_names',
   'refactor_judge', 'diagnose', 'canvas_notes', 'gateway_provider', 'read_project_docs',
   'capability_map',
 ];
@@ -37,7 +37,7 @@ describe('capability_map 目录契约', () => {
 
   it('目录覆盖所有注册工具（无遗漏、无超集）', () => {
     const catalogued = LANES.flatMap((l) => l.tools.map((t) => t.name));
-    expect(catalogued.length).toBe(50);
+    expect(catalogued.length).toBe(51);
     expect(catalogued).toEqual(expect.arrayContaining(regTools.filter((t) => t !== 'capability_map')));
     expect(new Set(catalogued).size).toBe(catalogued.length); // 无跨线重复
   });

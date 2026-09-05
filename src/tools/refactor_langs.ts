@@ -40,17 +40,24 @@ export interface PackageMigrationStepCfg {
   enabled?: boolean;
   migrate?: PackageMigrationSpec;
 }
+export interface FunctionAnnotationStepCfg {
+  /** 是否开启"函数语义注释"（默认 false，须显式开） */
+  enabled?: boolean;
+  /** 限定范围：只注释这些文件（相对 cwd）；缺省扫目录内 TS/JS 源文件 */
+  files?: string[];
+}
 export interface RefactorStepsCfg {
   dead_imports?: DeadImportsStepCfg;
   dead_statements?: DeadStatementsStepCfg;
   package_migration?: PackageMigrationStepCfg;
   spring_mvc_layering?: { enabled?: boolean; annotate?: Record<string, unknown> };
+  function_annotation?: FunctionAnnotationStepCfg;
 }
 
 // ─────────────────────────────────────────────
 // 契约接口
 // ─────────────────────────────────────────────
-export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_migration' | 'spring_mvc_layering';
+export type RefactorStageKind = 'dead_imports' | 'dead_statements' | 'package_migration' | 'spring_mvc_layering' | 'function_annotation';
 
 /** 一次迁移参数：把 `project/<prefix>` 整棵树移动到 `project/<to>`，
  *  顶层源文件的 `package <packageRename.from>` → `package <packageRename.to>`，

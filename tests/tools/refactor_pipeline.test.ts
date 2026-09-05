@@ -239,7 +239,7 @@ describe('runRefactorPipeline 聚合', () => {
     });
 
     expect(res.ok).toBe(true);
-    expect(res.stages.every((x) => x.outcome === 'applied')).toBe(true);
+    expect(res.stages.filter((x) => x.outcome !== 'skipped').every((x) => x.outcome === 'applied')).toBe(true);
     expect(res.total_files_changed).toBe(2); // a.ts + c.ts
     expect(asSpy(s).calls.length).toBe(3); // 基线 + 2 改后
   });

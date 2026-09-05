@@ -39,6 +39,7 @@ const TRIGGER_ROWS = [
   ['改一段代码（函数体/range）', '`edit_code`', '按符号/行号定位改写'],
   ['理解一串代码/结构', '`explore_code`', '只读、即时答案'],
   ['清理无效 import', '`remove_dead_imports`', '剪刀剪 dead_deps'],
+  ['给函数补/维护语义化注释（缺失补、body 变了重注）', '`annotate_functions`', 'TS/JS 函数语义注释：扫覆盖→LLM 补→@fnhash body 指纹同步过期；mode=scan/dry_run/apply；也可开 refactor_pipeline 的 function_annotation 步'],
   ['看「谁引用了 X / 谁调用了 X」', '`find_references`', '只读引用查询；mode=field 报字段读取/构造点（加字段/改签名前必查，勿回退 grep）'],
   ['加字段/改接口签名前查波及面', '`find_references mode=field`/`mode=type field=<字段>/symbol=<类型>`', '读/构/解/声明四类 AST 分类＋行内上下文；type 模式找形如某类型的对象字面量构造候选'],
   ['跑测试/提交前回归', '`run_tests`', '结构化失败定位（filter 定向 or 全量）'],

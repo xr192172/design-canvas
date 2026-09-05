@@ -46,6 +46,7 @@ import { javaExecutor } from '../java_refactor/executor.js';
 import type { JudgeIssue } from './refactor_judge.js';
 import { scanContracts, diffContracts, type ContractSnapshot, type ScanContractsOptions, type UndefinedRef } from './contract_gate.js';
 import { checkEmbedSubmissions, type SubmitCheckResult } from './submit_gate.js';
+import { planFunctionAnnotation } from './function_annotation.js';
 
 // re-export 契约类型（向后兼容：外部可从本模块取用）
 export type {
@@ -102,6 +103,12 @@ export interface PipelineOptions {
     package_migration?: {
       enabled?: boolean;
       migrate?: PackageMigrationSpec;
+    };
+    /** 函数语义注释（TS/JS）：扫覆盖→缺失的用 LLM 补→过期的(body指纹变)重注。默认 false，
+     *  enabled=true 开启；files 限定范围（相对 cwd）。写入由管线统一落盘/验证/回滚。 */
+    function_annotation?: {
+      enabled?: boolean;
+      files?: string[];
     };
   };
   /** true = 自动探测验证命令；{commands} = 自定义命令组；false/缺省 = 不验证仅落盘 */
@@ -269,6 +276,21 @@ function buildDefaultLangs(): RefactorLangRegistry {
           'TS 提升（function/class/let/const/var）：return/throw 后不可达子树若含声明，需名字引用校验才删',
         ],
       },
+      {
+        kind: 'function_annotation',
+        label: '[ts] 函数语义注释',
+        compute: (a) => {
+          const abs = a.files ? a.files.map((f) => path.resolve(a.cwd ?? a.project_dir, f)).filter((f) => fs.existsSync(f)) : undefined;
+          return planFunctionAnnotation({ project_dir: a.project_dir, absFiles: abs, llm: true }).then(
+            (r) => ({ absToNew: r.absToNew, originals: r.originals, units: r.summary.annotated + r.summary.updated }),
+          );
+        },
+        limitations: [
+          '只注释 TS/JS；缺失的由 LLM 依据 签名+函数体 生成一句话语义注释',
+          '用 @fnhash 指纹标记：函数体一改即判 stale → 下次管线重注同步；手写无指纹注释绝不动',
+          'LLM 未配置时该步退化为扫描（no_change），不伪造注释',
+        ],
+      },
     ],
   });
 
@@ -370,7 +392,9 @@ export function collectSteps(
         files:
           stage.kind === 'dead_statements'
             ? (cfg as DeadStatementsStepCfg | undefined)?.files
-            : undefined,
+            : stage.kind === 'function_annotation'
+              ? (cfg as { files?: string[] } | undefined)?.files
+              : undefined,
         dead:
           stage.kind === 'dead_imports'
             ? (cfg as DeadImportsStepCfg | undefined)?.dead
@@ -631,6 +655,7 @@ function countPlanned(opts: PipelineOptions): number {
   if (opts.steps.dead_imports?.enabled) n++;
   if (opts.steps.dead_statements?.enabled) n++;
   if (opts.steps.package_migration?.enabled) n++;
+  if (opts.steps.function_annotation?.enabled) n++;
   return n;
 }
 

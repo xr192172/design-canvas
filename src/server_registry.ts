@@ -69,6 +69,7 @@ import { analyzeHealth } from './health/index.js';
 import { renameFiles } from './tools/rename_files.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
+import { planFunctionAnnotation, scanFileAnnotations } from './tools/function_annotation.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { runRefactorJudge } from './tools/refactor_judge.js';
@@ -101,7 +102,7 @@ import {
   ledgerSummary,
 } from './observe/instrument.js';
 import path from 'node:path';
-import { statSync, readFileSync, writeFileSync, readdirSync, type Dirent } from 'node:fs';
+import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, type Dirent } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // ─────────────────────────────────────────────────────────────
@@ -1977,8 +1978,71 @@ const TOOL_DEFS: ToolDef[] = [
     }),
   },
   {
+    name: 'annotate_functions',
+    title: '函数语义注释：扫描覆盖 → LLM 补全缺失 → body指纹同步过期（TS/JS）',
+    description:
+      '让"函数做什么"由源码自带语义注释承载，而非每次由 LLM 从中重新提取。对 TS/JS 项目的每个函数检查其上方是否有语义化注释：' +
+      '缺失 → 用 LLM 依据 签名+函数体 生成一句"这函数做什么"的 JSDoc 注入到函数名上方；' +
+      '带 `@fnhash <sha256(body)>` 指纹标记的函数被改动过（指纹失配 = 过期）→ LLM 重注同步。' +
+      '任何对函数体的修改都会改变 fingerprint，因此"每次修改都同步注释"被机械覆盖。' +
+      '安全：只替换带自己 `@fnhash` 标记的块，手写无指纹注释一律不动，绝不误删用户注释。' +
+      'mode=scan 只读报告覆盖（不生成、不写盘）；dry_run 生成并给出预览 diff、不写盘；apply（默认）生成并写盘。' +
+      '未配置 LLM 时 scan 照常，apply/dry_run 退化为仅报告缺/过期名单。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（扫描其下 TS/JS 源文件）'),
+      files: z.array(z.string()).optional().describe('限定只处理这些文件（相对 project_dir 或绝对路径）；缺省扫目录全部'),
+      mode: z.enum(['apply', 'dry_run', 'scan']).optional().default('apply').describe('apply=生成并写盘；dry_run=生成但只预览；scan=只读报告'),
+    },
+    handler: wrap(async (a) => {
+      const project_dir = String(a.project_dir);
+      const mode = (a.mode as string | undefined) || 'apply';
+      const files = Array.isArray(a.files) ? a.files.map((f) => String(f)) : undefined;
+      const absFiles = files
+        ? files.map((f) => (path.isAbsolute(f) ? path.resolve(f) : path.resolve(project_dir, f))).filter((f) => existsSync(f))
+        : undefined;
+      const useLlm = mode !== 'scan';
+      const r = await planFunctionAnnotation({ project_dir, absFiles, llm: useLlm });
+      const s = r.summary;
+      if (mode === 'apply') {
+        let written = 0;
+        for (const [abs, content] of r.absToNew) {
+          writeFileSync(abs, content, 'utf-8');
+          written += 1;
+        }
+        const parts = [
+          `函数语义注释完成：扫描 ${s.scanned} 个函数 / ${s.files} 个文件；`,
+          `已有注释 ${s.with_comment}，缺失 ${s.missing}，过期 ${s.stale}；`,
+          `本轮新注入 ${s.annotated}、同步重注 ${s.updated}，改写 ${written} 个文件。`,
+        ];
+        if (r.note) parts.push(` 备注：${r.note}`);
+        if (written === 0) parts.push('  无待补全/无过期注释，或 LLM 未配置——未写任何文件。');
+        return { message: parts.join('\n'), data: { summary: s, files_changed: written, note: r.note } };
+      }
+      if (mode === 'dry_run') {
+        const preview = [...r.absToNew.keys()].map((abs) => {
+          const lines = (r.absToNew.get(abs) ?? '').split(/\r?\n/);
+          const added = lines.reduce((n, ln) => n + (/^[ \t]*[/][*][*]/.test(ln) || /@fnhash/.test(ln) ? 1 : 0), 0);
+          return { file: abs, functions_annotated: added };
+        });
+        const parts = [
+          `【干跑】函数语义注释计划：扫描 ${s.scanned} 个函数，缺失 ${s.missing}、过期 ${s.stale}，`,
+          `本轮将新注入 ${s.annotated}、重注 ${s.updated}，改写 ${r.absToNew.size} 个文件（未落盘）。`,
+        ];
+        for (const p of preview) parts.push(`  - ${p.file.replace(/\\/g, '/')}：+${p.functions_annotated}`);
+        if (r.note) parts.push(`  备注：${r.note}`);
+        return { message: parts.join('\n'), data: { summary: s, preview, note: r.note } };
+      }
+      const parts = [
+        `【扫描】函数语义注释覆盖：${s.files} 个文件 / ${s.scanned} 个函数；`,
+        `已有语义注释 ${s.with_comment}；待补（缺失）${s.missing}；待同步（body 已改，过期）${s.stale}。`,
+      ];
+      if (r.note) parts.push(`  备注：${r.note}`);
+      return { message: parts.join('\n'), data: { summary: s, note: r.note } };
+    }),
+  },
+  {
     name: 'refactor_pipeline',
-    title: 'Run deterministic refactor pipeline (dead imports + dead statements + package migration)',
+    title: 'Run deterministic refactor pipeline (dead imports + dead statements + package migration + function annotation)',
     description:
       '确定性重构管线：把可自动执行的瘦身改写串成一条链，一次调用按序执行、统一增量验证、失败只回滚到最近绿点。' +
       '入口只跑一次改前基线（build+test），其后每步基于上一步已绿的内容只跑一次改后验证——不改动的步骤不验证（性能友好）。' +
@@ -1988,6 +2052,8 @@ const TOOL_DEFS: ToolDef[] = [
       '  2) dead_statements：自动扫描（可选 files 收敛范围）删除 return/throw/continue 后不可达语句与死分支（TS/Go）。' +
       '  3) package_migration（包改名/提级）：把缺换代的包一次性涤荡干净——全项目 import 引用面重写（prefix→to）、' +
       '     package 声明改名（v2→hub，from_test→to_test）、import 别名清洗（hubv2→hub）；可选目录物理移动。' +
+      '  4) function_annotation（函数语义注释，TS/JS）：扫覆盖→缺失的用 LLM 依据 签名+函数体 生成一句话语义注释；' +
+      '     用 @fnhash body 指纹标记，函数体一改即判过期 → 下次管线重注同步；手写无指纹注释绝不动。' +
       '失败语义：某步改后验证回归 → 只还原该步预读的原始内容，回到上一步绿点，前面已绿的改动保留；管线结果 ok=false。' +
       '基线失败 → 一个文件都不改。verify=true 启用验证；{commands} 自定义命令组；缺省/verify=false 仅落盘不验证（not_verifiable）。' +
       'rename 步骤需人工候选，暂不内置。' +
@@ -2051,6 +2117,12 @@ const TOOL_DEFS: ToolDef[] = [
                 .describe('只改直接位于 packageRenameDir 下的源文件（缺省 true）'),
             })
             .optional(),
+          function_annotation: z
+            .object({
+              enabled: z.boolean().optional().default(false).describe('是否启用函数语义注释步骤（TS/JS，需 LLM 已配置才生成）'),
+              files: z.array(z.string()).optional().describe('限定只注释这些文件（相对或绝对路径）；缺省扫目录内全部 TS/JS 源'),
+            })
+            .optional(),
         })
         .describe('按序执行的步骤开关（至少启用一个才有产出）'),
       verify: z
@@ -2091,6 +2163,7 @@ const TOOL_DEFS: ToolDef[] = [
               skipDirs?: string[];
               packageRenameTopLevelOnly?: boolean;
             };
+            function_annotation?: { enabled?: boolean; files?: string[] };
           }
         | undefined;
       const verify = a.verify as Parameters<typeof runRefactorPipeline>[0]['verify'];
@@ -2119,6 +2192,9 @@ const TOOL_DEFS: ToolDef[] = [
                   packageRenameTopLevelOnly: migrate.packageRenameTopLevelOnly,
                 },
               }
+            : undefined,
+          function_annotation: steps?.function_annotation?.enabled
+            ? { enabled: true, files: steps.function_annotation.files }
             : undefined,
         },
         verify,

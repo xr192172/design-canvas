@@ -104,7 +104,7 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **51 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+A total of **52 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
 
 ### Capability navigation (1)
 
@@ -194,6 +194,7 @@ A total of **51 MCP tools** are registered, organized into "capability navigatio
 | `refactor_pipeline` | Deterministic refactoring pipeline (dead code cleanup + package
 migration; auto-detects the project language and runs language-specific stages — auto-triggers Spring MVC layering on
 Java projects, Python dead-code cleanup on Python projects; apply / verify / rollback all in one loop) |
+| `annotate_functions` | Function semantic comments (TS/JS): scan coverage → LLM fills missing → re-sync via `@fnhash` body fingerprint when stale; mode=scan/dry_run/apply |
 | `suggest_renames` | Suggest semantic names for short / meaningless variables (incl. restoring readable names in obfuscated / minified code) |
 | `find_similar_names` | Detect and disambiguate easily-confused similar names |
 

@@ -39,6 +39,8 @@ export interface FunctionOutlineFn {
   feature_name?: string;
   /** 文件职责聚合（SemanticFile.responsibility，展开函数卡用）。只读投影 */
   file_responsibility?: string;
+  /** 函数上方的语义化注释（源码里 @fnhash 块或手写块提出来展示；读源码，缓存缺失时无） */
+  doc?: string;
 }
 export interface FunctionOutline {
   feature?: string;
@@ -239,6 +241,12 @@ export function buildFunctionOutline(feature?: string, sourceRoot?: string, opts
       outline.functions = attachFunctionFeatures(outline.functions, dsl);
     } catch { /* DSL 不可读时保持无 feature 投影，不阻塞函数大纲 */ }
   }
+  // 读源码把每函数上方的语义注释提出来（一个文件只读一次）；无 source_root/文件缺失时跳过
+  if (sourceRoot && outline.functions.length) {
+    try {
+      attachDocs(outline.functions, sourceRoot);
+    } catch { /* 注释展示失败不阻塞大纲 */ }
+  }
   return { ok: true, outline };
 }
 
@@ -308,4 +316,59 @@ export function attachFunctionFeatures(
     }
   }
   return fns;
+}
+
+function isCommentLineTrim(t: string): boolean {
+  return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*/') || t.startsWith('*');
+}
+
+/** 取出声明行上方注释块的"可读单行"（剥注释符号/空行/@fnhash 指纹），无则 undefined。 */
+function fnDocAt(lines: string[], decl0: number): string | undefined {
+  const last = decl0 - 1;
+  if (last < 0 || !isCommentLineTrim(lines[last].trim())) return undefined;
+  let s = last;
+  while (s - 1 >= 0 && isCommentLineTrim(lines[s - 1].trim())) s -= 1;
+  if (last - s + 1 > 16) return undefined; // 文件头/超大块，非函数级
+  const text = lines
+    .slice(s, last + 1)
+    .map((l) =>
+      l.trim()
+        .replace(/^\/\*\*?/, '')
+        .replace(/\*\//, '')
+        .replace(/^\*\s?/, '')
+        .replace(/^\/\//, '')
+        .trim(),
+    )
+    .filter((l) => l && !/@fnhash/.test(l))
+    .join('·');
+  return text.length ? text.slice(0, 200) : undefined;
+}
+
+/** 按函数.func 逐个把源码里该函数上方注释提出来（一个文件只读一次）。 */
+export function attachDocs(fns: FunctionOutlineFn[], sourceRoot: string): void {
+  const cache = new Map<string, string[]>();
+  const fnsByFile = new Map<string, FunctionOutlineFn[]>();
+  for (const f of fns) {
+    if (!f.file) continue;
+    if (!fnsByFile.has(f.file)) fnsByFile.set(f.file, []);
+    fnsByFile.get(f.file)!.push(f);
+  }
+  for (const [rel, group] of fnsByFile) {
+    let lines: string[];
+    if (cache.has(rel)) lines = cache.get(rel)!;
+    else {
+      const abs = path.join(sourceRoot, rel);
+      if (!fs.existsSync(abs)) continue;
+      try {
+        lines = fs.readFileSync(abs, 'utf-8').split(/\r?\n/);
+      } catch {
+        continue;
+      }
+      cache.set(rel, lines);
+    }
+    for (const f of group) {
+      const doc = fnDocAt(lines, f.start_line - 1);
+      if (doc) f.doc = doc;
+    }
+  }
 }
