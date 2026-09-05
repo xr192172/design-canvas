@@ -11,7 +11,7 @@
  */
 import path from 'node:path';
 import fs from 'node:fs';
-import { getStorageRoot } from '../storage.js';
+import { getStorageRoot, getDSL } from '../storage.js';
 import { openDb, type Database } from '../db/db.js';
 
 export interface FuncCallRef {
@@ -34,6 +34,11 @@ export interface FunctionOutlineFn {
   calls: FuncCallRef[];
   called_by: FuncCallRef[];
   recursive: boolean;
+  /** 所属功能（DSL feature_tree join）：id + 名。只读投影，不写回 DSL */
+  feature_id?: string;
+  feature_name?: string;
+  /** 文件职责聚合（SemanticFile.responsibility，展开函数卡用）。只读投影 */
+  file_responsibility?: string;
 }
 export interface FunctionOutline {
   feature?: string;
@@ -227,5 +232,80 @@ export function buildFunctionOutline(feature?: string, sourceRoot?: string, opts
   outline.db_file = dbFile ?? '';
   outline.feature = feature;
   outline.source_root = sourceRoot;
+  // 读实时 DSL，把每函数 join 上「所属功能」（feature_tree）作只读投影
+  if (feature) {
+    try {
+      const dsl = getDSL(feature);
+      outline.functions = attachFunctionFeatures(outline.functions, dsl);
+    } catch { /* DSL 不可读时保持无 feature 投影，不阻塞函数大纲 */ }
+  }
   return { ok: true, outline };
+}
+
+/** buildFeatureIndex 所需的最小 DSL 形状（结构缩略，避免与完整 DesignDSL 类型耦合） */
+export interface FeatureIndexDsl {
+  feature_tree?: {
+    features?: Array<{ id: string; name: string }>;
+    file_map?: Record<string, { feature_id: string; community_id?: number }>;
+  };
+  semantic?: {
+    files?: Array<{ id: string; path: string; responsibility?: string }>;
+  };
+}
+
+/** 单文件 → 功能的投影条目 */
+export interface FeatureIndexEntry {
+  id: string;
+  name: string;
+  /** 文件职责聚合（SemanticFile.responsibility） */
+  responsibility?: string;
+}
+
+/**
+ * 从 DSL 建「文件相对路径 → 功能」索引（key → FeatureIndexEntry）。
+ * 路径形态可能不一（cache.db 相对 project root vs DSL 剥顶层目录），
+ * 用「精确 + 多段后缀」兜底（自长到短，至少两段，不带裸文件名）。
+ * DSL 无 feature_tree / 无语义文件时返回空 Map（不做功能投影）。
+ */
+export function buildFeatureIndex(dsl: FeatureIndexDsl | null | undefined): Map<string, FeatureIndexEntry> {
+  const out = new Map<string, FeatureIndexEntry>();
+  if (!dsl?.feature_tree?.file_map) return out;
+  const sem = dsl.semantic?.files ?? [];
+  if (!sem.length) return out;
+  const nameById = new Map((dsl.feature_tree.features ?? []).map((f) => [f.id, f.name]));
+  const exact = new Map<string, FeatureIndexEntry>();
+  for (const sf of sem) {
+    const fm = dsl.feature_tree.file_map[sf.id];
+    if (!fm) continue;
+    exact.set(sf.path, { id: fm.feature_id, name: nameById.get(fm.feature_id) ?? fm.feature_id, responsibility: sf.responsibility });
+  }
+  if (!exact.size) return out;
+  // 精确键 + 多段后缀键（自长到短，至少两段；不带裸文件名，避免短名误吞）
+  for (const [p, v] of exact) {
+    if (!out.has(p)) out.set(p, v);
+    const segs = p.split('/');
+    for (let k = 0; k < segs.length - 1; k++) {
+      const key = segs.slice(k).join('/');
+      if (!out.has(key)) out.set(key, v);
+    }
+  }
+  return out;
+}
+
+/** 给函数列表挂上 DSL feature 投影（读写同一批对象，返回原数组便于链式）。索引空时原样返回。 */
+export function attachFunctionFeatures(
+  fns: FunctionOutlineFn[],
+  dsl: FeatureIndexDsl | null | undefined,
+): FunctionOutlineFn[] {
+  const idx = buildFeatureIndex(dsl);
+  if (!idx.size) return fns;
+  for (const f of fns) {
+    const hit = idx.get(f.file);
+    if (hit) {
+      f.feature_id = hit.id;
+      f.feature_name = hit.name;
+      f.file_responsibility = hit.responsibility;
+    }
+  }
+  return fns;
 }

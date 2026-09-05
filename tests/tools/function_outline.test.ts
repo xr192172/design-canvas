@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb, closeAllProjectCacheDbs, type Database } from '../../src/db/db';
-import { queryFunctionOutline } from '../../src/tools/function_outline';
+import { queryFunctionOutline, buildFeatureIndex, attachFunctionFeatures, type FunctionOutlineFn } from '../../src/tools/function_outline';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -108,5 +108,57 @@ describe('queryFunctionOutline', () => {
     // 无 dir → 全量
     const all = queryFunctionOutline(db);
     expect(all.functions.map((f) => f.name).sort()).toEqual(['Helper', 'Main', 'Other', 'Top', 'step']);
+  });
+});
+
+describe('buildFeatureIndex / attachFunctionFeatures（DSL feature_tree 投影）', () => {
+  const dsl = {
+    feature_tree: {
+      features: [
+        { id: 'renderer', name: '渲染器' },
+        { id: 'observe', name: '观测' },
+      ],
+      file_map: {
+        'renderer.tsx': { feature_id: 'renderer', community_id: 0 },
+        'observe/chain.ts': { feature_id: 'observe', community_id: 1 },
+        'observe/rings.ts': { feature_id: 'observe', community_id: 1 },
+      },
+    },
+    semantic: {
+      files: [
+        { id: 'renderer.tsx', path: 'src/app/renderer.tsx', responsibility: '渲染输出层' },
+        { id: 'observe/chain.ts', path: 'observe/chain.ts', responsibility: '探针链构建与匹配' },
+        { id: 'observe/rings.ts', path: 'observe/rings.ts', responsibility: '环形观测' },
+      ],
+    },
+  };
+
+  it('buildFeatureIndex 精确命中 + 长后缀兜底（路径形态不一致）', () => {
+    const idx = buildFeatureIndex(dsl as never);
+    // 精确：DSL path = observe/chain.ts → 观测
+    expect(idx.get('observe/chain.ts')).toEqual({ id: 'observe', name: '观测', responsibility: '探针链构建与匹配' });
+    // 后缀兜底：cache 里文件是 project_root/observe/chain.ts，取 L2 后缀 observe/chain.ts
+    expect(idx.get('src/app/renderer.tsx')).toEqual({ id: 'renderer', name: '渲染器', responsibility: '渲染输出层' });
+    // 单文件名后缀不应吞掉（仅 ≥2 段做后缀）
+    expect(idx.get('chain.ts')).toBeUndefined();
+  });
+
+  it('attachFunctionFeatures 把函数挂上所属功能，索引空时不改原数组', () => {
+    const fns: FunctionOutlineFn[] = [
+      { id: 'a#Main', name: 'Main', kind: 'function', qualified_name: 'Main', file: 'observe/chain.ts', dir: 'observe', start_line: 1, end_line: 5, calls: [], called_by: [], recursive: false },
+      { id: 'b#Other', name: 'Other', kind: 'function', qualified_name: 'Other', file: 'app/renderer.tsx', dir: 'app', start_line: 1, end_line: 4, calls: [], called_by: [], recursive: false },
+      { id: 'c#Miss', name: 'Miss', kind: 'function', qualified_name: 'Miss', file: 'unknown/x.go', dir: 'unknown', start_line: 1, end_line: 3, calls: [], called_by: [], recursive: false },
+    ];
+    const out = attachFunctionFeatures(fns, dsl as never);
+    expect(out.find((f) => f.name === 'Main')?.feature_name).toBe('观测');
+    expect(out.find((f) => f.name === 'Main')?.file_responsibility).toBe('探针链构建与匹配');
+    expect(out.find((f) => f.name === 'Other')?.feature_name).toBe('渲染器');
+    expect(out.find((f) => f.name === 'Miss')?.feature_name).toBeUndefined();
+    expect(out).toBe(fns); // 同步返回原数组
+
+    // 无 feature_tree / 无语义文件 → 空索引，不新增 feature（用全新数组，避免沿用上面已挂的字段）
+    const fresh: FunctionOutlineFn = { id: 'c#Miss', name: 'Miss', kind: 'function', qualified_name: 'Miss', file: 'unknown/x.go', dir: 'unknown', start_line: 1, end_line: 3, calls: [], called_by: [], recursive: false };
+    const bare = attachFunctionFeatures([fresh], { feature_tree: undefined, semantic: { files: [] } } as never);
+    expect(bare[0].feature_name).toBeUndefined();
   });
 });
