@@ -56,25 +56,39 @@ export function toArchitecture(sem: SemanticSurface): DiagramCandidate {
 
 // ── workflow（schema_version 2，readable 布局）──
 export function toWorkflow(sem: SemanticSurface): DiagramCandidate {
-  // 按拓扑列号流式分 lane（每 lane 至多 6 列），col 用全局单调递增序号（跨 lane 不重置）
-  // → 主路径列号恒递增，validate 不再报 "mainPath moves backward"（8 步链被 LANE_COLS 回绕曾中招）
+  // schema 限制每 lane col ∈ 0..5（6 列），而官方主路径校验只看 col 不看 lane：
+  //   to.col < from.col 才报 backward。因此长链不能靠"全局递增 col"（超 5 会被
+  //   schema 拒）也不能跨 lane 回绕到 0（会被判 backward）。
+  // 正解：col 单调非递减，装不下时节点落到本 lane 尾列（col5）往后堆叠、下一 lane
+  //   垂直承接——视觉是"一行走完蛇形到下行"，主路径 col 恒 ≥ 前驱，validate 放行。
   const ordered = [...sem.nodes].sort((a, b) => (sem.colOrder.get(a.id) ?? 0) - (sem.colOrder.get(b.id) ?? 0));
-  const LANE_COLS = 6;
+  const LANE_COLS = 6; // schema 硬限每 lane 6 列（col 0..5）
   const lanes: Record<string, unknown>[] = [];
   const laneOf = new Map<string, string>();
   const colOf = new Map<string, number>();
+  const yOffOf = new Map<string, number>();
   const ZH = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  const laneColCount = new Map<string, number>(); // laneId·col → 该位已叠节点数（用于 yOffset 错开）
   ordered.forEach((n, idx) => {
     const laneIdx = Math.min(Math.floor(idx / LANE_COLS), 9);
     const laneId = `lane${laneIdx}`;
     const laneLabel = `实现 ${ZH[laneIdx] ?? String(laneIdx + 1)}`;
     if (!lanes.some((l) => l.id === laneId)) lanes.push({ id: laneId, label: laneLabel });
     laneOf.set(n.id, laneId);
-    colOf.set(n.id, idx); // 全局递增，跨 lane 不回绕
+    // schema 限 col∈0..5 且主路径校验只看 col（to.col<from.col 才判 backward）。
+    // 长链只能 col 单调非递减：超过 6 列的节点落到尾列 col5，下一 lane 垂直承接。
+    // 同 lane 同 col 的堆叠节点用 yOffset 垂直错开，避免节点重叠。
+    const col = Math.min(idx, LANE_COLS - 1);
+    colOf.set(n.id, col);
+    const key = `${laneId}·${col}`;
+    yOffOf.set(n.id, (laneColCount.get(key) ?? 0) * 96);
+    laneColCount.set(key, (laneColCount.get(key) ?? 0) + 1);
   });
   const nodes = sem.nodes.map((n) => {
     const c: Record<string, unknown> = { id: n.id, lane: laneOf.get(n.id)!, col: colOf.get(n.id)!, type: n.type, label: n.label };
     if (n.sublabel) c.sublabel = n.sublabel;
+    const y = yOffOf.get(n.id);
+    if (y) c.yOffset = y;
     return c;
   });
   const edges = sem.edges.map((e, i) => {

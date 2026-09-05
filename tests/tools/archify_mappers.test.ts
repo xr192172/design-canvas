@@ -57,6 +57,37 @@ describe('toWorkflow', () => {
     for (const [, cols] of colByLane) expect(cols.length).toBeLessThanOrEqual(6);
     expect(c.mainPath.length).toBeGreaterThanOrEqual(2);
   });
+  it('8 步长链跨 lane：col 单调非递减 + 同 lane 同 col 用 yOffset 错开（修 col 回绕 backward）', () => {
+    const chain: ArchifyTreeNode = {
+      id: 'nav:steps', label: '主程序编排', type: 'view',
+      children: {
+        nodes: Array.from({ length: 8 }, (_, i) => ({
+          id: `s${i}`, label: `步骤${i}`, role: 'step', type: 'step',
+          children: { id: `s${i}:files`, label: '实现', nodes: [{ id: `f${i}`, label: 'main.go', role: 'file', type: 'file' }], edges: [] },
+        })),
+        edges: Array.from({ length: 7 }, (_, i) => ({ from: `s${i}`, to: `s${i + 1}`, kind: 'flow', label: '顺序承接' })),
+      },
+    };
+    const semChain = deriveSemantics(adaptIRTree(chain));
+    const c = toWorkflow(semChain).ir as any;
+    expect(c.schema_version).toBe(2);
+    // 节点集：s0..s7 全部保留
+    expect(c.nodes.map((n: any) => n.id).sort()).toEqual(['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']);
+    // 每个节点 col ∈ 0..5（schema 硬限）
+    for (const n of c.nodes) { expect(n.col).toBeGreaterThanOrEqual(0); expect(n.col).toBeLessThanOrEqual(5); }
+    // 主路径 col 单调非递减（to.col >= from.col），修复跨 lane 回绕 backward
+    const colById = new Map(c.nodes.map((n: any) => [n.id, n.col]));
+    for (let i = 0; i < c.mainPath.length - 1; i++) {
+      expect(colById.get(c.mainPath[i + 1])).toBeGreaterThanOrEqual(colById.get(c.mainPath[i]));
+    }
+    // 同 lane 同 col 的堆叠节点必须有 yOffset 错开，避免节点重叠
+    const seen = new Map<string, number>();
+    for (const n of c.nodes) {
+      const key = `${n.lane}:${n.col}`;
+      if (seen.has(key)) expect(n.yOffset).toBeGreaterThan(0);
+      seen.set(key, (seen.get(key) ?? 0) + 1);
+    }
+  });
 });
 
 describe('toSequence', () => {
