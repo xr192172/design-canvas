@@ -126,18 +126,6 @@ function mainPathAlongEdges(sem: SemanticSurface): string[] {
   if (run.length > best.length) best = run;
   return best;
 }
-/** 架构图网格列数：随节点数增长，保持近似正方形布局 */
-function archCols(nodeCount: number): number {
-  return Math.max(1, Math.min(4, Math.ceil(Math.sqrt(nodeCount))));
-}
-/** dataflow 画布：宽度随 stage 数扩展（官方要求 viewBox[0]≥stages 布局宽度），高度随行数 */
-function dataflowViewBox(stageCount: number, nodeCount: number): [number, number] {
-  const rowsPerStage = Math.max(1, Math.ceil(nodeCount / Math.max(1, stageCount)));
-  return [
-    Math.max(900, stageCount * 230),
-    Math.max(560, rowsPerStage * 120 + 160),
-  ];
-}
 /** 架构组件宽度：按 label + sublabel 长度给足，避免官方校验拒超宽 sublabel */
 function componentWidth(label: string, sublabel?: string): number {
   const units = (s: string) => { let t = 0; for (const ch of s || '') t += (/[\u2E80-\u9FFF\uFF00-\uFFEF\u{1F000}-\u{1FAFF}]/u.test(ch) ? 2 : 1); return t; };
@@ -155,8 +143,12 @@ function archBoundaries(sem: SemanticSurface): Array<{ kind: 'region'; label: st
     .filter(([, ids]) => ids.length >= 2)
     .map(([g, ids]) => ({ kind: 'region' as const, label: g, wraps: ids }));
 }
-/** 架构组件：按 groupOf 分区成列排布（每分区一列、区内纵向叠放），显式 pos + 适配 size。
- *  列序按拓扑（colOrder 最小值）而非字典序 → 链式/管线节点相邻列，主路径边不横穿中间列节点（修 edge-through-node） */
+/** 架构组件：按拓扑分列排布（每列 ≤6 节点纵向叠放，跨列横排）。分列依据：
+ *  - 有多个顶层功能分区（groupOf）时按分区成列——各区一列、区内纵排，表达边界归属；
+ *  - 分区数 ≤1（无分组 / 平铺文件 / 单链步骤）时退化为按 colOrder 拓扑分列——
+ *    链式/星式节点横排成列，边沿列间方向走，避免单列堆叠下 star 边垂直穿节点
+ *    （修 architecture/lifecycle 的 edge-through-node）。
+ *  列序按拓扑（colOrder 最小值）而非字典序 → 链式/管线节点相邻列，主路径边不横穿中间列。 */
 function archPosComponents(sem: SemanticSurface): Record<string, unknown>[] {
   const byCol = new Map<string, string[]>();
   for (const n of sem.nodes) {
@@ -164,12 +156,26 @@ function archPosComponents(sem: SemanticSurface): Record<string, unknown>[] {
     if (!byCol.has(g)) byCol.set(g, []);
     byCol.get(g)!.push(n.id);
   }
+  const isSinglePartition = byCol.size <= 1;
   const pos = new Map<string, [number, number]>();
-  // 列按组内拓扑最深列最小来排序（越上游越靠左），保证连接边相邻、不穿中间列
-  const cols = [...byCol.keys()].sort(
-    (a, b) => minCol(sem, byCol.get(a)!) - minCol(sem, byCol.get(b)!),
-  );
-  cols.forEach((g, ci) => byCol.get(g)!.forEach((id, ri) => pos.set(id, [ci * 250, ri * 130])));
+  if (isSinglePartition) {
+    // 单分区退化：按拓扑分列，节点横排成「近正方形」网格，边不穿节点
+    const ordered = [...sem.nodes].sort((a, b) => (sem.colOrder.get(a.id) ?? 0) - (sem.colOrder.get(b.id) ?? 0));
+    const n = ordered.length;
+    const cols = Math.max(1, Math.min(6, Math.ceil(Math.sqrt(n))));
+    const rowsPerCol = Math.ceil(n / cols);
+    ordered.forEach((nd, i) => {
+      const ci = Math.floor(i / rowsPerCol);
+      const ri = i % rowsPerCol;
+      pos.set(nd.id, [ci * 250, ri * 120]);
+    });
+  } else {
+    // 多分区：列按组内拓扑最深列最小来排序（越上游越靠左），保证连接边相邻、不穿中间列
+    const cols = [...byCol.keys()].sort(
+      (a, b) => minCol(sem, byCol.get(a)!) - minCol(sem, byCol.get(b)!),
+    );
+    cols.forEach((g, ci) => byCol.get(g)!.forEach((id, ri) => pos.set(id, [ci * 250, ri * 120])));
+  }
   return sem.nodes.map((n) => {
     const c: Record<string, unknown> = { id: n.id, type: n.type, label: n.label, pos: pos.get(n.id) || [0, 0], size: [componentWidth(n.label, n.sublabel), 60] };
     if (n.sublabel) c.sublabel = n.sublabel;
@@ -194,7 +200,7 @@ export function toSequence(sem: SemanticSurface): DiagramCandidate | null {
   const keep = likelyTopologyOf(sem);
   if (keep.length < 2) return null;
   const participants = keep.map((n) => {
-    const p: Record<string, unknown> = { id: n.id, type: n.type, label: n.label };
+    const p: Record<string, unknown> = { id: n.id, type: n.type, label: seqParticipantLabel(n.label) };
     if (n.sublabel) p.sublabel = n.sublabel;
     return p;
   });
@@ -259,6 +265,15 @@ export function toDataflow(sem: SemanticSurface): DiagramCandidate | null {
     if (n.sublabel) c.sublabel = n.sublabel;
     return c;
   });
+  // 画布高度按「实际最深行号」扩展（深度不均时个别 stage 行数更高，nodeCount/stageCount 会低估 → y 越界）
+  const maxRow = Math.max(0, ...[...rowIdx.values()]);
+  const rowH = 120;
+  const viewBoxFor = (): [number, number] => {
+    return [
+      Math.max(900, stages.length * 230),
+      Math.max(560, maxRow * rowH + 320),
+    ];
+  };
   const seenU = new Set<string>();
   const flows = sem.edges.map((e, i) => {
     const fl: Record<string, unknown> = { id: `f${i}`, from: e.from, to: e.to, label: edgeLabel(e, '承接'), labelDy: 60 };
@@ -270,7 +285,7 @@ export function toDataflow(sem: SemanticSurface): DiagramCandidate | null {
     ir: {
       schema_version: 1,
       diagram_type: 'dataflow',
-      meta: { ...metaFor(sem, 'dataflow'), viewBox: dataflowViewBox(stages.length, sem.nodes.length) },
+      meta: { ...metaFor(sem, 'dataflow'), viewBox: viewBoxFor() },
       stages,
       nodes,
       flows, // flows 允许为空（无跨段依赖时）—— schema 未 required flows minItems
@@ -282,6 +297,15 @@ export function toDataflow(sem: SemanticSurface): DiagramCandidate | null {
 // ── lifecycle ──
 export function toLifecycle(sem: SemanticSurface): DiagramCandidate | null {
   if (sem.mainPath.length < 2 || sem.nodes.length < 2) return null; // 不适配：缺主路径/终态
+  // 并行扇出不适配：lifecycle 是「单一状态机主链」，任一节点出度 ≥2（并列出分支）
+  // 时，分支边从主链横穿到侧轨必触发官方 edge-through-node。诚实降级交 architecture 表达。
+  const fanout = new Map<string, number>();
+  for (const e of sem.edges) fanout.set(e.from, (fanout.get(e.from) ?? 0) + 1);
+  if ([...fanout.values()].some((d) => d >= 2)) return null;
+  // 超长主链不适配：lifecycle 状态机主轨约 5 个状态（col 0..4）。跨 5 的顺序链越轨后
+  // 剩余状态塞进侧轨、与主轨端跨 lane 回流，官方布局校验「transition 过短/回流」必失败。
+  // 这类线性长链的本征表达是 workflow（已 deliver），lifecycle 诚实降级。
+  if (sem.mainPath.length > 5) return null;
   const zh = ['一', '二', '三', '四', '五'];
   const lanes: Record<string, unknown>[] = [{ id: 'main', label: '生命周期' }];
   const laneBy: Record<string, unknown> = { main: lanes[0] };
@@ -334,6 +358,21 @@ export function toLifecycle(sem: SemanticSurface): DiagramCandidate | null {
       cards: [{ dot: 'cyan', title: '主路径', items: rail.map((id) => plain.get(id)?.label || id) }],
     },
   };
+}
+
+/** 序列图参与者标签短化：官方 participant box 宽约 86px，中文约 7 字即顶格。
+ *  过长标签（如 6 字以上步骤名）会触发 showcase「标签超宽」。截断至 ≤8 显示单位
+ *  （中文/全角算 2 单位），避免长链参与者全部顶格超宽。 */
+function seqParticipantLabel(label: string): string {
+  const units = (s: string) => { let t = 0; for (const ch of s || '') t += (/[\u2E80-\u9FFF\uFF00-\uFFEF\u{1F000}-\u{1FAFF}]/u.test(ch) ? 2 : 1); return t; };
+  if (units(label) <= 8) return label;
+  let acc = 0, out = '';
+  for (const ch of label) {
+    const u = (/[\u2E80-\u9FFF\uFF00-\uFFEF\u{1F000}-\u{1FAFF}]/u.test(ch) ? 2 : 1);
+    if (acc + u > 8) break;
+    acc += u; out += ch;
+  }
+  return out.length ? out + '…' : label.slice(0, 1) + '…';
 }
 
 /** 序列图参与者：主路径优先 ∪ 分支触及，控制在 4–8 */

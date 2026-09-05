@@ -54,6 +54,35 @@ describe('deriveSemantics', () => {
       expect(ids.has(e.to)).toBe(true);
     }
   });
+
+  it('平铺文件层聚合（mod_*）不丢边：原始 id 映射到聚合 id，依赖边保留', () => {
+    // L4 文件视图：纯平铺文件节点 + flow 边。旧实现聚合 re-key 后边端点按原始 id miss → 边全丢、主路径塌缩。
+    const tree4: ArchifyTreeNode = {
+      id: 'v', label: '文件视图', children: {
+        nodes: [
+          { id: 'main', label: 'main', role: 'file', file: 'main.go' },
+          { id: 'a', label: 'orch', role: 'file', file: 'orch.go' },
+          { id: 'b', label: 'met', role: 'file', file: 'met.go' },
+          { id: 'c', label: 'soul', role: 'file', file: 'soul.go' },
+        ],
+        edges: [
+          { from: 'main', to: 'a', kind: 'flow' },
+          { from: 'main', to: 'b', kind: 'flow' },
+          { from: 'main', to: 'c', kind: 'flow' },
+        ],
+      },
+    };
+    const sem4 = deriveSemantics(adaptIRTree(tree4));
+    // 聚合节点 id 是 mod_*；原始文件 id 被映射到这些聚合 id —— 边端点必须解析到存在的节点
+    const ids = new Set(sem4.nodes.map((n) => n.id));
+    expect(sem4.edges.length).toBe(3); // 三条 star 边都保留
+    for (const e of sem4.edges) {
+      expect(ids.has(e.from)).toBe(true);
+      expect(ids.has(e.to)).toBe(true);
+    }
+    // 主路径不再塌缩成单节点（有真实依赖边 → 能形成拓扑链）
+    expect(sem4.mainPath.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe('legalNodeId', () => {

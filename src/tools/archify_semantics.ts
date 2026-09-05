@@ -145,6 +145,23 @@ function pickMain(nodes: RawNode[]): { chosen: RawNode[]; ownerOf: Map<string, s
     for (const c of n.children?.nodes || []) rec(c, isMain ? n.id : parentMain);
   };
   for (const n of nodes) rec(n, null);
+  // 平铺聚合 re-key：chooseModules 可能把原始叶子包进合成容器（mod_<key>_<idx>），
+  // 聚合节点 id ≠ 原始 id，边解析按原始 id 会 miss。把每个 chosen 聚合节点的成员原始 id
+  // 全部映射到该聚合 id（仅当其不在其他 chosen 中），保证 addRaw `semByRaw.get(f)` 命中。
+  const memberOwner = new Map<string, string>();
+  for (const m of chosen) {
+    const walk = (c: RawNode | undefined, owner: string) => {
+      if (!c) return;
+      if (!chosenSet.has(c.id)) { memberOwner.set(c.id, owner); ownerOf.set(c.id, owner); }
+      for (const cc of c.children?.nodes || []) walk(cc, owner);
+    };
+    walk(m, m.id);
+  }
+  // 有成员映射的原始 id，用它替换 ownerOf 里可能错的自身映射（平铺叶子 self 归组）
+  for (const [raw, owner] of memberOwner) {
+    // 仅当叶子自身未被选为主节点时，把它的 id 归入聚合组（使边端点可解析到组）
+    if (!chosenSet.has(raw)) ownerOf.set(raw, owner);
+  }
   return { chosen, ownerOf };
 }
 

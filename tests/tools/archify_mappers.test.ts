@@ -39,6 +39,31 @@ describe('toArchitecture', () => {
       expect(conn.labelAt).toBeUndefined();
     }
   });
+  it('单分区（无 groupOf）。拓扑分列横排：同链节点不在同一坐标列，避免 star 边垂直穿节点', () => {
+    // 平铺文件层：无分组，源节点扇出到多个下游 —— 旧实现单列堆叠必触发 edge-through-node
+    const star: ArchifyTreeNode = {
+      id: 'v', label: '文件视图', children: {
+        nodes: [
+          { id: 'main', label: 'main', role: 'file', file: 'main.go' },
+          { id: 'a', label: 'a', role: 'file', file: 'a.go' },
+          { id: 'b', label: 'b', role: 'file', file: 'b.go' },
+          { id: 'c', label: 'c', role: 'file', file: 'c.go' },
+        ],
+        edges: [
+          { from: 'main', to: 'a', kind: 'flow' },
+          { from: 'main', to: 'b', kind: 'flow' },
+          { from: 'main', to: 'c', kind: 'flow' },
+        ],
+      },
+    };
+    const semStar = deriveSemantics(adaptIRTree(star));
+    expect(semStar.groupOf).toBeUndefined(); // 无分组 → 走拓扑分列路径
+    const c = toArchitecture(semStar).ir as any;
+    // 拓扑分列后，主源(main)与任一下游的 x（列）不同 → 边横向走，不垂直穿节点
+    const posById = new Map(c.components.map((x: any) => [x.id, x.pos]));
+    const mainX = posById.get('mod_main_0')[0];
+    expect(c.components.some((x: any) => x.id !== 'mod_main_0' && posById.get(x.id)[0] !== mainX)).toBe(true);
+  });
 });
 
 describe('toWorkflow', () => {
@@ -101,6 +126,31 @@ describe('toSequence', () => {
       prev = m.y;
     }
   });
+it('长参与者标签被短化（≤8 显示单位），避免超宽触 showcase 校验', () => {
+    const chain: ArchifyTreeNode = {
+      id: 'v', label: '线性链', children: {
+        nodes: [
+          { id: 'a0', label: '客户端', role: 'step', file: 'c.go' },
+          { id: 'a1', label: '安装性能记录仪', role: 'step', file: 'm.go' },
+          { id: 'a2', label: '生成端到端表单', role: 'step', file: 'f.go' },
+          { id: 'a3', label: '服务端', role: 'step', file: 's.go' },
+        ],
+        edges: [
+          { from: 'a0', to: 'a1', kind: 'flow' },
+          { from: 'a1', to: 'a2', kind: 'flow' },
+          { from: 'a2', to: 'a3', kind: 'flow' },
+        ],
+      },
+    };
+    const c = toSequence(deriveSemantics(adaptIRTree(chain)));
+    expect(c).not.toBeNull();
+    const ir = c!.ir as any;
+    for (const p of ir.participants) {
+      // 中文算 2 单位，6 字以上标签必被截断；截断内容带省略号
+      expect(p.label.length).toBeLessThanOrEqual(9);
+      if (p.label.includes('性能记录仪')) expect(p.label.endsWith('…')).toBe(true);
+    }
+  });
 });
 
 describe('toDataflow', () => {
@@ -115,6 +165,19 @@ describe('toDataflow', () => {
       cellKey.add(key);
     }
     for (const f of c.flows) expect(typeof f.label === 'string' && f.label.length > 0).toBe(true);
+  });
+  it('深度不均的长链：viewBox 高度跟随实际最深行，避免 y 越界', () => {
+    // 8 步单链深度不均时某 stage 行数更高，旧版 nodeCount/stageCount 低估 → y 越界
+    const chain: ArchifyTreeNode = {
+      id: 'v', label: '主程序编排', children: {
+        nodes: Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, label: `步骤${i}`, role: 'step' })),
+        edges: Array.from({ length: 7 }, (_, i) => ({ from: `s${i}`, to: `s${i + 1}`, kind: 'flow' })),
+      },
+    };
+    const c = toDataflow(deriveSemantics(adaptIRTree(chain)))!.ir as any;
+    // 最深 row 对应的 y 必须在画布高度内：viewBox[1] 需容纳 maxRow*120 + 余量
+    const maxRow = Math.max(...c.nodes.map((n: any) => n.row));
+    expect(c.meta.viewBox[1]).toBeGreaterThan(maxRow * 120 + 320 - 1);
   });
 });
 
@@ -132,6 +195,35 @@ describe('toLifecycle', () => {
   it('缺主路径 → 返回 null（走诚实降级）', () => {
     const single = deriveSemantics(adaptIRTree({ id: 'x', label: 'x', children: { nodes: [{ id: 'a', label: 'A', role: 'service' }], edges: [] } }));
     expect(toLifecycle(single)).toBeNull();
+  });
+  it('并行扇出（一源多下游）→ 返回 null（状态机主链不适配，交 architecture 表达）', () => {
+    // star：main 扇出到 3 下游 —— 旧实现会生成边横穿主轨状态触发 edge-through-node
+    const star: ArchifyTreeNode = {
+      id: 'v', label: '文件视图', children: {
+        nodes: [
+          { id: 'main', label: 'main', role: 'file', file: 'main.go' },
+          { id: 'a', label: 'a', role: 'file', file: 'a.go' },
+          { id: 'b', label: 'b', role: 'file', file: 'b.go' },
+          { id: 'c', label: 'c', role: 'file', file: 'c.go' },
+        ],
+        edges: [
+          { from: 'main', to: 'a', kind: 'flow' },
+          { from: 'main', to: 'b', kind: 'flow' },
+          { from: 'main', to: 'c', kind: 'flow' },
+        ],
+      },
+    };
+    expect(toLifecycle(deriveSemantics(adaptIRTree(star)))).toBeNull();
+  });
+  it('超长主链（>5 状态）→ 返回 null（线性长链交 workflow 表达）', () => {
+    // 8 步单链：越轨后侧轨跨 lane 回流，官方校验「transition 过短」必失败
+    const chain: ArchifyTreeNode = {
+      id: 'v', label: '主程序编排', children: {
+        nodes: Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, label: `步骤${i}`, role: 'step' })),
+        edges: Array.from({ length: 7 }, (_, i) => ({ from: `s${i}`, to: `s${i + 1}`, kind: 'flow' })),
+      },
+    };
+    expect(toLifecycle(deriveSemantics(adaptIRTree(chain)))).toBeNull();
   });
 });
 
