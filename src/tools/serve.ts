@@ -48,6 +48,8 @@ import { runArchifyPipeline } from './archify_pipeline.js';
 import { adaptIRTree } from './archify_project.js';
 import { buildFunctionOutline, listFunctionDirs } from './function_outline.js';
 import { getFeatureLine } from './feature_line.js';
+import { exampleInputFor } from './trace_exec.js';
+import { parseFileFull } from './ts_kernel/index.js';
 import { deriveMindMap, buildFileIndex } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
@@ -902,6 +904,45 @@ async function handleApiFunctionRun(req: http.IncomingMessage, res: http.ServerR
     }
     const r = await traceExecChain({ steps: [{ node_id, func_name: func, file_path: filePath }], input_value: input_value ?? undefined });
     sendJson(res, 200, { feature, node_id, entryParams: r.entryParams, steps: r.steps });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/function-example?feature=<f>&node_id=<相对路径/文件#Fn>&project_dir=<root>
+ *  按函数签名生成示例入参（不执行）：让功能线点位"不用手工拼 JSON"，基础示例自动预填。 */
+async function handleApiFunctionExample(req: http.IncomingMessage, res: http.ServerResponse, sourceRoot?: string): Promise<void> {
+  try {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const nodeId = (url.searchParams.get('node_id') || '').trim();
+    const feature = (url.searchParams.get('feature') || '').trim();
+    if (!nodeId) {
+      sendError(res, 400, '缺参数 node_id');
+      return;
+    }
+    const hash = nodeId.lastIndexOf('#');
+    const fileRel = hash === -1 ? nodeId : nodeId.slice(0, hash);
+    const func = hash === -1 ? '' : nodeId.slice(hash + 1);
+    if (!func) {
+      sendError(res, 400, `node_id 需形如 "相对路径/文件#函数名"`);
+      return;
+    }
+    const root = sourceRoot ?? process.cwd();
+    const filePath = path.join(root, fileRel.replace(/\//g, path.sep));
+    if (!fs.existsSync(filePath)) {
+      sendError(res, 404, `函数对应源文件不存在：${filePath}`);
+      return;
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = await parseFileFull(filePath, content);
+    const sym = parsed.symbols.find((s) => s.name === func && (s.kind === 'function' || s.kind === 'method'));
+    if (!sym) {
+      sendError(res, 404, `函数 "${func}" 不存在于 ${fileRel}`);
+      return;
+    }
+    const lang = /\.go$/.test(fileRel) ? 'go' : /\.py$/.test(fileRel) ? 'py' : 'ts';
+    const { example, params, preview } = exampleInputFor(sym.signature, lang);
+    sendJson(res, 200, { feature, node_id: nodeId, func_name: func, signature: sym.signature, lang, example, params, preview });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -2993,6 +3034,12 @@ export async function startServer(port?: number): Promise<void> {
       const q = new URL(req.url || '/', 'http://localhost');
       const proot = (q.searchParams.get('project_dir') || '').trim() || undefined;
       void handleApiFunctionRun(req, res, proot);
+      return;
+    }
+    if (url.startsWith('/api/function-example') && method === 'GET') {
+      const q = new URL(req.url || '/', 'http://localhost');
+      const proot = (q.searchParams.get('project_dir') || '').trim() || undefined;
+      void handleApiFunctionExample(req, res, proot);
       return;
     }
 

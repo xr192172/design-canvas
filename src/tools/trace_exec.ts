@@ -85,6 +85,93 @@ function paramNames(lang: Lang, signature: string): string[] {
   return names;
 }
 
+// ─────────────────────────────────────────────
+// 示例入参生成（按签名推类型 → 生成可执行的示例值，免手工拼 JSON）
+// ─────────────────────────────────────────────
+
+export interface ExampleParam {
+  name: string;
+  type?: string;
+  /** 该参生成的示例值；不可示例（context/error/receiver 等）为 undefined */
+  example?: unknown;
+}
+
+/** 取签名里"最后一个括号组"作为参数列表（正确跳过 Go 方法接收者 `(r *X)` 与嵌套类型括号）。 */
+function extractParamList(signature: string): string {
+  const close = signature.lastIndexOf(')');
+  if (close === -1) return '';
+  let depth = 0;
+  for (let i = close; i >= 0; i--) {
+    const ch = signature[i];
+    if (ch === ')') depth += 1;
+    else if (ch === '(') {
+      depth -= 1;
+      if (depth === 0) return signature.slice(i + 1, close);
+    }
+  }
+  return '';
+}
+
+/** 按顶层逗号拆分参数块（depth-aware，忽略类型里的括号/中括号/花括号）。 */
+function splitParams(inner: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of inner) {
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    if (ch === ',' && depth === 0) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/** 类型串 → 示例值（粗粒度按关键词映射；context/error/receiver 无法示例 → undefined） */
+function exampleForType(t: string | undefined, name: string): unknown | undefined {
+  if (!t) return '';
+  const low = t.toLowerCase();
+  const nameLow = name.toLowerCase();
+  if (nameLow === 'ctx' || nameLow.startsWith('context') || low.includes('context') || /^(error|runtime\.error)$/.test(low)) return undefined;
+  if (low.includes('map') || low.includes('object') || low.includes('dict') || low.includes('record')) return {};
+  if (low.includes('[') && !low.includes('string') && !low.includes('bool') && !low.includes('int')) return [];
+  if (low === 'bool' || low.includes('bool')) return false;
+  if (/^(int|uint|byte|float|double|int64|int32|uint64|number|num|size|count|limit|total|max|min|port|$)/.test(low)) return 0;
+  if (low === 'string' || low.includes('string') || low.includes('char')) return '';
+  return '';
+}
+
+/** 由签名生成示例入参对象 + 逐参说明。两种语言命名约定：Go `n type`；TS `n: type`。 */
+export function exampleInputFor(signature: string, lang: string): { example: Record<string, unknown>; params: ExampleParam[]; preview: string } {
+  const params: ExampleParam[] = [];
+  const example: Record<string, unknown> = {};
+  const inner = extractParamList(signature);
+  for (const chunk of splitParams(inner)) {
+    const c = chunk.trim().replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/, '').trim();
+    if (!c) continue;
+    if (c.startsWith('...') || c.startsWith('_')) continue; // 可变参数/丢弃参
+    let name = '';
+    let type: string | undefined;
+    const isGo = lang === 'go';
+    const mGo = isGo ? /^([A-Za-z_][\w]*)\s+(.+)$/.exec(c) : null;
+    const mTs = !isGo ? /^([A-Za-z_$][\w$]*)\s*:\s*(.+)$/.exec(c) : null;
+    if (mGo) { name = mGo[1]; type = mGo[2].trim(); }
+    else if (mTs) { name = mTs[1]; type = mTs[2].trim(); }
+    else {
+      // 无类型（仅名字）
+      const bare = /^([A-Za-z_$][\w$]*)$/.exec(c);
+      if (bare) name = bare[1];
+      else continue;
+    }
+    const value = exampleForType(type, name);
+    params.push({ name, type, example: value });
+    if (value !== undefined) example[name] = value;
+  }
+  let preview: string;
+  try { preview = JSON.stringify(example, null, 2); } catch { preview = '{}'; }
+  return { example, params, preview };
+}
+
 /** 输入值 → 位置参数数组（对象按参数名取值；标量单参） */
 function toArgs(names: string[], input: unknown): unknown[] {
   if (input && typeof input === 'object' && !Array.isArray(input)) {
