@@ -165,8 +165,8 @@ export async function scanFileAnnotations(absFile: string): Promise<FnTarget[]> 
 /** 由 (indent, desc) 组注释块（含 @fnhash）。go=true 用 Go 惯例 `//` 行；否则 JSDoc 星号注释块。 */
 function newBlock(go: boolean, indent: string, desc: string, hash: string): string[] {
   const raw = go
-    ? [`// ${desc}`, '//', `// @${FNHASH_PREFIX} ${hash}`]
-    : ['/**', ` * ${desc}`, ' *', ` * @${FNHASH_PREFIX} ${hash}`, '*/'];
+    ? [`// ${desc}`, '//', `// ${FNHASH_PREFIX} ${hash}`]
+    : ['/**', ` * ${desc}`, ' *', ` * ${FNHASH_PREFIX} ${hash}`, '*/'];
   if (indent) return raw.map((ln) => (ln.trim() === '' ? '' : indent + ln));
   return raw;
 }
