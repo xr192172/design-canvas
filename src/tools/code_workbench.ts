@@ -9,6 +9,8 @@
  *      approve 时才真正 `renameFile` 执行迁移 + 全项目改写引用 + 重索引。
  *   - P2 edit_code op:'range'（显式行区间）：dry_run 走语法门不写盘；
  *     approve 时才真正写盘并重建索引。
+ *   - dsl_intent（设计意图改写，why 侧）：propose 只算意图 diff 不写盘；
+ *     approve 才调 setDesignIntent 把 goals / edge_intents 落进 overlay + base。
  *
  * 安全：
  *   - approve 时重新跑真实操作（非内存假执行），复用 edit_code 的语法门 /
@@ -20,6 +22,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getStorageRoot, getDSL, saveDSL } from '../storage.js';
+import { loadOverlay, saveOverlay } from '../storage_overlay.js';
+import { reconcileOverlay, buildCandidates, buildEdgeCandidates, seedOverlayFromDsl, applyOverlay, type OverlayGoal } from '../dsl/overlay.js';
+import { setDesignIntent, type DesignEdgeIntentWrite } from './set_design_intent.js';
 import { renameFile, type RenameFileInput } from './rename_file.js';
 import { editCode, type EditCodeArgs } from './edit_code.js';
 import type { DesignDSL } from '../dsl/types.js';
@@ -28,7 +33,7 @@ import type { DesignDSL } from '../dsl/types.js';
 // 类型
 // ─────────────────────────────────────────────────────────────
 
-export type ChangeKind = 'rename_file' | 'edit_code' | 'dsl_rename' | 'split_plan';
+export type ChangeKind = 'rename_file' | 'edit_code' | 'dsl_rename' | 'split_plan' | 'dsl_intent';
 
 export interface ChangeOp {
   /** rename_file */
@@ -48,6 +53,9 @@ export interface ChangeOp {
   /** split_plan：体检建议拆出的模块名 + 预估行数（落成文件顶部拆分标记注释） */
   suggested_name?: string;
   est_lines?: number;
+  /** dsl_intent：设计意图改写（why 侧）。approve 时才调 setDesignIntent 落进 overlay+base */
+  goals?: OverlayGoal[];
+  edge_intents?: DesignEdgeIntentWrite[];
 }
 
 export type ChangeStatus = 'pending' | 'approved' | 'rejected' | 'executed';
@@ -158,6 +166,7 @@ function buildLabel(kind: ChangeKind, op: ChangeOp): string {
   if (kind === 'rename_file') return `移动/重命名文件 ${op.from ?? ''} → ${op.to ?? ''}`;
   if (kind === 'dsl_rename') return `数据名重命名 ${op.oldName ?? ''} → ${op.newName ?? ''}`;
   if (kind === 'split_plan') return `拆分提案 ${op.file ?? ''} → 拆出「${op.suggested_name ?? ''}」`;
+  if (kind === 'dsl_intent') return `设计意图改写 ${op.feature ?? ''}（目标 ${op.goals?.length ?? 0} 条 · 边意图 ${op.edge_intents?.length ?? 0} 条）`;
   return `行区间编辑 ${op.file ?? ''} L${op.start}-L${op.end}`;
 }
 
@@ -375,6 +384,67 @@ async function executeDslRename(project_dir: string, op: ChangeOp): Promise<stri
   return `已重命名「${op.oldName}」→「${op.newName}」，同步 ${n}/${edits.length} 处（节点 label/title + 引用边），feature "${feature}" 已回写`;
 }
 
+/** dsl_intent 干跑：只读 overlay 算出"当前 why vs 将改 why"的可视化 diff + 预览文本，绝不写盘。
+ *   approve 时才真正走 setDesignIntent 落进 overlay + base。 */
+async function previewDslIntent(project_dir: string, op: ChangeOp): Promise<{ diffs: ChangeDiff[]; preview: string }> {
+  const feature = op.feature;
+  if (!feature) throw new Error('dsl_intent 变更缺 feature');
+  const dsl = getDSL(feature);
+  if (!dsl) throw new Error(`DSL 不存在: feature "${feature}"（请先 save 该 feature）`);
+  const overlay = loadOverlay(feature) ?? seedOverlayFromDsl(dsl);
+  const { overlay: reconciled } = reconcileOverlay(overlay, buildCandidates(dsl), buildEdgeCandidates(dsl));
+  const baseEdges = dsl.geometry?.edges ?? [];
+
+  const before: string[] = [];
+  const after: string[] = [];
+
+  // 目标（goals）：全量替换
+  const beforeGoals = reconciled.global?.goals ?? [];
+  const afterGoals = op.goals;
+  before.push(beforeGoals.length ? `目标（${beforeGoals.length}）:` : '目标：无');
+  for (const g of beforeGoals) before.push(`  - ${g.title ?? '(无标题)'}${g.description ? `：${g.description}` : ''}`);
+  if (afterGoals) {
+    after.push(`目标（${afterGoals.length}，全量替换）:`);
+    for (const g of afterGoals) after.push(`  - ${g.title ?? '(无标题)'}${g.description ? `：${g.description}` : ''}`);
+  } else {
+    after.push(`目标：不变`);
+  }
+
+  // 边意图
+  const byId = new Map(baseEdges.map((e) => [e.id, e]));
+  const byPair = new Map(baseEdges.map((e) => [`${e.from}\u0000${e.to}`, e]));
+  const changed = reconciled.edges ?? {};
+  const itents = op.edge_intents ?? [];
+  if (itents.length) {
+    before.push(`边意图（${itents.length} → 将写）:`);
+    after.push(`边意图（${itents.length}）:`);
+    for (const it of itents) {
+      const edge = it.id ? byId.get(it.id) : it.from && it.to ? byPair.get(`${it.from}\u0000${it.to}`) : undefined;
+      if (!edge) {
+        before.push(`  - ${it.id ?? `${it.from}->${it.to}`}：未匹配到 base 边（不会写入）`);
+        after.push(`  - ${it.id ?? `${it.from}->${it.to}`}：不匹配`);
+        continue;
+      }
+      const prev = changed[edge.id];
+      const label = `${it.id ?? `${edge.from}->${edge.to}`}`;
+      before.push(`  - ${label}：${prev?.reason ?? '（无）'}${prev?.boundary ? ` ／${prev.boundary}` : ''}`);
+      after.push(`  - ${label}：${it.reason ?? prev?.reason ?? '（无）'}${it.boundary ? ` ／${it.boundary}` : ''}`);
+    }
+  }
+
+  const diffs: ChangeDiff[] = [{ file: `DSL意图 · ${feature}`, kind: 'replace', before, after, note: 'why 层改写（目标+边意图），approve 通过才落盘' }];
+  const preview = `设计意图改写 · feature=${feature}\n` + [...before, '↓', ...after].map((l) => l).join('\n');
+  return { diffs, preview };
+}
+
+/** dsl_intent 真写：approve 时调 setDesignIntent 落 overlay + base + saveDSL */
+function executeDslIntent(project_dir: string, op: ChangeOp): string {
+  const feature = op.feature;
+  if (!feature) throw new Error('dsl_intent 变更缺 feature');
+  const r = setDesignIntent({ feature, goals: op.goals, edge_intents: op.edge_intents });
+  return r.message;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 提案 / 列表 / 审批 / 驳回
 // ─────────────────────────────────────────────────────────────
@@ -412,6 +482,11 @@ export async function proposeChange(input: ProposeInput): Promise<{ change: Pend
       preview = p.preview;
       diffs = p.diffs;
       summary = [`拆分提案 ${op.file}：建议拆出「${op.suggested_name ?? ''}」（~${op.est_lines ?? 0} 行）`, '语法门通过（干跑预览）'];
+    } else if (input.kind === 'dsl_intent') {
+      const p = await previewDslIntent(project_dir, op);
+      preview = p.preview;
+      diffs = p.diffs;
+      summary = [`设计意图改写 ${op.feature ?? ''}`, `目标 ${op.goals?.length ?? 0} 条 · 边意图 ${op.edge_intents?.length ?? 0} 条`, '干跑预览（未写盘，approve 才落）'];
     } else {
       throw new Error(`未知变更类型: ${input.kind}`);
     }
@@ -491,6 +566,18 @@ export async function approveChange(project_dir: string, id: string): Promise<Ap
 
     if (c.kind === 'dsl_rename') {
       const result = await executeDslRename(c.project_dir, c.op);
+      findAndUpdate(project_dir, id, (x) => {
+        x.result = result;
+        x.lastError = undefined;
+        x.status = 'executed';
+        x.decided_at = nowIso();
+      });
+      return { ok: true, status: 'executed', result };
+    }
+
+    // dsl_intent：approve 才真写设计意图到 overlay + base
+    if (c.kind === 'dsl_intent') {
+      const result = executeDslIntent(c.project_dir, c.op);
       findAndUpdate(project_dir, id, (x) => {
         x.result = result;
         x.lastError = undefined;
