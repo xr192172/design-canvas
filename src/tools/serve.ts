@@ -877,6 +877,36 @@ function handleApiFunctionOutline(req: http.IncomingMessage, res: http.ServerRes
   }
 }
 
+/** POST /api/function-run：按函数级 id（缓存格式 `相对路径/文件名#Fn`）真实执行单个函数，返回 入/出/状态。
+ *  供功能线点位单步运行用（traceExecChain 走一个 step）。feature 定位 source_root，把相对文件路径拼成绝对路径。 */
+async function handleApiFunctionRun(req: http.IncomingMessage, res: http.ServerResponse, sourceRoot?: string): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const { feature, node_id, input_value } = JSON.parse(body.toString('utf-8'));
+    if (!feature || !node_id) {
+      sendError(res, 400, '缺参数 "feature" 或 "node_id"');
+      return;
+    }
+    const hash = String(node_id).lastIndexOf('#');
+    const fileRel = hash === -1 ? String(node_id) : String(node_id).slice(0, hash);
+    const func = hash === -1 ? '' : String(node_id).slice(hash + 1);
+    if (!func) {
+      sendError(res, 400, `node_id 需形如 "相对路径/文件#函数名"，收到 "${node_id}"`);
+      return;
+    }
+    const root = sourceRoot ?? process.cwd();
+    const filePath = path.join(root, fileRel.replace(/\//g, path.sep));
+    if (!fs.existsSync(filePath)) {
+      sendError(res, 404, `函数对应源文件不存在：${filePath}`);
+      return;
+    }
+    const r = await traceExecChain({ steps: [{ node_id, func_name: func, file_path: filePath }], input_value: input_value ?? undefined });
+    sendJson(res, 200, { feature, node_id, entryParams: r.entryParams, steps: r.steps });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
 /** GET /api/feature-line?feature=<feature>[&project_dir=<root>][&target=<功能名>][&max_steps=<n>]
  *  功能线：target 缺省 → 全功能 入口+链长 总览；给 target → 该功能入口+主链。只读，不执行。 */
 function handleApiFeatureLine(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -2957,6 +2987,12 @@ export async function startServer(port?: number): Promise<void> {
     }
     if (url.startsWith('/api/feature-line') && method === 'GET') {
       handleApiFeatureLine(req, res);
+      return;
+    }
+    if (url.startsWith('/api/function-run') && method === 'POST') {
+      const q = new URL(req.url || '/', 'http://localhost');
+      const proot = (q.searchParams.get('project_dir') || '').trim() || undefined;
+      void handleApiFunctionRun(req, res, proot);
       return;
     }
 
