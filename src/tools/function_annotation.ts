@@ -1,9 +1,10 @@
 /**
- * function_annotation —— 函数语义注释（TS/JS）
+ * function_annotation —— 函数语义注释（TS/JS + Go）
  *
  * 目标：让"函数做什么"由**源码自带注释**承载，而不是每次由 LLM 从代码重新提取
  * （那只是把编译器信息再抄一遍，费时费钱还不更新）。作者意图在**写入时一次性沉淀**
  * （缺失时由 LLM 生成，随后在每次修改时通过 body 指纹检测同步），读端直接提出注释。
+ * 注释风格按语言惯例：TS/JS 用 JSDoc `/**` 块；Go 用 `//` 行（贴近 godoc 惯例）。
  *
  * 机制：
  *   - 每个函数检查函数名上方是否有**语义化注释**。
@@ -161,11 +162,13 @@ export async function scanFileAnnotations(absFile: string): Promise<FnTarget[]> 
   return out;
 }
 
-/** 由 (indent, desc) 组 JSDoc 块（含 @fnhash） */
-function newBlock(indent: string, desc: string, hash: string): string[] {
-  const lines: string[] = ['/**', ` * ${desc}`, ' *', ` * @${FNHASH_PREFIX} ${hash}`, ' */'];
-  if (indent) return lines.map((ln) => (ln.trim() === '' ? '' : indent + ln));
-  return lines;
+/** 由 (indent, desc) 组注释块（含 @fnhash）。go=true 用 Go 惯例 `//` 行；否则 JSDoc 星号注释块。 */
+function newBlock(go: boolean, indent: string, desc: string, hash: string): string[] {
+  const raw = go
+    ? [`// ${desc}`, '//', `// @${FNHASH_PREFIX} ${hash}`]
+    : ['/**', ` * ${desc}`, ' *', ` * @${FNHASH_PREFIX} ${hash}`, '*/'];
+  if (indent) return raw.map((ln) => (ln.trim() === '' ? '' : indent + ln));
+  return raw;
 }
 
 /** 把待注入的函数目标应用到源码，返回新源码。targets 需已带 status 与（stale 时）新块。
@@ -238,7 +241,7 @@ export async function planFunctionAnnotation(input: PlanAnnotationInput): Promis
 
   let absFiles = input.absFiles;
   if (!absFiles || absFiles.length === 0) {
-    absFiles = scanProjectSourceFiles(input.project_dir).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f));
+    absFiles = scanProjectSourceFiles(input.project_dir).filter((f) => /\.(ts|tsx|js|jsx|mjs|cjs|go)$/.test(f));
   }
 
   for (const f of absFiles) {
@@ -268,6 +271,7 @@ export async function planFunctionAnnotation(input: PlanAnnotationInput): Promis
     if (descs.size === 0) continue;
 
     const jobs: Array<{ startLine: number; status: FnCommentStatus; blockLines: string[]; blockStart: number; newBlock: string[] }> = [];
+    const go = /\.go$/.test(f);
     for (let i = 0; i < need.length; i++) {
       const desc = descs.get(i);
       if (!desc) continue;
@@ -277,7 +281,7 @@ export async function planFunctionAnnotation(input: PlanAnnotationInput): Promis
         status: t.status,
         blockLines: t.blockLines,
         blockStart: t.blockStart,
-        newBlock: newBlock(t.indent, desc, t.bodyHash),
+        newBlock: newBlock(go, t.indent, desc, t.bodyHash),
       });
     }
     if (jobs.length === 0) continue;

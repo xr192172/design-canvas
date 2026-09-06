@@ -74,7 +74,7 @@ export const LANES: Lane[] = [
       { name: 'impact_analysis', when: '计算一次改动的变更点/风险面' },
       { name: 'remove_dead_imports', when: '清理未使用 import' },
       { name: 'refactor_pipeline', when: '整条重构流水线（预览→执行→校验闭环）' },
-      { name: 'annotate_functions', when: '函数语义注释（TS/JS）：扫覆盖→缺失用 LLM 补→@fnhash body 指纹同步过期；可配进 refactor_pipeline 的 function_annotation 步' },
+      { name: 'annotate_functions', when: '函数语义注释（TS/JS + Go）：扫覆盖→缺失用 LLM 补→@fnhash body 指纹同步过期；可配进 refactor_pipeline 的 function_annotation 步' },
       { name: 'suggest_renames', when: '生成改名建议（就近相似名/命名规范）；混淆/压缩代码的短名还原可读也走这里——建议先由格式化梳理结构，再经 rename_symbols 应用，意图复原留人/LLM' },
       { name: 'find_similar_names', when: '找相似命名（撞名/歧义排查）' },
       { name: 'refactor_judge', when: '重构后裁判：校验是否符合契约/无回归' },

@@ -1979,10 +1979,10 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'annotate_functions',
-    title: '函数语义注释：扫描覆盖 → LLM 补全缺失 → body指纹同步过期（TS/JS）',
+    title: '函数语义注释：扫描覆盖 → LLM 补全缺失 → body指纹同步过期（TS/JS + Go）',
     description:
-      '让"函数做什么"由源码自带语义注释承载，而非每次由 LLM 从中重新提取。对 TS/JS 项目的每个函数检查其上方是否有语义化注释：' +
-      '缺失 → 用 LLM 依据 签名+函数体 生成一句"这函数做什么"的 JSDoc 注入到函数名上方；' +
+      '让"函数做什么"由源码自带语义注释承载，而非每次由 LLM 从中重新提取。对 TS/JS + Go 项目的每个函数检查其上方是否有语义化注释：' +
+      '缺失 → 用 LLM 依据 签名+函数体 生成一句"这函数做什么"，按语言惯例（TS/JS 用 JSDoc，Go 用 `//` 近 godoc）注入到函数名上方；' +
       '带 `@fnhash <sha256(body)>` 指纹标记的函数被改动过（指纹失配 = 过期）→ LLM 重注同步。' +
       '任何对函数体的修改都会改变 fingerprint，因此"每次修改都同步注释"被机械覆盖。' +
       '安全：只替换带自己 `@fnhash` 标记的块，手写无指纹注释一律不动，绝不误删用户注释。' +
@@ -2052,7 +2052,7 @@ const TOOL_DEFS: ToolDef[] = [
       '  2) dead_statements：自动扫描（可选 files 收敛范围）删除 return/throw/continue 后不可达语句与死分支（TS/Go）。' +
       '  3) package_migration（包改名/提级）：把缺换代的包一次性涤荡干净——全项目 import 引用面重写（prefix→to）、' +
       '     package 声明改名（v2→hub，from_test→to_test）、import 别名清洗（hubv2→hub）；可选目录物理移动。' +
-      '  4) function_annotation（函数语义注释，TS/JS）：扫覆盖→缺失的用 LLM 依据 签名+函数体 生成一句话语义注释；' +
+      '  4) function_annotation（函数语义注释，TS/JS + Go）：扫覆盖→缺失的用 LLM 依据 签名+函数体 生成一句话语义注释；' +
       '     用 @fnhash body 指纹标记，函数体一改即判过期 → 下次管线重注同步；手写无指纹注释绝不动。' +
       '失败语义：某步改后验证回归 → 只还原该步预读的原始内容，回到上一步绿点，前面已绿的改动保留；管线结果 ok=false。' +
       '基线失败 → 一个文件都不改。verify=true 启用验证；{commands} 自定义命令组；缺省/verify=false 仅落盘不验证（not_verifiable）。' +
@@ -2119,8 +2119,8 @@ const TOOL_DEFS: ToolDef[] = [
             .optional(),
           function_annotation: z
             .object({
-              enabled: z.boolean().optional().default(false).describe('是否启用函数语义注释步骤（TS/JS，需 LLM 已配置才生成）'),
-              files: z.array(z.string()).optional().describe('限定只注释这些文件（相对或绝对路径）；缺省扫目录内全部 TS/JS 源'),
+              enabled: z.boolean().optional().default(false).describe('是否启用函数语义注释步骤（TS/JS + Go，需 LLM 已配置才生成）'),
+              files: z.array(z.string()).optional().describe('限定只注释这些文件（相对或绝对路径）；缺省扫目录内全部 TS/JS + Go 源'),
             })
             .optional(),
         })

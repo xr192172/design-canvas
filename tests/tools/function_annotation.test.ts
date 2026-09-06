@@ -96,4 +96,31 @@ describe('scanFileAnnotations 分类', () => {
     expect(hello!.indent).toBe('  ');
     expect(hello!.status).toBe('missing');
   });
+
+  it('Go：扫到函数、用 `//` 行注入（godoc 式）、re-scan→ok', async () => {
+    const abs = path.join(dir, 'a.go');
+    fs.writeFileSync(abs, [
+      'package demo',
+      '',
+      'func Add(a int, b int) int {',
+      '\treturn a + b',
+      '}',
+      '',
+    ].join('\n'), 'utf-8');
+    const first = await scanFileAnnotations(abs);
+    const add = first.find((t) => t.name === 'Add');
+    expect(add).toBeDefined();
+    expect(add!.status).toBe('missing');
+
+    // 用手工 Go 块做注入（空格缩进）
+    const job = { startLine: add!.startLine, status: 'missing' as const, blockLines: [], blockStart: -1, newBlock: ["// Add 返回两数之和。", "//", `// @fnhash ${add!.bodyHash}`] };
+    const annotated = applyAnnotationsToSource(fs.readFileSync(abs, 'utf-8'), [job]);
+    const annLines = annotated.split('\n');
+    // 推断：注释插在 func Add 声明行上方（package demo\n\n 之后 = 第 2 行）
+    expect(annLines[2]).toBe('// Add 返回两数之和。');
+    expect(annotated.includes(`// @fnhash ${add!.bodyHash}`)).toBe(true);
+    fs.writeFileSync(abs, annotated, 'utf-8');
+    const again = await scanFileAnnotations(abs);
+    expect(again.find((t) => t.name === 'Add')?.status).toBe('ok');
+  });
 });

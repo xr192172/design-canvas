@@ -185,17 +185,17 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **确定性改造**
 
-| 工具                    | 用途                                                                                                 |
-| --------------------- | -------------------------------------------------------------------------------------------------- |
-| `edit_code`           | 符号级代码编辑（replace / insert / delete / range）                                                         |
-| `rename_many`         | 批量重命名局部变量（作用域隔离）                                                                                   |
-| `rename_symbols`      | 批量跨文件符号重命名（单条或批量统一入口，整体先 dry-run）                                                                  |
-| `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）                                                                     |
-| `remove_dead_imports` | 移除失效 import                                                                                        |
+| 工具                    | 用途                                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `edit_code`           | 符号级代码编辑（replace / insert / delete / range）                                                                  |
+| `rename_many`         | 批量重命名局部变量（作用域隔离）                                                                                            |
+| `rename_symbols`      | 批量跨文件符号重命名（单条或批量统一入口，整体先 dry-run）                                                                           |
+| `rename_files`        | 批量文件重命名（单条或批量统一入口，整体先 dry-run）                                                                              |
+| `remove_dead_imports` | 移除失效 import                                                                                                 |
 | `refactor_pipeline`   | 确定性重构流水线（死代码清理 + 包迁移 + 函数语义注释；按项目探测语言并跑语言专属 stage——Java 工程自动触发 Spring MVC 分层迁移、Python 走其死代码清理，落盘/验证/回滚统一闭环） |
-| `annotate_functions`  | 函数语义注释（TS/JS）：扫覆盖→缺失用 LLM 补→`@fnhash` body 指纹同步过期；mode=scan/dry_run/apply |
-| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字（含混淆/压缩代码的短名还原可读）                                                                |
-| `find_similar_names`  | 检测易混淆相似名并消歧                                                                                        |
+| `annotate_functions`  | 函数语义注释（TS/JS + Go）：扫覆盖→缺失用 LLM 补→`@fnhash` body 指纹同步过期；mode=scan/dry\_run/apply                             |
+| `suggest_renames`     | 为短名 / 无意义变量建议语义化名字（含混淆/压缩代码的短名还原可读）                                                                         |
+| `find_similar_names`  | 检测易混淆相似名并消歧                                                                                                 |
 
 > **反混淆边界**：完整"解混淆"是启发/LLM 级的非确定性还原，不适合作为确定性重构管线的
 > 基础工具。可逆的那半（保结构改名）走 `suggest_renames` + `rename_symbols`（可回滚）；
@@ -210,9 +210,9 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 **设计意图（overlay）**
 
-| 工具                 | 用途                                                         |
-| ------------------ | ---------------------------------------------------------- |
-| `set_design_intent` | 写设计意图到设计意图 overlay：goals（结构化目标/方向）+ edge_intents（「A 为何依赖 B」/边界归属），落进 base 的 `meta.goals` / `edge.intent` 供 LLM 与读端消费（缺口①③④ 的写入口） |
+| 工具                  | 用途                                                                                                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `set_design_intent` | 写设计意图到设计意图 overlay：goals（结构化目标/方向）+ edge\_intents（「A 为何依赖 B」/边界归属），落进 base 的 `meta.goals` / `edge.intent` 供 LLM 与读端消费（缺口①③④ 的写入口） |
 
 **画布批注**
 

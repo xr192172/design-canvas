@@ -194,7 +194,7 @@ A total of **52 MCP tools** are registered, organized into "capability navigatio
 | `refactor_pipeline` | Deterministic refactoring pipeline (dead code cleanup + package
 migration; auto-detects the project language and runs language-specific stages — auto-triggers Spring MVC layering on
 Java projects, Python dead-code cleanup on Python projects; apply / verify / rollback all in one loop) |
-| `annotate_functions` | Function semantic comments (TS/JS): scan coverage → LLM fills missing → re-sync via `@fnhash` body fingerprint when stale; mode=scan/dry_run/apply |
+| `annotate_functions` | Function semantic comments (TS/JS + Go): scan coverage → LLM fills missing → re-sync via `@fnhash` body fingerprint when stale; mode=scan/dry_run/apply |
 | `suggest_renames` | Suggest semantic names for short / meaningless variables (incl. restoring readable names in obfuscated / minified code) |
 | `find_similar_names` | Detect and disambiguate easily-confused similar names |
 

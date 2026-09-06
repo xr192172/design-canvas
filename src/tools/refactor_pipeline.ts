@@ -251,6 +251,23 @@ function computeDeadImportsPlan(
 function buildDefaultLangs(): RefactorLangRegistry {
   const reg = new RefactorLangRegistry();
 
+  // 函数语义注释：TS/JS + Go 共用同一 stage（compute 自扫两语言、幂等——二次 run 是 no_change）。
+  const functionAnnotationStage = (): RefactorStageExecutor => ({
+    kind: 'function_annotation',
+    label: '[ts/go] 函数语义注释',
+    compute: (a) => {
+      const abs = a.files ? a.files.map((f) => path.resolve(a.cwd ?? a.project_dir, f)).filter((f) => fs.existsSync(f)) : undefined;
+      return planFunctionAnnotation({ project_dir: a.project_dir, absFiles: abs, llm: true }).then(
+        (r) => ({ absToNew: r.absToNew, originals: r.originals, units: r.summary.annotated + r.summary.updated }),
+      );
+    },
+    limitations: [
+      '覆盖 TS/JS + Go；缺失的由 LLM 依据 签名+函数体 生成一句话语义注释（TS/JS 用 JSDoc、Go 用 `//` 近 godoc）',
+      '用 @fnhash 指纹标记：函数体一改即判 stale → 下次管线重注同步；手写无指纹注释绝不动',
+      'LLM 未配置时该步退化为扫描（no_change），不伪造注释',
+    ],
+  });
+
   // TS 家族（含 JS/JSX/MJS/CJS）。manifest：package.json
   reg.register({
     lang: 'ts',
@@ -276,21 +293,7 @@ function buildDefaultLangs(): RefactorLangRegistry {
           'TS 提升（function/class/let/const/var）：return/throw 后不可达子树若含声明，需名字引用校验才删',
         ],
       },
-      {
-        kind: 'function_annotation',
-        label: '[ts] 函数语义注释',
-        compute: (a) => {
-          const abs = a.files ? a.files.map((f) => path.resolve(a.cwd ?? a.project_dir, f)).filter((f) => fs.existsSync(f)) : undefined;
-          return planFunctionAnnotation({ project_dir: a.project_dir, absFiles: abs, llm: true }).then(
-            (r) => ({ absToNew: r.absToNew, originals: r.originals, units: r.summary.annotated + r.summary.updated }),
-          );
-        },
-        limitations: [
-          '只注释 TS/JS；缺失的由 LLM 依据 签名+函数体 生成一句话语义注释',
-          '用 @fnhash 指纹标记：函数体一改即判 stale → 下次管线重注同步；手写无指纹注释绝不动',
-          'LLM 未配置时该步退化为扫描（no_change），不伪造注释',
-        ],
-      },
+      functionAnnotationStage(),
     ],
   });
 
@@ -319,6 +322,7 @@ function buildDefaultLangs(): RefactorLangRegistry {
           'Go 终止后兄弟语句可删；唯一禁删"被可达 goto 指向"的带标签语句，遇即停',
         ],
       },
+      functionAnnotationStage(),
       {
         kind: 'package_migration',
         label: '[go] 包改名/提级',
