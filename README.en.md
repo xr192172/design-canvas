@@ -104,7 +104,7 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **52 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+A total of **53 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
 
 ### Capability navigation (1)
 
@@ -179,6 +179,7 @@ A total of **52 MCP tools** are registered, organized into "capability navigatio
 | `observe_instrument` | Auto-instrument / restore TS projects; writes a probe ledger and stats after the run |
 | `observe_log` | Query runtime logs per file |
 | `observe_judge` | Batch-judge runtime events |
+| `feature_line` | Feature line: wire each feature into one main chain (feature → entry → call nodes), for step-through run / big-screen projection |
 | `reconcile_chain` | Reconcile a host chain against its real runtime events |
 | `run_tests` | Run tests and return structured failure localization (filter-targeted / full) |
 

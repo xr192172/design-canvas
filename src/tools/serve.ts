@@ -47,6 +47,7 @@ import type { FileMonolithReport } from './monolith.js';
 import { runArchifyPipeline } from './archify_pipeline.js';
 import { adaptIRTree } from './archify_project.js';
 import { buildFunctionOutline, listFunctionDirs } from './function_outline.js';
+import { getFeatureLine } from './feature_line.js';
 import { deriveMindMap, buildFileIndex } from './derive_mind_map.js';
 import { placeProposals } from './derive_mind_map.js';
 import { getOverview } from './overview.js';
@@ -871,6 +872,26 @@ function handleApiFunctionOutline(req: http.IncomingMessage, res: http.ServerRes
     // 有 dir → 仅该目录函数（真按目录懒加载，SQL 层过滤）
     const { ok, outline, note } = buildFunctionOutline(feature, sourceRoot, { dir });
     sendJson(res, ok ? 200 : 404, ok ? outline : { error: note ?? '无函数级数据', functions: [] });
+  } catch (e) {
+    sendError(res, 500, (e as Error).message);
+  }
+}
+
+/** GET /api/feature-line?feature=<feature>[&project_dir=<root>][&target=<功能名>][&max_steps=<n>]
+ *  功能线：target 缺省 → 全功能 入口+链长 总览；给 target → 该功能入口+主链。只读，不执行。 */
+function handleApiFeatureLine(req: http.IncomingMessage, res: http.ServerResponse): void {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const feature = (url.searchParams.get('feature') || '').trim();
+    const sourceRoot = (url.searchParams.get('project_dir') || '').trim() || undefined;
+    if (!feature) {
+      sendError(res, 400, '缺参数 "feature"（用于定位函数级缓存的 feature 名）');
+      return;
+    }
+    const target = (url.searchParams.get('target') || '').trim() || undefined;
+    const maxSteps = Number(url.searchParams.get('max_steps')) || undefined;
+    const r = getFeatureLine(feature, sourceRoot, { target, maxSteps });
+    sendJson(res, r.ok ? 200 : 404, r.ok ? r : { error: r.note ?? '功能线不可用' });
   } catch (e) {
     sendError(res, 500, (e as Error).message);
   }
@@ -2932,6 +2953,10 @@ export async function startServer(port?: number): Promise<void> {
 
     if (url.startsWith('/api/function-outline') && method === 'GET') {
       handleApiFunctionOutline(req, res);
+      return;
+    }
+    if (url.startsWith('/api/feature-line') && method === 'GET') {
+      handleApiFeatureLine(req, res);
       return;
     }
 

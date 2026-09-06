@@ -70,6 +70,7 @@ import { renameFiles } from './tools/rename_files.js';
 import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsVerifyOptions } from './tools/remove_dead_imports.js';
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { planFunctionAnnotation, scanFileAnnotations } from './tools/function_annotation.js';
+import { getFeatureLine } from './tools/feature_line.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { runRefactorJudge } from './tools/refactor_judge.js';
@@ -2038,6 +2039,40 @@ const TOOL_DEFS: ToolDef[] = [
       ];
       if (r.note) parts.push(`  备注：${r.note}`);
       return { message: parts.join('\n'), data: { summary: s, note: r.note } };
+    }),
+  },
+  {
+    name: 'feature_line',
+    title: '功能线：每个功能搭一条主链（功能 → 入口函数 → 依次调用节点），供沿线单步运行/投屏',
+    description:
+      '把"这个功能是怎么一步步走的"搭成一条可读主链：对每个功能（DSL feature）挑一个入口函数' +
+      '（功能内不被本功能函数调用的根，否则按名启发 main/run/handle 等），再沿功能内调用边贪心走成有序链。' +
+      'target 留空 → 返回该项目所有功能的 入口+链长 总览；给 target=功能名 → 返回该功能 entry + chain（每个节点含 函数名/签名/文件/行/所属功能/语义注释 doc）。' +
+      '纯推导、不执行：要沿线跑入/出参请用 trace-exec；要投大屏点位由前端消费本条 line。只读，不改任何存储。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（定位该项目的 cache.db + DSL feature_tree，给函数打功能标记）'),
+      project_dir: z.string().optional().describe('项目根目录（定位 cache.db；缺省按 feature 的导入缓存）'),
+      target: z.string().optional().describe('指定功能名；缺省返回所有功能 入口+链长 总览'),
+      max_steps: z.number().optional().describe('主链最大步数（默认 24）'),
+    },
+    handler: wrap(async (a) => {
+      const feature = String(a.feature ?? '');
+      const sourceRoot = a.project_dir ? String(a.project_dir) : undefined;
+      const opts = { target: a.target ? String(a.target) : undefined, maxSteps: typeof a.max_steps === 'number' ? a.max_steps : undefined };
+      const r = getFeatureLine(feature, sourceRoot, opts);
+      if (!r.ok) return { message: `功能线不可用：${r.note ?? '未知'}`, data: r };
+      if (r.features) {
+        const parts = [`功能线总览（${r.features.length} 个功能）：`, ...r.features.map((f) => `  - ${f.feature}：入口 ${f.entry}，主链 ${f.steps} 步`)];
+        if (r.note) parts.push(`  备注：${r.note}`);
+        return { message: parts.join('\n'), data: { ok: true, features: r.features } };
+      }
+      const line = r.line!;
+      const parts = [
+        `功能线「${line.feature}」：入口=${line.entry?.name ?? '—'}，主链 ${line.chain.length} 步：`,
+        ...line.chain.map((n, i) => `  ${i + 1}. ${n.name}（${n.file}:${n.line}）${n.doc ? ' — ' + n.doc : ''}`),
+      ];
+      if (r.note) parts.push(`  备注：${r.note}`);
+      return { message: parts.join('\n'), data: { ok: true, feature: line.feature, line } };
     }),
   },
   {
