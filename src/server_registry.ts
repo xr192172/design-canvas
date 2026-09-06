@@ -71,6 +71,7 @@ import { removeDeadImports, removeDeadImportsWithVerify, type RemoveDeadImportsV
 import { runRefactorPipeline } from './tools/refactor_pipeline.js';
 import { planFunctionAnnotation, scanFileAnnotations } from './tools/function_annotation.js';
 import { getFeatureLine } from './tools/feature_line.js';
+import { proposeChange } from './tools/code_workbench.js';
 import { suggestRenames, type SuggestOptions } from './tools/ast_suggest.js';
 import { suggestDisambiguations, disambiguationItems } from './tools/similar_names.js';
 import { runRefactorJudge } from './tools/refactor_judge.js';
@@ -2648,6 +2649,77 @@ const TOOL_DEFS: ToolDef[] = [
         .describe('边级意图：按 base 边 id 或 from+to 匹配挂载 reason/boundary'),
     },
     handler: setDesignIntentHandler,
+  },
+  {
+    name: 'propose_design_intent',
+    title: '提出设计意图改写审批卡（by LLM，approve 才落 DSL）',
+    description:
+      '由 LLM 代拟「设计意图（why）」的改写提案并进入人工审批闸门：把 goals / edge_intents 的意图变更' +
+      '算成一份 before/after（当前意图 vs 将改意图）预览，落为 pending 提案，**不写盘不碰 DSL**——' +
+      '需要人在工作台「代码审批」页签 approve 后，才真正写入 overlay + base（复用 set_design_intent 的写端）。' +
+      '这与直接 set_design_intent 的区别：本工具是"先请人批再落"，符合"人只做决策审批、LLM 只做提案转述"的分层。' +
+      'project_dir 是审批台账的隔离桶名（缺省取 feature 的 source_root），应与人当前查看的项目一致，提案才会出现在他的审批列表里。',
+    inputSchema: {
+      feature: z.string().describe('feature 名（要改哪个设计意图）'),
+      project_dir: z.string().optional().describe('审批台账桶名（人查看的项目目录）；缺省取 feature 的 source_root'),
+      goals: z
+        .array(
+          z.object({
+            id: z.string().optional(),
+            title: z.string().describe('目标一句话'),
+            description: z.string().optional(),
+            status: z.enum(['active', 'done', 'parked', 'dropped']).optional(),
+          }),
+        )
+        .optional()
+        .describe('结构化目标/方向（全量替换）'),
+      edge_intents: z
+        .array(
+          z.object({
+            id: z.string().optional().describe('目标 base 边 id（优先于 from+to）'),
+            from: z.string().optional(),
+            to: z.string().optional(),
+            reason: z.string().optional().describe('A 为何依赖 B'),
+            boundary: z.string().optional().describe('边界归属说明'),
+            status: z.enum(['open', 'resolved']).optional(),
+          }),
+        )
+        .optional()
+        .describe('边级意图：按 base 边 id 或 from+to 匹配挂载'),
+    },
+    handler: wrap(async (a) => {
+      const feature = String(a.feature ?? '');
+      if (!feature) throw new Error('缺参数 feature');
+      let project_dir = a.project_dir ? String(a.project_dir) : '';
+      if (!project_dir) {
+        const dsl = getDSL(feature);
+        project_dir = dsl?.source_root ?? process.cwd();
+      }
+      const goals = Array.isArray(a.goals) ? (a.goals as unknown[]) : undefined;
+      const edgeIntents = Array.isArray(a.edge_intents) ? (a.edge_intents as unknown[]) : undefined;
+      if (!goals && !edgeIntents) throw new Error('至少传 goals 或 edge_intents 之一');
+      const r = await proposeChange({
+        kind: 'dsl_intent',
+        project_dir,
+        op: { feature, goals: goals as never, edge_intents: edgeIntents as never },
+        submitter: 'llm',
+      });
+      if (!r.ok) throw new Error(r.error ?? '提案失败');
+      const c = r.change;
+      const message = [
+        `已提出设计意图改写审批卡（pending，未写盘）：`,
+        `  提案：${c.label}`,
+        ...(c.summary ?? []).map((s) => `  · ${s}`),
+        `  预览：`,
+        ...(c.preview ?? '').split('\n').map((l) => `    ${l}`),
+        ``,
+        `人将在工作台「代码审批」页签看到这条提案，approve 后 goals/边意图才真正写入 DSL；reject 则丢弃。`,
+      ].join('\n');
+      return {
+        message,
+        data: { ok: true, project_dir, proposal: { id: c.id, kind: c.kind, label: c.label, summary: c.summary, diffs: c.diffs, preview: c.preview, status: c.status } },
+      };
+    }),
   },
 ];
 

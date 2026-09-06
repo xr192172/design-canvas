@@ -104,7 +104,7 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **53 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+A total of **54 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
 
 ### Capability navigation (1)
 
@@ -217,6 +217,7 @@ Java projects, Python dead-code cleanup on Python projects; apply / verify / rol
 | Tool | Purpose |
 |------|------|
 | `set_design_intent` | Write design intent to the intent overlay: `goals` (structured objectives/direction) + `edge_intents` (why A depends on B / boundary attribution); lands into base `meta.goals` / `edge.intent` for the LLM and read side to consume (write entry for overlay gaps ①③④) |
+| `propose_design_intent` | LLM drafts a "design-intent (why) rewrite" approval card: propose only computes a before/after intent diff without writing; the human approves in the workbench "Code approval" tab before it truly lands in the DSL; reject discards (human is the decision approver, LLM the proposer) |
 
 **Canvas annotations**
 

@@ -16,6 +16,7 @@ import {
 const regTools = [
   'get_dsl', 'edit_dsl', 'manage_feature', 'render_design', 'render_brickwork', 'scaffold',
   'backfill_scaffold', 'consistency_check', 'detect_drift', 'import_project', 'explore_code',
+  'set_design_intent', 'propose_design_intent',
   'diff_views', 'archive_node', 'list_archive', 'harvest_decisions', 'sync_contracts',
   'harvest_closure', 'extract_contracts', 'reconcile_effects', 'harvest_from_url',
   'reconcile_brick', 'search_bricks', 'assemble_bricks', 'slim_brick', 'narrate_step',
@@ -37,7 +38,7 @@ describe('capability_map 目录契约', () => {
 
   it('目录覆盖所有注册工具（无遗漏、无超集）', () => {
     const catalogued = LANES.flatMap((l) => l.tools.map((t) => t.name));
-    expect(catalogued.length).toBe(52);
+    expect(catalogued.length).toBe(53);
     expect(catalogued).toEqual(expect.arrayContaining(regTools.filter((t) => t !== 'capability_map')));
     expect(new Set(catalogued).size).toBe(catalogued.length); // 无跨线重复
   });
