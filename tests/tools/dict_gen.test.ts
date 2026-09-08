@@ -10,12 +10,20 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { ingestTerm } from '../../src/tools/dict_gen';
 import { loadGlobalDict, loadProjectDict, setAllowedProjectRoots } from '../../src/tools/dictionary';
 
 const dataHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-dictgen-'));
 const projectRoot = path.join(os.tmpdir(), 'dc-dictgen-proj-' + Date.now());
+
+// branchMock 用「直接赋值 globalThis.fetch」而非 vi.stubGlobal——后者会被 vitest 的
+// unstubGlobals 自动还原，直接赋值却不会。singleFork 下所有测试文件共用同一进程，
+// 若不还原，遗留的 mock 会让后续测试（如 chain_exec 真 HTTP e2e）的真实 fetch 被吞。
+const origFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = origFetch;
+});
 
 function jsonResp(obj: unknown): Response {
   return { ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) } as unknown as Response;

@@ -22,5 +22,11 @@ export default defineConfig({
     poolOptions: {
       forks: { singleFork: true },
     },
+    // singleFork 下所有测试文件共用同一进程/globalThis：LLM 测试常用
+    // vi.stubGlobal('fetch', mock) 注入假响应，若不复原（restoreAllMocks 只管
+    // vi.fn/spyOn，管不到 stubGlobal）会全局劫持后续测试的真实 fetch——
+    // chain_exec 等真 HTTP e2e 就被 mock 吞掉。此处让 vitest 每个用例后自动
+    // vi.unstubAllGlobals()，杜绝跨文件全局桩泄漏（幂等：没打桩则无操作）。
+    unstubGlobals: true,
   },
 });
