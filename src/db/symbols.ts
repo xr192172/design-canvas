@@ -178,7 +178,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
   }
 
   const hash = contentHash(content);
-  const existing = db.prepare('SELECT content_hash, norm_hash FROM files WHERE path = ?').get(rel) as
+  const existing = db.prepare('SELECT content_hash, norm_hash FROM files WHERE path = $p').get({ p: rel }) as
     | { content_hash: string; norm_hash: string | null }
     | undefined;
   if (existing && existing.content_hash === hash) {
@@ -208,8 +208,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     if (!existing) return undefined;
     const oldSets = hashSetsOf(
       db
-        .prepare("SELECT qualified_name, sym_hash FROM nodes WHERE file_path = ? AND kind != 'file'")
-        .all(rel) as Array<{ qualified_name: string; sym_hash: string | null }>,
+        .prepare("SELECT qualified_name, sym_hash FROM nodes WHERE file_path = $p AND kind != 'file'")
+        .all({ p: rel }) as Array<{ qualified_name: string; sym_hash: string | null }>,
     );
     const newSets = new Map<string, Set<string>>();
     parsed.symbols.forEach((s, i) => {
@@ -236,8 +236,8 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     let from = existing.content_hash;
     let normFrom = existing.norm_hash ?? ''; // null（v4 前的旧行）= 未知 → 保守视为已变
     const stored = db
-      .prepare('SELECT from_hash, to_hash, added, removed, changed, norm_from, norm_to FROM symbol_diffs WHERE file_path = ?')
-      .get(rel) as
+      .prepare('SELECT from_hash, to_hash, added, removed, changed, norm_from, norm_to FROM symbol_diffs WHERE file_path = $p')
+      .get({ p: rel }) as
       | { from_hash: string; to_hash: string; added: string; removed: string; changed: string; norm_from: string; norm_to: string }
       | undefined;
     let net = cur;
@@ -264,11 +264,11 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     // 1. 文件节点：UPSERT 不删除（保护指向它的 import 边不被级联带走）
     db.prepare(
       `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, updated_at)
-       VALUES (?, 'file', ?, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?)
+       VALUES ($id, 'file', $nm, $qn, $fp, $lang, 1, $endLine, NULL, NULL, NULL, $ts)
        ON CONFLICT(id) DO UPDATE SET
          kind = 'file', name = excluded.name, language = excluded.language,
          start_line = 1, end_line = excluded.end_line, updated_at = excluded.updated_at`,
-    ).run(fileNodeId, path.posix.basename(rel), rel, rel, ext, lineCount, now);
+    ).run({ id: fileNodeId, nm: path.posix.basename(rel), qn: rel, fp: rel, lang: ext, endLine: lineCount, ts: now });
 
     // 2. 符号节点：整批删除重插。
     //    删除会经 edges.target 的 FK ON DELETE CASCADE 清掉【指向本文件符号的入边】
@@ -276,60 +276,61 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     //    （对端的 unresolved_refs 已是 resolved，不会重试）。先备份，重插后还原。
     const backupInEdges = db
       .prepare(
-        "SELECT source, target, kind, line, col, metadata FROM edges WHERE kind IN ('call','type_ref') AND target LIKE ? AND source NOT LIKE ?",
+        "SELECT source, target, kind, line, col, metadata FROM edges WHERE kind IN ('call','type_ref') AND target LIKE $tp AND source NOT LIKE $sp",
       )
-      .all(`${rel}#%`, `${rel}#%`) as Array<{ source: string; target: string; kind: string; line: number; col: number | null; metadata: string | null }>;
-    db.prepare("DELETE FROM nodes WHERE file_path = ? AND kind != 'file'").run(rel);
+      .all({ tp: `${rel}#%`, sp: `${rel}#%` }) as Array<{ source: string; target: string; kind: string; line: number; col: number | null; metadata: string | null }>;
+    db.prepare("DELETE FROM nodes WHERE file_path = $p AND kind != 'file'").run({ p: rel });
     const insNode = db.prepare(
       `INSERT INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, parent, signature, docstring, sym_hash, is_closure, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+       VALUES ($id, $k, $nm, $qn, $fp, $lang, $sl, $el, $par, $sig, NULL, $h, $isClos, $ts)`,
     );
     const seenIds = new Set<string>();
     parsed.symbols.forEach((s, i) => {
       let id = `${rel}#${s.qualified_name}`;
       if (seenIds.has(id)) id = `${id}:L${s.start_line}`; // 文件内重名（如 TS 重载）
       seenIds.add(id);
-      insNode.run(
-        id, s.kind, s.name, s.qualified_name, rel, ext,
-        s.start_line, s.end_line, s.parent ?? null, s.signature ?? null, symHashList[i], s.is_closure ? 1 : 0, now,
-      );
+      insNode.run({
+        id: id, k: s.kind, nm: s.name, qn: s.qualified_name, fp: rel, lang: ext,
+        sl: s.start_line, el: s.end_line, par: s.parent ?? null, sig: s.signature ?? null,
+        h: symHashList[i], isClos: s.is_closure ? 1 : 0, ts: now,
+      });
     });
 
     // 2.1 符号级 diff 落库（v3）：diffImpact 的波及源数据。首次导入 symbolDiff=undefined 不写
     if (symbolDiff) {
       db.prepare(
         `INSERT OR REPLACE INTO symbol_diffs(file_path, from_hash, to_hash, added, removed, changed, norm_from, norm_to, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        rel, symbolDiff.from, hash,
-        JSON.stringify(symbolDiff.added), JSON.stringify(symbolDiff.removed), JSON.stringify(symbolDiff.changed),
-        symbolDiff.normFrom, symbolDiff.normTo,
-        now,
-      );
+         VALUES ($fp, $from, $to, $added, $removed, $changed, $nf, $nt, $ts)`,
+      ).run({
+        fp: rel, from: symbolDiff.from, to: hash,
+        added: JSON.stringify(symbolDiff.added), removed: JSON.stringify(symbolDiff.removed), changed: JSON.stringify(symbolDiff.changed),
+        nf: symbolDiff.normFrom, nt: symbolDiff.normTo,
+        ts: now,
+      });
     }
 
     // 2.5 还原入边：只还原 target 仍存在的（符号被删/改名的边任其正确消失）。
     //     FK 开启下 INSERT 会校验 target 存在性，必须先过滤否则整事务回滚。
     if (backupInEdges.length > 0) {
       const currentIds = new Set(
-        (db.prepare("SELECT id FROM nodes WHERE file_path = ? AND kind != 'file'").all(rel) as Array<{ id: string }>).map((r) => r.id),
+        (db.prepare("SELECT id FROM nodes WHERE file_path = $p AND kind != 'file'").all({ p: rel }) as Array<{ id: string }>).map((r) => r.id),
       );
       const insIn = db.prepare(
-        'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES ($src, $tgt, $k, $ln, $col, $md)',
       );
       for (const e of backupInEdges) {
-        if (currentIds.has(e.target)) insIn.run(e.source, e.target, e.kind, e.line, e.col, e.metadata);
+        if (currentIds.has(e.target)) insIn.run({ src: e.source, tgt: e.target, k: e.kind, ln: e.line, col: e.col, md: e.metadata });
       }
     }
 
     // 3. import 边：按 source 整批重插；目标未同步时建桩节点
-    db.prepare("DELETE FROM edges WHERE source = ? AND kind = 'import'").run(fileNodeId);
+    db.prepare("DELETE FROM edges WHERE source = $p AND kind = 'import'").run({ p: fileNodeId });
     const ensureStub = db.prepare(
       `INSERT OR IGNORE INTO nodes(id, kind, name, qualified_name, file_path, language, start_line, end_line, updated_at)
-       VALUES (?, 'file', ?, ?, ?, '', 0, 0, ?)`,
+       VALUES ($id, 'file', $nm, $qn, $fp, '', 0, 0, $ts)`,
     );
     const insEdge = db.prepare(
-      'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, ?, ?, NULL, NULL)',
+      'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES ($src, $tgt, $k, $ln, NULL, NULL)',
     );
     let edgeCount = 0;
     for (const imp of parsed.imports) {
@@ -338,79 +339,79 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
       if (imp.type_only) continue;
       const target = resolveImportTarget(projectRoot, rel, imp.source);
       if (!target) continue;
-      ensureStub.run(target, path.posix.basename(target), target, target, now);
-      insEdge.run(fileNodeId, target, 'import', imp.line);
+      ensureStub.run({ id: target, nm: path.posix.basename(target), qn: target, fp: target, ts: now });
+      insEdge.run({ src: fileNodeId, tgt: target, k: 'import', ln: imp.line });
       edgeCount++;
     }
 
     // 3.5 调用边（同文件函数级，kind='call'；未解析的跨文件/外部调用进 unresolved_refs）
-    db.prepare("DELETE FROM edges WHERE source LIKE ? AND kind = 'call'").run(`${rel}#%`);
-    db.prepare("DELETE FROM unresolved_refs WHERE from_node_id LIKE ?").run(`${rel}#%`);
+    db.prepare("DELETE FROM edges WHERE source LIKE $p AND kind = 'call'").run({ p: `${rel}#%` });
+    db.prepare("DELETE FROM unresolved_refs WHERE from_node_id LIKE $p").run({ p: `${rel}#%` });
     const idOf = (qn: string) => `${rel}#${qn}`;
     // FK 防御：插边前校验两端 id 已在 nodes——符号提取器与调用边提取器的 qn
     // 算法曾不一致（FOREIGN KEY 炸整文件事务、符号零写入，2026-08-20
     // NodeSqliteAdapter.prepare.run 实证）。kernel v7 已对齐 qn，此处防御性
     // 兜底：坏边跳过，不再牵连整文件事务
     const nodeIdSet = new Set(
-      (db.prepare('SELECT id FROM nodes WHERE file_path = ?').all(rel) as Array<{ id: string }>).map((r) => r.id),
+      (db.prepare('SELECT id FROM nodes WHERE file_path = $p').all({ p: rel }) as Array<{ id: string }>).map((r) => r.id),
     );
     const insCall = db.prepare(
-      'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, \'call\', ?, NULL, NULL)',
+      'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES ($src, $tgt, \'call\', $ln, NULL, NULL)',
     );
     const insUnresolved = db.prepare(
       `INSERT OR IGNORE INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col, file_path, language, status, name_tail)
-       VALUES (?, ?, 'call', ?, 0, ?, ?, 'pending', ?)`,
+       VALUES ($from, $rn, 'call', $ln, 0, $fp, $lang, 'pending', $nt)`,
     );
     let callCount = 0;
     for (const c of parsed.calls) {
       const srcId = idOf(c.caller);
       if (!nodeIdSet.has(srcId)) continue; // qn 漂移坏边：跳过不炸事务
       if (c.resolved && c.callee_qn && nodeIdSet.has(idOf(c.callee_qn))) {
-        insCall.run(srcId, idOf(c.callee_qn), c.line);
+        insCall.run({ src: srcId, tgt: idOf(c.callee_qn), ln: c.line });
         callCount++;
       } else {
-        insUnresolved.run(srcId, c.callee_expr, c.line, rel, ext, c.callee);
+        insUnresolved.run({ from: srcId, rn: c.callee_expr, ln: c.line, fp: rel, lang: ext, nt: c.callee });
       }
     }
 
     // 3.6 类型引用边（kind='type_ref'：引用者函数/类 → 被引用 interface/type/class 符号）。
     //     波及语义：改类型定义 → 引用者受影响。跨文件引用进 unresolved_refs，
     //     收尾 resolveCrossFileCalls 沿 imports 解析（目标限定 interface/type/class）。
-    db.prepare("DELETE FROM edges WHERE source LIKE ? AND kind = 'type_ref'").run(`${rel}#%`);
+    db.prepare("DELETE FROM edges WHERE source LIKE $p AND kind = 'type_ref'").run({ p: `${rel}#%` });
     db.prepare(
-      "DELETE FROM unresolved_refs WHERE from_node_id LIKE ? AND reference_kind = 'type_ref'",
-    ).run(`${rel}#%`);
+      "DELETE FROM unresolved_refs WHERE from_node_id LIKE $p AND reference_kind = 'type_ref'",
+    ).run({ p: `${rel}#%` });
     const insTypeRef = db.prepare(
-      "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, 'type_ref', ?, NULL, NULL)",
+      "INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES ($src, $tgt, 'type_ref', $ln, NULL, NULL)",
     );
     const insUnresolvedType = db.prepare(
       `INSERT OR IGNORE INTO unresolved_refs(from_node_id, reference_name, reference_kind, line, col, file_path, language, status, name_tail)
-       VALUES (?, ?, 'type_ref', ?, 0, ?, ?, 'pending', ?)`,
+       VALUES ($from, $rn, 'type_ref', $ln, 0, $fp, $lang, 'pending', $nt)`,
     );
     for (const t of parsed.type_refs) {
       const srcId = idOf(t.referrer);
       if (!nodeIdSet.has(srcId)) continue; // 同上：qn 漂移坏边防御
       if (t.resolved && t.target_qn && nodeIdSet.has(idOf(t.target_qn))) {
-        insTypeRef.run(srcId, idOf(t.target_qn), t.line);
+        insTypeRef.run({ src: srcId, tgt: idOf(t.target_qn), ln: t.line });
       } else {
-        insUnresolvedType.run(srcId, t.type_name, t.line, rel, ext, t.type_name);
+        insUnresolvedType.run({ from: srcId, rn: t.type_name, ln: t.line, fp: rel, lang: ext, nt: t.type_name });
       }
     }
 
     // 4. 原始 import 记录（全量种类：relative + package）
     //    import_project 缓存路径靠它重建依赖边——edges 表只有已解析的相对导入，
     //    Go 包路径 / Python 点分模块的原始 source 串只存在这里
-    db.prepare('DELETE FROM imports WHERE file_path = ?').run(rel);
-    const insImport = db.prepare('INSERT INTO imports(file_path, line, source, kind, type_only) VALUES (?, ?, ?, ?, ?)');
+    db.prepare('DELETE FROM imports WHERE file_path = $p').run({ p: rel });
+    const insImport = db.prepare('INSERT INTO imports(file_path, line, source, kind, type_only) VALUES ($fp, $ln, $src, $kind, $typeOnly)');
     for (const imp of parsed.imports) {
-      insImport.run(rel, imp.line, imp.source, imp.kind, imp.type_only ? 1 : 0);
+      insImport.run({ fp: rel, ln: imp.line, src: imp.source, kind: imp.kind, typeOnly: imp.type_only ? 1 : 0 });
     }
 
     // 5. files 行
     db.prepare(
       `INSERT OR REPLACE INTO files(path, content_hash, language, size, modified_at, indexed_at, node_count, errors, norm_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-    ).run(rel, hash, ext, stat.size, Math.round(stat.mtimeMs), now, parsed.symbols.length, normHash);
+       VALUES ($path, $hash, $lang, $size, $mtime, $ts, $nc, NULL, $nh)`,
+    ).run({ path: rel, hash, lang: ext, size: stat.size, mtime: Math.round(stat.mtimeMs), ts: now, nc: parsed.symbols.length, nh: normHash });
 
     db.exec('COMMIT');
     return {
@@ -462,9 +463,9 @@ export async function syncProject(
 
 /** 按相对路径删除一个文件的全部缓存行（nodes 级联清边与 FTS） */
 function removeFileRel(db: Database, rel: string): void {
-  db.prepare('DELETE FROM nodes WHERE file_path = ?').run(rel);
-  db.prepare('DELETE FROM files WHERE path = ?').run(rel);
-  db.prepare('DELETE FROM imports WHERE file_path = ?').run(rel);
+  db.prepare('DELETE FROM nodes WHERE file_path = $p').run({ p: rel });
+  db.prepare('DELETE FROM files WHERE path = $p').run({ p: rel });
+  db.prepare('DELETE FROM imports WHERE file_path = $p').run({ p: rel });
 }
 
 /** 文件从项目删除时调用：清节点（级联清边与 FTS）+ files 行 + 原始 import 记录 */
@@ -567,11 +568,11 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
     arr.push(i);
   }
 
-  const updResolved = db.prepare("UPDATE unresolved_refs SET status='resolved' WHERE id = ?");
-  const updExternal = db.prepare("UPDATE unresolved_refs SET status='external' WHERE id = ?");
-  const updFailed = db.prepare("UPDATE unresolved_refs SET status='failed' WHERE id = ?");
+  const updResolved = db.prepare("UPDATE unresolved_refs SET status='resolved' WHERE id = $i");
+  const updExternal = db.prepare("UPDATE unresolved_refs SET status='external' WHERE id = $i");
+  const updFailed = db.prepare("UPDATE unresolved_refs SET status='failed' WHERE id = $i");
   const insEdge = db.prepare(
-    'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES (?, ?, ?, ?, NULL, ?)',
+    'INSERT OR IGNORE INTO edges(source, target, kind, line, col, metadata) VALUES ($src, $tgt, $k, $ln, NULL, $md)',
   );
   const CROSS_META = JSON.stringify({ cross: true });
 
@@ -583,17 +584,17 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
 
     if (kind === 'type_ref') {
       if (BUILTIN_TYPES.has(expr)) {
-        updExternal.run(r.id);
+        updExternal.run({ i: r.id });
         stats.external++;
         continue;
       }
       const t = findCrossFileTarget(db, relImportsByFile, projectRoot, rel, expr, typeNamesByFile);
       if (t) {
-        insEdge.run(r.from_node_id, `${t.file}#${t.qn}`, 'type_ref', r.line, CROSS_META);
-        updResolved.run(r.id);
+        insEdge.run({ src: r.from_node_id, tgt: `${t.file}#${t.qn}`, k: 'type_ref', ln: r.line, md: CROSS_META });
+        updResolved.run({ i: r.id });
         stats.resolved++;
       } else {
-        updFailed.run(r.id);
+        updFailed.run({ i: r.id });
         stats.failed++;
       }
       continue;
@@ -601,13 +602,13 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
 
     if (expr.includes('.')) {
       // 有点调用：内置前缀 external；其余（局部变量/Go 包调用）保守 external
-      updExternal.run(r.id);
+      updExternal.run({ i: r.id });
       stats.external++;
       continue;
     }
 
     if (BUILTIN_CALLEES.has(expr)) {
-      updExternal.run(r.id);
+      updExternal.run({ i: r.id });
       stats.external++;
       continue;
     }
@@ -615,11 +616,11 @@ export function resolveCrossFileCalls(db: Database, projectRoot: string): CrossF
     // 无点调用：沿 relative imports 定位目标文件，符号表命中即解析
     const target = findCrossFileTarget(db, relImportsByFile, projectRoot, rel, expr, symbolsByFile);
     if (target) {
-      insEdge.run(r.from_node_id, `${target.file}#${target.qn}`, 'call', r.line, CROSS_META);
-      updResolved.run(r.id);
+      insEdge.run({ src: r.from_node_id, tgt: `${target.file}#${target.qn}`, k: 'call', ln: r.line, md: CROSS_META });
+      updResolved.run({ i: r.id });
       stats.resolved++;
     } else {
-      updFailed.run(r.id);
+      updFailed.run({ i: r.id });
       stats.failed++;
     }
   }
@@ -656,8 +657,8 @@ function findCrossFileTarget(
     if (syms && syms.has(name)) {
       // 目标文件确有该符号 → 取 qualified_name（重名取首个，v1 近似）
       const q = db
-        .prepare('SELECT qualified_name FROM nodes WHERE file_path = ? AND name = ? LIMIT 1')
-        .get(target, name) as { qualified_name: string } | undefined;
+        .prepare('SELECT qualified_name FROM nodes WHERE file_path = $tp AND name = $n LIMIT 1')
+        .get({ tp: target, n: name }) as { qualified_name: string } | undefined;
       if (q) return { file: target, qn: q.qualified_name };
     }
   }
@@ -725,22 +726,22 @@ export interface CachedFileParse {
  * 符号按 start_line 排序，与 kernel 文档序一致，保证 50 上限截断行为与全量解析相同。
  */
 export function getFileParse(db: Database, relPath: string): CachedFileParse | null {
-  const indexed = db.prepare('SELECT 1 x FROM files WHERE path = ?').get(relPath);
+  const indexed = db.prepare('SELECT 1 x FROM files WHERE path = $p').get({ p: relPath });
   if (!indexed) return null;
-  const fileNode = db.prepare("SELECT end_line FROM nodes WHERE id = ? AND kind = 'file'").get(relPath) as
+  const fileNode = db.prepare("SELECT end_line FROM nodes WHERE id = $p AND kind = 'file'").get({ p: relPath }) as
     | { end_line: number }
     | undefined;
   if (!fileNode) return null;
   const symbols = db
     .prepare(
       `SELECT kind, name, qualified_name, start_line, end_line, signature, is_closure
-       FROM nodes WHERE file_path = ? AND kind != 'file'
+       FROM nodes WHERE file_path = $p AND kind != 'file'
        ORDER BY start_line, id`,
     )
-    .all(relPath) as unknown as CachedSymbol[];
+    .all({ p: relPath }) as unknown as CachedSymbol[];
   const imports = db
-    .prepare('SELECT line, source, kind FROM imports WHERE file_path = ? ORDER BY line, source')
-    .all(relPath) as unknown as CachedImport[];
+    .prepare('SELECT line, source, kind FROM imports WHERE file_path = $p ORDER BY line, source')
+    .all({ p: relPath }) as unknown as CachedImport[];
   return { line_count: fileNode.end_line, symbols, imports };
 }
 
@@ -754,10 +755,10 @@ export function searchSymbols(db: Database, query: string, limit = 20): SymbolHi
     .prepare(
       `SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path, n.start_line
        FROM nodes_fts f JOIN nodes n ON n.rowid = f.rowid
-       WHERE nodes_fts MATCH ? AND n.kind != 'file'
-       ORDER BY rank LIMIT ?`,
+       WHERE nodes_fts MATCH $q AND n.kind != 'file'
+       ORDER BY rank LIMIT $lim`,
     )
-    .all(phrase, limit) as unknown as SymbolHit[];
+    .all({ q: phrase, lim: limit }) as unknown as SymbolHit[];
   return rows;
 }
 
@@ -782,7 +783,7 @@ export function hasAnyIndexedFiles(db: Database): boolean {
 
 /** 文件是否已在索引中（cache.db 快路径：未索引文件需回退解析） */
 export function isFileIndexed(db: Database, relPath: string): boolean {
-  const row = db.prepare('SELECT 1 x FROM files WHERE path = ?').get(relPath) as { x: number } | undefined;
+  const row = db.prepare('SELECT 1 x FROM files WHERE path = $p').get({ p: relPath }) as { x: number } | undefined;
   return !!row;
 }
 
@@ -793,8 +794,8 @@ export function isFileIndexed(db: Database, relPath: string): boolean {
  */
 export function getResolvedImportTargets(db: Database, relPath: string): string[] {
   const rows = db
-    .prepare("SELECT target FROM edges WHERE source = ? AND kind = 'import'")
-    .all(relPath);
+    .prepare("SELECT target FROM edges WHERE source = $p AND kind = 'import'")
+    .all({ p: relPath });
   return (rows as Array<{ target: string }>).map((r) => r.target);
 }
 
@@ -805,8 +806,8 @@ export function getResolvedImportTargets(db: Database, relPath: string): string[
  */
 export function getResolvedImportSources(db: Database, relPath: string): string[] {
   const rows = db
-    .prepare("SELECT source FROM edges WHERE target = ? AND kind = 'import'")
-    .all(relPath);
+    .prepare("SELECT source FROM edges WHERE target = $p AND kind = 'import'")
+    .all({ p: relPath });
   return (rows as Array<{ source: string }>).map((r) => r.source);
 }
 
@@ -820,8 +821,8 @@ export function getRawImportsOfFile(
   relPath: string,
 ): Array<{ source: string; kind: 'relative' | 'package'; type_only: boolean; line: number }> {
   const rows = db
-    .prepare('SELECT source, kind, type_only, line FROM imports WHERE file_path = ? ORDER BY line')
-    .all(relPath);
+    .prepare('SELECT source, kind, type_only, line FROM imports WHERE file_path = $p ORDER BY line')
+    .all({ p: relPath });
   return (rows as Array<{ source: string; kind: 'relative' | 'package'; type_only: number; line: number }>)
     .map((r) => ({ source: r.source, kind: r.kind, type_only: r.type_only === 1, line: r.line }));
 }
@@ -841,8 +842,9 @@ export function getRawImportsOfFile(
  */
 export function findFilesImportingAnySource(db: Database, sources: string[]): string[] {
   if (sources.length === 0) return [];
-  const placeholders = sources.map(() => '?').join(',');
+  const placeholders = sources.map((_, i) => `$${i}`).join(',');
   const stmt = db.prepare(`SELECT DISTINCT file_path FROM imports WHERE source IN (${placeholders})`);
-  const rows = stmt.all(...sources);
+  const bind = Object.fromEntries(sources.map((s, i) => [String(i), s]));
+  const rows = stmt.all(bind);
   return (rows as Array<{ file_path: string }>).map((r) => r.file_path);
 }

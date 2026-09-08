@@ -247,6 +247,12 @@ func WithFullSink(s *Sink) TieredOption {
 	return func(t *Tiered) { t.full = s }
 }
 
+// WithRunRecorder 挂"帧录制"落盘：把带 trace/frame 的 enter/exit/catch 帧
+// 追加到 path（一次操作的调用树回放素材）。默认 nil（不落盘）。
+func WithRunRecorder(path string) TieredOption {
+	return func(t *Tiered) { t.runRec = newRunRecorder(path) }
+}
+
 // WithIncidentDir 设置错误开箱导出目录（空=不导出，c6 关闭）。
 func WithIncidentDir(dir string) TieredOption {
 	return func(t *Tiered) { t.incidentDir = dir }
@@ -266,6 +272,7 @@ type Tiered struct {
 
 	full        *Sink // 可选全量镜像（conformance 模式）
 	incidentDir string
+	runRec      *runRecorder // 可选帧录制（一次操作的调用树回放素材）
 	gate        *exportGate
 
 	// 事件序号（导出头/统计用）
@@ -304,6 +311,18 @@ func (t *Tiered) Emit(ev Event) {
 	if t.full != nil {
 		_ = t.full.Emit(ev.Probe, ev.Source, ev.Fields)
 	}
+	// 可选帧录制（带 trace/frame 的一次操作回放素材）
+	if t.runRec != nil {
+		t.runRec.write(ev)
+	}
+}
+
+// Close flush 并关闭可选录制器。
+func (t *Tiered) Close() error {
+	if t == nil || t.runRec == nil {
+		return nil
+	}
+	return t.runRec.Close()
 }
 
 // Counters 返回全部计数器快照（按探针名排序）。

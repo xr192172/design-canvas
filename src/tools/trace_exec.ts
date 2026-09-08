@@ -67,22 +67,112 @@ function langOf(filePath: string): Lang {
   return 'ts';
 }
 
-/** 签名 → 参数名列表（ts/py: name: T；go: name T；忽略接收者/可变参数） */
+/** 签名 → 参数名列表（ts/py: name: T；go: name T；忽略接收者/可变参数）。
+ *  用"最后一个括号组"取参数——正确跳过 Go 方法接收者 `(r *X)`。 */
 function paramNames(lang: Lang, signature: string): string[] {
-  const m = signature.match(/\(([^)]*)\)/);
-  if (!m) return [];
-  const inner = m[1].replace(/\/\*[\s\S]*?\*\//g, '');
-  const parts = inner.split(',').map((s) => s.trim()).filter(Boolean);
+  const inner = extractParamList(signature);
   const names: string[] = [];
-  for (const p of parts) {
-    // 可变参数/展开符号跳过（*args、...rest）
-    if (p.startsWith('*') || p.startsWith('...') || p.startsWith('_')) continue;
-    const raw = p.split(':')[0].trim();
-    // Go：'n int'（类型在后）→ 名字是空格前 token
-    const name = lang === 'go' ? raw.split(/\s+/)[0] : raw;
-    if (/^[A-Za-z_$][\w$]*$/.test(name)) names.push(name);
+  for (const chunk of splitParams(inner)) {
+    const c = chunk.trim().replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/, '').trim();
+    if (!c || c.startsWith('...') || c.startsWith('_')) continue;
+    const mGo = lang === 'go' ? /^([A-Za-z_][\w]*)\s+/.exec(c) : null;
+    const mTs = lang !== 'go' ? /^([A-Za-z_$][\w$]*)\s*:/.exec(c) : null;
+    const name = (mGo?.[1] ?? mTs?.[1] ?? (/^([A-Za-z_$][\w$]*)$/.exec(c)?.[1]));
+    if (name) names.push(name);
   }
   return names;
+}
+
+/** 从方法签名头部解析接收者 → {varName, typeName}；无则 null。
+ *  两种格式：
+ *   - 本工具 Go 解析器输出：`Type.Method(params) ret`（接收者类型前置）→ typeName=Type
+ *   - 兜底：字面接收者前缀 `(r *X) Name(...)` → typeName=X */
+export function parseReceiver(signature: string): { varName: string; typeName: string } | null {
+  const s = signature.trim();
+  const m1 = /^([A-Za-z_][\w]*)\s*\.\s*([A-Za-z_][\w]*)\s*\(/.exec(s);
+  if (m1) return { varName: 'r', typeName: m1[1] };
+  const m2 = /^\(\s*([A-Za-z_][\w]*)\s*\*?\s*([A-Za-z_][\w]*)\s*\)/.exec(s);
+  return m2 ? { varName: m2[1], typeName: m2[2] } : null;
+}
+
+interface GoField { name: string; type: string; }
+
+/** 在源码里定位 `type <typeName> struct { ... }`，抽取字段。未定位返回 null。 */
+function findStruct(content: string, typeName: string): GoField[] | null {
+  const re = new RegExp(`\\btype\\s+${typeName}\\s+struct\\s*\\{`);
+  const m = re.exec(content);
+  if (!m) return null;
+  let open = content.indexOf('{', m.index);
+  if (open === -1) return null;
+  let depth = 1;
+  let i = open + 1;
+  const end = content.length;
+  for (; i < end && depth > 0; i++) {
+    const ch = content[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  const block = content.slice(open + 1, i - 1);
+  const fields: GoField[] = [];
+  for (const line of block.split('\n')) {
+    const t = line.replace(/\/\/.*$/, '').trim();
+    if (!t) continue;
+    // 字段：`Name Type`（跳过嵌入/多行/复杂声明，保守）
+    const f = /^([A-Za-z_][\w]*)\s+(.+)$/.exec(t);
+    if (f) fields.push({ name: f[1], type: f[2].trim() });
+  }
+  return fields;
+}
+
+/** 字段类型 → Go 零值字面量；无法隔离合成（导入/chan/func/未知标识符）返回 null。 */
+function goFieldZero(t: string): string | null {
+  const s = t.trim();
+  if (/^(string|string)$/.test(s)) return '""';
+  if (/^bool$/.test(s)) return 'false';
+  if (/^(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|byte|rune|float32|float64|complex64|complex128)$/.test(s)) return '0';
+  if (/^(error|interface\{\}|any|interface)$/.test(s)) return 'nil';
+  if (/^(\[\].*|map\[.*|\[\].*\b|\[\].*\w.*|\*[A-Za-z_])$/.test(s)) return 'nil';
+  if (s.startsWith('[]') || s.startsWith('map[') || s.startsWith('*') || s === 'nil') return 'nil';
+  return null; // 导入类型 / chan / func / 未知标识符
+}
+
+/** 单行花括号净配对（+1 每 {，-1 每 }） */
+function netBraces(line: string): number {
+  let d = 0;
+  for (const ch of line) { if (ch === '{') d++; else if (ch === '}') d--; }
+  return d;
+}
+
+/** 提取 Go 源码中所有顶层 type 声明（struct/interface/别名），大括号平衡到闭合。
+ *  供隔离执行带上同文件自定义类型上下文，避免入口函数引用到自定义类型时 undefined。 */
+function goTopTypes(content: string): string {
+  const lines = content.split('\n');
+  const decls: string[] = [];
+  let i = 0;
+  const N = lines.length;
+  while (i < N) {
+    const head = lines[i].trim();
+    if (/^type\s/.test(head)) {
+      let buf = lines[i];
+      let depth = netBraces(lines[i]);
+      let hasBrace = head.includes('{');
+      let j = i;
+      while (depth > 0 && j + 1 < N) {
+        j++;
+        buf += '\n' + lines[j];
+        const c = netBraces(lines[j]);
+        depth += c;
+        if (lines[j].includes('{')) hasBrace = true;
+      }
+      // 无结尾分号/无大括号的别名单行声明：直接收尾
+      if (!hasBrace && depth === 0) { /* 已完成 */ }
+      decls.push(buf);
+      i = j + 1;
+    } else {
+      i++;
+    }
+  }
+  return decls.join('\n\n');
 }
 
 // ─────────────────────────────────────────────
@@ -208,6 +298,8 @@ interface ResolvedFn {
   codeText: string;
   entryName: string;
   names: string[];
+  /** Go 方法：合成的接收者信息（execGo 用来自建实例并调方法） */
+  recv?: { typeName: string; structDecl: string; zero: Record<string, string> };
 }
 
 /** 判定符号是否纯函数并可执行；可执行则返回入口 + 依赖代码文本 */
@@ -219,7 +311,24 @@ function resolvePure(
   lang: Lang,
   pkgNames: Set<string>,
 ): { ok: true; fn: ResolvedFn } | { ok: false; reason: string } {
-  if (symbol.kind === 'method') return { ok: false, reason: '方法（有 receiver）暂不支持真实执行' };
+  // Go 方法：接收者自包含（字段均为基本/切片/map/指针）时合成零值实例来执行；
+  // 非 Go 方法 / 字段含导入·chan·func → 如实标不支持。
+  let methodRecv: ResolvedFn['recv'];
+  if (symbol.kind === 'method') {
+    if (lang !== 'go') return { ok: false, reason: '非 Go 方法暂不支持隔离执行' };
+    const recv = parseReceiver(symbol.signature);
+    if (!recv) return { ok: false, reason: '无法识别方法接收者' };
+    const fields = findStruct(content, recv.typeName);
+    if (!fields || fields.length === 0) return { ok: false, reason: `接收者类型 ${recv.typeName} 未定位到 struct，无法合成实例` };
+    const zero: Record<string, string> = {};
+    for (const f of fields) {
+      const z = goFieldZero(f.type);
+      if (z === null) return { ok: false, reason: `接收者字段 ${f.name} 类型 ${f.type} 含导入/chan/func，无法隔离合成` };
+      zero[f.name] = z;
+    }
+    const structDecl = `type ${recv.typeName} struct {\n` + fields.map((f) => `\t${f.name} ${f.type}`).join('\n') + `\n}`;
+    methodRecv = { typeName: recv.typeName, structDecl, zero };
+  }
 
   // 依赖 BFS：收集本文件内被调用的纯函数
   const byQn = new Map(symbols.map((s) => [s.qualified_name, s]));
@@ -248,9 +357,12 @@ function resolvePure(
   return {
     ok: true,
     fn: {
-      codeText: depTexts.join('\n\n'),
+      // Go：带上同文件顶层 type 声明（含方法接收者 struct）作为隔离上下文；
+      // TS/Python 依赖已随函数体提取，无需额外 type 上下文。
+      codeText: (lang === 'go' ? goTopTypes(content) : '') + '\n\n' + depTexts.join('\n\n'),
       entryName: symbol.name,
       names: paramNames(lang, symbol.signature),
+      recv: methodRecv,
     },
   };
 }
@@ -315,16 +427,27 @@ async function execPy(codeText: string, entryName: string, kwargs: Record<string
   return JSON.parse(out.trim());
 }
 
-/** Go 字面量（v1：基本类型；复合类型不支持） */
+/** Go 字面量（v1：基本类型；空切片/空映射→nil；复合/非空复合需类型 hint 暂不支持） */
 function goLit(v: unknown): string {
+  if (v === null || v === undefined) return 'nil';
   if (typeof v === 'string') return JSON.stringify(v);
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  throw new Error('Go 参数暂支持基本类型（string/number/boolean）');
+  if (Array.isArray(v) && v.length === 0) return 'nil';
+  if (typeof v === 'object' && Object.keys(v).length === 0) return 'nil';
+  throw new Error('Go 参数暂支持基本类型与空切片/空映射/空对象（string/number/boolean/null/[]/{}）');
 }
 
-/** Go：生成临时 main.go → go run（需本机 go 工具链） */
-async function execGo(codeText: string, entryName: string, args: unknown[]): Promise<unknown> {
+/** Go：生成临时 main.go → go run（需本机 go 工具链）。
+ *  - 顶层函数：`v := <entry>(args...)`
+ *  - 方法（recv 非空）：合成零值接收者实例后调用 `r := <Type>{f0:z0,…}; v := r.<Method>(args...)` */
+async function execGo(codeText: string, entryName: string, args: unknown[], recv?: ResolvedFn['recv']): Promise<unknown> {
   const argLits = args.map(goLit).join(', ');
+  const call = recv
+    ? [
+        `\tr := ${recv.typeName}{${Object.entries(recv.zero).map(([k, z]) => `${k}: ${z}`).join(', ')}}`,
+        `\tv := r.${entryName}(${argLits})`,
+      ].join('\n')
+    : `\tv := ${entryName}(${argLits})`;
   const main = [
     'package main',
     '',
@@ -336,7 +459,7 @@ async function execGo(codeText: string, entryName: string, args: unknown[]): Pro
     codeText,
     '',
     'func main() {',
-    `\tv := ${entryName}(${argLits})`,
+    call,
     '\tb, _ := json.Marshal(v)',
     '\tfmt.Print(string(b))',
     '}',
@@ -471,7 +594,7 @@ async function execByLang(lang: Lang, fn: ResolvedFn, args: unknown[]): Promise<
       return execPy(fn.codeText, fn.entryName, kw);
     }
     case 'go':
-      return execGo(fn.codeText, fn.entryName, args);
+      return execGo(fn.codeText, fn.entryName, args, fn.recv);
     default:
       throw new Error('不支持的执行语言');
   }

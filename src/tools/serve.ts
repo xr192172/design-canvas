@@ -909,6 +909,38 @@ async function handleApiFunctionRun(req: http.IncomingMessage, res: http.ServerR
   }
 }
 
+/** POST /api/chain-exec：功能线整条链一次性真实执行。
+ *  body: { feature, steps: [{ id, func, file }], input_value?, project_dir? }
+ *  各 step 的 id 为函数级 id（相对路径#函数名）；file 为相对 feature 源码根的路径。
+ *  用 feature/project_dir 定位源码根拼绝对路径，构造 TraceStepSpec[] 交给 traceExecChain
+ *  整链串联执行——上一步出参自动作为下一步入参（不再依赖 detail 节点 id，修复沿链演示口径错配）。
+ */
+async function handleApiChainExec(req: http.IncomingMessage, res: http.ServerResponse, sourceRoot?: string): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const { feature, steps, input_value } = JSON.parse(body.toString('utf-8') || '{}');
+    if (!feature) { sendError(res, 400, '缺参数 "feature"'); return; }
+    if (!Array.isArray(steps) || steps.length === 0) { sendError(res, 400, '缺参数 "steps"（整条链的步骤数组）'); return; }
+    const root = sourceRoot ?? getServeProjectRoot();
+    const specs = steps.map((s: any) => {
+      const id = String(s?.id ?? '');
+      const rawFunc = s?.func;
+      const rawFile = s?.file;
+      const hash = id.lastIndexOf('#');
+      const file = rawFile || (hash !== -1 ? id.slice(0, hash) : '');
+      const func = rawFunc || (hash !== -1 ? id.slice(hash + 1) : '');
+      if (!file || !func) throw new Error(`每个 step 需含 file+func 或 id 形如 "相对路径/文件#函数名"，收到 "${id}"`);
+      const filePath = path.join(root, file.replace(/\//g, path.sep));
+      if (!fs.existsSync(filePath)) throw new Error(`步骤源文件不存在：${filePath}`);
+      return { node_id: id, func_name: func, file_path: filePath };
+    });
+    const r = await traceExecChain({ steps: specs, input_value: input_value ?? undefined });
+    sendJson(res, 200, { success: true, feature, entryParams: r.entryParams, steps: r.steps });
+  } catch (e) {
+    sendError(res, 400, (e as Error).message);
+  }
+}
+
 /** GET /api/function-example?feature=<f>&node_id=<相对路径/文件#Fn>&project_dir=<root>
  *  按函数签名生成示例入参（不执行）：让功能线点位"不用手工拼 JSON"，基础示例自动预填。 */
 async function handleApiFunctionExample(req: http.IncomingMessage, res: http.ServerResponse, sourceRoot?: string): Promise<void> {
@@ -3034,6 +3066,12 @@ export async function startServer(port?: number): Promise<void> {
       const q = new URL(req.url || '/', 'http://localhost');
       const proot = (q.searchParams.get('project_dir') || '').trim() || undefined;
       void handleApiFunctionRun(req, res, proot);
+      return;
+    }
+    if (url.startsWith('/api/chain-exec') && method === 'POST') {
+      const q = new URL(req.url || '/', 'http://localhost');
+      const proot = (q.searchParams.get('project_dir') || '').trim() || undefined;
+      void handleApiChainExec(req, res, proot);
       return;
     }
     if (url.startsWith('/api/function-example') && method === 'GET') {

@@ -201,6 +201,74 @@ describe('trace_exec - Go 真实执行', () => {
     expect(result.steps[0].status).toBe('ok');
     expect(result.steps[0].out_value).toBe(5);
   }, 30000); // go run 需编译，首次或冷缓存时显著慢于 5s
+
+  it('方法：合成零值接收者实例后真执行', async () => {
+    const f = writeFixture('acc.go', `package main
+
+type Account struct {
+    Balance float64
+    Name    string
+}
+
+func (a *Account) ApplyTax() float64 {
+    if a.Balance > 100 {
+        return a.Balance * 0.9
+    }
+    return a.Balance
+}
+`);
+    const result = await traceExecChain({
+      steps: [{ node_id: 'n1', func_name: 'ApplyTax', file_path: f }],
+      input_value: {}, // 方法无参数；零值接收者 Balance=0
+    });
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
+    expect(result.steps[0].status).toBe('ok');
+    // 零值接收者 Balance=0 ≤ 100 → 走降本分支，返回 0
+    expect(result.steps[0].out_value).toBe(0);
+  }, 30000);
+
+  it('函数引用同文件自定义类型 + 空切片入参 → 真执行（带 type 上下文 + nil 参数）', async () => {
+    const f = writeFixture('batch.go', `package main
+
+type RawEntry struct { ID string }
+
+func batchRawEntries(entries []RawEntry, maxBatch int) [][]RawEntry {
+    if len(entries) == 0 {
+        return [][]RawEntry{}
+    }
+    return [][]RawEntry{entries}
+}
+`);
+    const result = await traceExecChain({
+      steps: [{ node_id: 'n1', func_name: 'batchRawEntries', file_path: f }],
+      input_value: { entries: [], maxBatch: 0 },
+    });
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
+    expect(result.steps[0].status).toBe('ok');
+    // len==0 分支 → 返回空外层切片
+    expect(result.steps[0].out_value).toEqual([]);
+  }, 30000);
+
+  it('方法字段含导入类型（context.Context）→ 如实 unsupported，不假装执行', async () => {
+    const f = writeFixture('job.go', `package main
+import "context"
+
+type Job struct {
+    Ctx context.Context
+}
+
+func (j *Job) Handle(payload map[string]any) error {
+    return nil
+}
+`);
+    const result = await traceExecChain({
+      steps: [{ node_id: 'n1', func_name: 'Handle', file_path: f }],
+      input_value: { payload: {} },
+    });
+    if (result.steps[0].status === 'error' && isMissingEnv(result.steps[0].note)) { return; }
+    expect(result.steps[0].status).toBe('unsupported');
+    expect(result.steps[0].note).toContain('无法隔离合成');
+  }, 30000);
 });
 
 // ─────────────────────────────────────────────────────────────

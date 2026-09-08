@@ -185,7 +185,35 @@ function chooseModules(nodes: RawNode[]): RawNode[] {
   }
   const containers = nodes.filter(isDirish);
   if (containers.length >= 2 && containers.length <= 12) return containers;
-  if (containers.length >= 2) return foldTo(containers);
+  if (containers.length >= 2) {
+    // 目录容器（dir_* 模块）是原子拓扑单元——它们之间的依赖/回环（双向 imports）是真实结构，
+    // 不该被 foldTo 合并成 grp_N 抹掉。但数量多（agent-shell 65 个）时也不能全平铺。
+    // 解：按目录路径「第二段」聚合成骨架节点（dir_pkg_sub → dir_pkg）：同包的多级子目录归入
+    // 同一骨架，回环发生在包级（dir_internal_hub <-> dir_internal_memory <-> dir_internal_tools）
+    // 就清晰可见，且骨架数量可控（≈包数，远小于 65 个扁平目录）。
+    if (containers.every((c) => /^dir[_-]/.test(String(c.id ?? '')))) {
+      const skel = new Map<string, RawNode[]>();
+      for (const c of containers) {
+        // 目录 id 是扁平路径（dir_pkg_sub_sub...）。取「前两段」作骨架键（dir_internal_hub_v2_web_src
+        // → internal_hub）：保留回环端（internal_hub / internal_memory / internal_tools 各异），
+        // 更深的多级子目录归入同骨架。只取一段会把 hub/memory/tools 全并进 internal 变自环、看不见。
+        const seg = String(c.id).replace(/^dir[_-]/, '').split('_').slice(0, 2).join('_') || String(c.id);
+        if (!skel.has(seg)) skel.set(seg, []);
+        skel.get(seg)!.push(c);
+      }
+      const buckets = [...skel.entries()];
+      if (buckets.length > 1 && buckets.length <= 48) {
+        return buckets.map(([seg, kids], idx) => ({
+          id: legalNodeId(`dirgrp_${seg}_${idx}`, idx),
+          label: seg,
+          role: 'service',
+          children: { nodes: kids, edges: [] },
+        }));
+      }
+      return buckets.length <= 48 ? containers : foldTo(containers);
+    }
+    return foldTo(containers);
+  }
   if (containers.length === 1 && containers[0].children?.nodes) {
     const sub = chooseModules(containers[0].children.nodes);
     if (sub.length >= 2) return sub;

@@ -91,6 +91,7 @@ export const LANES: Lane[] = [
       { name: 'observe_log', when: '读运行日志/观测产物' },
       { name: 'observe_judge', when: '对观测结果做判定' },
       { name: 'observe_instrument', when: '源码插桩探针（dry_run 可预览）' },
+      { name: 'observe_trace', when: '读录制调用链回放：从 events.jsonl 重建结构化调用树（纯后端，LLM 分析用）' },
       { name: 'feature_line', when: '功能线：每个功能搭一条主链（功能→入口→调用节点），供沿线单步运行/投大屏点位' },
       { name: 'narrate_step', when: '把某一步观测过程叙述成可读记录' },
       { name: 'behavior_baseline', when: '编译语言行为基线（跑函数用例出返回值）' },

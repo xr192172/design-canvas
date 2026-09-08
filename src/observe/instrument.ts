@@ -92,6 +92,17 @@ export interface InstrumentOptions {
    *  `<mod>.<fn>.<suffix>`），并做模块级过滤；undefined 时全量无脑插桩（探索模式）。
    *  与 Go 侧 instrument.Options.ContractProbes 语义对齐。 */
   contractProbes?: string[];
+  /** scope 模式：true 时用 try/finally 包裹函数体注入 enterScope/exitScope
+   *  （带 trace/frame 的调用树录制），替代逐点 captureProbe。默认 false（captureProbe 点探针）。 */
+  scope?: boolean;
+}
+
+/** 前缀插入且兼容 shebang：若 content 首行是 `#!...`，把 head 插到首行之后（保住 shebang 在行 1）。 */
+function prependAfterShebang(content: string, head: string): string {
+  if (!content.startsWith('#!')) return head + content;
+  const nl = content.indexOf('\n');
+  if (nl < 0) return content + '\n' + head;
+  return content.slice(0, nl + 1) + head + content.slice(nl + 1);
 }
 
 /**
@@ -313,7 +324,7 @@ export function collectTsFiles(root: string): string[] {
 
 /** 计算相对模块路径的 import 语句 */
 function buildImportStmt(probeImport: string): string {
-  return `import { captureProbe } from '${probeImport}';\n`;
+  return `import { captureProbe, enterScope, exitScope } from '${probeImport}';\n`;
 }
 
 /** 计算 import 相对路径：从 file 目录到编译后的探针实现 dist/src/observe/probe.js
@@ -488,7 +499,7 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
   const insertions: { index: number; removeTo?: number; site: InstrumentedSite }[] = [];
   const probes = opts.contractProbes;
   // core/event 探针：仅当文件尚未注入 core/event 时收集（避免对已插桩文件重复注入）
-  if (!hasCore) collectSites(root, file, content, insertions, fileRel, probes);
+  if (!hasCore) collectSites(root, file, content, insertions, fileRel, probes, opts.scope === true);
   // deep 探针：仅在请求 enableDeep 且尚未注入 deep 时收集
   if (enableDeep && !hasDeep) collectDeepSites(root, file, content, insertions, fileRel, probes);
 
@@ -505,9 +516,13 @@ export async function instrumentFile(file: string, opts: InstrumentOptions = {})
     const removeTo = ins.removeTo ?? ins.index; // 默认纯插入；removeTo>index 表示替换区间
     out = out.slice(0, ins.index) + ins.site.injected + out.slice(removeTo);
   }
-  // 头部补 import 与分级标记（避免重复补：import 已存在则跳过）
-  if (!hasCore) out = importStmt + `// ${PROBE_MARKER}\n` + out;
-  if (enableDeep && !hasDeep) out = `// ${DEEP_MARKER}\n` + out;
+  // 头部补 import 与分级标记（shebang 兼容：shebang 必须留在文件首行，
+  // 否则带 `#!/usr/bin/env node` 的入口被 esbuild/tsx 视为语法错 `!`）
+  // scope 模式走 globalThis.__probeScope，无需每文件 import 探针 → 不注入 importStmt
+  let head = '';
+  if (!hasCore) head += (opts.scope === true ? '' : importStmt) + `// ${PROBE_MARKER}\n`;
+  if (enableDeep && !hasDeep) head += `// ${DEEP_MARKER}\n`;
+  if (head) out = prependAfterShebang(out, head);
 
   result.sites = insertions.map((i) => i.site);
   if (applyWrite) {
@@ -531,6 +546,7 @@ function collectSites(
   insertions: { index: number; removeTo?: number; site: InstrumentedSite }[],
   fileRel: string,
   probes?: string[],
+  scope = false,
 ): void {
   const walk = (n: InstrNode, parent?: InstrNode): void => {
     // ── 函数入口/出口（core）──
@@ -540,6 +556,27 @@ function collectSites(
       const mod = path.basename(file).replace('.ts', '');
       const params = extractParamNames(n);
       const probeName = `${mod}.${fn}`;
+
+      // scope 模式：try/finally 包裹函数体 → 全局探针 enter/exit（调用树录制）。
+      // 用 globalThis.__probeScope 调用而非 `import { enterScope }` —— 这样跨目录/相对路径/
+      // esbuild 解析问题全消失，可对任意层级目录全量插桩。未挂 global 时 noop 不崩。
+      if (scope) {
+        if (matchContract(probeName + '.enter', probes)) {
+          const open = body.startIndex;
+          let entryIdx = open;
+          if (content[entryIdx] === '{') entryIdx++;
+          while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
+          const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
+          const scopeEnter = `((globalThis as any).__probeScope?.enter ?? (()=>{}))(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj} });\ntry {\n`;
+          insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: scopeEnter } });
+        }
+        if (matchContract(probeName + '.exit', probes)) {
+          const tailIdx = body.endIndex - 1; // 指向函数体 '}'
+          const scopeExit = `\n} finally { ((globalThis as any).__probeScope?.exit ?? (()=>{}))(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)} }); }`;
+          insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: scopeExit } });
+        }
+        return; // scope 模式下该函数不再注入逐点 captureProbe/return 探针
+      }
 
       // 入口：body.startIndex 指向 '{'，跳过后首非空白
       if (matchContract(probeName + '.enter', probes)) {

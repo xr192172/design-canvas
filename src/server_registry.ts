@@ -89,6 +89,7 @@ import { listProvidersMasked, upsertProvider, deleteProvider, getStats, resetSta
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryObserveLog } from './observe/log_query.js';
+import { observeTrace } from './tools/observe_trace.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './observe/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './observe/contract.js';
 import { rebuildChains } from './observe/chain.js';
@@ -103,6 +104,13 @@ import {
   clearProbeLedger,
   ledgerSummary,
 } from './observe/instrument.js';
+import {
+  isGoProject,
+  instrumentGoProject,
+  restoreGoProject,
+  goReportSummary,
+  checkGoObserveDeps,
+} from './observe/go_instrument.js';
 import path from 'node:path';
 import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, type Dirent } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -520,6 +528,20 @@ const observeLogHandler = wrap(async (a) => {
   return { message: lines.join('\n'), data: r.entries };
 });
 
+/** observe_trace：读录制调用链 → 采样 → 返回结构化调用树（面向 LLM 的纯后端回放）。
+ * 不给 trace_id 时返回链路清单（供 LLM 挑）；给 trace_id 展开该针完整调用树文本+数据。 */
+const observeTraceHandler = wrap(async (a) => {
+  const cfg = {
+    events_path: typeof a.events_path === 'string' && a.events_path ? a.events_path : undefined,
+    events_text: typeof a.events_text === 'string' && a.events_text ? a.events_text : undefined,
+    keep: (a.keep === 'all' ? 'all' : 'default') as 'all' | 'default',
+    trace_id: typeof a.trace_id === 'string' && a.trace_id ? a.trace_id : undefined,
+    limit: typeof a.limit === 'number' ? a.limit : undefined,
+  };
+  const r = observeTrace(cfg);
+  return { message: r.message, data: r.data };
+});
+
 /** observe_judge：对一批事件执行偏差判定。decls（可选）提供时额外执行 P2 链路契约判定——
  * 重建实测调用链（trace 三元组）+ Comparator 全量对比（探针级 + 链路级），
  * 链路断裂（chain-broken）带 trace_id 与实测窗口。不传 decls 保持逐事件判定。 */
@@ -590,6 +612,50 @@ const observeInstrumentHandler = wrap(async (a) => {
     ? (a.contract_probes as string[])
     : undefined;
 
+  // Go 工程 → 桥接 go-observe（自动注入 camprobe.Capture）：插桩/还原统一出口。
+  if (isGoProject(target)) {
+    const lines = [`Observe Go 插桩（go-observe） ${dryRun ? 'DRY-RUN' : 'WRITE'} → ${target}`];
+    const data: Record<string, unknown> = {};
+    try {
+      if (unintrument) {
+        const restored = await restoreGoProject(target);
+        if (restored === 0) {
+          return { message: 'Observe Go 一键全拔：未找到备份（可能从未插桩，或备份已删除）。', data: [] };
+        }
+        return {
+          message: `Observe Go 一键全拔：已还原 ${restored} 个文件并删除备份目录。\n` +
+            `  目标：${target}\n  提示：被插桩工程内对 go-observe 的 reduce/require 需自行清理（本操作不触碰 go.mod）。`,
+          data: { restored },
+        };
+      }
+      const rep = await instrumentGoProject(target, { dryRun, deep: a.deep === true, effects: a.effects === true, contractProbes });
+      const mode = contractProbes ? `契约模式（${contractProbes.length} 个探针）` : '探索模式（全量插桩）';
+      lines.push(`  [${mode}] ${rep.files.length} 个 .go 文件参与扫描`);
+      for (const f of rep.files) {
+        if (f.error) lines.push(`  ✗ ${f.file}  ${f.error}`);
+        else if (f.sites.length > 0) lines.push(`  + ${f.file}  ${dryRun ? '将注入' : '注入'} ${f.sites.length} 探针点`);
+      }
+      const s = goReportSummary(rep);
+      lines.push(`  完成：${s.instrumented} 新插桩 / ${s.skipped} 已含探针跳过 / ${s.errors} 失败，共 ${s.totalSites} 探针点`);
+      data.report = rep;
+      if (dryRun) lines.push('  DRY-RUN 未写盘。传 dry_run=false 实际改写源码（备份在 .design-canvas/observe-backup，随时可还原）。');
+      // 运行前提预检：工程能否 import go-observe（否则插桩后编译报错）
+      const deps = checkGoObserveDeps(target);
+      lines.push(deps.needs_replace || deps.needs_require
+        ? `  运行前提：工程尚未接 go-observe。可在 go.mod 补：
+       ${deps.require_line}
+       ${deps.replace_line}`
+        : `  运行前提：${deps.note}`);
+      return { message: lines.join('\n'), data };
+    } catch (e) {
+      return {
+        message: `Observe Go 插桩失败：${(e as Error).message}`,
+        data,
+        isError: true,
+      };
+    }
+  }
+
   if (unintrument) {
     const restored = restoreInstrumented(target);
     const cleared = clearProbeLedger(target);
@@ -605,7 +671,7 @@ const observeInstrumentHandler = wrap(async (a) => {
   }
 
   const files = collectTsFiles(target);
-  const results = await instrumentProject(target, { projectRoot, write: !dryRun, contractProbes });
+  const results = await instrumentProject(target, { projectRoot, write: !dryRun, contractProbes, scope: a.scope === true });
   let totalSites = 0;
   let instrumented = 0;
   let skipped = 0;
@@ -1264,6 +1330,25 @@ const TOOL_DEFS: ToolDef[] = [
     handler: observeLogHandler,
   },
   {
+    name: 'observe_trace',
+    title: 'Read recorded call-chain traces (LLM-facing replay)',
+    description:
+      '读探针录制的事件（events.jsonl）→ 重建完整调用树 → 采样保留，返回结构化的调用链给 LLM 分析/总结/找根因。' +
+      '一针 = 一次采样的完整链路（前因后果在，每环节 probe / 入参 / 出参 / 耗时 / 缺帧），不裁剪不伪造。' +
+      '不给 trace_id：返回链路清单（trace_id、帧数、根函数、信号），供挑哪针展开。' +
+      '给 trace_id：展开该针完整调用树（文本树 + 结构化 JSON）。' +
+      'keep=all 返回全部链路不过滤（弥合默认 judge 丢纯对话长针的偏差）。' +
+      'events_path 缺省自动找探针 sink：DS_OBSERVE_EVENTS > 系统临时目录 dsh_events.jsonl > cwd/runs.jsonl。',
+    inputSchema: {
+      events_path: z.string().optional().describe('录制事件 JSONL 路径；缺省自动找探针 sink（dsh_events.jsonl / runs.jsonl）'),
+      events_text: z.string().optional().describe('内联事件文本，优先于 events_path（调试用）'),
+      keep: z.enum(['all', 'default']).optional().describe("'all'=返回全部链路；'default'=采样只留代表针（默认）"),
+      trace_id: z.string().optional().describe('指定展开某条链路（trace_id）；不给则返回链路清单'),
+      limit: z.number().optional().describe('最多返回几针（防上下文撑爆；给 trace_id 时忽略）'),
+    },
+    handler: observeTraceHandler,
+  },
+  {
     name: 'observe_judge',
     title: 'Judge a batch of Observe events',
     description:
@@ -1309,26 +1394,30 @@ const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'observe_instrument',
-    title: 'Auto-instrument or restore a TS project',
+    title: 'Auto-instrument or restore a TS/Go project',
     description:
-      '对目标项目全自动 AST 插桩（函数出入口/return/catch/IO 写盘），幂等（已含探针文件跳过）。' +
-      'action=uninstrument|restore 一键全拔（从自动备份拷回原文件、删备份目录、清理探针台账）。' +
+      '对目标项目全自动插桩，按语言分派：Go 工程走 go-observe（go/ast 注入 camprobe.Capture，函数出/入/return/catch/IO）；' +
+      'TS 工程走 TS AST（captureProbe）。均幂等（已含探针文件跳过）。' +
+      'action=uninstrument|restore 一键全拔（从自动备份拷回原文件、删备份目录）。' +
       'dry_run=true 只预览不写盘。写盘前自动备份，git 可兜底。' +
-      '写盘插桩成功后自动生成探针台账（data.ledger：全部探针点+统计，落盘 .design-canvas/observe-ledger.json）。' +
-      '契约模式：contract_probes 传探针 id 数组（如 ["store.save.writefile"]）则只注入声明的探针点；' +
-      '缺省/空数组则探索模式全量插桩（挖掘隐藏问题）。',
+      'TS 写盘后自动生成探针台账（.design-canvas/observe-ledger.json）；Go 写盘后可用 --restore 还原。' +
+      '契约模式：contract_probes 传探针 id 数组则只注入这些探针点；缺省=探索模式全量插桩。' +
+      'Go 运行前提：被测工程须能 import `go-observe/probe`（其 go.mod 需 replace/require 指向本仓 go-observe）。',
     inputSchema: {
       action: z
         .enum(['instrument', 'uninstrument', 'restore'])
         .optional()
-        .describe('instrument=插桩（默认）；uninstrument/restore=一键全拔（还原+清台账）'),
+        .describe('instrument=插桩（默认）；uninstrument/restore=一键全拔（还原+清备份）'),
       target: z.string().describe('要插桩/还原的目标项目目录'),
       dry_run: z.boolean().optional().describe('true=只预览探针点不写盘（默认 false）'),
       contract_probes: z
         .array(z.string())
         .optional()
         .describe('契约模式探针 id 数组（如 ["store.save.writefile"]），只注入这些探针点；缺省=探索模式全量插桩'),
-      project_root: z.string().optional().describe('design-canvas 根（探针实现 src/observe/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
+      project_root: z.string().optional().describe('design-canvas 根（TS 探针实现 src/observe/probe.js 所在仓库根），用于计算相对 import 路径，默认自动推断'),
+      deep: z.boolean().optional().describe('仅 Go：开启 deep 级插桩（函数内变量赋值捕获），默认 false'),
+      effects: z.boolean().optional().describe('仅 Go：开启 effect 级插桩（包级变量写/chan send/资源获取观测），默认 false'),
+      scope: z.boolean().optional().describe('仅 TS：开启 scope 模式（try/finally 包裹函数体注入 enterScope/exitScope，录带帧调用树），默认 false（captureProbe 点探针）'),
     },
     handler: observeInstrumentHandler,
   },
