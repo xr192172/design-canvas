@@ -14,7 +14,7 @@ import { LANGUAGES, findLanguageByExt, LanguageEntry } from './languages.js';
 
 /** 缓存扫描结果（启动时一次扫，后续零开销） */
 let probeCache: Set<string> | null = null;
-let nodeModulesRoot: string | null = null;
+let nodeModulesRoots: string[] | null = null;
 
 /**
  * 定位 node_modules 根目录。
@@ -24,58 +24,46 @@ let nodeModulesRoot: string | null = null;
  * 若只依赖 cwd，将找不到项目根的 node_modules，导致语言包探测为空、import_project 无法解析。
  * 从模块位置（dist/src/tools/ts_kernel/probe.js）向上 4 级即项目根，与 cwd 无关，任何 client 下都稳定。
  */
-function getNodeModulesRoot(): string {
-  if (nodeModulesRoot !== null) return nodeModulesRoot;
-
-  const candidates = new Set<string>();
-  let dir = process.cwd();
-  while (dir !== path.dirname(dir)) {
-    candidates.add(dir);
-    dir = path.dirname(dir);
-  }
-  // 模块自身位置向上链（dist/src/tools/ts_kernel/ → … → 项目根）
-  let modDir = path.dirname(fileURLToPath(import.meta.url));
-  while (modDir !== path.dirname(modDir)) {
-    candidates.add(modDir);
-    modDir = path.dirname(modDir);
-  }
-
-  for (const c of candidates) {
-    const candidate = path.join(c, 'node_modules');
-    if (fs.existsSync(candidate)) {
-      nodeModulesRoot = candidate;
-      return nodeModulesRoot;
-    }
-  }
-  nodeModulesRoot = path.join(process.cwd(), 'node_modules');
-  return nodeModulesRoot;
+function getAllNodeModulesRoots() : string[] {
+if (nodeModulesRoots !== null) {
+  return nodeModulesRoots;
+}
+const roots = new Set();
+let dir = process.cwd();
+while (dir !== path.dirname(dir)) {
+  const c = path.join(dir, 'node_modules');
+  if (fs.existsSync(c)) roots.add(c);
+  dir = path.dirname(dir);
+}
+let modDir = path.dirname(fileURLToPath(import.meta.url));
+while (modDir !== path.dirname(modDir)) {
+  const c = path.join(modDir, 'node_modules');
+  if (fs.existsSync(c)) roots.add(c);
+  modDir = path.dirname(modDir);
+}
+if (roots.size === 0) roots.add(path.join(process.cwd(), 'node_modules'));
+nodeModulesRoots = [...roots];
+return nodeModulesRoots;
 }
 
-/** 扫描已安装的 tree-sitter-* 包 */
-function scanInstalledPackages(): Set<string> {
-  const root = getNodeModulesRoot();
-  const installed = new Set<string>();
-
-  if (!fs.existsSync(root)) return installed;
-
-  // 处理 scoped 命名空间（@org/...）和顶级 tree-sitter-*
+function scanInstalledPackages() {
+const installed = new Set();
+for (const root of getAllNodeModulesRoots()) {
+  if (!fs.existsSync(root)) continue;
   const entries = fs.readdirSync(root, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isDirectory() && entry.name === '@tree-sitter') {
-      // 未来可能用 @tree-sitter scope
       const subEntries = fs.readdirSync(path.join(root, '@tree-sitter'), { withFileTypes: true });
       for (const sub of subEntries) {
         if (sub.isDirectory()) installed.add(`@tree-sitter/${sub.name}`);
       }
-    } else if (entry.isDirectory() && entry.name.startsWith('tree-sitter-')) {
-      const pkgName = entry.name.replace('tree-sitter-', '');
-      installed.add(pkgName);
-    } else if (entry.isDirectory() && entry.name === 'tree-sitter-cli') {
-      // 跳过 cli
+    }
+    else if (entry.isDirectory() && entry.name.startsWith('tree-sitter-')) {
+      installed.add(entry.name.replace('tree-sitter-', ''));
     }
   }
-
-  return installed;
+}
+return installed;
 }
 
 /** 探测已安装的语言 */

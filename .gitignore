@@ -141,3 +141,7 @@ tests/tools/z_dg_*.test.ts
 /L3-*.png
 /gw_panel_check.png
 
+
+# 根一次性探针（AI/诊断辅助）
+/_*.mjs
+
