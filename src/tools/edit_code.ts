@@ -201,6 +201,19 @@ async function findBodyRange(
   return out;
 }
 
+/** 行首空白字符数 */
+function leadingSpaces(line: string): number {
+  const m = /^[ \t]*/.exec(line);
+  return m ? m[0].length : 0;
+}
+
+/** 取第 line 行（1-based）的前导空白 */
+function leadingWhitespaceOfLine(content: string, line: number): string {
+  const l = content.split('\n')[line - 1];
+  const m = l ? /^[ \t]*/.exec(l) : null;
+  return m ? m[0] : '';
+}
+
 export async function editCode(args: EditCodeArgs): Promise<{ message: string }> {
   const { op } = args;
   const projectRoot = path.resolve(args.project_dir);
@@ -264,7 +277,27 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     const body = await findBodyRange(absPath, original, args.symbol!, args.parent);
     if (!body) throw new Error(`sub=body 未定位到 ${args.symbol} 的函数体（确认 qualified_name 或传 parent）`);
     if (args.code == null) throw new Error('sub=body 需要 code（新函数体内容，含大括号；传空串=清空函数体）');
-    const newContent = original.slice(0, body.startIndex) + args.code + original.slice(body.endIndex);
+    // ── 智能缩进对齐：保留大括号原位置，body 内容按父级缩进重排 ──
+    const braceIndent = leadingWhitespaceOfLine(original, body.startLine);
+    // 从原 body 内部推导 indent unit（内部最小缩进 − 大括号缩进）；单行/空 body 回退 2 空格
+    const innerLines = original.slice(body.startIndex + 1, body.endIndex - 1).split('\n').filter((l) => l.trim().length > 0);
+    let indentUnit = '  ';
+    if (innerLines.length > 0) {
+      const minInner = Math.min(...innerLines.map((l) => leadingSpaces(l)));
+      indentUnit = ' '.repeat(Math.max(2, minInner - braceIndent.length));
+    }
+    const innerIndent = braceIndent + indentUnit;
+    // code 剥可选大括号 → 相对化（去最小公共缩进）→ 加 innerIndent（保持内部相对嵌套）
+    let codeLines = args.code.replace(/\r\n/g, '\n').split('\n');
+    if ((codeLines[0] ?? '').trim() === '{') codeLines = codeLines.slice(1);
+    if ((codeLines[codeLines.length - 1] ?? '').trim() === '}') codeLines = codeLines.slice(0, -1);
+    while (codeLines.length > 0 && codeLines[0].trim() === '') codeLines.shift();
+    while (codeLines.length > 0 && codeLines[codeLines.length - 1].trim() === '') codeLines.pop();
+    const nonEmpty = codeLines.filter((l) => l.trim().length > 0);
+    const minCodeIndent = nonEmpty.length > 0 ? Math.min(...nonEmpty.map((l) => leadingSpaces(l))) : 0;
+    const realigned = codeLines.map((l) => (l.trim().length === 0 ? '' : innerIndent + l.slice(minCodeIndent))).join('\n');
+    const newBodyText = '{\n' + (realigned.length > 0 ? realigned + '\n' : '') + braceIndent + '}';
+    const newContent = original.slice(0, body.startIndex) + newBodyText + original.slice(body.endIndex);
 
     // 语法门（同 replace_text：解析失败 / 新引入语法错误 → 拒绝不写盘）
     const reparsed = await parseFileFull(absPath, newContent);
@@ -279,7 +312,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     const preview = buildGenericDiff(
       `L${body.startLine}-${body.endLine}（body）`,
       oldBody.split(/\r?\n/),
-      args.code.split(/\r?\n/),
+      newBodyText.split(/\r?\n/),
     );
     if (args.dry_run) {
       return {
