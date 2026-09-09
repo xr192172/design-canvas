@@ -24,7 +24,31 @@ import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js'
 import { camelToSnake, scanLiteralOccurrences, type RawLiteralMatch } from './rename_symbols.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 import { parseFileFull } from './ts_kernel/index.js';
+import { getProjectCacheDb } from '../db/db.js';
+import { buildImportGraph } from './import_graph.js';
 
+/** 候选引用文件：优先走已建 cache.db 的 import 图（反向闭包 = 谁（直接/间接）import 定义模块）。
+ * 避免 find_references 对全依赖闭包"逐文件即时解析"的慢路径；索引缺失/失败返回 null，
+ * 由调用方回退到即时 expandClosure。返回绝对路径列表。 */
+async function indexCandidateFiles(resolvedRoot: string, defAbs: string): Promise<string[] | null> {
+  try {
+    const db = getProjectCacheDb(resolvedRoot);
+    const cnt = (db.prepare('SELECT COUNT(*) AS c FROM files').get() as { c?: number } | undefined)?.c ?? 0;
+    if (cnt === 0) return null;
+    const g = buildImportGraph(db, resolvedRoot);
+    const defRel = path.relative(resolvedRoot, defAbs).split(path.sep).join('/');
+    const seen = new Set<string>([defRel]);
+    const queue = [defRel];
+    while (queue.length > 0) {
+      const cur = queue.shift() as string;
+      const imp = g.importerOf.get(cur);
+      if (imp) for (const e of imp) if (!seen.has(e.to)) { seen.add(e.to); queue.push(e.to); }
+    }
+    return [...seen].map((r) => path.join(resolvedRoot, r));
+  } catch {
+    return null;
+  }
+}
 export interface ReferenceSite {
   /** export/import/使用点所在的字节偏移 */
   offset: number;
@@ -177,7 +201,7 @@ export async function findReferences(input: {
   const declOffset = (isTsDef && def ? def.rootOffsets.get(symbol!) ?? 0 : 0);
 
   // 闭包内引用点收集（import + usage + export_list）
-  const files = await expandClosure(fileAbs, resolvedRoot, rootAlias);
+  const files = (await indexCandidateFiles(resolvedRoot, fileAbs)) ?? (await expandClosure(fileAbs, resolvedRoot, rootAlias));
   const byNoExt = buildNoExt(files);
 
   const aliasMemo = new Map<string, ReturnType<typeof loadAliasConfig>>();
