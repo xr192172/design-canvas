@@ -45,6 +45,8 @@ export interface EditCodeArgs {
   end?: number;
   /** op='range' 专用：true=只出 diff 预览 + 语法门结果，不写盘、不改索引 */
   dry_run?: boolean;
+  /** op='range' 专用：true=区间穿透只报符号计数、不展开明细列表（减少视觉噪声） */
+  quiet?: boolean;
 }
 
 interface LineOp {
@@ -108,6 +110,7 @@ function buildRangePreview(
   removed: string[],
   added: string[],
   overlapped: ParsedSymbol[],
+  quiet?: boolean,
 ): string {
   const cap = 400;
   const trunc = removed.length > cap || added.length > cap;
@@ -116,11 +119,13 @@ function buildRangePreview(
     ...added.slice(0, cap).map((l) => '+ ' + l.replace(/\r?\n$/, '')),
   ].join('\n');
   const symNote =
-    overlapped.length > 0
-      ? `\n⚠ 区间穿透 ${overlapped.length} 个符号: ` +
+  overlapped.length > 0
+    ? quiet
+      ? `\n⚠ 区间穿透 ${overlapped.length} 个符号（quiet，明细略）`
+      : `\n⚠ 区间穿透 ${overlapped.length} 个符号: ` +
         overlapped.map((s) => describeSymbol(s)).join('；') +
         '（显式行区间，默认信任 caller，请复核）'
-      : '';
+    : '';
   return (
     `diff L${start}-L${end}/${total}（${removed.length} 行 → ${added.length} 行）` +
     (trunc ? '，预览已截断' : '') +
@@ -209,7 +214,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
 
     // 区间穿透的符号（提示影响面，不禁止——行区间是显式请求，默认信任 caller）
     const overlapped = parsed.symbols.filter((s) => s.start_line <= end && s.end_line >= start);
-    const preview = buildRangePreview(start, end, total, lines.slice(startIdx, startIdx + count), codeLines, overlapped);
+    const preview = buildRangePreview(start, end, total, lines.slice(startIdx, startIdx + count), codeLines, overlapped, args.quiet);
 
     if (args.dry_run) {
       return {
