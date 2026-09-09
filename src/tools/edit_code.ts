@@ -21,7 +21,7 @@ import { syncFile } from '../db/symbols.js';
 import { getProjectCacheDb } from '../db/db.js';
 import { splitKeepEnds, detectEol, isBlankLine } from './line_utils.js';
 
-export type EditCodeOp = 'replace' | 'insert' | 'delete' | 'range';
+export type EditCodeOp = 'replace' | 'insert' | 'delete' | 'range' | 'replace_text';
 
 export interface EditCodeArgs {
   /** 项目根目录（索引归属，编辑后重建该文件的 cache.db 索引） */
@@ -43,10 +43,14 @@ export interface EditCodeArgs {
   start?: number;
   /** op='range' 专用：1-based 含端点的结束行 */
   end?: number;
-  /** op='range' 专用：true=只出 diff 预览 + 语法门结果，不写盘、不改索引 */
+  /** 所有 op 支持：true=只出 diff 预览 + 语法门结果，不写盘、不改索引 */
   dry_run?: boolean;
   /** op='range' 专用：true=区间穿透只报符号计数、不展开明细列表（减少视觉噪声） */
   quiet?: boolean;
+  /** op='replace_text' 专用：要替换的旧文本（在文件中须恰好出现 1 次，否则报歧义） */
+  old_text?: string;
+  /** op='replace_text' 专用：替换后的新文本 */
+  new_text?: string;
 }
 
 interface LineOp {
@@ -136,6 +140,22 @@ function buildRangePreview(
   );
 }
 
+/** 生成通用 diff 预览（− 移除 / + 新增），行数设上限防爆 */
+function buildGenericDiff(header: string, removed: string[], added: string[]): string {
+  const cap = 400;
+  const trunc = removed.length > cap || added.length > cap;
+  const body = [
+    ...removed.slice(0, cap).map((l) => '- ' + l),
+    ...added.slice(0, cap).map((l) => '+ ' + l),
+  ].join('\n');
+  return (
+    `diff ${header}${trunc ? '，预览已截断' : ''}\n` +
+    '```diff\n' +
+    body +
+    '\n```'
+  );
+}
+
 export async function editCode(args: EditCodeArgs): Promise<{ message: string }> {
   const { op } = args;
   const projectRoot = path.resolve(args.project_dir);
@@ -147,6 +167,10 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   }
   if (op === 'replace' || op === 'insert') {
     if (!args.code || !args.code.trim()) throw new Error(`${op} 需要 code（新代码）`);
+  }
+  if (op === 'replace_text') {
+    if (!args.old_text || !args.old_text.trim()) throw new Error('replace_text 需要 old_text（要替换的唯一旧文本）');
+    if (args.new_text == null) throw new Error('replace_text 需要 new_text（新文本，传空串表示删除该文本）');
   }
 
   const fileExists = fs.existsSync(absPath);
@@ -163,6 +187,12 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     if (reparsed.error) throw new Error(`新文件内容解析失败（不写盘）: ${reparsed.error}`);
     if (await hasSyntaxError(absPath, content)) {
       throw new Error('新文件内容含语法错误（hasError=true，不写盘）。请检查 code 的括号/缩进/引号。');
+    }
+    if (args.dry_run) {
+      return {
+        message:
+          `[干跑] 将创建 ${relPath}（${reparsed.symbols.length} 符号），语法门通过，未写盘:\n\`\`\`\n` + content + '\n\`\`\`',
+      };
     }
     fs.mkdirSync(path.dirname(absPath), { recursive: true });
     fs.writeFileSync(absPath, content, 'utf8');
@@ -235,6 +265,55 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
       message:
         `✓ range 编辑 ${relPath} L${start}-L${end}（${count} 行 → ${codeLines.length} 行），` +
         `索引已重建（${sync.status}）${diffNote}${repairNote}\n${preview}`,
+    };
+  }
+
+  // ── op='replace_text'：文本唯一替换（edit 工具的 AST 安全版）──
+  if (op === 'replace_text') {
+    const oldText = args.old_text!;
+    const newText = args.new_text ?? '';
+    const content = original;
+    const idx = content.indexOf(oldText);
+    if (idx < 0) throw new Error(`replace_text 未找到 old_text（${JSON.stringify(oldText.slice(0, 40))}）`);
+    const occurrences: number[] = [];
+    let pos = 0;
+    while ((pos = content.indexOf(oldText, pos)) !== -1) {
+      occurrences.push(content.slice(0, pos).split('\n').length);
+      pos += oldText.length;
+    }
+    if (occurrences.length > 1) {
+      throw new Error(
+        `replace_text 不唯一：old_text 出现 ${occurrences.length} 次（行号 ${occurrences.join(', ')}）。` +
+          '请用更长/更独特的 old_text（含上下文）唯一化。',
+      );
+    }
+    const newContent = content.slice(0, idx) + newText + content.slice(idx + oldText.length);
+    const reparsed = await parseFileFull(absPath, newContent);
+    if (reparsed.error) {
+      throw new Error(`编辑后文件解析失败，已放弃（未写盘）: ${reparsed.error}`);
+    }
+    const afterHasError = await hasSyntaxError(absPath, newContent);
+    if (!baselineHasError && afterHasError) {
+      throw new Error('编辑引入了语法错误（hasError false→true），已放弃（未写盘）。请检查 new_text。');
+    }
+    const line = occurrences[0];
+    const oldLines = oldText.split(/\r?\n/);
+    const newLines = newText.split(/\r?\n/);
+    const preview = buildGenericDiff(`L${line}（${oldLines.length} 行 → ${newLines.length} 行）`, oldLines, newLines);
+    if (args.dry_run) {
+      return {
+        message:
+          `[干跑] replace_text ${relPath} L${line}（唯一命中），语法门通过，未写盘:\n${preview}`,
+      };
+    }
+    fs.writeFileSync(absPath, newContent, 'utf8');
+    const sync = await syncFile(getProjectCacheDb(projectRoot), projectRoot, absPath);
+    const diffNote = sync.symbol_diff
+      ? `（符号 diff: +${sync.symbol_diff.added} -${sync.symbol_diff.removed} ~${sync.symbol_diff.changed}）`
+      : '';
+    return {
+      message:
+        `✓ replace_text ${relPath} L${line}（${oldLines.length} 行 → ${newLines.length} 行），索引已重建（${sync.status}）${diffNote}\n${preview}`,
     };
   }
 
@@ -356,6 +435,21 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
           '\n请从 code 中移除重复定义后重试。',
       );
     }
+  }
+
+  // ── dry_run（replace/delete/insert 已有文件）：语法门已过，只出 diff 预览，不写盘 ──
+  if (args.dry_run) {
+    const removed = lines.slice(lineOp.startIdx, lineOp.startIdx + lineOp.count).map((l) => l.replace(/\r?\n$/, ''));
+    const added = lineOp.insert.map((l) => l.replace(/\r?\n$/, ''));
+    const preview = buildGenericDiff(
+      `L${lineOp.startIdx + 1}-${lineOp.startIdx + lineOp.count}（${removed.length} 行 → ${added.length} 行）`,
+      removed,
+      added,
+    );
+    return {
+      message:
+        `[干跑] ${op} ${relPath}（${args.symbol ?? '文件末尾'}）语法门通过，未写盘:\n${preview}`,
+    };
   }
 
   // ── 写盘 + 索引重建（新鲜度闭环） ──
