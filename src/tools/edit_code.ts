@@ -51,6 +51,8 @@ export interface EditCodeArgs {
   old_text?: string;
   /** op='replace_text' 专用：替换后的新文本 */
   new_text?: string;
+  /** op='replace' 专用：sub='body' 时只替换函数/方法体（code 只给新 body 内容，免自包含/签名） */
+  sub?: string;
 }
 
 interface LineOp {
@@ -156,6 +158,49 @@ function buildGenericDiff(header: string, removed: string[], added: string[]): s
   );
 }
 
+/** 定位符号的函数/方法体行区间（AST 精确：body/suite 字段节点）。失败返回 null。 */
+async function findBodyRange(
+  absPath: string,
+  content: string,
+  symbol: string,
+  parent?: string,
+): Promise<{ startIndex: number; endIndex: number; startLine: number; endLine: number } | null> {
+  const ast = await parseAstRoot(absPath, content);
+  if (!ast?.root) return null;
+  const TYPE_NODES = new Set([
+    'class_declaration', 'abstract_class_declaration', 'interface_declaration',
+    'class_definition', 'type_alias_declaration', 'enum_declaration', 'struct_specifier',
+  ]);
+  let out: { startIndex: number; endIndex: number; startLine: number; endLine: number } | null = null;
+  const walk = (node: any, parentName: string | undefined): void => {
+    if (out) return;
+    const nameNode = node?.childForFieldName?.('name');
+    if (nameNode) {
+      const name = nameNode.text ?? '';
+      const qn = parentName ? `${parentName}.${name}` : name;
+      if ((qn === symbol || name === symbol) && (!parent || parentName === parent)) {
+        const body = node.childForFieldName('body') ?? node.childForFieldName('suite');
+        if (body) {
+          out = {
+            startIndex: body.startIndex ?? 0,
+            endIndex: body.endIndex ?? 0,
+            startLine: body.startPosition.row + 1,
+            endLine: body.endPosition.row + 1,
+          };
+          return;
+        }
+      }
+    }
+    const childParent = nameNode && TYPE_NODES.has(node.type) ? (nameNode.text ?? '') : parentName;
+    for (let i = 0; i < (node?.childCount ?? 0); i++) {
+      const child = node.child(i);
+      if (child) walk(child, childParent);
+    }
+  };
+  walk(ast.root as any, undefined);
+  return out;
+}
+
 export async function editCode(args: EditCodeArgs): Promise<{ message: string }> {
   const { op } = args;
   const projectRoot = path.resolve(args.project_dir);
@@ -171,6 +216,9 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   if (op === 'replace_text') {
     if (!args.old_text || !args.old_text.trim()) throw new Error('replace_text 需要 old_text（要替换的唯一旧文本）');
     if (args.new_text == null) throw new Error('replace_text 需要 new_text（新文本，传空串表示删除该文本）');
+  }
+  if (op === 'replace' && args.sub !== undefined && args.sub !== 'body') {
+    throw new Error(`replace 的 sub 仅支持 'body'，收到 ${args.sub}`);
   }
 
   const fileExists = fs.existsSync(absPath);
@@ -211,6 +259,46 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   if (parsed.error) throw new Error(`目标文件当前就解析失败（先修文件再编辑）: ${parsed.error}`);
   const baselineHasError = await hasSyntaxError(absPath, original);
 
+  // ── op='replace' + sub='body'：只替换函数/方法体（文本级，保留签名与大括号；code 只给 body、免自包含）──
+  if (op === 'replace' && args.sub === 'body') {
+    const body = await findBodyRange(absPath, original, args.symbol!, args.parent);
+    if (!body) throw new Error(`sub=body 未定位到 ${args.symbol} 的函数体（确认 qualified_name 或传 parent）`);
+    if (args.code == null) throw new Error('sub=body 需要 code（新函数体内容，含大括号；传空串=清空函数体）');
+    const newContent = original.slice(0, body.startIndex) + args.code + original.slice(body.endIndex);
+
+    // 语法门（同 replace_text：解析失败 / 新引入语法错误 → 拒绝不写盘）
+    const reparsed = await parseFileFull(absPath, newContent);
+    if (reparsed.error) {
+      throw new Error(`编辑后文件解析失败，已放弃（未写盘）: ${reparsed.error}`);
+    }
+    const afterHasError = await hasSyntaxError(absPath, newContent);
+    if (!baselineHasError && afterHasError) {
+      throw new Error('编辑引入了语法错误（hasError false→true），已放弃（未写盘）。请检查 code。');
+    }
+    const oldBody = original.slice(body.startIndex, body.endIndex);
+    const preview = buildGenericDiff(
+      `L${body.startLine}-${body.endLine}（body）`,
+      oldBody.split(/\r?\n/),
+      args.code.split(/\r?\n/),
+    );
+    if (args.dry_run) {
+      return {
+        message:
+          `[干跑] replace ${relPath} 的 ${args.symbol} body（L${body.startLine}-${body.endLine}），语法门通过，未写盘:\n${preview}`,
+      };
+    }
+    fs.writeFileSync(absPath, newContent, 'utf8');
+    const sync = await syncFile(getProjectCacheDb(projectRoot), projectRoot, absPath);
+    const diffNote = sync.symbol_diff
+      ? `（符号 diff: +${sync.symbol_diff.added} -${sync.symbol_diff.removed} ~${sync.symbol_diff.changed}）`
+      : '';
+    return {
+      message:
+        `✓ 已替换 ${relPath} 的 ${args.symbol} body（L${body.startLine}-${body.endLine}），` +
+        `签名与大括号保留，索引已重建（${sync.status}）${diffNote}\n${preview}`,
+    };
+  }
+
   // ── op='range'：显式行区间编辑（符号为主路径的可选偏好；行号由调用方先读文件确认）──
   if (op === 'range') {
     if (args.start == null || args.end == null) {
@@ -226,7 +314,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
 
     const startIdx = start - 1;
     const count = end - start + 1;
-    const codeLines = normalizeCode(args.code, eol);
+    const codeLines = normalizeCode(args.code!, eol);
     const newLines = [...lines];
     newLines.splice(startIdx, count, ...codeLines);
     const newContent = newLines.join('');
