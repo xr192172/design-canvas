@@ -19,7 +19,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, resolveLangImport } from './project_root.js';
+import { resolveProjectRoot, loadAliasConfig, resolveAliasedImport, resolveLangImport } from './project_root.js';
 import { analyzeModuleSource, resolveRel, buildNoExt } from './rename_symbol.js';
 import { camelToSnake, scanLiteralOccurrences, type RawLiteralMatch } from './rename_symbols.js';
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
@@ -201,7 +201,31 @@ export async function findReferences(input: {
   const declOffset = (isTsDef && def ? def.rootOffsets.get(symbol!) ?? 0 : 0);
 
   // 闭包内引用点收集（import + usage + export_list）
-  const files = (await indexCandidateFiles(resolvedRoot, fileAbs)) ?? (await expandClosure(fileAbs, resolvedRoot, rootAlias));
+  // 闭包内引用点收集（import + usage + export_list）。候选集只走持久索引的 import 反闭包；
+  // 索引缺失时拒绝并请先建索引，绝不再回退"全闭包逐文件即时解析"（仓库大时打满 CPU/内存）。
+  const candidates = await indexCandidateFiles(resolvedRoot, fileAbs);
+  if (candidates === null) {
+    return {
+      ok: false,
+      symbol: symbol!,
+      mode,
+      importerCount: 0,
+      blocked: [
+        `未建索引：${resolvedRoot} 尚无符号/import 索引。为避免全仓 import 闭包逐文件即时解析导致的卡顿与内存暴涨，` +
+        `find_references / safe_rename 不再回退到时即扫描。请先 import_project（或 design_canvas_prewarm）建索引后再调用。`,
+      ],
+    };
+  }
+  if (candidates.length > 4000) {
+    return {
+      ok: false,
+      symbol: symbol!,
+      mode,
+      importerCount: 0,
+      blocked: [`索引反闭包过大（${candidates.length} 个候选文件，上限 4000）。请收窄项目规模或核实索引是否越界（如误把依赖建进索引）。`],
+    };
+  }
+  const files = candidates;
   const byNoExt = buildNoExt(files);
 
   const aliasMemo = new Map<string, ReturnType<typeof loadAliasConfig>>();
