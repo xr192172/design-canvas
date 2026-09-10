@@ -188,9 +188,13 @@ function buildSignature(node: SyntaxNodeLike, fieldMap: LanguageEntry['field_map
   const name = extractName(node, fieldMap);
   const rawParams = fieldText(node, fieldMap.parameters || '');
   const params = stripParens(rawParams);
+  // 一些 tree-sitter 语法（如 typescript 的 type_annotation）返回类型文本含前导 ':'，
+  // 而这里各语言分支都会自己拼 ': ' / ' -> '。统一剥掉前导冒号，避免 '): : number' 双冒号。
+  const retType = (fieldName: string): string =>
+    fieldText(node, fieldName).replace(/^\s*:\s*/, '');
 
   if (lang.name === 'go') {
-    const result = fieldText(node, fieldMap.return_type || '');
+    const result = retType(fieldMap.return_type || '');
     const receiver = fieldText(node, fieldMap.receiver || '');
     // receiver text 如 "(u *UserService)" 或 "u *UserService"
     const receiverClean = stripParens(receiver);
@@ -203,24 +207,24 @@ function buildSignature(node: SyntaxNodeLike, fieldMap: LanguageEntry['field_map
   }
 
   if (lang.name === 'python') {
-    const ret = fieldText(node, fieldMap.return_type || '');
+    const ret = retType(fieldMap.return_type || '');
     // 移除 self 参数
     const cleanParams = params.replace(/^self\s*,?\s*/, '').trim();
     return `${name}(${cleanParams})${ret ? ' -> ' + ret : ''}`;
   }
 
   if (lang.name === 'rust') {
-    const ret = fieldText(node, fieldMap.return_type || '');
+    const ret = retType(fieldMap.return_type || '');
     return `${name}(${params})${ret ? ' -> ' + ret : ''}`;
   }
 
   if (lang.name === 'java' || lang.name === 'c_sharp' || lang.name === 'kotlin' || lang.name === 'swift') {
-    const ret = fieldText(node, fieldMap.return_type || '');
+    const ret = retType(fieldMap.return_type || '');
     return `${name}(${params})${ret ? ': ' + ret : ''}`;
   }
 
   // TypeScript / JavaScript / C / C++ 等
-  const ret = fieldText(node, fieldMap.return_type || '');
+  const ret = retType(fieldMap.return_type || '');
   return `${name}(${params})${ret ? ': ' + ret : ''}`;
 }
 

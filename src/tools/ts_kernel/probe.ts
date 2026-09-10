@@ -7,26 +7,51 @@
  *
  * resolve 同步、不加载 native（只解析路径）：成功=包可解析，抛 ERR_MODULE_NOT_FOUND=未装。
  */
+import { createRequire } from 'node:module';
 import { LANGUAGES, findLanguageByExt, LanguageEntry } from './languages.js';
+
+/**
+ * 语言包可解析性判定用了两套 resolver，按可用性依次回退：
+ *   - import.meta.resolve：标准 ESM resolver，从【本模块所在包】向上解析，
+ *     与进程 cwd 无关（修复深度注入下被误判"语言未装"→ 0 符号）。
+ *   - createRequire(import.meta.url).resolve：vitest/vite 转换环境里
+ *     import.meta.resolve 对裸包名解析不可用（会被当虚拟模块），回退到
+ *     CommonJS 的 require.resolve，从模块真实落盘位置解析 node_modules——
+ *     let 测试环境（tests/）与运行时（dist/）都能探到已安装语言包。
+ */
+const nodeRequire = createRequire(import.meta.url);
+
+function resolvePackage(pkgName: string): string | null {
+  const meta = import.meta as unknown as { resolve?: (specifier: string) => string };
+  if (typeof meta.resolve === 'function') {
+    try {
+      return meta.resolve(pkgName);
+    } catch {
+      /* fall through */
+    }
+  }
+  try {
+    return nodeRequire.resolve(pkgName);
+  } catch {
+    return null;
+  }
+}
 
 /** 已确认可解析的语言包缓存 */
 let loadable = new Set<string>();
 /** 已确认不可解析的语言包缓存（避免反复 resolve 失败） */
 let unloadable = new Set<string>();
 
-/** 用标准 resolver 判定某 tree-sitter 语言包是否可加载（同步、不加载 native） */
+/** 判定某 tree-sitter 语言包是否可解析（同步、不加载 native） */
 export function isLanguageInstalled(pkgName: string): boolean {
   if (loadable.has(pkgName)) return true;
   if (unloadable.has(pkgName)) return false;
-  const meta = import.meta as unknown as { resolve(specifier: string): string };
-  try {
-    meta.resolve('tree-sitter-' + pkgName);
+  if (resolvePackage('tree-sitter-' + pkgName) !== null) {
     loadable.add(pkgName);
     return true;
-  } catch {
-    unloadable.add(pkgName);
-    return false;
   }
+  unloadable.add(pkgName);
+  return false;
 }
 
 /** 探测已安装的语言（LANGUAGES 中可解析的子集） */
