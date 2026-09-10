@@ -57,6 +57,7 @@ import { slimBrick } from './tools/slim_brick.js';
 import type { SlimBrickInput } from './tools/slim_brick.js';
 import { renameMany, type RenameItem } from './tools/ast_rename.js';
 import { renameSymbols } from './tools/rename_symbols.js';
+import { moveSymbol } from './tools/symbol_move.js';
 import { findReferences } from './tools/find_references.js';
 import { runTests } from './tools/run_tests.js';
 import { checkStaleBuild, formatStaleText } from './tools/stale_check.js';
@@ -89,6 +90,7 @@ import { listProvidersMasked, upsertProvider, deleteProvider, getStats, resetSta
 import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryObserveLog } from './observe/log_query.js';
+import { memoryObserveHandler, memoryTargetsHandler } from './tools/memory_observe.js';
 import { observeTrace } from './tools/observe_trace.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './observe/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './observe/contract.js';
@@ -711,6 +713,29 @@ const observeInstrumentHandler = wrap(async (a) => {
 // ─────────────────────────────────────────────────────────────
 
 const TOOL_DEFS: ToolDef[] = [
+  {
+    name: 'memory_observe',
+    title: 'External process memory observer (CDP)',
+    description:
+      '外部进程内存观测：开发期对 DSH gen / 任意 node 进程做内存诊断。通过 CDP 从外部连到目标进程的 --inspect 端口（observer≠subject，不需往目标进程塞插件）。' +
+      'action：status=一次性内存构成 / baseline=记基线 / track=对比基线报增量+增长率+泄漏方向(JS堆 vs native) / gc=目标进程强制 global.gc() 判断瞬时或泄漏(需目标带 --expose-gc) / snapshot=HeapProfiler 写 heap snapshot 落盘。' +
+      'target 是目标进程的 --inspect 端口；不知道用 memory_targets 自动列出。',
+    inputSchema: {
+      target: z.number().int().positive().describe('目标进程的 --inspect 端口（纯数字）；用 memory_targets 可自动列出'),
+      action: z.enum(['status', 'baseline', 'track', 'gc', 'snapshot']).default('status').optional().describe('status=一次性统计（默认）/ baseline=记基线 / track=对比基线 / gc=强制GC判定瞬时或泄漏 / snapshot=写heap snapshot'),
+      project_dir: z.string().optional().describe('snapshot 用：heapsnapshot 落盘归属项目根（缺省 process.cwd）'),
+    },
+    handler: wrapData(async (a) => memoryObserveHandler(a)),
+  },
+  {
+    name: 'memory_targets',
+    title: 'List local node processes exposing --inspect',
+    description:
+      '列出本机所有带 --inspect=<port> 的 node 进程（含 DSH gen），返回 pid + inspect端口，供 memory_observe 的 target 使用。',
+    inputSchema: {},
+    handler: wrapData(async () => memoryTargetsHandler()),
+  },
+
   {
     name: 'get_dsl',
     title: 'Query feature data',
@@ -1608,6 +1633,56 @@ const TOOL_DEFS: ToolDef[] = [
         r.dryRun ? `[批量文件改名 dry-run 预览·未落盘] 共 ${r.previews.length} 条` : `批量文件改名完成：${r.previews.length} 条，联动改写引用 ${r.filesWritten} 处`,
       ];
       for (const p of r.previews) parts.push(fmt(p, p.result).replace(/\n/g, '\n\t'));
+      return { message: parts.join('\n'), data: r };
+    }),
+  },
+  {
+    name: 'move_symbol',
+    title: 'Move a module-level symbol across files (semantic refactor, redirects importers)',
+    description:
+      '跨文件移动模块级符号（语义重构第一棒）：把 file 里的模块级符号 symbol 搬到 to_file，' +
+      '并自动把工作区内所有「仅引入该符号」的 import/再导出目标从源文件重定向到 to_file（只改 import 的 source，远程名/别名/使用点不动）。' +
+      '导入到工作区外（外部仓库）的引用只反馈（externalRefs）不追外。' +
+      '防护（任一触发→整体不落盘并说明）：目标文件撞同名 / namespace import / export * 转发 / 一条 import 同时引入其它符号 / 非模块级符号 / 源文件是 import 绑定。' +
+      'v1 仅 TS/JS 模块级符号；to_symbol 改名未启用（改名著 safe_rename）。',
+    inputSchema: {
+      project_dir: z.string().optional().describe('目标项目根（可选；缺省按 file 自动定位）'),
+      file: z.string().describe('定义符号的源文件（相对 project_dir 或绝对路径）'),
+      symbol: z.string().describe('要移动的模块级符号名'),
+      to_file: z.string().describe('目标文件（相对 project_dir 或绝对路径；不存在则创建；仅 TS/JS）'),
+      to_symbol: z.string().optional().describe('可选：移动后改名为该名（v1 未启用，仅提示走 safe_rename）'),
+      dry_run: z.boolean().optional().describe('true=只出结构化预览不落盘（默认：先整体校验，全通过才落盘）'),
+    },
+    handler: wrap(async (a) => {
+      const r = await moveSymbol({
+        project_dir: typeof a.project_dir === 'string' && a.project_dir ? a.project_dir : undefined,
+        file: String(a.file),
+        symbol: String(a.symbol),
+        to_file: String(a.to_file),
+        to_symbol: typeof a.to_symbol === 'string' && a.to_symbol ? a.to_symbol : undefined,
+        dry_run: a.dry_run === true,
+      });
+      if (!r.ok) {
+        return {
+          message: `移动被阻断（${r.dryRun ? '整体未落盘' : ''}）：\n` + (r.blocked || []).join('\n') +
+            (r.toSymbolDeferred ? '\n⚠ to_symbol 改名未启用，改名请走 safe_rename。' : ''),
+          data: r,
+        };
+      }
+      const parts = [
+        r.dryRun ? `[move_symbol dry-run 预览·未落盘] ${r.symbol}：${r.source?.file} → ${r.target?.file}` : `move_symbol 完成：${r.symbol} 已移到 ${r.target?.file}（改写 ${r.affectedFiles?.length ?? 0} 文件）`,
+      ];
+      if (r.source) parts.push(`源文件删除 ${r.source.file}（L${r.source.startLine}-${r.source.endLine}）：\n` + (r.source.removed ?? []).map((l) => `  - ${l.trimEnd()}`).join('\n'));
+      if (r.target) parts.push(`目标文件 ${r.target.file}（${r.target.created ? '新建' : '追加'}）: + ${r.target.symbol ?? r.symbol}`);
+      if (r.redirects?.length) {
+        parts.push(`import 重定向 ${r.redirects.length} 处（远程名/用法不变）：`);
+        for (const d of r.redirects) parts.push(`  ~ ${d.file}: ${d.oldSource} → ${d.newSource}`);
+      }
+      if (r.externalRefs?.length) {
+        parts.push(`项目边界（不追外）: ${r.externalRefs.length} 处 import 解析到工作区外，未改动外部：`);
+        for (const e of r.externalRefs.slice(0, 8)) parts.push(`  - ${e.resolved}${e.source ? `（import ${e.source}）` : ''}`);
+      }
+      if (r.toSymbolDeferred) parts.push('⚠ to_symbol 改名未启用，改名请走 safe_rename。');
       return { message: parts.join('\n'), data: r };
     }),
   },
