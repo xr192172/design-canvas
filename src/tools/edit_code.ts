@@ -214,6 +214,62 @@ function leadingWhitespaceOfLine(content: string, line: number): string {
   return m ? m[0] : '';
 }
 
+/**
+ * 把新代码按目标缩进重排（以周围上下文为准）：
+ * 去最小公共缩进（相对化）后整体补上 refIndent，保留内部相对嵌套。
+ * 空行保持原样。用于 range 编辑让粘贴代码贴合周围缩进层级，
+ * 而非把 AI 给的可能来自别处的缩进原样塞进去。
+ * 幂等：调用方已按 refIndent 对齐时，minIndent==refIndent → 结果不变。
+ */
+function realignCode(lines: string[], refIndent: string): string[] {
+  const nonEmpty = lines.filter((l) => l.trim().length > 0);
+  if (nonEmpty.length === 0) return lines;
+  const minIndent = Math.min(...nonEmpty.map((l) => leadingSpaces(l)));
+  return lines.map((l) => (l.trim().length === 0 ? l : refIndent + l.slice(minIndent)));
+}
+
+/** 声明样首行关键字（用于判断新 code 是否像完整定义而非裸函数体片段） */
+const DECL_PREFIXES = [
+  'function ', 'class ', 'interface ', 'enum ', 'type ', 'abstract class ', 'export ',
+  'import ', 'const ', 'let ', 'var ', 'func ', 'def ', 'public ', 'private ', 'protected ', 'static ',
+];
+
+/** 新 code 是否像「函数/方法体片段」而非「完整自包含定义」（缺签名声明行） */
+function looksLikeBareBody(code: string): boolean {
+  const first = (code.trim().split('\n')[0] ?? '').trim();
+  if (!first) return false;
+  if (/^[{[\]:;]/u.test(first)) return true; // 直接以花括号/返回语句开头 → 体片段
+  return !DECL_PREFIXES.some((k) => first.startsWith(k));
+}
+
+/** 目标符号是函数/方法时，附加「改用 sub=body」的引导文案 */
+function subBodyHint(targetKind: string | undefined): string {
+  if (targetKind !== 'function' && targetKind !== 'method') return '';
+  return (
+    '\n提示：目标符号是函数/方法。若你只想改函数体而非整套重写定义，' +
+    "请改用 op='replace' + sub='body'——把 code 只设为新的函数体内容即可，工具会自动保留签名与大括号。"
+  );
+}
+
+/** 符号 disambiguate 的上下文摘要（签名行 + 其后两行正文，让 AI 凭内容而不是行号区分同名） */
+function describeSymbolCtx(s: ParsedSymbol, lines: string[]): string {
+  const snippet = lines
+    .slice(s.start_line - 1, Math.min(s.end_line, s.start_line + 2))
+    .map((l) => l.replace(/^\s+/, '').trimEnd())
+    .filter((l) => l.length > 0)
+    .join(' → ');
+  return `  ${describeSymbol(s)}\n      ctx: ${snippet || '（无上下文）'}`;
+}
+
+/** 同名多候选歧义错误：N 候选 + 每个的上下文摘要 + 引导 parent 消歧 */
+function buildAmbiguityError(hits: ParsedSymbol[], symbol: string, lines: string[]): string {
+  return (
+    `符号不唯一（${hits.length} 候选，symbol=${symbol}）。传 parent 消歧` +
+    '（方法 → 所在类名；Go 方法 → receiver 类型名），候选如下:\n' +
+    hits.map((s) => describeSymbolCtx(s, lines)).join('\n')
+  );
+}
+
 export async function editCode(args: EditCodeArgs): Promise<{ message: string }> {
   const { op } = args;
   const projectRoot = path.resolve(args.project_dir);
@@ -348,8 +404,11 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     const startIdx = start - 1;
     const count = end - start + 1;
     const codeLines = normalizeCode(args.code!, eol);
+    // ── 缩进规范化（以周围上下文为准）：新代码按 start 行的所在缩进层级重排，
+    //    而非把 AI 给的（可能来自别处的）缩进原样塞进去。
+    const aligned = realignCode(codeLines, leadingWhitespaceOfLine(original, start));
     const newLines = [...lines];
-    newLines.splice(startIdx, count, ...codeLines);
+    newLines.splice(startIdx, count, ...aligned);
     const newContent = newLines.join('');
 
     // 语法门（同 replace：解析失败 / 新引入语法错误 → 拒绝不写盘）
@@ -365,12 +424,12 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
 
     // 区间穿透的符号（提示影响面，不禁止——行区间是显式请求，默认信任 caller）
     const overlapped = parsed.symbols.filter((s) => s.start_line <= end && s.end_line >= start);
-    const preview = buildRangePreview(start, end, total, lines.slice(startIdx, startIdx + count), codeLines, overlapped, args.quiet);
+    const preview = buildRangePreview(start, end, total, lines.slice(startIdx, startIdx + count), aligned, overlapped, args.quiet);
 
     if (args.dry_run) {
       return {
         message:
-          `[干跑] range ${relPath} L${start}-L${end}（${count} 行 → ${codeLines.length} 行）` +
+          `[干跑] range ${relPath} L${start}-L${end}（${count} 行 → ${aligned.length} 行）` +
           (syntaxRepaired ? '（此编辑会顺手修复原文件语法错误）' : '') +
           `，${afterHasError ? '⚠ 文件原有语法错误仍在（未恶化也未修复）' : '语法门通过'}，未写盘:\n${preview}`,
       };
@@ -384,7 +443,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
     const repairNote = syntaxRepaired ? '（顺手修复了原文件的语法错误 ✓）' : '';
     return {
       message:
-        `✓ range 编辑 ${relPath} L${start}-L${end}（${count} 行 → ${codeLines.length} 行），` +
+        `✓ range 编辑 ${relPath} L${start}-L${end}（${count} 行 → ${aligned.length} 行），` +
         `索引已重建（${sync.status}）${diffNote}${repairNote}\n${preview}`,
     };
   }
@@ -439,6 +498,8 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   }
 
   let lineOp: LineOp;
+  /** 本次替换/删除/插入命中的目标符号 kind（供 sub=body 引导文案用；replace/delete 时才有值） */
+  let targetKind: ParsedSymbol['kind'] | undefined;
 
   if (op === 'insert') {
     const codeLines = normalizeCode(args.code!, eol);
@@ -453,10 +514,7 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
         );
       }
       if (hits.length > 1) {
-        throw new Error(
-          `插入锚点不唯一（${hits.length} 候选），传 parent 消歧:\n` +
-            hits.map((s) => `  ${describeSymbol(s)}`).join('\n'),
-        );
+        throw new Error(buildAmbiguityError(hits, args.symbol, lines));
       }
       at = hits[0].end_line; // 符号最后一行的下一行
     } else {
@@ -478,24 +536,28 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
       const alt = [...qnHits, ...nameHits, ...q2, ...n2];
       if (alt.length > 0) {
         throw new Error(
-          `symbol=${args.symbol} + parent=${args.parent} 无命中，但去掉 parent 有 ${alt.length} 候选:\n` +
-            alt.map((s) => `  ${describeSymbol(s)}`).join('\n'),
+          `symbol=${args.symbol} + parent=${args.parent} 无命中（parent 可能写错），但去掉 parent 有 ${alt.length} 候选:\n` +
+            alt.map((s) => `  ${describeSymbol(s)}`).join('\n') +
+            '\n请按上面候选的 parent（类名 / receiver 类型名）修正 parent 重试。',
         );
       }
     }
     if (hits.length === 0) {
+      targetKind = parsed.symbols.find((s) => s.name === args.symbol!)?.kind;
+      const hint = subBodyHint(targetKind);
+      // 若缺命中且新 code 像裸函数体 → 多一个提示给用户引导，大概率是想改函数体却传成了 full replace
+      const bodyHint = (args.code && looksLikeBareBody(args.code)) ? hint : '';
       throw new Error(
         `符号未找到: ${args.symbol}。文件符号:\n` +
-          parsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n'),
+          parsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n') +
+          bodyHint,
       );
     }
     if (hits.length > 1) {
-      throw new Error(
-        `符号不唯一（${hits.length} 候选），传 parent 消歧:\n` +
-          hits.map((s) => `  ${describeSymbol(s)}`).join('\n'),
-      );
+      throw new Error(buildAmbiguityError(hits, args.symbol!, lines));
     }
     const target = hits[0];
+    targetKind = target.kind;
     const startIdx = target.start_line - 1;
     const count = target.end_line - target.start_line + 1;
     lineOp = {
@@ -515,11 +577,13 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   }
 
   // ── 安全校验：re-parse，失败不写盘 ──
+  const bodyHint = op === 'replace' && !args.sub && args.code && looksLikeBareBody(args.code) ? subBodyHint(targetKind) : '';
   const reparsed = await parseFileFull(absPath, newContent);
   if (reparsed.error) {
     throw new Error(
       `编辑后文件解析失败，已放弃（未写盘）: ${reparsed.error}\n` +
-        '常见原因：新代码缩进/括号不完整、class 方法缩进层级错。请检查 code 后重试。',
+        '常见原因：新代码缩进/括号不完整、class 方法缩进层级错。请检查 code 后重试。' +
+        bodyHint,
     );
   }
   const afterHasError = await hasSyntaxError(absPath, newContent);
@@ -527,7 +591,8 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   if (!baselineHasError && afterHasError) {
     throw new Error(
       '编辑引入了语法错误（hasError false→true），已放弃（未写盘）。\n' +
-        '常见原因：新代码括号/引号不闭合、缩进层级错、Go 少了 return。请检查 code 后重试。',
+        '常见原因：新代码括号/引号不闭合、缩进层级错、Go 少了 return。请检查 code 后重试。' +
+        bodyHint,
     );
   }
   if (op === 'replace') {
@@ -539,7 +604,8 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
       throw new Error(
         `替换后未找到同名符号 ${args.symbol}（疑似粘贴了别的函数），已放弃（未写盘）。\n` +
           '新代码解析出的符号:\n' +
-          reparsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n'),
+          reparsed.symbols.map((s) => `  ${describeSymbol(s)}`).join('\n') +
+          bodyHint,
       );
     }
     // 重复顶层符号防御（狗食缺陷：replace 大符号时新 code 带入了旧定义的副本，

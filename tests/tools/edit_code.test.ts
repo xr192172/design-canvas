@@ -14,7 +14,7 @@ import path from 'node:path';
 import { editCode } from '../../src/tools/edit_code.js';
 import { parseFileFull } from '../../src/tools/ts_kernel/index.js';
 import { getProjectCacheDb, closeAllProjectCacheDbs } from '../../src/db/db.js';
-import { searchSymbols } from '../../src/db/symbols.js';
+import { searchSymbols, getFileParse } from '../../src/db/symbols.js';
 
 let dir: string;
 
@@ -441,5 +441,246 @@ describe('range（显式行区间编辑）', () => {
     await expect(
       editCode({ project_dir: dir, file: 'src/badr.ts', op: 'range', start: 5, end: 2, code: 'x' }),
     ).rejects.toThrow(/end\(2\) < start\(5\)/);
+  });
+});
+
+describe('未预热：replace_text 无需预建索引（vs safe_rename 需预热）', () => {
+  it('全新目录、无 cache.db、未预热 → replace_text 仍可编辑并事后建索引', async () => {
+    write(
+      'src/plain.ts',
+      `export const GREETING = 'hello';
+
+export function greet(): string {
+  return GREETING;
+}
+`,
+    );
+    // 未预热：不做任何 index/import_project，直接 replace_text（文本唯一替换不依赖符号索引）
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/plain.ts',
+      op: 'replace_text',
+      old_text: "'hello'",
+      new_text: "'hi'",
+    });
+    expect(r.message).toContain('replace_text');
+    const after = fs.readFileSync(path.join(dir, 'src/plain.ts'), 'utf8');
+    expect(after).toContain("'hi'");
+    // 编辑后索引已建立（新鲜度闭环）——即使此前从未预热
+    const db = getProjectCacheDb(dir);
+    expect(searchSymbols(db, 'greet', 5).length).toBeGreaterThan(0);
+  });
+
+  it('replace_text 降级失败用于绕开符号缺索引时：dry_run 亦不写盘', async () => {
+    const p = write('src/dry_text.ts', `const A = 1;\n`);
+    const before = fs.readFileSync(p, 'utf8');
+    const r = await editCode({
+      project_dir: dir,
+      file: 'src/dry_text.ts',
+      op: 'replace_text',
+      old_text: 'A = 1',
+      new_text: 'A = 2',
+      dry_run: true,
+    });
+    expect(r.message).toContain('[干跑]');
+    expect(fs.readFileSync(p, 'utf8')).toBe(before);
+  });
+});
+
+describe('落盘原子性：中止编辑无残留（文件与 cache.db 双一致）', () => {
+  it('先建索引基线，被拒绝的编辑既不改文件也不污染 cache.db', async () => {
+    const p = write('src/math.ts', TS_SAMPLE);
+    // 先建立索引基线（通过一次成功编辑确定性触发 syncFile）
+    await editCode({
+      project_dir: dir,
+      file: 'src/math.ts',
+      op: 'insert',
+      symbol: 'helper',
+      code: 'export function seeded(): number {\n  return 1;\n}',
+    });
+    const db = getProjectCacheDb(dir);
+    const beforeContent = fs.readFileSync(p, 'utf8');
+    const beforeSym = (getFileParse(db, 'src/math.ts')?.symbols ?? [])
+      .map((s) => `${s.qualified_name}@${s.start_line}`)
+      .sort();
+    // 注入语法破坏的 replace → 被拒绝
+    await expect(
+      editCode({
+        project_dir: dir,
+        file: 'src/math.ts',
+        op: 'replace',
+        symbol: 'helper',
+        code: 'export function helper(): string {\n  return "oops\n}',
+      }),
+    ).rejects.toThrow(/语法错误|放弃|解析失败|未写盘/);
+    // 文件原样（没有半截写入）
+    expect(fs.readFileSync(p, 'utf8')).toBe(beforeContent);
+    // cache.db 符号表原样（没有被半写污染）
+    const afterSym = (getFileParse(db, 'src/math.ts')?.symbols ?? [])
+      .map((s) => `${s.qualified_name}@${s.start_line}`)
+      .sort();
+    expect(afterSym).toEqual(beforeSym);
+  });
+});
+
+describe('并发 cache.db 写锁：并发编辑不抛 locked 也不损坏索引', () => {
+  it('N 个文件并发 replace 各自成功，索引整体完整可查', async () => {
+    const n = 12;
+    for (let i = 0; i < n; i++) write(`src/f${i}.ts`, TS_SAMPLE);
+    const jobs = Array.from({ length: n }, (_, i) =>
+      editCode({
+        project_dir: dir,
+        file: `src/f${i}.ts`,
+        op: 'replace',
+        symbol: 'add',
+        code: `export function add(a: number, b: number): number {\n  return a + b + ${i};\n}`,
+      }),
+    );
+    const results = await Promise.all(jobs); // 任一抛「database is locked」都会使该句失败
+    results.forEach((r) => expect(r.message).toContain('已替换'));
+    // 每文件正文正确（并发没有互相覆盖/丢写）
+    for (let i = 0; i < n; i++) {
+      expect(fs.readFileSync(path.join(dir, `src/f${i}.ts`), 'utf8')).toContain(`a + b + ${i};`);
+    }
+    // 索引整体一致：12 个文件各有索引（每文件一个被编辑过的 add 顶层符号）
+    const db = getProjectCacheDb(dir);
+    const rows = searchSymbols(db, 'add', 50);
+    const indexedFiles = new Set(rows.filter((s) => s.file_path.startsWith('src/f')).map((s) => s.file_path));
+    expect(indexedFiles.size).toBe(n);
+  });
+});
+
+describe('range 缩进规范化（以周围上下文为准）', () => {
+  it('AI 给零缩进代码，range 后自动贴合所在缩进层级', async () => {
+    write(
+      'src/ind.ts',
+      `class Svc {
+  run(): void {
+    stepA();
+    stepB();
+  }
+}
+`,
+    );
+    // range L3（run() 体，缩进 4 空格），传零缩进代码 → 归一化到 4 空格
+    await editCode({
+      project_dir: dir,
+      file: 'src/ind.ts',
+      op: 'range',
+      start: 3,
+      end: 3,
+      code: 'stepNEW();\n',
+    });
+    const after = fs.readFileSync(path.join(dir, 'src/ind.ts'), 'utf8');
+    expect(after).toMatch(/^ {4}stepNEW\(\);/m);
+  });
+
+  it('多行块只去公共缩进、保留内部相对嵌套', async () => {
+    write(
+      'src/ind2.ts',
+      `function outer(): void {
+  if (ok()) {
+    inner();
+  }
+}
+`,
+    );
+    // 传一段带 4 空格基线缩进（为更深层级写的）代码，range 到 L2-L4（if 语句，体缩进 2 空格）→
+    // 去公共缩进（4）→ 按所在层级（2）重排，内部相对嵌套保留（inner/extra 相对 +2）
+    await editCode({
+      project_dir: dir,
+      file: 'src/ind2.ts',
+      op: 'range',
+      start: 2,
+      end: 4,
+      code: `    if (ok()) {
+      inner();
+      extra();
+    }`,
+    });
+    const after = fs.readFileSync(path.join(dir, 'src/ind2.ts'), 'utf8');
+    // if 在 fn 体层级（2 空格），其内部再 +2
+    expect(after).toMatch(/^  if \(ok\(\)\) \{$/m);
+    expect(after).toContain('\n    inner();\n');
+    expect(after).toContain('\n    extra();\n');
+    // 仍能解析出 outer 函数
+    const parsed = await parseFileFull('x.ts', after);
+    expect(parsed.symbols.map((s) => s.name)).toContain('outer');
+  });
+});
+
+describe('replace 裸函数体 → 提示改用 sub=body', () => {
+  it('对 class 方法 replace 裸语句 → 报错含 sub=body 引导，且不写盘', async () => {
+    const p = write(
+      'src/rep.ts',
+      `export class Calc {
+  total = 0;
+
+  add(n: number): number {
+    return this.total + n;
+  }
+}
+`,
+    );
+    const before = fs.readFileSync(p, 'utf8');
+    await expect(
+      editCode({
+        project_dir: dir,
+        file: 'src/rep.ts',
+        op: 'replace',
+        symbol: 'add',
+        code: 'return this.total + 100;\n',
+      }),
+    ).rejects.toThrow(/sub='body'/);
+    expect(fs.readFileSync(p, 'utf8')).toBe(before);
+  });
+
+  it('完整定义被替换不误报 sub=body（自包含代码正常通过）', async () => {
+    const p = write('src/full.ts', TS_SAMPLE);
+    await editCode({
+      project_dir: dir,
+      file: 'src/full.ts',
+      op: 'replace',
+      symbol: 'helper',
+      code: 'export function helper(): string {\n  return \'v2\';\n}',
+    });
+    expect(fs.readFileSync(p, 'utf8')).toContain("'v2'");
+  });
+});
+
+describe('同名命中返回 N 候选 + 上下文摘要 + parent 引导', () => {
+  it('歧义报错含候选数、ctx 摘要与 parent 指引，AI 可凭正文分辨', async () => {
+    write(
+      'src/ambctx.ts',
+      `export class A {
+  save(): void {
+    console.log('A saves fast');
+  }
+}
+
+export class B {
+  save(): void {
+    console.log('B saves slow');
+  }
+}
+`,
+    );
+    try {
+      await editCode({
+        project_dir: dir,
+        file: 'src/ambctx.ts',
+        op: 'replace',
+        symbol: 'save',
+        code: '  save(): void {\n    console.log(1);\n  }',
+      });
+      throw new Error('应当抛歧义错误，却成功了');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toMatch(/不唯一（[23] 候选/);
+      expect(msg).toContain('ctx:'); // 上下文摘要
+      expect(msg).toContain('parent'); // 引导 parent 消歧
+      expect(msg).toMatch(/A saves fast/); // 摘要含方法正文
+      expect(msg).toMatch(/B saves slow/);
+    }
   });
 });
