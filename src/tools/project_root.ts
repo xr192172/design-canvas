@@ -50,8 +50,33 @@ const MANIFESTS = ['package.json', 'go.mod', 'pyproject.toml', 'Cargo.toml', 'po
 /** 邻域项目样兄弟数量上限：超过即判定为 temp/缓存容器（非工作区），短路不扫 */
 const NEIGHBOR_LIMIT = 20;
 
+/**
+ * 邻域 importer 扫描时间预算（毫秒）：跨 git 根引用是极少数场景，而"每个兄弟仓库
+ * 的每个源码文件做一次 AST 解析"在塞满众多仓库的工作区（如 D:\project_develop 下
+ * 数十个仓库）里会随 safe_rename 每次调用被反复执行 → 卡死 + 内存持续增长（曾实测
+ * 单进程升至 10GB）。给扫描设硬 deadline，超时即停止并返回已收集的引用者——
+ * 宁可漏掉跨根引用，也绝不允许一次 rename 把整个工作区解析常驻内存。
+ */
+const EXTERNAL_IMPORTER_DEADLINE_MS = 2500;
+
 function isSkippedDir(name: string): boolean {
   return SKIP_DIRS.has(name) || name.startsWith('.');
+}
+
+/** 闭包边界外的一次 import 依赖记录（"此文件引用了项目外的哪个目标"——只反馈，绝不追进去改） */
+export interface ExternalRef {
+  /** 引用方文件（绝对路径，位于 root 内） */
+  fromAbs: string;
+  /** import source 字符串（相对/别名/包路径）；无法取得时为空串 */
+  source: string;
+  /** 解析到 root 外的目标文件绝对路径 */
+  resolved: string;
+}
+
+/** 判断绝对路径是否落在 root（或其子目录）内——闭包只扩根内，越界即视为外部边界 */
+export function isInsideRoot(abs: string, root: string): boolean {
+  const rp = path.relative(path.resolve(root), path.resolve(abs));
+  return rp === '' || (!rp.startsWith('..') && !path.isAbsolute(rp));
 }
 
 /**
@@ -528,7 +553,10 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
   const rootAlias = loadAliasConfig(rootAbs);
   // 裸包 workspace 互引：seed 所在项目包名（B `import {..} from 'a'`，a=A 包名 → 命中）
   const rootPkgName = readPackageName(rootAbs);
+  // 时间预算：跨根扫描常超时，超 deadline 即停止（宁可漏跨根，不可卡死/爆内存）
+  const deadline = Date.now() + EXTERNAL_IMPORTER_DEADLINE_MS;
   for (const e of entries) {
+    if (Date.now() > deadline) break; // 预算耗尽 → 停止扫描剩余兄弟
     if (!e) continue;
     if (isSkippedDir(e.name)) continue;
     const p = path.join(siblingDir, e.name);
@@ -540,11 +568,13 @@ export async function findExternalImporters(seedFile: string, root: string): Pro
       const projFiles: string[] = [];
       walkProjectFiles(p, projFiles);
       for (const f of projFiles) {
+        if (Date.now() > deadline) break; // 单个仓库内也受同一预算约束
         const abs = path.resolve(f);
         if (abs === seedAbs || !isLocalSource(abs)) continue;
         if (await importsTargetFile(abs, seedAbs, projAlias, rootPkgName)) out.push(abs);
       }
     } else if (e.isFile() && SRC_EXTS.has(path.extname(e.name))) {
+      if (Date.now() > deadline) break;
       const abs = path.resolve(p);
       if (abs === seedAbs || !isLocalSource(abs)) continue;
       if (await importsTargetFile(abs, seedAbs, rootAlias, rootPkgName)) out.push(abs);
@@ -699,7 +729,7 @@ async function tryIndexedExpandClosure(
   seedAbs: string,
   root: string,
   aliasCfg: AliasConfig | null,
-): Promise<string[] | null> {
+): Promise<{ files: string[]; externalRefs: ExternalRef[] } | null> {
   // 存在性预检：避免 getProjectCacheDb() 在无索引的项目里把空 cache.db 创建出来（否则 Windows 上会持有 EBUSY 锁，
   // 导致 temp 目录测试的 rmSync 抛错，且无意义消耗一次池连接）。
   const dbFile = path.join(root, '.design-canvas', 'cache.db');
@@ -726,12 +756,19 @@ async function tryIndexedExpandClosure(
   const langCtx: LangResolveCtx = { root, goModules };
   const included = new Map<string, boolean>(); // abs → 是否已扩边（true=已处理）
   const queue: string[] = [];
+  const externalRefs: ExternalRef[] = [];
   const addAbs = (a: string) => {
     if (!isLocalSource(a)) return;
     if (!included.has(a)) {
       included.set(a, false);
       queue.push(a);
     }
+  };
+  /** 正向 resolve 结果：根内 → 扩入闭包；根外 → 记为外部边界（不追外、不解析其 import） */
+  const addResolved = (fromAbs: string, source: string, real: string | null): void => {
+    if (!real) return;
+    if (isInsideRoot(real, root)) addAbs(real);
+    else externalRefs.push({ fromAbs, source, resolved: real });
   };
 
   // 1) seed 必含
@@ -775,13 +812,12 @@ async function tryIndexedExpandClosure(
           };
           real = resolveLangImport(f, pi, langCtx);
         }
-        if (real) addAbs(real);
+        if (real) addResolved(f, imp.source, real);
       }
     } else {
-      // 未索引文件（典型：跨根 findExternalImporters 扩入的兄弟项目文件）
-      // → 现场读+解析一次（这类文件极少，不等于全扫）
+      // 未索引文件（root 内尚未索引的增量文件，数量极少）→ 现场读+解析一次
       for (const real of await expandOneFileOnTheFly(f, aliasCfg, langCtx)) {
-        addAbs(real);
+        addResolved(f, '', real);
       }
     }
 
@@ -804,23 +840,10 @@ async function tryIndexedExpandClosure(
     // 再找"它们的反向引用"属于极端边角，本轮不扩（宁可少不可错）。
   }
 
-  // 6) 邻域 importer 有界扫描（跨 git 根引用 seed → 扩入，并 BFS 其 import 边）
-  //    本步复用原 findExternalImporters——它是 O(兄弟项目数 × walk + import 解析)，
-  //    但 NEIGHBOR_LIMIT=20 有界，且 seed 的邻域项目集合本身就很小（通常 0-2 个），
-  //    不会回到 O(root)。
-  const externalImporters = await findExternalImporters(seedAbs, root);
-  for (const extAbs of externalImporters) addAbs(extAbs);
-  // 对新加的邻域文件再跑一轮扩边（它们的依赖也要入闭包，与原逻辑一致）
-  while (head < queue.length) {
-    const f = queue[head++];
-    if (included.get(f)) continue;
-    included.set(f, true);
-    for (const real of await expandOneFileOnTheFly(f, aliasCfg, langCtx)) {
-      addAbs(real);
-    }
-  }
+  // 6) 邻域 importer（外部"谁 import 我"）—— 我们不改外部仓库，不做这方向扫描，
+  //    故不再调用 findExternalImporters（那曾是每次 rename O(全兄弟仓库 AST) 卡死 + 爆内存的根源）。
 
-  return [...included.keys()];
+  return { files: [...included.keys()], externalRefs };
 }
 
 /**
@@ -835,11 +858,20 @@ async function tryIndexedExpandClosure(
  *
  * 2026-09 新增：cache.db 索引快速路径（交接文档 ②+④）。
  *  - 有可用 cache.db（import_project / watcher 已建索引）→ 走反查子图 BFS：
- *    从 seed 沿 import 边只扩实际相连文件，从 O(root) 降到 O(relevant)；
- *    仍做邻域 findExternalImporters 有界扫描（跨 git 根引用不进单项目 cache）。
- *  - 无索引/索引不可用/seed 未索引 → 完全保留原"现场全扫"逻辑（零前置免摩擦）。
+ *    从 seed 沿 import 边只扩实际相连文件，从 O(root) 降到 O(relevant)。
+ *  - 无索引/索引不可用/seed 未索引 → 兜底"现场全扫"（零前置免摩擦）。
+ *
+ * 外部边界语义（2026-09）：**只在本工作区内扩闭包**；任一 import 解析到 root 外
+ * （外部仓库）→ 记录为 externalRef（不进入解析其 import 边、不落盘外部），并把该
+ * 边界反馈给调用方。**不做 importer 方向**（外部"谁 import 我"与我们无关——我们是
+ * 外部依赖的下游，没有资格也不应该去改上游仓库；那曾是每次 rename O(全兄弟仓库
+ * AST) 卡死 + 爆内存的根源，已移除）。
  */
-export async function expandClosure(seedFile: string, root: string, alias?: AliasConfig | null): Promise<string[]> {
+export async function expandClosureDetailed(
+  seedFile: string,
+  root: string,
+  alias?: AliasConfig | null,
+): Promise<{ files: string[]; externalRefs: ExternalRef[] }> {
   const aliasCfg = alias === undefined ? loadAliasConfig(root) : alias;
   const seedAbs = path.resolve(seedFile);
 
@@ -847,9 +879,10 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
   const fast = await tryIndexedExpandClosure(seedAbs, root, aliasCfg);
   if (fast) return fast;
 
-  // ④ 兜底：无索引时保留原现场全扫（零前置、免摩擦）
+  // ④ 兜底：无索引时走现场全扫（零前置、免摩擦）
   const included = new Map<string, boolean>(); // absPath → 是否已解析其 imports
   const queue: string[] = [];
+  const externalRefs: ExternalRef[] = [];
 
   // 初始：项目根内全部本地源 + 种子文件（种子可能不在根内，如跨根引用起点）
   const rootFiles: string[] = [];
@@ -910,23 +943,26 @@ export async function expandClosure(seedFile: string, root: string, alias?: Alia
       }
       for (const real of edges) {
         if (!real || !isLocalSource(real)) continue;
-        if (!included.has(real)) {
-          included.set(real, false);
-          queue.push(real);
+        if (isInsideRoot(real, root)) {
+          if (!included.has(real)) {
+            included.set(real, false);
+            queue.push(real);
+          }
+        } else {
+          externalRefs.push({ fromAbs: f, source: '', resolved: real });
         }
       }
     }
   };
   await drain();
 
-  // 阶段 2：邻域 importer 有界扫描（根外引用 seed 的文件）→ 扩入，再 BFS 其 import 边
-  for (const ext of await findExternalImporters(seedAbs, root)) {
-    if (!included.has(ext)) {
-      included.set(ext, false);
-      queue.push(ext);
-    }
-  }
-  await drain();
+  return { files: [...included.keys()], externalRefs };
+}
 
-  return [...included.keys()];
+/**
+ * 便捷版：只返回闭包文件列表（供不关心外部边界的调用方/旧签名使用）。
+ * 跨根等外部依赖可经 expandClosureDetailed 取得 externalRefs。
+ */
+export async function expandClosure(seedFile: string, root: string, alias?: AliasConfig | null): Promise<string[]> {
+  return (await expandClosureDetailed(seedFile, root, alias)).files;
 }

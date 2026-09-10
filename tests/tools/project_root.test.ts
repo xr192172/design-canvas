@@ -19,6 +19,7 @@ import {
   resolveProjectRoot,
   realResolveImport,
   expandClosure,
+  expandClosureDetailed,
   loadAliasConfig,
   resolveAliasedImport,
   findExternalImporters,
@@ -129,7 +130,7 @@ describe('realResolveImport - 相对导入真实落盘解析', () => {
 });
 
 describe('expandClosure - 动态闭包边界', () => {
-  it('根内文件 + 沿 import 边扩入根外 shared.ts → 自包含闭包', async () => {
+  it('根内文件扩入闭包；import 根外 shared.ts → 记为 externalRef，不扩入不追外', async () => {
     const dir = mkProj({
       // 项目 A：manifest 标志根
       'A/package.json': '{ "name": "a" }\n',
@@ -148,12 +149,18 @@ describe('expandClosure - 动态闭包边界', () => {
     const root = resolveProjectRoot(path.join(dir, 'A/src/def.ts'));
     expect(path.resolve(root)).toBe(path.resolve(path.join(dir, 'A')));
 
-    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), root);
-    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    const res = await expandClosureDetailed(path.join(dir, 'A/src/def.ts'), root);
+    const norm = res.files.map((f) => f.replace(/\\/g, '/'));
     expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
     expect(norm).toContain(path.join(dir, 'A/src/app.ts').replace(/\\/g, '/'));
-    // 跨根 shared.ts 被 import 边纳入
-    expect(norm).toContain(path.join(dir, 'shared.ts').replace(/\\/g, '/'));
+    // 根外 shared.ts 不再扩入闭包（不追外）
+    expect(norm).not.toContain(path.join(dir, 'shared.ts').replace(/\\/g, '/'));
+    // 边界反馈：def.ts import 到了根外 shared.ts
+    expect(
+      res.externalRefs.some(
+        (e) => e.fromAbs === path.join(dir, 'A/src/def.ts') && e.resolved === path.join(dir, 'shared.ts'),
+      ),
+    ).toBe(true);
     rmForce(dir);
   });
 
@@ -253,7 +260,7 @@ describe('resolveAliasedImport - 别名导入落盘解析', () => {
 });
 
 describe('expandClosure - 别名边跨根扩展', () => {
-  it('def 用别名 @shared/* 依赖根外 helper.ts → 闭包沿别名边扩入', async () => {
+  it('def 用别名 @shared/* 依赖根外 helper.ts → 记为 externalRef，不扩入根外', async () => {
     const dir = mkProj({
       // 项目 A：manifest 根 + tsconfig 把 @shared/* 映射到根外 ../shared/*
       'A/package.json': '{ "name": "a" }\n',
@@ -267,11 +274,14 @@ describe('expandClosure - 别名边跨根扩展', () => {
     expect(path.resolve(root)).toBe(path.resolve(path.join(dir, 'A')));
     const cfg = loadAliasConfig(root);
 
-    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), root, cfg);
-    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    const res = await expandClosureDetailed(path.join(dir, 'A/src/def.ts'), root, cfg);
+    const norm = res.files.map((f) => f.replace(/\\/g, '/'));
     expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
-    // 根外 helper.ts 经别名边被纳入
-    expect(norm).toContain(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'));
+    // 根外 helper.ts 不再经别名边扩入（不追外）
+    expect(norm).not.toContain(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'));
+    expect(
+      res.externalRefs.some((e) => e.resolved === path.join(dir, 'shared/helper.ts')),
+    ).toBe(true);
     rmForce(dir);
   });
 });
@@ -309,7 +319,7 @@ describe('findExternalImporters - importer 邻域有界扫描', () => {
 });
 
 describe('expandClosure - importer 邻域自包含', () => {
-  it('兄弟项目引用 seed → 闭包纳入并沿其 import 边扩展（自包含）', async () => {
+  it('兄弟项目引用 seed → 不再纳入闭包（不追外，importer 方向与我们无关）', async () => {
     const dir = mkProj({
       'A/package.json': '{ "name": "a" }\n',
       'A/src/def.ts': 'export function compute() { return 1; }\n',
@@ -317,13 +327,12 @@ describe('expandClosure - importer 邻域自包含', () => {
       'B/src/use.ts': "import { compute } from '../../A/src/def';\nimport { helper } from './util';\nexport function use() { return compute() + helper(); }\n",
       'B/src/util.ts': 'export function helper() { return 1; }\n',
     });
-    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), path.join(dir, 'A'));
-    const norm = files.map((f) => f.replace(/\\/g, '/'));
+    const res = await expandClosureDetailed(path.join(dir, 'A/src/def.ts'), path.join(dir, 'A'));
+    const norm = res.files.map((f) => f.replace(/\\/g, '/'));
     expect(norm).toContain(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'));
-    // 兄弟项目引用 seed 的文件被邻域扫描纳入
-    expect(norm).toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
-    // 邻域文件的本地依赖也被纳入（自包含承诺）
-    expect(norm).toContain(path.join(dir, 'B/src/util.ts').replace(/\\/g, '/'));
+    // 兄弟项目（根外）既不扩入闭包、也不扫（外部 import 我们 = 上游不管下游）
+    expect(norm).not.toContain(path.join(dir, 'B/src/use.ts').replace(/\\/g, '/'));
+    expect(norm).not.toContain(path.join(dir, 'B/src/util.ts').replace(/\\/g, '/'));
     rmForce(dir);
   });
 });
@@ -564,11 +573,12 @@ describe('expandClosure 索引快速路径 - ②+④ 行为', () => {
 
     const root = path.join(dir, 'A');
     const cfg = loadAliasConfig(root);
-    const files = await expandClosure(path.join(dir, 'A/src/def.ts'), root, cfg);
-    const s = normSet(files);
+    const res = await expandClosureDetailed(path.join(dir, 'A/src/def.ts'), root, cfg);
+    const s = normSet(res.files);
     expect(s.has(path.join(dir, 'A/src/def.ts').replace(/\\/g, '/'))).toBe(true);
-    // 跨根 shared/helper.ts：正向 resolveAliasedImport 命中 → 加入；它未索引 → expandOneFileOnTheFly 解析；应纳入
-    expect(s.has(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'))).toBe(true);
+    // 跨根 shared/helper.ts：目标是根外 → 记为 externalRef，不扩入闭包
+    expect(s.has(path.join(dir, 'shared/helper.ts').replace(/\\/g, '/'))).toBe(false);
+    expect(res.externalRefs.some((e) => e.resolved === path.join(dir, 'shared/helper.ts'))).toBe(true);
     closeProjectCacheDb(root);
     rmForce(dir);
   });

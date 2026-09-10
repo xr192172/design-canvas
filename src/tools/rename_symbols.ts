@@ -17,6 +17,7 @@ import path from 'node:path';
 import { renameSymbol, type RenameSymbolInput, type RenameSymbolResult } from './rename_symbol.js';
 import { resolveProjectRoot } from './project_root.js';
 import { createProtectGuard } from './protect.js';
+import type { ExternalRef } from './project_root.js';
 
 /** 字面量命中的类别：contract=对外工具注册名(破坏契约需人审)；history=tool-convergence 历史记录(保留原貌)；docs=文档；test=测试断言；code=源码字符串 */
 export type LiteralMatchKind = 'contract' | 'history' | 'docs' | 'test' | 'code';
@@ -85,6 +86,8 @@ export interface RenameSymbolsResult {
   }>;
   /** apply_literals + 非 dry_run 时，字面量落盘的文件数 */
   literalFilesWritten?: number;
+  /** 工作区外的 import 依赖边界（各条目 rename 反馈聚合）——只反馈不改 */
+  externalRefs?: ExternalRef[];
 }
 
 export async function renameSymbols(input: {
@@ -144,11 +147,14 @@ export async function renameSymbols(input: {
     if (!result.ok) allOk = false;
   }
 
+  // 跨条目聚合：工作区外的 import 依赖边界（只反馈不改）
+  const externalRefs = previews.flatMap((p) => p.result?.externalRefs ?? []);
+
   // 任一阻断 → 整体不落盘，给预览报告
-  if (!allOk) return { ok: false, dryRun: true, previews, applied: [], filesWritten: 0, blocked: ['至少一个条目被阻断→整体未落盘'], literals };
+  if (!allOk) return { ok: false, dryRun: true, previews, applied: [], filesWritten: 0, blocked: ['至少一个条目被阻断→整体未落盘'], literals, ...(externalRefs.length ? { externalRefs } : {}) };
 
   // dry_run 显式要求 → 只预览
-  if (dry_run === true) return { ok: true, dryRun: true, previews, applied: [], filesWritten: 0, literals };
+  if (dry_run === true) return { ok: true, dryRun: true, previews, applied: [], filesWritten: 0, literals, ...(externalRefs.length ? { externalRefs } : {}) };
 
   // 阶段 2：全部通过 → 逐条真落盘（串行；前面改动导致后续阻断则中止并据实报告）
   const applied: RenameSymbolsResult['applied'] = [];
@@ -180,7 +186,7 @@ export async function renameSymbols(input: {
     literals = fresh;
   }
 
-  return { ok: true, previews, applied, filesWritten, ...(literalFilesWritten ? { literalFilesWritten } : {}), literals };
+  return { ok: true, previews, applied, filesWritten, ...(literalFilesWritten ? { literalFilesWritten } : {}), literals, ...(externalRefs.length ? { externalRefs } : {}) };
 }
 
 // ──────────────── 字面量引用扫描（只报告，不改动） ────────────────
@@ -204,6 +210,23 @@ function classifyLiteral(file: string, lineText: string, needle: string): Litera
   return 'code';
 }
 
+/** 解析根 .gitignore 中形如 `/<name>/`、`<name>/`、`/<name>`、`<name>` 的顶层目录忽略项。 */
+function gitIgnoredTopDirs(root: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    const lines = fs.readFileSync(path.join(root, '.gitignore'), 'utf-8').split(/\r?\n/);
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t.startsWith('#') || t.startsWith('!') || t.includes('*') || t.includes('**')) continue;
+      const m = t.match(/^\/?([^/#?\\][^/]*?)\/?$/);
+      if (!m) continue;
+      const name = m[1];
+      if (name && name !== '.git' && !name.includes('.')) out.add(name);
+    }
+  } catch { /* 无 .gitignore 则视为无忽略项 */ }
+  return out;
+}
+
 /** 在 projectDir 下扫描所有常见文本文件，返回 needle 列表的命中（含字节偏移，非二进制/非编译产物） */
 export function scanLiteralOccurrences(
   projectDir: string,
@@ -215,13 +238,15 @@ export function scanLiteralOccurrences(
   // 只扫描常见可读扩展名（排除二进制/编译产物）
   const SCAN_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.mts', '.json', '.md', '.yml', '.yaml', '.html', '.css', '.vue', '.py', '.go', '.java', '.sh', '.mjs']);
   const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.github']);
+  // 根 .gitignore 标记为忽略的顶层目录：git-ignore 了 = 非一手源码（依赖/派生物），不扫。
+  const gitIgnored = gitIgnoredTopDirs(projectDir);
 
   const files: string[] = [];
   function walk(dir: string): void {
     try {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (entry.isDirectory()) {
-          if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
+          if (!SKIP_DIRS.has(entry.name) && !gitIgnored.has(entry.name)) walk(path.join(dir, entry.name));
         } else if (entry.isFile() && SCAN_EXTS.has(path.extname(entry.name))) {
           files.push(path.join(dir, entry.name));
         }

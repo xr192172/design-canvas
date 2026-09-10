@@ -27,7 +27,7 @@ import { getParser } from './ts_kernel/loader.js';
 import { findLanguageByExt } from './ts_kernel/languages.js';
 import { parseContent } from './ts_kernel/kernel.js';
 import { renameFile } from './rename_file.js';
-import { resolveProjectRoot, expandClosure, loadAliasConfig, resolveAliasedImport, type AliasConfig } from './project_root.js';
+import { resolveProjectRoot, expandClosureDetailed, loadAliasConfig, resolveAliasedImport, type AliasConfig, type ExternalRef } from './project_root.js';
 import { createProtectGuard } from './protect.js';
 
 // ─────────────────────────────────────────────
@@ -1595,6 +1595,8 @@ export interface RenameSymbolResult {
   filesWritten: number;
   /** 是否 dry-run（true=未落盘，只出 diff 预览） */
   dryRun?: boolean;
+  /** 工作区外的 import 依赖边界（本文件的 import 解析到 root 外部仓库）——只反馈不改，LLM 可据此判断是否另处理 */
+  externalRefs?: ExternalRef[];
   /** 联动文件名（rename_file_if_matching 且文件名=符号名时，被同步改名的新路径） */
   fileRenamed?: string;
   /** 文件联动阻断理由（符号已改名成功，仅文件联动失败时给出） */
@@ -1670,7 +1672,8 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
   const defEditList: Edit[] = [...defEditSet].map((pos) => ({ pos, len: symbol.length, text: to }));
 
   // 收集自包含闭包源文件（项目根内全部 + 沿 import 边/别名边扩展边界外本地文件），构建相对解析表
-  const files = await expandClosure(defAbs, resolvedRoot, aliasCfg);
+  const closure = await expandClosureDetailed(defAbs, resolvedRoot, aliasCfg);
+  const files = closure.files;
   const byNoExt = buildNoExt(files);
 
   // 解析 importer 文件
@@ -1811,6 +1814,7 @@ export async function renameSymbol(input: RenameSymbolInput): Promise<RenameSymb
     definition: { file: (path.relative(resolvedRoot, defAbs) || defAbs).replace(/\\/g, '/'), edits: defEditList.length, note: '定义+同文件引用', ops: toOps(defSrc, defEditList) },
     importers,
     filesWritten,
+    ...(closure.externalRefs.length > 0 ? { externalRefs: closure.externalRefs } : {}),
     ...(fileRenamed !== undefined ? { fileRenamed } : {}),
     ...(fileRenameBlocked !== undefined ? { fileRenameBlocked } : {}),
   };
