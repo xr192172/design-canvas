@@ -29,6 +29,7 @@ import { saveDSL, getDSL, onDslChange } from '../storage.js';
 import { updateFeature } from '../tools/update_feature.js';
 import { createDaemonServer, type DslWriteRequest, type DslWriteResult } from './server.js';
 import { probeDaemon, daemonPort } from './client.js';
+import { startMemoryWatch } from './memory_watch.js';
 
 // ─────────────────────────────────────────────────────────────
 // 依赖区域感知：写冲突的"细粒度"判据
@@ -288,6 +289,17 @@ async function main(): Promise<void> {
   console.log(`  GET  /api/events          SSE（watch-alert / ledger-violated / loop-*）`);
   console.log(`  POST /api/shutdown        优雅退出（Windows 无 POSIX 信号的 HTTP 替代）`);
   console.log(`  pid ${process.pid} · pidfile ${pidfilePath(port)}`);
+
+  // 内存自动托管看门狗：持续采样 gen（带 --inspect 的外部进程）→ 阈值判定 →
+  // pushAlert（daemon SSE 实时广播 + 下一次 MCP 工具响应自动附带，DSH gen 自己看到）。
+  if ((process.env.DESIGN_CANVAS_MEMORY_WATCH ?? '1') !== '0') {
+    const intervalMs = Number(process.env.MEMORY_WATCH_INTERVAL_MS ?? 60_000);
+    const rssDeltaMb = Number(process.env.MEMORY_WATCH_RSS_DELTA_MB ?? 1024);
+    const leakRuns = Number(process.env.MEMORY_WATCH_LEAK_RUNS ?? 3);
+    const minGapMs = Number(process.env.MEMORY_WATCH_MIN_GAP_MS ?? 300_000);
+    await startMemoryWatch({ enabled: true, intervalMs, rssDeltaMb, leakRuns, minAlertGapMs: minGapMs });
+    console.log(`  [memory_watch] 采样间隔 ${intervalMs}ms · RSS 增幅>${rssDeltaMb}MB 或 heapUsed 连续${leakRuns}次↑判告警 · DESIGN_CANVAS_MEMORY_WATCH=0 关闭`);
+  }
 
   // 优雅退出：停 watch（flush 未落库变更）→ 关 server → 清 pidfile。
   // 触发：SIGINT/SIGTERM（POSIX）或 POST /api/shutdown（Windows/远程一律走这里）

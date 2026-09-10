@@ -25,7 +25,7 @@ const nodeRequire = createRequire(import.meta.url);
 const MB = (b: number | undefined): number => Math.round((b ?? 0) / 1048576);
 
 /** 单份内存采样 */
-interface MemSample {
+export interface MemSample {
   t: number;
   rss: number;
   heapUsed: number;
@@ -126,6 +126,16 @@ const MEM_EXPR = `(()=>{const m=process.memoryUsage();const h=process.getHeapSta
 
 async function sample(c: CdpClient): Promise<MemSample> {
   return (await evalJson(c, MEM_EXPR)) as MemSample;
+}
+
+/** 供外部（daemon 监控循环等）复用的单次远程采样：连目标端口 → 采样 → 关闭。 */
+export async function sampleRemote(target: number): Promise<MemSample> {
+  const c = await connectCdp(target);
+  try {
+    return await sample(c);
+  } finally {
+    c.close();
+  }
 }
 
 function fmt(s: MemSample, t0: number): string {
