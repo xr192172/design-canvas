@@ -322,6 +322,73 @@ func process() { select {} }
   });
 });
 
+describe('安全半：类型表扩展 + const + 命名返回 + 函数别名 + 嵌入 note', () => {
+  it('类型表：[]byte→Uint8Array、[]rune→number[]、[N]T→T[]、complex 如实标注', () => {
+    expect(mapGoType('[]byte').ts).toBe('Uint8Array');
+    expect(mapGoType('[]rune').ts).toBe('number[]');
+    expect(mapGoType('[4]int').ts).toBe('number[]');
+    expect(mapGoType('complex128').degree).toBe('unsupported');
+    expect(mapGoType('complex128').ts).toBe('[number, number]');
+  });
+
+  it('命名返回去名：func() (v int, err error) → [number, Error | null]', async () => {
+    const src = `package s
+func Read() (v int, err error) {
+\treturn 0, nil
+}
+`;
+    const units = await unitsOf(src);
+    const read = units.find((u) => u.name === 'Read')!;
+    renderTsSkeleton(read);
+    expect(read.skeleton).toContain('export function Read(): [number, Error | null] {');
+  });
+
+  it('包级 const/var 标量字面量 → export const', async () => {
+    const src = `package s
+const Max = 42
+const Name = "hi"
+var Debug = true
+`;
+    const r = await translateGoToTs('/tmp/c.go', src);
+    expect(r.output).toContain('export const Max = 42;');
+    expect(r.output).toContain('export const Name = "hi";');
+    expect(r.output).toContain('export const Debug = true;');
+    const max = r.units.find((u) => u.name === 'Max');
+    expect(max?.kind).toBe('const');
+    expect(max?.value).toBe('42');
+  });
+
+  it('函数类型别名：type Handler func(a int) error → (a: number) => Error | null', async () => {
+    const src = `package s
+type Handler func(a int) error
+`;
+    const units = await unitsOf(src);
+    const h = units.find((u) => u.name === 'Handler')!;
+    expect(h?.typeKind).toBe('alias');
+    renderTsSkeleton(h);
+    expect(h.skeleton).toBe('export type Handler = (a: number) => Error | null;');
+    const issues = await verifySkeletons([h]);
+    expect(issues).toEqual([]);
+  });
+
+  it('struct 嵌入字段：不机械展开，写诚实 note', async () => {
+    const src = `package s
+type Base struct {
+\tID int
+}
+type Manager struct {
+\t*Base
+\tName string
+}
+`;
+    const units = await unitsOf(src);
+    const mgr = units.find((u) => u.name === 'Manager')!;
+    // 只含命名字段 Name；嵌入 *Base 被跳过并标注
+    expect(mgr.fields).toEqual([{ name: 'Name', type: 'string' }]);
+    expect(mgr.constraints.join(' ')).toContain('嵌入字段');
+  });
+});
+
 describe('方法 receiver 泛型 + 类型约束传递', () => {
   const GO_SRC_GEN_METHOD = `package g
 type Pair[T any] struct {

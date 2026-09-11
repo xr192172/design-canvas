@@ -106,6 +106,24 @@ function appendBodyHints(snippet: string, constraints: string[]): void {
   if (/<-/.test(snippet)) constraints.push('函数体含 <- 通道收发：Channel<T> 垫片为近似，阻塞/竞态语义需人工核');
 }
 
+/** 归一化返回类型：去命名返回的名字，`(x int, err error)` → `(int, error)`；`(x int)` → `int` */
+function normResult(s: string): string {
+  const t = s.trim();
+  if (t.startsWith('(') && t.endsWith(')')) {
+    const parts = t
+      .slice(1, -1)
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => {
+        const m = /^[A-Za-z_]\w*\s+(.+)$/.exec(p);
+        return m ? m[1].trim() : p;
+      });
+    return parts.length === 1 ? parts[0] : '(' + parts.join(', ') + ')';
+  }
+  return t;
+}
+
 /** func/方法 单元：`func Add(...)` 或 `func (u *User) Greet(...)` → TransUnit(kind='func')
  *  方法映射为 TS 自由函数：receiver 作首参，名取 `${recvType}_${method}`（防同文件多类型方法撞名）。 */
 function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
@@ -115,7 +133,7 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
   const paramsNode = childField(node, 'parameters');
   const params = paramsNode ? extractParamList(paramsNode) : [];
   const resultNode = childField(node, 'result');
-  const result = resultNode ? resultNode.text.trim() : null;
+  const result = resultNode ? normResult(resultNode.text.trim()) : null;
   const snippet = node.text.trim();
   const constraints = [...DEFAULT_CONSTRAINTS];
   appendBodyHints(snippet, constraints);
@@ -155,13 +173,13 @@ function methodFromElem(elem: SyntaxNodeLike): TranslateMethod | null {
     if (!c) continue;
     if (c.type === 'field_identifier' && !name) name = c.text;
     else if (c.type === 'parameter_list') {
-      if (paramSeen) result = c.text; // 第二个参数表 = 多返回值结果
+      if (paramSeen) result = normResult(c.text); // 第二个参数表 = 多返回值结果
       else {
         params = extractParamList(c);
         paramSeen = true;
       }
     } else if (c.type === 'type_identifier' && result === undefined) {
-      result = c.text; // 单返回值
+      result = normResult(c.text); // 单返回值
     }
   }
   if (!name) return null;
@@ -192,22 +210,30 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   // struct → TS interface（数据字段）
   if (typeNode.type === 'struct_type') {
     const fields: { name: string; type: string }[] = [];
+    const embedded: string[] = [];
     const list = childField(typeNode, 'field_declaration_list') || childField(typeNode, 'body') || findChildOfType(typeNode, 'field_declaration_list');
     if (list) {
       for (let i = 0; i < list.childCount; i++) {
         const fd = list.child(i);
         if (!fd || fd.type !== 'field_declaration') continue;
         const typeNode2 = childField(fd, 'type');
-        if (!typeNode2) continue; // 嵌入字段无独立 name，切片跳过
+        if (!typeNode2) continue;
         const type = typeNode2.text;
+        let named = false;
         for (let j = 0; j < fd.childCount; j++) {
           const c = fd.child(j);
-          if (c && c.type === 'field_identifier') fields.push({ name: c.text, type });
+          if (c && c.type === 'field_identifier') {
+            fields.push({ name: c.text, type });
+            named = true;
+          }
         }
+        if (!named) embedded.push(type); // 嵌入字段（无独立 name）：机械展开会丢字段提升语义，跳过并如实标注
       }
     }
+    const constraints = [...base.constraints];
+    for (const e of embedded) constraints.push(`struct 含嵌入字段「${e}」：字段提升语义需 LLM/人工决定（未机械展开）`);
     if (fields.length === 0) return null; // 空结构体无翻译价值，跳过
-    return { ...base, typeKind: 'struct', fields };
+    return { ...base, typeKind: 'struct', fields, constraints };
   }
 
   // interface → TS interface（方法签名契约）
@@ -221,8 +247,56 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   return { ...base, typeKind: 'alias', aliasType: typeNode.text };
 }
 
-/** 深度遍历 AST，收集目标单元 */
-function collect(node: SyntaxNodeLike, units: TransUnit[]): void {
+/** Go 标量字面量节点 → TS 字面量源码（确定性可自动翻译）；不支持返回 null */
+function literalToTs(node: SyntaxNodeLike | null): string | null {
+  if (!node) return null;
+  switch (node.type) {
+    case 'int_literal':
+    case 'float_literal':
+    case 'true':
+    case 'false':
+    case 'interpreted_string_literal':
+    case 'raw_string_literal':
+      return node.text;
+    default:
+      return null; // 复合字面量/调用等 → 交给 LLM/人工，不硬猜
+  }
+}
+
+/** 包级 const/var 单元：`const Max = 100` → TransUnit(kind='const', value='100')；仅收标量字面量 */
+function unitFromVarConst(spec: SyntaxNodeLike): TransUnit | null {
+  const nameNode = childField(spec, 'name');
+  const valNode = childField(spec, 'value') || findChildLiteral(spec);
+  const name = nameNode?.text;
+  if (!name || !valNode) return null;
+  // value 可能是 expression_list，取其首个字面量子节点
+  let lit: SyntaxNodeLike | null = valNode;
+  if (valNode.type === 'expression_list') lit = findChildLiteral(valNode);
+  const value = literalToTs(lit);
+  if (value === null) return null; // 复合值不支持自动直译，跳过（不硬猜）
+  return {
+    id: name,
+    kind: 'const' as TranslateKind,
+    dstLang: 'ts',
+    name,
+    value,
+    srcSnippet: spec.text.trim(),
+    skeleton: '',
+    bodyHole: false,
+    constraints: [...DEFAULT_CONSTRAINTS],
+  };
+}
+
+function findChildLiteral(node: SyntaxNodeLike): SyntaxNodeLike | null {
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i);
+    if (c && ['int_literal', 'float_literal', 'true', 'false', 'interpreted_string_literal', 'raw_string_literal'].includes(c.type)) return c;
+  }
+  return null;
+}
+
+/** 深度遍历 AST，收集目标单元。const/var 仅收包级（顶层）。 */
+function collect(node: SyntaxNodeLike, units: TransUnit[], topLevel: boolean): void {
   const isFunc = node.type === 'function_declaration' || node.type === 'method_declaration';
   const isTypeDecl = node.type === 'type_declaration';
   if (isFunc) {
@@ -241,9 +315,20 @@ function collect(node: SyntaxNodeLike, units: TransUnit[]): void {
     }
     return; // type_spec 内部不再需要一般遍历
   }
+  // 包级 const/var（仅顶层；多 spec 的 declaration 逐条收）
+  if (topLevel && (node.type === 'const_declaration' || node.type === 'var_declaration')) {
+    const specType = node.type === 'const_declaration' ? 'const_spec' : 'var_spec';
+    for (let i = 0; i < node.childCount; i++) {
+      const spec = node.child(i);
+      if (!spec || spec.type !== specType) continue;
+      const u = unitFromVarConst(spec);
+      if (u) units.push(u);
+    }
+    return;
+  }
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i);
-    if (c) collect(c, units);
+    if (c) collect(c, units, false);
   }
 }
 
@@ -262,6 +347,9 @@ export async function extractGo(filePath: string, source: string): Promise<Extra
   const parsed = await parseAstRoot(filePath, source);
   if (!parsed?.root) return { units: [], error: `Go 解析失败（可解析性未知）：${filePath}` };
   const units: TransUnit[] = [];
-  collect(parsed.root, units);
+  for (let i = 0; i < parsed.root.childCount; i++) {
+    const c = parsed.root.child(i);
+    if (c) collect(c, units, true); // 顶层声明（包级 const/var 只在这里收）
+  }
   return { units };
 }

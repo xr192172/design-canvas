@@ -34,6 +34,10 @@ function structureCheck(u: TransUnit): string | null {
     if (nParams !== n) return `参数个数不一致：源=${n}，骨架=${nParams}`;
     return null;
   }
+  if (u.kind === 'const') {
+    if (!new RegExp(`^export\\s+const\\s+${escapeRe(u.name)}\\s*=`, 'm').test(u.skeleton)) return `const 骨架缺少 export const ${u.name} =`;
+    return null;
+  }
   if (u.kind === 'type') {
     if (u.typeKind === 'alias') {
       if (!new RegExp(`^export\\s+type\\s+${escapeRe(u.name)}(?:<[^>]*>)?\\s*=`).test(u.skeleton)) return `type 骨架缺少 export type ${u.name} =`;

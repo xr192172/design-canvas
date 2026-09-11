@@ -54,6 +54,17 @@ export function mapGoType(goType: string): MappedType {
   const t = (goType || '').trim();
   if (t === '') return { degree: 'direct', ts: 'void' };
 
+  // 特殊字节/字符切片 → 惯用 JS 类型
+  if (t === '[]byte') return { degree: 'direct', ts: 'Uint8Array' };
+  if (t === '[]rune') return { degree: 'direct', ts: 'number[]' };
+
+  // 定长数组 `[N]T` → T[]（按值语义近似）
+  const farr = /^\[(\d+)\](.+)$/.exec(t);
+  if (farr) {
+    const inner = mapGoType(farr[2]);
+    return { degree: inner.degree, ts: `${inner.ts}[]`, note: inner.note };
+  }
+
   // 切片 `[]T`
   if (t.startsWith('[]')) {
     const inner = mapGoType(t.slice(2));
@@ -100,8 +111,28 @@ export function mapGoType(goType: string): MappedType {
       note: elem.degree === 'unsupported' ? `chan 元素: ${elem.note}` : 'chan → Channel<T> 垫片（近似；select/阻塞/竞态语义需人工核）',
     };
   }
+  // 函数类型 `func(a int) error` → `(a: number) => Error | null`（逐参/返回映射；可省略参数名）
   if (t.startsWith('func')) {
-    return { degree: 'unsupported', ts: '(...args: unknown[]) => unknown', note: '函数类型参数语义需 LLM 换算签名' };
+    const fm = /^func\s*(?:\(([^)]*)\))?\s*(?:\s+(.+))?$/.exec(t);
+    if (fm) {
+      const params = fm[1] ? fm[1].split(',').map((s) => s.trim()).filter(Boolean) : [];
+      const pOut: string[] = [];
+      let anyUnsup = false;
+      for (const p of params) {
+        const pm = /^([A-Za-z_]\w*)\s+(.+)$/.exec(p); // `a int` → name=a, type=int（名字可省略）
+        const mt = mapGoType(pm ? pm[2].trim() : p);
+        if (mt.degree === 'unsupported') anyUnsup = true;
+        pOut.push(`${pm ? pm[1] : 'arg'}: ${mt.ts}`);
+      }
+      let ret = 'void';
+      if (fm[2] && fm[2].trim()) {
+        const r = mapGoType(fm[2].trim());
+        if (r.degree === 'unsupported') anyUnsup = true;
+        ret = r.ts;
+      }
+      return { degree: anyUnsup ? 'unsupported' : 'direct', ts: `(${pOut.join(', ')}) => ${ret}` };
+    }
+    return { degree: 'unsupported', ts: '(...args: unknown[]) => unknown', note: '函数类型无法归类，需 LLM 换算签名' };
   }
   // 泛型类型实参（Go 用方括号）：`Name[K, V]` / `List[int]` → 逐实参映射成 TS `Name<K, V>`
   const genSB = /^([A-Za-z_][\w.]*)\[([^\]]+)\]$/.exec(t);
@@ -126,6 +157,9 @@ export function mapGoType(goType: string): MappedType {
 
   const direct = GO_TO_TS[t];
   if (direct) return { degree: 'direct', ts: direct };
+  if (t === 'complex64' || t === 'complex128') {
+    return { degree: 'unsupported', ts: '[number, number]', note: '复数无 TS 内建，按 [实, 虚] 元组映射，运算需人工核对' };
+  }
   // 未识别 → 假定是用户类型/结构体名，透传（type 单元已机械生成 interface）
   return { degree: 'direct', ts: t };
 }
@@ -245,12 +279,18 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
   return { code: `export interface ${u.name}${typeParamString(u)} {\n${fields}\n}`, notes };
 }
 
+/** 渲染 const 单元骨架：`const Max = "hi"` → `export const Max = "hi";` */
+function renderConstSkeleton(u: TransUnit): { code: string; notes: string[] } {
+  return { code: `export const ${u.name} = ${u.value ?? 'undefined'};`, notes: [] };
+}
+
 /**
  * 确定性生成目标骨架，并把 typeMap 的语义 note 并入单元约束。
  * 幂等：重复调用结果一致；约束用 withConstraints 去重并入。
  */
 export function renderTsSkeleton(u: TransUnit): string {
-  const { code, notes } = u.kind === 'func' ? renderFuncSkeleton(u) : renderTypeSkeleton(u);
+  const { code, notes } =
+    u.kind === 'const' ? renderConstSkeleton(u) : u.kind === 'func' ? renderFuncSkeleton(u) : renderTypeSkeleton(u);
   // 类型约束传递：非 any/interface{} 的 Go 约束 → 写进约束提醒（TS 无等价约束）
   for (const [tp, c] of Object.entries(u.typeParamConstraints ?? {})) {
     if (c.trim() && !['any', 'interface{}'].includes(c.trim())) {
