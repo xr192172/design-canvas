@@ -45,30 +45,34 @@ function extractParamList(block: SyntaxNodeLike): TranslateParam[] {
   return out;
 }
 
-/** func 单元：`func Add(a, b int) int { ... }` → TransUnit(kind='func') */
+/** 解析 receiver 文本（`(u *User)` / `u *User` / `(u User)`）→ 参名 + 类型名（去 *） */
+function parseReceiver(recvText: string): { name: string; type: string } | null {
+  const m = recvText.match(/\(?\s*([A-Za-z_]\w*)\s+(?:\*\s*)?([\w.]+)/);
+  if (!m) return null;
+  return { name: m[1], type: m[2].replace(/\./g, '_') };
+}
+
+/** func/方法 单元：`func Add(...)` 或 `func (u *User) Greet(...)` → TransUnit(kind='func')
+ *  方法映射为 TS 自由函数：receiver 作首参，名取 `${recvType}_${method}`（防同文件多类型方法撞名）。 */
 function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
-  // 有 receiver 字段 = 方法，切片跳过（保顶层函数）
-  if (childField(node, 'receiver')) return null;
   const nameNode = childField(node, 'name');
   if (!nameNode) return null;
-  const name = nameNode.text;
+  const method = nameNode.text;
   const paramsNode = childField(node, 'parameters');
   const params = paramsNode ? extractParamList(paramsNode) : [];
   const resultNode = childField(node, 'result');
   const result = resultNode ? resultNode.text.trim() : null;
   const snippet = node.text.trim();
-  return {
-    id: name,
-    kind: 'func',
-    dstLang: 'ts',
-    name,
-    params,
-    result,
-    srcSnippet: snippet,
-    skeleton: '',
-    bodyHole: true,
-    constraints: [...DEFAULT_CONSTRAINTS],
-  };
+
+  const recvNode = childField(node, 'receiver');
+  const recv = recvNode ? parseReceiver(recvNode.text) : null;
+  if (recv) {
+    // 方法：receiver 作首参；命名带类型前缀防撞名
+    params.unshift({ name: recv.name, type: recv.type });
+    const qn = `${recv.type}_${method}`;
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints: [...DEFAULT_CONSTRAINTS] };
+  }
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints: [...DEFAULT_CONSTRAINTS] };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */
@@ -119,7 +123,7 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
 
 /** 深度遍历 AST，收集目标单元 */
 function collect(node: SyntaxNodeLike, units: TransUnit[]): void {
-  const isFunc = node.type === 'function_declaration';
+  const isFunc = node.type === 'function_declaration' || node.type === 'method_declaration';
   const isTypeDecl = node.type === 'type_declaration';
   if (isFunc) {
     const u = unitFromFunc(node);

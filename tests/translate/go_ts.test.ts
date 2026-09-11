@@ -97,8 +97,9 @@ describe('ts_codegen：typeMap 薄表 + 确定性骨架', () => {
   it('不可机械翻译的语义被写进单元约束', async () => {
     const read = (await unitsOf(GO_SRC)).find((u) => u.name === 'Read')!;
     renderTsSkeleton(read);
-    expect(read.skeleton).toContain('export function Read(): unknown {');
-    expect(read.constraints.join(' ')).toContain('多返回值');
+    // 多返回值现映射为 TS 元组（string, error）→ [string, Error | null]
+    expect(read.skeleton).toContain('export function Read(): [string, Error | null] {');
+    expect(read.constraints.join(' ')).toContain('多返回值'); // error 分量仍标不可机械翻译
   });
 
   it('struct → interface 完整生成（非孔）', async () => {
@@ -151,5 +152,50 @@ describe('pairs：端到端管道', () => {
     expect(r.output).toContain('export function Add(a: number, b: number): number');
     expect(r.output).toContain('export interface User');
     expect(r.holePrompts.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('方法(receiver)：Go 语义覆盖', () => {
+  const GO_SRC_METHOD = `package svc
+type User struct {
+\tName string
+}
+func (u *User) Greet(n string) string {
+\treturn u.Name + " " + n
+}
+`;
+  it('萃取到方法单元：receiver 作首参，命名带类型前缀', async () => {
+    const units = await unitsOf(GO_SRC_METHOD);
+    const greet = units.find((u) => u.name === 'User_Greet');
+    expect(greet).toBeTruthy();
+    expect(greet?.kind).toBe('func');
+    expect(greet?.params?.[0]).toEqual({ name: 'u', type: 'User' });
+  });
+
+  it('方法骨架：receiver 参数映射为 User，body 留孔且验证通过', async () => {
+    const units = await unitsOf(GO_SRC_METHOD);
+    const greet = units.find((u) => u.name === 'User_Greet')!;
+    renderTsSkeleton(greet);
+    expect(greet.skeleton).toContain('export function User_Greet(u: User, n: string): string {');
+    const issues = await verifySkeletons([greet]);
+    expect(issues).toEqual([]);
+  });
+});
+
+describe('多返回值→TS 元组：Go 语义覆盖', () => {
+  it('(int, bool) → [number, boolean] 机械直接映射', () => {
+    expect(mapGoType('(int, bool)').degree).toBe('direct');
+    expect(mapGoType('(int, bool)').ts).toBe('[number, boolean]');
+  });
+
+  it('(string, error) → [string, Error | null]，error 分量仍标不可机械翻译', () => {
+    const m = mapGoType('(string, error)');
+    expect(m.ts).toBe('[string, Error | null]');
+    expect(m.degree).toBe('unsupported');
+    expect(m.note).toContain('多返回值');
+  });
+
+  it('(int)(单个括号) 不误当元组', () => {
+    expect(mapGoType('(int)').degree).toBe('unsupported');
   });
 });

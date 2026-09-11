@@ -30,7 +30,7 @@ function structureCheck(u: TransUnit): string | null {
     if (!re.test(u.skeleton)) return `骨架函数名与单元不一致：${u.name}`;
     // 粗略数参数：函数头括号内逗号数 + (0 个参数时无逗号)
     const head = u.skeleton.slice(u.skeleton.indexOf('(') + 1, u.skeleton.indexOf(')'));
-    const nParams = head.trim() === '' ? 0 : head.split(',').length;
+    const nParams = countTopLevelParams(head);
     if (nParams !== n) return `参数个数不一致：源=${n}，骨架=${nParams}`;
     return null;
   }
@@ -44,6 +44,20 @@ function structureCheck(u: TransUnit): string | null {
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 深度感知的参数个数：逗号在 <>{}([]) 内不算分隔（如 `Map<string, number>, k: string` = 2 参） */
+function countTopLevelParams(s: string): number {
+  const t = s.trim();
+  if (t === '') return 0;
+  let depth = 0;
+  let count = 1;
+  for (const ch of t) {
+    if ('<({['.includes(ch)) depth++;
+    else if ('>)}]'.includes(ch)) depth--;
+    else if (ch === ',' && depth === 0) count++;
+  }
+  return count;
 }
 
 /**

@@ -71,6 +71,20 @@ export function mapGoType(goType: string): MappedType {
     const v = mapGoType(mM[2]).ts;
     return { degree: 'direct', ts: `Map<${k}, ${v}>` };
   }
+  // 多返回值 `(T1, T2[, ...])` → TS 元组 `[T1, T2, ...]`（分量各自 mapGoType）
+  if (t.startsWith('(') && t.endsWith(')') && /,\s*\S/.test(t)) {
+    const parts = splitTopLevel(t.slice(1, -1));
+    if (parts.length >= 2) {
+      const mapped = parts.map((p) => mapGoType(p.trim()));
+      const hasUnsup = mapped.some((m) => m.degree === 'unsupported');
+      const pieces = mapped.map((m, i) => (m.note ? `分量${i + 1}: ${m.note}` : null)).filter(Boolean);
+      return {
+        degree: hasUnsup ? 'unsupported' : 'direct',
+        ts: '[' + mapped.map((m) => m.ts).join(', ') + ']',
+        note: hasUnsup ? '多返回值含不可机械翻译分量：' + pieces.join('；') : undefined,
+      };
+    }
+  }
 
   // —— 语义包裹 / 不可机械翻译 ——
   if (t === 'error' || /^error$/.test(t)) {
@@ -82,15 +96,34 @@ export function mapGoType(goType: string): MappedType {
   if (t.startsWith('func')) {
     return { degree: 'unsupported', ts: '(...args: unknown[]) => unknown', note: '函数类型参数语义需 LLM 换算签名' };
   }
-  // 多返回值 `(int, error)`
+  // 其它复合/含逗号结果（非元组、无法归类）→ 如实标注
   if (t.includes(',') || /^\(/.test(t)) {
-    return { degree: 'unsupported', ts: 'unknown', note: '多返回值 / 复合结果不可 1:1 映射，需 LLM 设计结果形态' };
+    return { degree: 'unsupported', ts: 'unknown', note: '复合结果无法 1:1 映射，需 LLM 设计结果形态' };
   }
 
   const direct = GO_TO_TS[t];
   if (direct) return { degree: 'direct', ts: direct };
   // 未识别 → 假定是用户类型/结构体名，透传（type 单元已机械生成 interface）
   return { degree: 'direct', ts: t };
+}
+
+/** 在括号深度 0 处按逗号切分（`a, (b, c), d` → [a, (b, c), d]） */
+function splitTopLevel(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of s) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
 }
 
 function mapParam({ name, type }: TranslateParam, notes: string[]): string {
