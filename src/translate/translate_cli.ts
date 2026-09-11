@@ -31,15 +31,16 @@ async function main(): Promise<void> {
   const wantLlm = process.argv.includes('--llm');
   const projectDir = readArg('--project');
   const outDir = readArg('--out-dir');
+  const wantVerify = process.argv.includes('--verify');
 
-  // 项目级模式：--project <dir> [--out-dir <out>] [--llm]
+  // 项目级模式：--project <dir> [--out-dir <out>] [--llm] [--verify]
   if (projectDir) {
     const root = path.resolve(projectDir);
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
       console.error(`项目目录不存在: ${root}`);
       process.exit(1);
     }
-    const pr = await translateGoProject(root, { outDir: outDir ? path.resolve(outDir) : undefined, fill: wantLlm });
+    const pr = await translateGoProject(root, { outDir: outDir ? path.resolve(outDir) : undefined, fill: wantLlm, verify: wantVerify });
     console.log(`Go 项目翻译：${pr.modules.length} 个模块`);
     for (const m of pr.modules) {
       console.log(`  ${m.tsRel}  (${m.units.length} 单元${m.imports.length ? `; import ${m.imports.length} 处` : ''})`);

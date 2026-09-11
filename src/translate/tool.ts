@@ -23,6 +23,8 @@ export interface TranslateGoTsArgs {
   fill?: boolean;
   /** 对已填的纯函数跑行为对拍（需 go 工具链） */
   verify?: boolean;
+  /** 项目模式全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误入诊断（纯项目应 0 错） */
+  tscVerify?: boolean;
   /** LLM 纠错重试次数，默认 2 */
   maxRetries?: number;
 }
@@ -30,6 +32,7 @@ export interface TranslateGoTsArgs {
 export async function translateGoTsHandler(args: Record<string, unknown>): Promise<{ message: string; data?: unknown }> {
   const fill = args.fill === true;
   const verify = args.verify === true;
+  const tscVerify = args.tscVerify === true;
   const maxRetries = typeof args.maxRetries === 'number' ? args.maxRetries : 2;
 
   // 项目级：一次翻译整个 Go 项目
@@ -38,7 +41,7 @@ export async function translateGoTsHandler(args: Record<string, unknown>): Promi
     const root = path.resolve(projectDir);
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return { message: `Go 项目目录不存在：${root}` };
     const outDir = args.outDir ? path.resolve(String(args.outDir)) : undefined;
-    const r = await translateGoProject(root, { outDir, fill, maxRetries });
+    const r = await translateGoProject(root, { outDir, fill, maxRetries, verify: tscVerify });
     const lines = [`Go 项目翻译：${r.modules.length} 个模块`];
     for (const m of r.modules) {
       lines.push(`  ${m.tsRel}  (${m.units.length} 单元${m.imports.length ? `; import ${m.imports.length} 处` : ''})`);

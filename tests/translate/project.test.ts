@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { translateGoProject, walkGoFiles } from '../../src/translate/project.js';
+import { translateGoProject, walkGoFiles, buildProjectCallNote } from '../../src/translate/project.js';
 
 function tmpProject(files: Record<string, string>): string {
   const root = path.join(os.tmpdir(), `dc-tr-proj-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -87,5 +87,82 @@ describe('translateGoProject', () => {
     expect(r.modules.length).toBe(2);
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(out, { recursive: true, force: true });
+  });
+
+  it('同包跨文件自由函数调用 → 补相对 import', async () => {
+    const root = tmpProject({
+      'svc/help.go': 'package svc\nfunc Help(x int) int { return x + 1 }\n',
+      'svc/app.go': 'package svc\nfunc F(x int) int { return Help(x) }\n',
+    });
+    const r = await translateGoProject(root);
+    const app = r.modules.find((m) => m.rel === 'svc/app.go')!;
+    const help = r.modules.find((m) => m.rel === 'svc/help.go')!;
+    expect(app.callRefsRaw).toContain('Help');
+    expect(app.imports).toEqual(["import { Help } from './help';"]);
+    expect(help.ts).toContain('export function Help(x: number): number');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('跨包限定调用（pkg.Foo）→ 按 import 别名补 import；方法调用不盲补', async () => {
+    const root = tmpProject({
+      'util/util.go': 'package util\nfunc Help(x int) int { return x + 1 }\n',
+      'svc/app.go': 'package svc\nimport m "util"\nfunc F(x int) int { return m.Help(x) }\n',
+      'model/user.go': 'package model\ntype User struct { ID int }\n',
+      'svc/use.go': 'package svc\nimport "model"\nfunc ID(u *model.User) int { return u.ID }\n',
+    });
+    const r = await translateGoProject(root);
+    const app = r.modules.find((m) => m.rel === 'svc/app.go')!;
+    expect(app.imports).toEqual(["import { Help } from '../util/util';"]); // m.Help → Help（用 import 绑定别名 m）
+    expect(app.callRefsRaw).toContain('Help');
+    // 方法字段访问 u.ID / receiver 前缀 u 不是 import 别名 → 不误当函数 import
+    const use = r.modules.find((m) => m.rel === 'svc/use.go')!;
+    expect(use.callRefsRaw).not.toContain('ID');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('verify=true 纯项目 → 全工程 tsc 零错误', async () => {
+    const root = tmpProject({
+      'model/user.go': 'package model\ntype User struct { Name string }\n',
+      'svc/app.go': 'package svc\nfunc F(u *User) string { return u.Name }\n',
+    });
+    const r = await translateGoProject(root, { verify: true });
+    expect(r.diagnostics.some((d) => d.startsWith('全工程 tsc'))).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('verify=true stdlib 类型未定义 → 如实列出 tsc 错误', async () => {
+    const root = tmpProject({
+      'main.go': 'package main\nimport "bytes"\nfunc G(b *bytes.Buffer) int { return b.Len() }\n',
+    });
+    const r = await translateGoProject(root, { verify: true });
+    const tsc = r.diagnostics.find((d) => d.startsWith('全工程 tsc'));
+    expect(tsc).toBeTruthy();
+    expect(tsc!).toContain('bytes'); // bytes.Buffer 的命名空间未定义 → 如实报出
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('buildProjectCallNote → 列出本地/new跨文件 free func + receiver 方法约定', async () => {
+    // svc/app.go 本地 func: F；裸调用 Help(user_Get); 跨文件 Help(user_Get in svc/help.go)
+    const def = new Map<string, { file: string; isFunc: boolean }>([
+      ['F', { file: 'svc/app.go', isFunc: true }],
+      ['Help', { file: 'svc/help.go', isFunc: true }],
+      ['user_Get', { file: 'svc/help.go', isFunc: true }],
+      ['User', { file: 'model/user.go', isFunc: false }],
+    ]);
+    const m = {
+      rel: 'svc/app.go',
+      callRefsRaw: ['Help', 'user_Get', 'User', 'noSuch'],
+      units: [
+        { name: 'F', kind: 'func' } as any,
+        { name: 'user_Get', kind: 'func' } as any,
+        { name: 'User', kind: 'type' } as any,
+      ],
+    };
+    const note = buildProjectCallNote(m as any, def as any);
+    expect(note).toContain('Help'); // 跨文件 imported func
+    expect(note).toContain('user_Get'); // 本地 func（receiver 方法译成的自由函数）
+    expect(note).toContain('user_GetName'); // 方法约定提示
+    expect(note).not.toContain('User'); // 类型不列
+    expect(note).not.toContain('noSuch'); // 未定义不列
   });
 });

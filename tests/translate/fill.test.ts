@@ -113,3 +113,25 @@ describe('fillUnitWithRetry：纠错重试', () => {
     expect(rs[0].ok).toBe(true);
   });
 });
+
+describe('projectNote：项目级调用约定注入单孔 prompt', () => {
+  it('buildFillContext 注入 projectNote → ctx 携带 + prompt 含 note', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    const note = '【项目级调用约定】\n- 可直接调用函数：user_GetName\n- receiver 方法请译成 user_GetName(recv, ...)';
+    const ctx = (await import('../../src/translate/fill.js')).buildFillContext(add, undefined, note);
+    expect(ctx.projectNote).toBe(note);
+    expect(ctx.prompt).toContain('user_GetName');
+  });
+
+  it('fillUnit 把 projectNote 透传给 translator 的 ctx', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    let seen: string | undefined;
+    const recorder: HoleTranslator = (ctx) => {
+      seen = ctx.projectNote;
+      return 'return a + b;';
+    };
+    const r = await fillUnit(add, recorder, undefined, 'NOTE-X');
+    expect(r?.ok).toBe(true);
+    expect(seen).toBe('NOTE-X');
+  });
+});

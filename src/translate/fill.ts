@@ -23,6 +23,8 @@ export interface FillContext {
   srcSnippet: string;
   /** 合并后的约束（typeMap 语义 note + 默认约束） */
   constraints: string[];
+  /** 项目级调用约定（receiver→T_f、可引用的跨文件符号名）；项目模式注入 */
+  projectNote?: string;
   /** 给模型的单孔指令（可由调用方改用 buildHolePrompt 变体） */
   prompt: string;
 }
@@ -62,15 +64,17 @@ function indentBody(body: string): string {
     .join('\n');
 }
 
-/** 构造给翻译器的上下文；feedback 非空时追加到 prompt 尾部（纠错重试用） */
-export function buildFillContext(u: TransUnit, feedback?: string): FillContext {
-  const base = buildHolePrompt(u);
-  const prompt = feedback ? `${base}\n\n--- 上次尝试未通过验证，请据此修正，仍只输出函数体 ---\n${feedback}` : base;
+/** 构造给翻译器的上下文；feedback 非空时追加到 prompt 尾部（纠错重试用），projectNote 附在 prompt 尾部（项目级调用约定） */
+export function buildFillContext(u: TransUnit, feedback?: string, projectNote?: string): FillContext {
+  let prompt = buildHolePrompt(u);
+  if (projectNote) prompt = `${prompt}\n\n${projectNote}`;
+  if (feedback) prompt = `${prompt}\n\n--- 上次尝试未通过验证，请据此修正，仍只输出函数体 ---\n${feedback}`;
   return {
     unit: u,
     skeleton: u.skeleton,
     srcSnippet: u.srcSnippet,
     constraints: u.constraints,
+    projectNote,
     prompt,
   };
 }
@@ -78,11 +82,12 @@ export function buildFillContext(u: TransUnit, feedback?: string): FillContext {
 /**
  * 填充单个 bodyHole 单元并重验证。type 单元（非孔）返回 null。
  * feedback：把上一次失败产物/诊断作为纠错上下文注入 prompt（见 fillUnitWithRetry）。
+ * projectNote：项目级调用约定（receiver→T_f、可引用跨文件符号名），注入 prompt 帮函数体引用对名。
  * 验证不过 → ok:false + 具体 issue，不抛、不丢源（骨架原样保留）。
  */
-export async function fillUnit(u: TransUnit, translate: HoleTranslator, feedback?: string): Promise<FillResult | null> {
+export async function fillUnit(u: TransUnit, translate: HoleTranslator, feedback?: string, projectNote?: string): Promise<FillResult | null> {
   if (!u.bodyHole) return null;
-  const ctx = buildFillContext(u, feedback);
+  const ctx = buildFillContext(u, feedback, projectNote);
   let body: string;
   try {
     body = await translate(ctx);
@@ -105,12 +110,12 @@ export function buildRetryFeedback(u: TransUnit, r: FillResult): string {
 }
 
 /** 逐次纠错重试：失败则把坏产物+诊断喂回翻译器再试，直到 ok 或重试耗尽。 */
-export async function fillUnitWithRetry(u: TransUnit, translate: HoleTranslator, maxRetries = 2): Promise<FillResult | null> {
+export async function fillUnitWithRetry(u: TransUnit, translate: HoleTranslator, maxRetries = 2, projectNote?: string): Promise<FillResult | null> {
   if (!u.bodyHole) return null;
   let feedback: string | undefined;
   let last: FillResult | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const r = await fillUnit(u, translate, feedback);
+    const r = await fillUnit(u, translate, feedback, projectNote);
     if (!r || r.ok) return r;
     last = r;
     feedback = buildRetryFeedback(u, r);
@@ -119,10 +124,10 @@ export async function fillUnitWithRetry(u: TransUnit, translate: HoleTranslator,
 }
 
 /** 批量填充全部 bodyHole 单元；逐孔独立验证，单孔失败不影响其余。 */
-export async function fillUnits(units: TransUnit[], translate: HoleTranslator): Promise<FillResult[]> {
+export async function fillUnits(units: TransUnit[], translate: HoleTranslator, projectNote?: string): Promise<FillResult[]> {
   const out: FillResult[] = [];
   for (const u of units) {
-    const r = await fillUnit(u, translate);
+    const r = await fillUnit(u, translate, undefined, projectNote);
     if (r) out.push(r);
   }
   return out;
@@ -133,10 +138,11 @@ export async function fillUnitsWithRetry(
   units: TransUnit[],
   translate: HoleTranslator,
   maxRetries = 2,
+  projectNote?: string,
 ): Promise<FillResult[]> {
   const out: FillResult[] = [];
   for (const u of units) {
-    const r = await fillUnitWithRetry(u, translate, maxRetries);
+    const r = await fillUnitWithRetry(u, translate, maxRetries, projectNote);
     if (r) out.push(r);
   }
   return out;
