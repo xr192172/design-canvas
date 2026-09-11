@@ -1,18 +1,22 @@
 /**
- * translate_cli —— Go→TS 最小切片命令行入口
+ * translate_cli —— Go→TS 半自动翻译命令行入口
  *
  * 用法：
- *   node dist/src/translate/translate_cli.js <file.go> [--out <file.ts>] [--holes]
+ *   node dist/src/translate/translate_cli.js <file.go> [--out <file.ts>] [--holes] [--llm]
  *
- * - 默认打印目标 TS 骨架 + 验证闸结果。
- * - --out <file.ts>：把骨架写入目标文件（不覆盖已存在的目标，防止掉 LLM 填的孔）。
- * - --holes：额外打印每个待填孔给 LLM 的 prompt（验证「规范 LLM」契约）。
+ * 无 --llm：打印目标 TS 骨架（函数体留孔）+ 验证闸结果。
+ * --llm：用 AGNES key 池（AGNES_KEY_POOL）真调 LLM 逐孔填函数体，输出填充后源码。
+ *   - baseURL 可经 AGNES_UPSTREAM_BASE 覆盖为本地 key-pool-proxy；model 经 AGNES_MODEL。
+ * --out <file.ts>：把产出写入目标文件（默认不覆盖已存在目标）。
+ * --holes：额外打印每个待填孔给 LLM 的 prompt。
  * - 骨架任一语法/结构闸不过，则整份不落盘（原子性，避免半成品）。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { translateGoToTs } from './pairs.js';
+import { createPooledHoleTranslator } from './llm.js';
+import { fillUnits } from './fill.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -24,8 +28,9 @@ async function main(): Promise<void> {
   const file = positional[0];
   const outFile = readArg('--out');
   const wantHoles = process.argv.includes('--holes');
+  const wantLlm = process.argv.includes('--llm');
   if (!file) {
-    console.error('用法: node dist/src/translate/translate_cli.js <file.go> [--out <file.ts>] [--holes]');
+    console.error('用法: node dist/src/translate/translate_cli.js <file.go> [--out <file.ts>] [--holes] [--llm]');
     process.exit(1);
   }
   const abs = path.resolve(file);
@@ -40,30 +45,53 @@ async function main(): Promise<void> {
     console.error(`翻译失败：${r.error}`);
     process.exit(1);
   }
-
-  console.log(`Go→TS 萃取 ${r.units.length} 个单元（含 ${r.holePrompts.length} 个待 LLM 填的孔）`);
-  console.log('── 目标 TS 骨架 ──');
-  console.log(r.output || '（无单元）');
-
   if (r.issues.length) {
     console.log('── 验证闸(未过) ──');
     for (const i of r.issues) console.log(`  [${i.gate}] ${i.id}: ${i.detail}`);
     console.error('骨架未通过验证，不落盘。');
     process.exit(1);
   }
+  if (r.units.length === 0) {
+    console.log('（无单元可翻译）');
+    return;
+  }
 
-  if (wantHoles) {
+  let output = r.output;
+  if (wantLlm) {
+    console.log('── 调 AGNES key 池 LLM 填孔 ──');
+    const translate = createPooledHoleTranslator();
+    const filled = await fillUnits(r.units, translate);
+    const byId = new Map(filled.map((f) => [f.unit.id, f]));
+    // 按原始单元顺序组装：func 用填充后源码，type 用骨架
+    output = r.units
+      .map((u) => {
+        const f = byId.get(u.id);
+        return (f?.ok ? f.filledSource : u.skeleton) ?? u.skeleton;
+      })
+      .join('\n\n');
+    // 报告每孔验证结果
+    for (const f of filled) {
+      if (f.ok) console.log(`  ✓ ${f.unit.id}`);
+      else console.log(`  ✗ ${f.unit.id}: ${(f.error ?? f.issues.map((i) => i.detail).join('; '))}`);
+    }
+  }
+
+  console.log(wantLlm ? '── 目标 TS（LLM 已填函数体）──' : '── 目标 TS 骨架 ──');
+  console.log(output);
+
+  if (wantHoles && !wantLlm) {
     console.log('── 待填孔 prompt（LLM） ──');
     r.holePrompts.forEach((p, i) => console.log(`\n=== 孔 #${i + 1} ===\n${p}`));
   }
 
   if (outFile) {
     const outAbs = path.resolve(outFile);
-    if (fs.existsSync(outAbs)) {
+    const finalOut = wantLlm ? output : r.output;
+    if (fs.existsSync(outAbs) && !wantLlm) {
       console.error(`目标已存在，不覆盖（防止丢弃已填的函数体）：${outAbs}`);
     } else {
       fs.mkdirSync(path.dirname(outAbs), { recursive: true });
-      fs.writeFileSync(outAbs, r.output, 'utf-8');
+      fs.writeFileSync(outAbs, finalOut, 'utf-8');
       console.log(`已写入 ${outAbs}`);
     }
   }
