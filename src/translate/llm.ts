@@ -110,24 +110,36 @@ async function chatOnce(fetchImpl: MinimalFetch, baseURL: string, key: string, b
   return { status: res.status, content };
 }
 
+/** 剥掉模型常见的 markdown 代码围栏（```lang ... ```），只取内层函数体 */
+export function normalizeBody(c: string): string {
+  const s = c.trim();
+  const m = /^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)```\s*$/.exec(s);
+  return (m ? m[1].trim() : s).trim();
+}
+
 /**
  * 基于 AGNES key 池的 HoleTranslator 工厂。
  * 返回的翻译器：把 FillContext.prompt 发给 LLM，只取函数体文本返回。
  * key 池空 / 环境无 fetch 时抛错（由 fillUnit 捕获为 error）。
  */
 export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}): HoleTranslator {
-  const keys = config.keys ?? loadKeys(config.poolEnv ?? 'AGNES_KEY_POOL', config.fallbackEnvs ?? []);
-  if (keys.length === 0) {
+  const baseURL = (config.baseURL ?? process.env.AGNES_UPSTREAM_BASE ?? 'https://apihub.agnes-ai.com').replace(/\/+$/, '');
+  // 指针已配的 key 池用 key 本身；未给 key 但显式配了 baseURL（典型指向本地 key-pool-proxy）
+  // → 客户端无需 key，Bearer 用占位，轮换发生在上游代理自己维护的池。
+  let keys = config.keys ?? loadKeys(config.poolEnv ?? 'AGNES_KEY_POOL', config.fallbackEnvs ?? []);
+  const explicitBase = config.baseURL !== undefined || process.env.AGNES_UPSTREAM_BASE !== undefined;
+  if (keys.length === 0 && explicitBase) {
+    keys = ['proxy-caller'];
+  } else if (keys.length === 0) {
     throw new Error(
       `[translate/llm] 空 key 池：可设 ${config.poolEnv ?? 'AGNES_KEY_POOL'}（逗号分隔多 key），` +
-        `或填 baseURL 指向本地 key-pool-proxy、或传入 keys 显式提供。`,
+        `或设 AGNES_UPSTREAM_BASE 指向本地 key-pool-proxy、或传入 keys 显式提供。`,
     );
   }
   const pool = new KeyPool(keys);
   const fetchImpl =
     config.fetchImpl ?? (((globalThis as { fetch?: MinimalFetch }).fetch as MinimalFetch | undefined)?.bind(globalThis) as MinimalFetch);
   if (!fetchImpl) throw new Error('[translate/llm] 环境无 fetch（Node >= 18）。');
-  const baseURL = (config.baseURL ?? process.env.AGNES_UPSTREAM_BASE ?? 'https://apihub.agnes-ai.com').replace(/\/+$/, '');
   const model = config.model ?? process.env.AGNES_MODEL ?? 'deepseek-chat';
   const cooldownMs = config.cooldownMs ?? 15000;
   const maxRetries = config.maxRetries ?? 3;
@@ -145,12 +157,13 @@ export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}):
       if (!pool.hasAvailable(now)) break;
       const idx = pool.pick(now);
       if (idx < 0) break;
-      const { status, content } = await chatOnce(fetchImpl, baseURL, pool.keys[idx], {
+      const { status, content: raw } = await chatOnce(fetchImpl, baseURL, pool.keys[idx], {
         model,
         messages,
         temperature,
         max_tokens: maxTokens,
       });
+      const content = normalizeBody(raw);
       if (content) return content; // 有函数体即成功
       if (retrySet.has(status) && attempt < maxRetries) {
         pool.cooldown(idx, Date.now(), cooldownMs);

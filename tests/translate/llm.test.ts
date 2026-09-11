@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractGo } from '../../src/translate/go_extractor.js';
 import { renderTsSkeleton } from '../../src/translate/ts_codegen.js';
-import { createPooledHoleTranslator, loadKeys, KeyPool } from '../../src/translate/llm.js';
+import { createPooledHoleTranslator, loadKeys, KeyPool, normalizeBody } from '../../src/translate/llm.js';
 import { fillUnit } from '../../src/translate/fill.js';
 import type { MinimalFetch } from '../../src/translate/llm.js';
 import type { TransUnit } from '../../src/translate/unit.js';
@@ -57,6 +57,15 @@ describe('loadKeys：读 AGNES key 池并去重', () => {
   });
 });
 
+describe('normalizeBody：剥 markdown 代码围栏', () => {
+  it('```typescript 围栏 → 取内层', () => {
+    expect(normalizeBody('```typescript\n  return a + b\n```')).toBe('return a + b');
+  });
+  it('无围栏直接返回修剪后文本', () => {
+    expect(normalizeBody('  return a + b\n')).toBe('return a + b');
+  });
+});
+
 describe('KeyPool：round-robin + 冷却', () => {
   it('冷却的 key 暂不返回，恢复后可再用', () => {
     const p = new KeyPool(['a', 'b']);
@@ -97,6 +106,15 @@ describe('createPooledHoleTranslator：轮换填孔', () => {
     const r = await fillUnit(u, translate);
     expect(r?.ok).toBe(false);
     expect(r?.error ?? '').toMatch(/冷却|耗尽|返回/);
+  });
+
+  it('指向本地 key-pool-proxy（无客户端 key）→ 不抛错，Bearer 用占位', async () => {
+    const { fetch, calls } = mkFetch([{ status: 200, content: 'return a + b;' }]);
+    const translate = createPooledHoleTranslator({ baseURL: 'http://127.0.0.1:3101', fetchImpl: fetch });
+    const u = await addUnit();
+    const body = await translate({ unit: u, skeleton: u.skeleton, srcSnippet: u.srcSnippet, constraints: u.constraints, prompt: 'x' });
+    expect(body).toBe('return a + b;');
+    expect(calls[0].url.startsWith('http://127.0.0.1:3101/v1/')).toBe(true);
   });
 
   it('空 key 池 → 工厂直接抛错', () => {
