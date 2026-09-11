@@ -26,7 +26,7 @@ function structureCheck(u: TransUnit): string | null {
   if (u.kind === 'func') {
     if (!/^export\s+function\s+/.test(u.skeleton)) return 'func 骨架缺少 export function 前缀';
     const n = (u.params ?? []).length;
-    const re = new RegExp(`^export\\s+function\\s+${escapeRe(u.name)}\\s*\\(`);
+    const re = new RegExp(`^export\\s+function\\s+${escapeRe(u.name)}(?:<[^>]*>)?\\s*\\(`);
     if (!re.test(u.skeleton)) return `骨架函数名与单元不一致：${u.name}`;
     // 粗略数参数：函数头括号内逗号数 + (0 个参数时无逗号)
     const head = u.skeleton.slice(u.skeleton.indexOf('(') + 1, u.skeleton.indexOf(')'));
@@ -36,7 +36,7 @@ function structureCheck(u: TransUnit): string | null {
   }
   if (u.kind === 'type') {
     if (u.typeKind === 'alias') {
-      if (!new RegExp(`^export\\s+type\\s+${escapeRe(u.name)}\\s*=`).test(u.skeleton)) return `type 骨架缺少 export type ${u.name} =`;
+      if (!new RegExp(`^export\\s+type\\s+${escapeRe(u.name)}(?:<[^>]*>)?\\s*=`).test(u.skeleton)) return `type 骨架缺少 export type ${u.name} =`;
     } else {
       if (!/^export\s+interface\s+/.test(u.skeleton)) return 'type 骨架缺少 export interface 前缀';
       if (!new RegExp(`^export\\s+interface\\s+${escapeRe(u.name)}\\b`).test(u.skeleton)) return `骨架类型名与单元不一致：${u.name}`;

@@ -52,6 +52,8 @@ export interface TransUnit {
   params?: TranslateParam[];
   /** 返回类型原文；null / undefined = 无返回值 */
   result?: string | null;
+  /** Go 类型参数名（泛型），如 ['T']；渲染为 TS `<T, ...>` */
+  typeParams?: string[];
 
   // —— type 用 ——
   /** 具体形态：struct → interface；interface → interface(方法签名)；alias → type 别名 */

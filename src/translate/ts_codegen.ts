@@ -132,6 +132,12 @@ function mapParam({ name, type }: TranslateParam, notes: string[]): string {
   return `${name}: ${m.ts}`;
 }
 
+/** 类型参数渲染：`['T','U']` → `<T, U>`（空则空串） */
+function typeParamString(u: TransUnit): string {
+  const tps = u.typeParams ?? [];
+  return tps.length ? `<${tps.join(', ')}>` : '';
+}
+
 /** 渲染函数单元骨架（签名锁定，body 留孔） */
 function renderFuncSkeleton(u: TransUnit): { code: string; notes: string[] } {
   const notes: string[] = [];
@@ -146,7 +152,7 @@ function renderFuncSkeleton(u: TransUnit): { code: string; notes: string[] } {
     u.bodyHole
       ? '\n  // TODO(translate): 待 LLM 翻译 Go 函数体'
       : '';
-  return { code: `export function ${u.name}(${params})${ret} {${hole}\n}`, notes };
+  return { code: `export function ${u.name}${typeParamString(u)}(${params})${ret} {${hole}\n}`, notes };
 }
 
 /** 渲染 type 单元骨架（struct/interface → interface；alias → type 别名；均非孔） */
@@ -157,10 +163,10 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
   if (u.typeKind === 'alias') {
     const m = mapGoType(u.aliasType ?? '');
     if (m.note) notes.push(`alias ${u.name}: ${m.note}`);
-    return { code: `export type ${u.name} = ${m.ts};`, notes };
+    return { code: `export type ${u.name}${typeParamString(u)} = ${m.ts};`, notes };
   }
 
-  // interface：方法签名契约 `export interface Greeter {\n  Greet(n: string): string;\n}`
+  // interface：方法签名契约 `export interface Greeter {...}`
   if (u.typeKind === 'interface') {
     const lines = (u.methods ?? [])
       .map((mm) => {
@@ -174,7 +180,7 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
         return `  ${mm.name}(${params}): ${ret};`;
       })
       .join('\n');
-    return { code: `export interface ${u.name} {\n${lines}\n}`, notes };
+    return { code: `export interface ${u.name}${typeParamString(u)} {\n${lines}\n}`, notes };
   }
 
   // struct → interface（数据字段）
@@ -185,7 +191,7 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
       return `  ${f.name}: ${m.ts};`;
     })
     .join('\n');
-  return { code: `export interface ${u.name} {\n${fields}\n}`, notes };
+  return { code: `export interface ${u.name}${typeParamString(u)} {\n${fields}\n}`, notes };
 }
 
 /**

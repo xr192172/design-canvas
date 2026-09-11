@@ -248,3 +248,42 @@ type Names []string
     expect(issues).toEqual([]);
   });
 });
+
+describe('Go 泛型：Go 语义覆盖', () => {
+  const GO_SRC_GEN = `package g
+type Pair[T any] struct {
+\tFirst  T
+\tSecond T
+}
+type Slice[T any] []T
+func Max[T comparable](a, b T) T {
+\tif a > b { return a }
+\treturn b
+}
+`;
+  it('泛型函数：typeParams=[T]，类型引用透传为 T', async () => {
+    const units = await unitsOf(GO_SRC_GEN);
+    const max = units.find((u) => u.name === 'Max');
+    expect(max?.typeParams).toEqual(['T']);
+    renderTsSkeleton(max!);
+    expect(max?.skeleton).toContain('export function Max<T>(a: T, b: T): T {');
+    const issues = await verifySkeletons([max!]);
+    expect(issues).toEqual([]);
+  });
+
+  it('泛型 struct：interface Pair<T>，字段 T 透传', async () => {
+    const units = await unitsOf(GO_SRC_GEN);
+    const pair = units.find((u) => u.name === 'Pair')!;
+    renderTsSkeleton(pair);
+    expect(pair.skeleton).toBe('export interface Pair<T> {\n  First: T;\n  Second: T;\n}');
+  });
+
+  it('泛型别名：type Slice<T> = T[]', async () => {
+    const units = await unitsOf(GO_SRC_GEN);
+    const slice = units.find((u) => u.name === 'Slice')!;
+    renderTsSkeleton(slice);
+    expect(slice.skeleton).toBe('export type Slice<T> = T[];');
+    const issues = await verifySkeletons([slice]);
+    expect(issues).toEqual([]);
+  });
+});
