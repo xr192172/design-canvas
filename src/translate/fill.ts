@@ -147,3 +147,78 @@ export async function fillUnitsWithRetry(
   }
   return out;
 }
+
+// ─────────────────────────────────────────────
+// 批量填充（一次 LLM 调用填多个函数体，省共享 prompt 常量成本）
+// ─────────────────────────────────────────────
+
+/** 批量翻译器：输入一批 FillContext，返回 raw 文本（内含 `<unit id>body</unit>` 标记块）。 */
+export type BatchHoleTranslator = (ctxs: FillContext[]) => Promise<string>;
+
+/** 确定性切分 `raw` 里的 `<unit id="X">…</unit>` 块 → id → 函数体。未命中 = 缺该单元的块。 */
+export function parseUnitBlocks(raw: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const re = /<unit\s+id="([^"]+)">([\s\S]*?)<\/unit>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw))) out.set(m[1], m[2].trim());
+  return out;
+}
+
+export interface BatchFillOptions {
+  batchSize?: number;
+  maxRetries?: number;
+  projectNote?: string;
+}
+
+/**
+ * 批量填充：把（命中）bodyHole 单元按 batchSize 分批，一次 LLM 调用返回多块（标记切分），
+ * 逐单元 splice + 验证；失败子集作为下一批带纠错反馈重试（隔离粒度≈失败子集，不整批重发）。
+ * 恢复单孔语义：一孔验证独立、只重试没过的孔。
+ */
+export async function fillUnitsBatched(
+  units: TransUnit[],
+  translateRaw: BatchHoleTranslator,
+  opts: BatchFillOptions = {},
+): Promise<FillResult[]> {
+  const holes = units.filter((u) => u.bodyHole);
+  const B = opts.batchSize ?? 5;
+  const maxRetries = opts.maxRetries ?? 2;
+  const out = new Map<string, FillResult>();
+  type QueueItem = { u: TransUnit; feedback?: string };
+  let queue: QueueItem[] = holes.map((u) => ({ u }));
+
+  for (let round = 0; round <= maxRetries && queue.length > 0; round++) {
+    const next: QueueItem[] = [];
+    for (let i = 0; i < queue.length; i += B) {
+      const chunk = queue.slice(i, i + B);
+      const ctxs = chunk.map(({ u, feedback }) => buildFillContext(u, feedback, opts.projectNote));
+      let raw: string;
+      try {
+        raw = await translateRaw(ctxs);
+      } catch (e) {
+        for (const { u } of chunk) {
+          const r: FillResult = { unit: u, filledSource: u.skeleton, ok: false, issues: [], error: `批量调用异常：${(e as Error).message}` };
+          out.set(u.id, r);
+          if (round < maxRetries) next.push({ u, feedback: buildRetryFeedback(u, r) });
+        }
+        continue;
+      }
+      const blocks = parseUnitBlocks(raw);
+      for (const { u } of chunk) {
+        const body = blocks.get(u.id);
+        const filledSource = spliceBody(u.skeleton, body ?? '');
+        let r: FillResult;
+        if (!body?.trim()) {
+          r = { unit: u, filledSource, ok: false, issues: [], error: '批中缺失该单元标记块或函数体为空' };
+        } else {
+          const issues = await verifySkeletons([{ ...u, bodyHole: false, skeleton: filledSource }]);
+          r = { unit: u, filledSource, ok: issues.length === 0, issues };
+        }
+        out.set(u.id, r);
+        if (!r.ok && round < maxRetries) next.push({ u, feedback: buildRetryFeedback(u, r) });
+      }
+    }
+    queue = next;
+  }
+  return holes.map((u) => out.get(u.id)!);
+}

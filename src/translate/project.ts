@@ -15,8 +15,8 @@ import ts from 'typescript';
 import { translateGoToTs } from './pairs.js';
 import { channelShimSource } from './ts_codegen.js';
 import { collectExternalTypeRefs } from './referenced.js';
-import { fillUnitsWithRetry } from './fill.js';
-import { createPooledHoleTranslator } from './llm.js';
+import { fillUnitsWithRetry, fillUnitsBatched } from './fill.js';
+import { createPooledBatchTranslator } from './llm.js';
 import { parseFileFull } from '../tools/ts_kernel/index.js';
 import type { TransUnit } from './unit.js';
 import type { VerifyIssue } from './verify.js';
@@ -82,6 +82,8 @@ export interface ProjectOptions {
   verify?: boolean;
   /** 注入翻译器（默认 createPooledHoleTranslator）——测试桩/自建 provider 用，便于确定性实证 */
   translator?: import('./fill.js').HoleTranslator | null;
+  /** 项目内一批函数一次 LLM 调用（内置 key 池走批量，注入 translator 时忽略）。默认 5 */
+  batchSize?: number;
 }
 
 function toPosix(abs: string): string {
@@ -210,7 +212,9 @@ function verifyProjectTree(modules: ProjectModule[]): string[] {
 export async function translateGoProject(projectDir: string, opts: ProjectOptions = {}): Promise<ProjectResult> {
   const root = path.resolve(projectDir);
   const files = walkGoFiles(root);
-  const translator = opts.fill ? (opts.translator ?? createPooledHoleTranslator()) : null;
+  // 内置 key 池 → 批量填（省共享 prompt 常量）；显式注入 translator → 单孔路径（测试桩 / 自建 provider）
+  const singleTranslator = opts.fill && opts.translator ? opts.translator : null;
+  const useBatch = opts.fill && !opts.translator;
   const diagnostics: string[] = [];
 
   // 第一遍：翻译每个文件，收集"名字 → 定义位置"（含类型/函数区分）与调用候选
@@ -283,10 +287,21 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
 
   // 第三遍（fill）：在 import 已算定的前提下逐模块注入「项目级调用约定」再填孔，
   // 让函数体引用对名；填完重建每个模块的 m.ts（门禁在填后输出上跑 = 填后 release gate）。
-  if (opts.fill && translator) {
+  if (opts.fill) {
     for (const m of modules) {
-      const note = buildProjectCallNote(m, defined);
-      const filled = await fillUnitsWithRetry(m.units, translator, opts.maxRetries ?? 2, note || undefined);
+      const note = buildProjectCallNote(m, defined) || undefined;
+      let filled: Awaited<ReturnType<typeof fillUnitsWithRetry>>;
+      if (useBatch) {
+        filled = await fillUnitsBatched(m.units, createPooledBatchTranslator(), {
+          batchSize: opts.batchSize ?? 5,
+          maxRetries: opts.maxRetries ?? 2,
+          projectNote: note,
+        });
+      } else if (singleTranslator) {
+        filled = await fillUnitsWithRetry(m.units, singleTranslator, opts.maxRetries ?? 2, note);
+      } else {
+        continue;
+      }
       const byId = new Map(filled.map((f) => [f.unit.id, f]));
       for (const u of m.units) {
         const f = byId.get(u.id);

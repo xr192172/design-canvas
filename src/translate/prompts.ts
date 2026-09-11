@@ -37,3 +37,37 @@ export function buildHolePrompt(u: TransUnit): string {
 export function buildHolePrompts(units: TransUnit[]): string[] {
   return units.filter((u) => u.bodyHole).map(buildHolePrompt);
 }
+
+/** 批量填充用的最小待译描述（复用 fill 的 FillContext 视图） */
+export interface BatchUnitView {
+  unit: TransUnit;
+  skeleton: string;
+  srcSnippet: string;
+  constraints: string[];
+}
+
+/** 输出标记块的包裹：每条函数体必须包在 `<unit id="...">...</unit>` 里，便于确定性切分 */
+export function buildBatchFillPrompt(views: BatchUnitView[], projectNote?: string): string {
+  const block = (v: BatchUnitView): string =>
+    [
+      `<unit id="${v.unit.id}">`,
+      '【目标签名（锁定，勿改）】',
+      v.skeleton,
+      '',
+      '【待翻译的 Go 源】',
+      v.srcSnippet,
+      '',
+      '【约束】',
+      ...(v.constraints.length ? v.constraints.map((c) => `- ${c}`) : ['- 无']),
+      '</unit>',
+    ].join('\n');
+  const head = [
+    `把下面的 ${views.length} 个 Go 函数分别翻译为 TypeScript 函数体。`,
+    '要求：',
+    '- 对每个函数都必须输出一个标记块 `<unit id="对应ID">函数体</unit>`，只含函数体，不含 export function 外壳，不改签名/参数名/返回类型；',
+    '- ID 必须与题目里的逐一对应，块间不要插入其它文字；',
+  ];
+  if (projectNote) head.push('', projectNote);
+  head.push('', '-----------', '', views.map(block).join('\n\n'));
+  return head.join('\n');
+}

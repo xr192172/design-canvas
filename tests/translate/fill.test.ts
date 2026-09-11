@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractGo } from '../../src/translate/go_extractor.js';
 import { renderTsSkeleton } from '../../src/translate/ts_codegen.js';
-import { spliceBody, fillUnit, fillUnits, fillUnitWithRetry, fillUnitsWithRetry, type HoleTranslator } from '../../src/translate/fill.js';
+import { spliceBody, fillUnit, fillUnits, fillUnitWithRetry, fillUnitsWithRetry, fillUnitsBatched, parseUnitBlocks, type HoleTranslator } from '../../src/translate/fill.js';
 import type { TransUnit } from '../../src/translate/unit.js';
 
 const GO_SRC = `package calc
@@ -133,5 +133,61 @@ describe('projectNote：项目级调用约定注入单孔 prompt', () => {
     const r = await fillUnit(add, recorder, undefined, 'NOTE-X');
     expect(r?.ok).toBe(true);
     expect(seen).toBe('NOTE-X');
+  });
+});
+
+describe('批量填充（fillUnitsBatched）', () => {
+  it('parseUnitBlocks 按 <unit id> 标记确定性切分 raw', () => {
+    const raw = [
+      '# 说明文字（应被忽略）',
+      '<unit id="Abs">',
+      'if (a < 0) {',
+      '  return -a;',
+      '}',
+      'return a;',
+      '</unit>',
+      '<unit id="Num_Double"> return n.Value * 2; </unit>',
+    ].join('\n');
+    const blocks = parseUnitBlocks(raw);
+    expect(blocks.get('Abs')).toContain('return a;');
+    expect(blocks.get('Num_Double')).toContain('return n.Value * 2;');
+    expect(blocks.size).toBe(2);
+  });
+
+  it('一批次填充全部孔：一次调用返回多块，全部 ok', async () => {
+    const units = (await extractGo('/tmp/fill.go', 'package calc\nfunc Add(a, b int) int {\n\treturn a + b\n}\nfunc Sub(a, b int) int {\n\treturn a - b\n}\n')).units;
+    for (const u of units) u.skeleton = renderTsSkeleton(u);
+    let calls = 0;
+    const stub = async (ctxs: any[]): Promise<string> =>
+      ctxs.map((c: any) => `<unit id="${c.unit.id}">\nreturn 0;\n</unit>`).join('\n') + `<!--call#${++calls}-->`;
+    const rs = await fillUnitsBatched(units, stub as any, { batchSize: 5 });
+    expect(calls).toBe(1); // 单次调用
+    expect(rs).toHaveLength(2);
+    expect(rs.every((r) => r.ok)).toBe(true);
+    expect(rs.every((r) => !r.filledSource.includes('TODO'))).toBe(true);
+  });
+
+  it('失败子集隔离重试：坏孔只重发自己，好孔不重发', async () => {
+    const src = 'package calc\nfunc Abs(a int) int {\n\treturn a\n}\nfunc Add(a, b int) int {\n\treturn a + b\n}\n';
+    const units = (await extractGo('/tmp/b.go', src)).units;
+    for (const u of units) u.skeleton = renderTsSkeleton(u);
+    const failOnce = new Set(['Abs']); // Abs 首轮给坏体
+    const served: string[][] = [];
+    const stub = async (ctxs: any[]): Promise<string> => {
+      served.push(ctxs.map((c: any) => c.unit.id));
+      return ctxs
+        .map((c: any) => {
+          const bad = failOnce.has(c.unit.id) && failOnce.delete(c.unit.id);
+          return `<unit id="${c.unit.id}">\n${bad ? 'return a +' : 'return 0;'}\n</unit>`;
+        })
+        .join('\n');
+    };
+    const rs = await fillUnitsBatched(units, stub as any, { batchSize: 5, maxRetries: 2 });
+    expect(rs).toHaveLength(2);
+    expect(rs.every((r) => r.ok)).toBe(true); // Abs 重试后也过
+    // 第一轮整批；第二轮只含 Abs（好孔不加塞）
+    expect(served[0].sort()).toEqual(['Abs', 'Add']);
+    expect(served[1]).toEqual(['Abs']);
+    expect(served).toHaveLength(2);
   });
 });

@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractGo } from '../../src/translate/go_extractor.js';
 import { renderTsSkeleton } from '../../src/translate/ts_codegen.js';
-import { createPooledHoleTranslator, loadKeys, KeyPool, normalizeBody } from '../../src/translate/llm.js';
+import { createPooledHoleTranslator, createPooledBatchTranslator, loadKeys, KeyPool, normalizeBody } from '../../src/translate/llm.js';
 import { fillUnit } from '../../src/translate/fill.js';
 import type { MinimalFetch } from '../../src/translate/llm.js';
 import type { TransUnit } from '../../src/translate/unit.js';
@@ -119,5 +119,18 @@ describe('createPooledHoleTranslator：轮换填孔', () => {
 
   it('空 key 池 → 工厂直接抛错', () => {
     expect(() => createPooledHoleTranslator({ keys: [] })).toThrow(/空 key 池/);
+  });
+});
+
+describe('createPooledBatchTranslator：一批次多函数', () => {
+  it('一次请求拼批量 prompt，返回 <unit id> 标记块原始文本（轮换/围栏剥离复用）', async () => {
+    const { fetch } = mkFetch([{ status: 200, content: '<unit id="Abs">\nreturn a;\n</unit>\n<unit id="Add">\nreturn a + b;\n</unit>' }]);
+    const translate = createPooledBatchTranslator({ keys: ['k1'], fetchImpl: fetch });
+    const u1 = await addUnit();
+    const mk = (id: string) => ({ unit: { ...u1, id, skeleton: `export function ${id}(a: number): number {\n}` }, skeleton: u1.skeleton, srcSnippet: u1.srcSnippet, constraints: u1.constraints, prompt: 'x' });
+    const raw = await translate([mk('Abs'), mk('Add')]);
+    expect(raw).toContain('<unit id="Abs">');
+    expect(raw).toContain('<unit id="Add">');
+    expect(raw).toContain('return a + b;');
   });
 });

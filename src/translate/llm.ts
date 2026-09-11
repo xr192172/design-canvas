@@ -9,7 +9,8 @@
  * 轮换语义（对齐 key-pool-proxy）：遇 retryStatuses（默认 429/5xx）把当前 key 打入冷却窗口，
  * 立即换下一个 key 重试，直到成功或重试耗尽；平时 round-robin。
  */
-import type { FillContext, HoleTranslator } from './fill.js';
+import type { FillContext, HoleTranslator, BatchHoleTranslator } from './fill.js';
+import { buildBatchFillPrompt, type BatchUnitView } from './prompts.js';
 
 /** 极简 fetch 形态（Node 18+ 全局 fetch 不依赖 DOM lib，这里显式声明） */
 export type MinimalFetch = (
@@ -117,20 +118,14 @@ export function normalizeBody(c: string): string {
   return (m ? m[1].trim() : s).trim();
 }
 
-/**
- * 基于 AGNES key 池的 HoleTranslator 工厂。
- * 返回的翻译器：把 FillContext.prompt 发给 LLM，只取函数体文本返回。
- * key 池空 / 环境无 fetch 时抛错（由 fillUnit 捕获为 error）。
- */
-export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}): HoleTranslator {
+/** 共享的池化 chat：遇冷却/空内容自动换 key 重试，返回原始 content 文本（含 markdown 围栏，由各翻译器自行剥） */
+function buildChat(config: PooledTranslatorConfig): (messages: ChatMessage[]) => Promise<string> {
   const baseURL = (config.baseURL ?? process.env.AGNES_UPSTREAM_BASE ?? 'https://apihub.agnes-ai.com').replace(/\/+$/, '');
-  // 指针已配的 key 池用 key 本身；未给 key 但显式配了 baseURL（典型指向本地 key-pool-proxy）
-  // → 客户端无需 key，Bearer 用占位，轮换发生在上游代理自己维护的池。
+  // 显式配 baseURL（典型指向本地 key-pool-proxy）→ 客户端无需 key，Bearer 占位，轮换发生在上游代理自己的池。
   let keys = config.keys ?? loadKeys(config.poolEnv ?? 'AGNES_KEY_POOL', config.fallbackEnvs ?? []);
   const explicitBase = config.baseURL !== undefined || process.env.AGNES_UPSTREAM_BASE !== undefined;
-  if (keys.length === 0 && explicitBase) {
-    keys = ['proxy-caller'];
-  } else if (keys.length === 0) {
+  if (keys.length === 0 && explicitBase) keys = ['proxy-caller'];
+  if (keys.length === 0) {
     throw new Error(
       `[translate/llm] 空 key 池：可设 ${config.poolEnv ?? 'AGNES_KEY_POOL'}（逗号分隔多 key），` +
         `或设 AGNES_UPSTREAM_BASE 指向本地 key-pool-proxy、或传入 keys 显式提供。`,
@@ -147,24 +142,19 @@ export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}):
   const temperature = config.temperature ?? 0.2;
   const maxTokens = config.maxTokens ?? 2048;
 
-  return async (ctx: FillContext): Promise<string> => {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: '你是源码翻译器。严格遵守 user 的约束：只输出目标函数体，不得生成 export function 外壳、不得改动签名。' },
-      { role: 'user', content: ctx.prompt },
-    ];
+  return async (messages: ChatMessage[]): Promise<string> => {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const now = Date.now();
       if (!pool.hasAvailable(now)) break;
       const idx = pool.pick(now);
       if (idx < 0) break;
-      const { status, content: raw } = await chatOnce(fetchImpl, baseURL, pool.keys[idx], {
+      const { status, content } = await chatOnce(fetchImpl, baseURL, pool.keys[idx], {
         model,
         messages,
         temperature,
         max_tokens: maxTokens,
       });
-      const content = normalizeBody(raw);
-      if (content) return content; // 有函数体即成功
+      if (content) return content; // 有内容即成功（是否合法由 fill 侧闸把关）
       if (retrySet.has(status) && attempt < maxRetries) {
         pool.cooldown(idx, Date.now(), cooldownMs);
         continue;
@@ -172,5 +162,34 @@ export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}):
       throw new Error(`LLM 返回 ${status}（key 池第 ${idx + 1} 把）：${content || '空内容/非 JSON'}`);
     }
     throw new Error('[translate/llm] key 池已全部冷却或重试耗尽');
+  };
+}
+
+const SYSTEM_FILL = '你是源码翻译器。严格遵守 user 的约束：只输出目标函数体，不得生成 export function 外壳、不得改动签名。';
+const SYSTEM_BATCH =
+  '你是源码翻译器。必须为每个函数各输出一个 `<unit id="...">函数体</unit>` 标记块，块数=题目函数数，ID 逐一对应，块间无其它文字、不改签名。';
+
+/**
+ * 基于 AGNES key 池的 HoleTranslator（单孔）工厂。
+ * 返回的翻译器：把 FillContext.prompt 发给 LLM，只取函数体文本返回。空 key 池/无 fetch 时抛错。
+ */
+export function createPooledHoleTranslator(config: PooledTranslatorConfig = {}): HoleTranslator {
+  const chat = buildChat(config);
+  return async (ctx: FillContext): Promise<string> => {
+    return normalizeBody(await chat([{ role: 'system', content: SYSTEM_FILL }, { role: 'user', content: ctx.prompt }]));
+  };
+}
+
+/**
+ * 基于 AGNES key 池的 BatchHoleTranslator（多孔一次性）工厂。
+ * 一次调用把一批 FillContext 拼成一个批量 prompt（共享 system/项目调用约定），返回
+ * `<unit id>body</unit>` 标记块的原始文本；切分/逐单元验证见 fill.fillUnitsBatched。
+ */
+export function createPooledBatchTranslator(config: PooledTranslatorConfig = {}): BatchHoleTranslator {
+  const chat = buildChat(config);
+  const view = (c: FillContext): BatchUnitView => ({ unit: c.unit, skeleton: c.skeleton, srcSnippet: c.srcSnippet, constraints: c.constraints });
+  return async (ctxs: FillContext[]): Promise<string> => {
+    const prompt = buildBatchFillPrompt(ctxs.map(view), ctxs[0]?.projectNote);
+    return normalizeBody(await chat([{ role: 'system', content: SYSTEM_BATCH }, { role: 'user', content: prompt }]));
   };
 }
