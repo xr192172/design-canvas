@@ -103,6 +103,22 @@ export function mapGoType(goType: string): MappedType {
   if (t.startsWith('func')) {
     return { degree: 'unsupported', ts: '(...args: unknown[]) => unknown', note: '函数类型参数语义需 LLM 换算签名' };
   }
+  // 泛型类型实参（Go 用方括号）：`Name[K, V]` / `List[int]` → 逐实参映射成 TS `Name<K, V>`
+  const genSB = /^([A-Za-z_][\w.]*)\[([^\]]+)\]$/.exec(t);
+  if (genSB) {
+    const base = genSB[1].replace(/\./g, '_');
+    const args = splitTopLevel(genSB[2]).map((a) => mapGoType(a.trim()));
+    const hasUnsup = args.some((a) => a.degree === 'unsupported');
+    return { degree: hasUnsup ? 'unsupported' : 'direct', ts: `${base}<${args.map((a) => a.ts).join(', ')}>` };
+  }
+  // 泛型类型实参 `<A, B>` → 逐实参映射直通
+  const genM = /^([A-Za-z_][\w.]*)<(.+)>$/.exec(t);
+  if (genM) {
+    const base = genM[1].replace(/\./g, '_');
+    const args = splitTopLevel(genM[2]).map((a) => mapGoType(a.trim()));
+    const hasUnsup = args.some((a) => a.degree === 'unsupported');
+    return { degree: hasUnsup ? 'unsupported' : 'direct', ts: `${base}<${args.map((a) => a.ts).join(', ')}>` };
+  }
   // 其它复合/含逗号结果（非元组、无法归类）→ 如实标注
   if (t.includes(',') || /^\(/.test(t)) {
     return { degree: 'unsupported', ts: 'unknown', note: '复合结果无法 1:1 映射，需 LLM 设计结果形态' };
@@ -235,6 +251,12 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
  */
 export function renderTsSkeleton(u: TransUnit): string {
   const { code, notes } = u.kind === 'func' ? renderFuncSkeleton(u) : renderTypeSkeleton(u);
+  // 类型约束传递：非 any/interface{} 的 Go 约束 → 写进约束提醒（TS 无等价约束）
+  for (const [tp, c] of Object.entries(u.typeParamConstraints ?? {})) {
+    if (c.trim() && !['any', 'interface{}'].includes(c.trim())) {
+      notes.push(`类型参数 ${tp} 约束为「${c}」：TS 无等价约束，调用方须保证类型满足（或用 近似值域）`);
+    }
+  }
   if (notes.length > 0) u.constraints = withConstraints(u.constraints, notes);
   u.skeleton = code;
   return code;

@@ -54,6 +54,8 @@ export interface TransUnit {
   result?: string | null;
   /** Go 类型参数名（泛型），如 ['T']；渲染为 TS `<T, ...>` */
   typeParams?: string[];
+  /** 各类型参数 → Go 约束原文（如 comparable/any/Ordered）；TS 无等价约束，仅传递提示 */
+  typeParamConstraints?: Record<string, string>;
 
   // —— type 用 ——
   /** 具体形态：struct → interface；interface → interface(方法签名)；alias → type 别名 */

@@ -45,11 +45,17 @@ function extractParamList(block: SyntaxNodeLike): TranslateParam[] {
   return out;
 }
 
-/** 解析 receiver 文本（`(u *User)` / `u *User` / `(u User)` / `(p *Pair[T])` / `(u User[T])`）→ 参名 + 基类型名（去 * 与类型实参） */
-function parseReceiver(recvText: string): { name: string; type: string } | null {
-  const m = recvText.match(/\(?\s*([A-Za-z_]\w*)\s+(?:\*\s*)?([\w.]+)/);
+/** 解析 receiver 文本 → 参名 + 基类型名 + 泛型实参 + 可渲染全类型
+ *  `(u *User)` → base User；`(p *Pair[T])` → base Pair, typeArgs ['T'], fullType 'Pair<T>' */
+function parseReceiver(recvText: string): { name: string; base: string; typeArgs: string[]; fullType: string } | null {
+  const m = recvText.match(/\(?\s*([A-Za-z_]\w*)\s+(?:\*\s*)?([\w.]+)(?:\[([^\]]*)\])?/);
   if (!m) return null;
-  return { name: m[1], type: m[2].replace(/\./g, '_') };
+  const base = m[2].replace(/\./g, '_');
+  const typeArgs = (m[3] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => /^[A-Za-z_]\w*$/.test(s));
+  return { name: m[1], base, typeArgs, fullType: typeArgs.length ? `${base}<${typeArgs.join(', ')}>` : base };
 }
 
 /** 类型参数名（泛型）：`[T any]` / `[T comparable]` → ['T'] */
@@ -69,6 +75,27 @@ function extractTypeParams(node: SyntaxNodeLike): string[] {
     }
   }
   return names;
+}
+
+/** 各类型参数 → 约束原文（`T comparable` → {T:'comparable'}；`T any` → {T:'any'}） */
+function extractTypeConstraints(node: SyntaxNodeLike): Record<string, string> {
+  const list = childField(node, 'type_parameters') || findChildOfType(node, 'type_parameter_list');
+  if (!list) return {};
+  const out: Record<string, string> = {};
+  for (let i = 0; i < list.childCount; i++) {
+    const c = list.child(i);
+    if (!c || c.type !== 'type_parameter_declaration') continue;
+    let name: string | undefined;
+    let constraint = '';
+    for (let j = 0; j < c.childCount; j++) {
+      const k = c.child(j);
+      if (!k) continue;
+      if (!name && k.type === 'identifier') name = k.text;
+      else if (name && (k.type === 'type_constraint' || k.type === 'type_identifier')) constraint = k.text;
+    }
+    if (name && constraint) out[name] = constraint;
+  }
+  return out;
 }
 
 /** 函数体里的并发/资源语义 → 给 LLM 的提示（不硬猜，只指导映射方向） */
@@ -95,14 +122,17 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
 
   const recvNode = childField(node, 'receiver');
   const recv = recvNode ? parseReceiver(recvNode.text) : null;
-  const typeParams = extractTypeParams(node);
+  const ownTypeParams = extractTypeParams(node);
+  const typeParamConstraints = extractTypeConstraints(node);
   if (recv) {
-    // 方法：receiver 作首参；命名带类型前缀防撞名
-    params.unshift({ name: recv.name, type: recv.type });
-    const qn = `${recv.type}_${method}`;
-    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+    // 方法：receiver 作首参（泛型 receiver 用全类型如 Pair<T>）；命名带类型基名前缀防撞名
+    params.unshift({ name: recv.name, type: recv.fullType });
+    const qn = `${recv.base}_${method}`;
+    // 方法自身无类型参数时，继承 receiver 的泛型实参作为自由函数的 <T...>
+    const typeParams = ownTypeParams.length ? ownTypeParams : recv.typeArgs;
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
   }
-  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */
@@ -157,7 +187,7 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   const typeNode = childField(spec, 'type');
   if (!nameNode || !typeNode) return null;
   const name = nameNode.text;
-  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
+  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), typeParamConstraints: extractTypeConstraints(spec), srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
 
   // struct → TS interface（数据字段）
   if (typeNode.type === 'struct_type') {

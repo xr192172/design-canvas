@@ -321,3 +321,40 @@ func process() { select {} }
     expect(process.constraints.join(' ')).toContain('select');
   });
 });
+
+describe('方法 receiver 泛型 + 类型约束传递', () => {
+  const GO_SRC_GEN_METHOD = `package g
+type Pair[T any] struct {
+\tFirst T
+}
+func (p *Pair[T]) Get() T {
+\treturn p.First
+}
+func Max[T comparable](a, b T) T {
+\tif a > b { return a }
+\treturn b
+}
+`;
+  it('方法 receiver 带泛型实参：继承 <T>，receiver 参数用 Pair<T>', async () => {
+    const units = await unitsOf(GO_SRC_GEN_METHOD);
+    const get = units.find((u) => u.name === 'Pair_Get')!;
+    expect(get.typeParams).toEqual(['T']);
+    expect(get.params?.[0]).toEqual({ name: 'p', type: 'Pair<T>' });
+    renderTsSkeleton(get);
+    expect(get.skeleton).toContain('export function Pair_Get<T>(p: Pair<T>): T {');
+    const issues = await verifySkeletons([get]);
+    expect(issues).toEqual([]);
+  });
+
+  it('类型约束传递：comparable 写进约束提示；any 不误报', async () => {
+    const units = await unitsOf(GO_SRC_GEN_METHOD);
+    const max = units.find((u) => u.name === 'Max')!;
+    expect(max.typeParamConstraints).toEqual({ T: 'comparable' });
+    renderTsSkeleton(max);
+    expect(max.constraints.join(' ')).toContain('comparable');
+    const get = units.find((u) => u.name === 'Pair_Get')!;
+    renderTsSkeleton(get);
+    // Pair<T> 的 T 约束是 any → 不产生 "受约束" 提示
+    expect(get.constraints.join(' ')).not.toContain('comparable');
+  });
+});
