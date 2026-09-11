@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractGo } from '../../src/translate/go_extractor.js';
 import { renderTsSkeleton } from '../../src/translate/ts_codegen.js';
-import { spliceBody, fillUnit, fillUnits, type HoleTranslator } from '../../src/translate/fill.js';
+import { spliceBody, fillUnit, fillUnits, fillUnitWithRetry, fillUnitsWithRetry, type HoleTranslator } from '../../src/translate/fill.js';
 import type { TransUnit } from '../../src/translate/unit.js';
 
 const GO_SRC = `package calc
@@ -80,6 +80,35 @@ describe('fillUnits：批量逐孔隔离', () => {
     const units = await unitsOf(GO_SRC);
     const rs = await fillUnits(units, simpleFiller);
     // 只有 Add 是 func 孔；User 是 type 跳过
+    expect(rs).toHaveLength(1);
+    expect(rs[0].ok).toBe(true);
+  });
+});
+
+describe('fillUnitWithRetry：纠错重试', () => {
+  it('首次坏函数体 → feedback 注入后第二次成功', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    let calls = 0;
+    const retry: HoleTranslator = (ctx) => {
+      calls++;
+      return ctx.prompt.includes('上次尝试') ? 'return a + b;' : 'return a +'; // 有 feedback 才修正
+    };
+    const r = await fillUnitWithRetry(add, retry, 2);
+    expect(r?.ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('重试耗尽仍坏 → 返回最后一次失败结果', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    const alwaysBad: HoleTranslator = () => 'return a +';
+    const r = await fillUnitWithRetry(add, alwaysBad, 1);
+    expect(r?.ok).toBe(false);
+    expect(r?.issues.length).toBeGreaterThan(0);
+  });
+
+  it('批量 fillUnitsWithRetry 只处理孔', async () => {
+    const units = await unitsOf(GO_SRC);
+    const rs = await fillUnitsWithRetry(units, simpleFiller, 1);
     expect(rs).toHaveLength(1);
     expect(rs[0].ok).toBe(true);
   });

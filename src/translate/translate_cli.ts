@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { translateGoToTs } from './pairs.js';
 import { createPooledHoleTranslator } from './llm.js';
-import { fillUnits } from './fill.js';
+import { fillUnitsWithRetry } from './fill.js';
 
 function readArg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   if (wantLlm) {
     console.log('── 调 AGNES key 池 LLM 填孔 ──');
     const translate = createPooledHoleTranslator();
-    const filled = await fillUnits(r.units, translate);
+    const filled = await fillUnitsWithRetry(r.units, translate);
     const byId = new Map(filled.map((f) => [f.unit.id, f]));
     // 按原始单元顺序组装：func 用填充后源码，type 用骨架
     output = r.units

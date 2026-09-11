@@ -62,19 +62,27 @@ function indentBody(body: string): string {
     .join('\n');
 }
 
-/**
- * 填充单个 bodyHole 单元并重验证。type 单元（非孔）返回 null。
- * 验证不过 → ok:false + 具体 issue，不抛、不丢源（骨架原样保留）。
- */
-export async function fillUnit(u: TransUnit, translate: HoleTranslator): Promise<FillResult | null> {
-  if (!u.bodyHole) return null;
-  const ctx: FillContext = {
+/** 构造给翻译器的上下文；feedback 非空时追加到 prompt 尾部（纠错重试用） */
+export function buildFillContext(u: TransUnit, feedback?: string): FillContext {
+  const base = buildHolePrompt(u);
+  const prompt = feedback ? `${base}\n\n--- 上次尝试未通过验证，请据此修正，仍只输出函数体 ---\n${feedback}` : base;
+  return {
     unit: u,
     skeleton: u.skeleton,
     srcSnippet: u.srcSnippet,
     constraints: u.constraints,
-    prompt: buildHolePrompt(u),
+    prompt,
   };
+}
+
+/**
+ * 填充单个 bodyHole 单元并重验证。type 单元（非孔）返回 null。
+ * feedback：把上一次失败产物/诊断作为纠错上下文注入 prompt（见 fillUnitWithRetry）。
+ * 验证不过 → ok:false + 具体 issue，不抛、不丢源（骨架原样保留）。
+ */
+export async function fillUnit(u: TransUnit, translate: HoleTranslator, feedback?: string): Promise<FillResult | null> {
+  if (!u.bodyHole) return null;
+  const ctx = buildFillContext(u, feedback);
   let body: string;
   try {
     body = await translate(ctx);
@@ -89,11 +97,46 @@ export async function fillUnit(u: TransUnit, translate: HoleTranslator): Promise
   return { unit: u, filledSource, ok: issues.length === 0, issues };
 }
 
+/** 把一次失败结果整理成给 LLM 的纠错反馈（含坏产物 + 具体问题） */
+export function buildRetryFeedback(u: TransUnit, r: FillResult): string {
+  if (r.error) return `翻译器/填充错误：${r.error}`;
+  const detail = r.issues.map((i) => `[${i.gate}] ${i.id}: ${i.detail}`).join('；');
+  return ['上次产物（含错误）：', r.filledSource, '', '问题：', detail || '未知'].join('\n');
+}
+
+/** 逐次纠错重试：失败则把坏产物+诊断喂回翻译器再试，直到 ok 或重试耗尽。 */
+export async function fillUnitWithRetry(u: TransUnit, translate: HoleTranslator, maxRetries = 2): Promise<FillResult | null> {
+  if (!u.bodyHole) return null;
+  let feedback: string | undefined;
+  let last: FillResult | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const r = await fillUnit(u, translate, feedback);
+    if (!r || r.ok) return r;
+    last = r;
+    feedback = buildRetryFeedback(u, r);
+  }
+  return last;
+}
+
 /** 批量填充全部 bodyHole 单元；逐孔独立验证，单孔失败不影响其余。 */
 export async function fillUnits(units: TransUnit[], translate: HoleTranslator): Promise<FillResult[]> {
   const out: FillResult[] = [];
   for (const u of units) {
     const r = await fillUnit(u, translate);
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+/** 批量逐孔纠错重试：每孔 fillUnitWithRetry。 */
+export async function fillUnitsWithRetry(
+  units: TransUnit[],
+  translate: HoleTranslator,
+  maxRetries = 2,
+): Promise<FillResult[]> {
+  const out: FillResult[] = [];
+  for (const u of units) {
+    const r = await fillUnitWithRetry(u, translate, maxRetries);
     if (r) out.push(r);
   }
   return out;
