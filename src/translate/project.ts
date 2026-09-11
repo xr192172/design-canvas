@@ -307,6 +307,11 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
         const f = byId.get(u.id);
         if (f?.ok) u.skeleton = f.filledSource;
       }
+      const failed = filled.filter((f) => !f.ok);
+      if (failed.length) {
+        const firstErr = failed[0].error ?? failed[0].issues.map((i) => i.detail).join('；');
+        diagnostics.push(`${m.rel}: LLM 填孔失败 ${failed.length}/${filled.length}：${firstErr}`);
+      }
     }
   }
   for (const m of modules) assembleModule(m);
