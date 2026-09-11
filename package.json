@@ -51,6 +51,7 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --doctor",
     "rebuild": "node scripts/rebuild_feature.mjs",
+    "translate": "node dist/src/translate/translate_cli.js",
     "dogfood": "node dist/src/tools/dogfood_stats.js",
     "brickify": "node dist/src/tools/brickify_cli.js",
     "signal-review": "node dist/src/tools/signal_review_cli.js",
