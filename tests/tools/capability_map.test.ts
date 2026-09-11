@@ -25,6 +25,7 @@ const regTools = [
   'cross_repo_symbol_index', 'hybrid_precheck', 'behavior_baseline', 'code_health', 'run_tests',
   'feature_line', 'remove_dead_imports', 'refactor_pipeline', 'annotate_functions', 'suggest_renames', 'find_similar_names',
   'refactor_judge', 'diagnose', 'canvas_notes', 'gateway_provider', 'read_project_docs',
+  'translate_go_ts',
   'capability_map',
 ];
 
@@ -38,7 +39,7 @@ describe('capability_map 目录契约', () => {
 
   it('目录覆盖所有注册工具（无遗漏、无超集）', () => {
     const catalogued = LANES.flatMap((l) => l.tools.map((t) => t.name));
-    expect(catalogued.length).toBe(54);
+    expect(catalogued.length).toBe(55);
     expect(catalogued).toEqual(expect.arrayContaining(regTools.filter((t) => t !== 'capability_map')));
     expect(new Set(catalogued).size).toBe(catalogued.length); // 无跨线重复
   });

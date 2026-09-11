@@ -91,6 +91,7 @@ import { getProjectCacheDb } from './db/db.js';
 import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryObserveLog } from './observe/log_query.js';
 import { memoryObserveHandler, memoryTargetsHandler } from './tools/memory_observe.js';
+import { translateGoTsHandler } from './translate/tool.js';
 import { observeTrace } from './tools/observe_trace.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './observe/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './observe/contract.js';
@@ -734,6 +735,20 @@ const TOOL_DEFS: ToolDef[] = [
       '列出本机所有带 --inspect=<port> 的 node 进程（含 DSH gen），返回 pid + inspect端口，供 memory_observe 的 target 使用。',
     inputSchema: {},
     handler: wrapData(async () => memoryTargetsHandler()),
+  },
+
+  {
+    name: 'translate_go_ts',
+    title: 'Go→TS 半自动翻译（骨架 + 可选 LLM 填 + 可选行为对拍）',
+    description:
+      '把 Go 源文件机械生成 TS 骨架 + 验证闸（默认）；fill=true 用 AGNES key 池 LLM 逐孔填函数体（需 AGNES_KEY_POOL 或本地 key-pool-proxy）；verify=true 再对已填的纯函数跑 Go↔TS 行为对拍（需 go 工具链）。跨语言翻译：函数/方法/struct/接口/named 别名/多返回元组/map·slice·指针/泛型/chan(近似)。',
+    inputSchema: {
+      file: z.string().describe('Go 源文件路径（绝对或相对 cwd）'),
+      fill: z.boolean().optional().describe('用 AGNES key 池 LLM 逐孔填函数体'),
+      verify: z.boolean().optional().describe('对已填纯函数跑 Go↔TS 行为对拍（需 go 工具链）'),
+      maxRetries: z.number().int().min(0).max(6).optional().describe('LLM 纠错重试次数，默认 2'),
+    },
+    handler: wrapData(async (a) => translateGoTsHandler(a)),
   },
 
   {

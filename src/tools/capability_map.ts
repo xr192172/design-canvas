@@ -126,6 +126,7 @@ export const LANES: Lane[] = [
       { name: 'cross_repo_symbol_index', when: '跨仓库符号索引建立/反查' },
       { name: 'hybrid_precheck', when: '仓库杂交前预检（依赖/符号连通性）' },
       { name: 'code_health', when: '代码健康度扫描（含 unused_import 多语言）' },
+      { name: 'translate_go_ts', when: '跨语言翻译：Go→TS 半自动（机械骨架+验证闸；fill 用 LLM 逐孔填；verify 跑行为对拍）' },
     ],
   },
   {

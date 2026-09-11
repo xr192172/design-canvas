@@ -51,6 +51,7 @@ const TRIGGER_ROWS = [
   ['改前看影响面', '`diff_views` / `reconcile_chain`', '波及方向'],
   ['改前**量化风险**/找最易炸的文件', '`impact_analysis`（hubs=true 热区盘点）', '改前风险闭包：变更点→反向可达闭包，输出受影响文件+风险排序'],
   ['两项目要合并/迁移，先查撞名', '`cross_repo_symbol_index` / `hybrid_precheck`', '符号冲突/双胞胎/迁移范围；杂交前先答会不会打架'],
+  ['把 Go 项目/文件翻成 TS', '`translate_go_ts`', '机械骨架+验证闸（默认）；fill 用 AGNES key 池 LLM 逐孔填函数体；verify 对纯函数跑 Go↔TS 行为对拍'],
   ['改完一个函数，验证"跑得对不对"', '`behavior_baseline`', '金丝雀 harness：样例输入跑一次 capture 快照，改后 verify 对比'],
   ['选材/体检，评估项目健康度', '`code_health`', '死代码/圈复杂度/分层违规 → 健康分 + 问题清单'],
 ];
