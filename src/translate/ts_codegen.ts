@@ -279,9 +279,10 @@ function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
   return { code: `export interface ${u.name}${typeParamString(u)} {\n${fields}\n}`, notes };
 }
 
-/** 渲染 const 单元骨架：`const Max = "hi"` → `export const Max = "hi";` */
+/** 渲染 const 单元骨架：`const Max = "hi"` → `export const Max = "hi";`（var → export let） */
 function renderConstSkeleton(u: TransUnit): { code: string; notes: string[] } {
-  return { code: `export const ${u.name} = ${u.value ?? 'undefined'};`, notes: [] };
+  const kw = u.isVar ? 'let' : 'const';
+  return { code: `export ${kw} ${u.name} = ${u.value ?? 'undefined'};`, notes: [] };
 }
 
 /**

@@ -35,7 +35,7 @@ function structureCheck(u: TransUnit): string | null {
     return null;
   }
   if (u.kind === 'const') {
-    if (!new RegExp(`^export\\s+const\\s+${escapeRe(u.name)}\\s*=`, 'm').test(u.skeleton)) return `const 骨架缺少 export const ${u.name} =`;
+    if (!new RegExp(`^export\\s+(?:const|let)\\s+${escapeRe(u.name)}\\s*=`, 'm').test(u.skeleton)) return `const 骨架缺少 export (const|let) ${u.name} =`;
     return null;
   }
   if (u.kind === 'type') {

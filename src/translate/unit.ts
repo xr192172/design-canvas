@@ -58,8 +58,10 @@ export interface TransUnit {
   typeParamConstraints?: Record<string, string>;
 
   // —— const 用 ——
-  /** 直译后的 TS 字面量源码（标量 const/var），如 '100' / '"hi"' / 'true' */
+  /** 直译后的 TS 字面量源码（标量 const/var 常量表达式），如 '100' / '"hi"' / 'true' */
   value?: string;
+  /** var（可变）→ 渲成 export let；const（不可变）→ export const。缺省 const */
+  isVar?: boolean;
 
   // —— type 用 ——
   /** 具体形态：struct → interface；interface → interface(方法签名)；alias → type 别名 */

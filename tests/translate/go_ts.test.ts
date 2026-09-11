@@ -352,7 +352,7 @@ var Debug = true
     const r = await translateGoToTs('/tmp/c.go', src);
     expect(r.output).toContain('export const Max = 42;');
     expect(r.output).toContain('export const Name = "hi";');
-    expect(r.output).toContain('export const Debug = true;');
+    expect(r.output).toContain('export let Debug = true;'); // var(可变) → export let，不冒充 const
     const max = r.units.find((u) => u.name === 'Max');
     expect(max?.kind).toBe('const');
     expect(max?.value).toBe('42');

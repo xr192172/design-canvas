@@ -14,6 +14,7 @@
 
 import { parseAstRoot, type SyntaxNodeLike } from '../tools/ts_kernel/index.js';
 import { DEFAULT_CONSTRAINTS, type TransUnit, type TranslateParam, type TranslateKind, type TranslateMethod } from './unit.js';
+import { evalConstExpr, constToTsLiteral, type ConstValue } from './const_eval.js';
 
 /** 从 Go AST 节点取字段子节点（tree-sitter 字段名访问，防御 null） */
 function childField(node: SyntaxNodeLike, name: string): SyntaxNodeLike | null {
@@ -247,56 +248,34 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   return { ...base, typeKind: 'alias', aliasType: typeNode.text };
 }
 
-/** Go 标量字面量节点 → TS 字面量源码（确定性可自动翻译）；不支持返回 null */
-function literalToTs(node: SyntaxNodeLike | null): string | null {
-  if (!node) return null;
-  switch (node.type) {
-    case 'int_literal':
-    case 'float_literal':
-    case 'true':
-    case 'false':
-    case 'interpreted_string_literal':
-    case 'raw_string_literal':
-      return node.text;
-    default:
-      return null; // 复合字面量/调用等 → 交给 LLM/人工，不硬猜
-  }
+/** 包级 const/var 描述符（name + 是否 var + 表达式节点），供 fixpoint 求值 */
+interface ConstDecl {
+  name: string;
+  isVar: boolean;
+  expr: SyntaxNodeLike;
+  src: string;
 }
 
-/** 包级 const/var 单元：`const Max = 100` → TransUnit(kind='const', value='100')；仅收标量字面量 */
-function unitFromVarConst(spec: SyntaxNodeLike): TransUnit | null {
-  const nameNode = childField(spec, 'name');
-  const valNode = childField(spec, 'value') || findChildLiteral(spec);
-  const name = nameNode?.text;
-  if (!name || !valNode) return null;
-  // value 可能是 expression_list，取其首个字面量子节点
-  let lit: SyntaxNodeLike | null = valNode;
-  if (valNode.type === 'expression_list') lit = findChildLiteral(valNode);
-  const value = literalToTs(lit);
-  if (value === null) return null; // 复合值不支持自动直译，跳过（不硬猜）
-  return {
-    id: name,
-    kind: 'const' as TranslateKind,
-    dstLang: 'ts',
-    name,
-    value,
-    srcSnippet: spec.text.trim(),
-    skeleton: '',
-    bodyHole: false,
-    constraints: [...DEFAULT_CONSTRAINTS],
-  };
-}
-
-function findChildLiteral(node: SyntaxNodeLike): SyntaxNodeLike | null {
+/** 在节点里取首个"表达式"子节点（找不到 value 字段时兜底） */
+function firstExprChild(node: SyntaxNodeLike): SyntaxNodeLike | null {
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i);
-    if (c && ['int_literal', 'float_literal', 'true', 'false', 'interpreted_string_literal', 'raw_string_literal'].includes(c.type)) return c;
+    if (c && ['int_literal', 'float_literal', 'true', 'false', 'interpreted_string_literal', 'raw_string_literal', 'character_literal', 'identifier', 'binary_expression', 'unary_expression', 'parenthesized_expression', 'expression_list'].includes(c.type)) return c;
   }
   return null;
 }
 
-/** 深度遍历 AST，收集目标单元。const/var 仅收包级（顶层）。 */
-function collect(node: SyntaxNodeLike, units: TransUnit[], topLevel: boolean): void {
+/** 收集一条 const/var spec → 描述符（无名字/无值则 null） */
+function constDeclFromSpec(spec: SyntaxNodeLike, isVar: boolean): ConstDecl | null {
+  const nameNode = childField(spec, 'name');
+  const valNode = childField(spec, 'value') || firstExprChild(spec);
+  const name = nameNode?.text;
+  if (!name || !valNode) return null;
+  return { name, isVar, expr: valNode, src: valNode.text.trim() };
+}
+
+/** 深度遍历 AST，收集目标单元。const/var 仅收包级（顶层），把表达式攒进 consts 待求值。 */
+function collect(node: SyntaxNodeLike, units: TransUnit[], consts: ConstDecl[], topLevel: boolean): void {
   const isFunc = node.type === 'function_declaration' || node.type === 'method_declaration';
   const isTypeDecl = node.type === 'type_declaration';
   if (isFunc) {
@@ -318,17 +297,18 @@ function collect(node: SyntaxNodeLike, units: TransUnit[], topLevel: boolean): v
   // 包级 const/var（仅顶层；多 spec 的 declaration 逐条收）
   if (topLevel && (node.type === 'const_declaration' || node.type === 'var_declaration')) {
     const specType = node.type === 'const_declaration' ? 'const_spec' : 'var_spec';
+    const isVar = node.type === 'var_declaration';
     for (let i = 0; i < node.childCount; i++) {
       const spec = node.child(i);
       if (!spec || spec.type !== specType) continue;
-      const u = unitFromVarConst(spec);
-      if (u) units.push(u);
+      const d = constDeclFromSpec(spec, isVar);
+      if (d) consts.push(d);
     }
     return;
   }
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i);
-    if (c) collect(c, units, false);
+    if (c) collect(c, units, consts, false);
   }
 }
 
@@ -347,9 +327,44 @@ export async function extractGo(filePath: string, source: string): Promise<Extra
   const parsed = await parseAstRoot(filePath, source);
   if (!parsed?.root) return { units: [], error: `Go 解析失败（可解析性未知）：${filePath}` };
   const units: TransUnit[] = [];
+  const consts: ConstDecl[] = [];
   for (let i = 0; i < parsed.root.childCount; i++) {
     const c = parsed.root.child(i);
-    if (c) collect(c, units, true); // 顶层声明（包级 const/var 只在这里收）
+    if (c) collect(c, units, consts, true); // 顶层声明（包级 const/var 只在这里收）
+  }
+  // 常量表达式 fixpoint 求值（支持同包常量引用；求不出 = 非编译期常量 → 跳过交 LLM/人工）
+  const constVals = new Map<string, { v: ConstValue; isVar: boolean }>();
+  let pending = consts.slice();
+  let progressed = true;
+  while (progressed && pending.length) {
+    progressed = false;
+    const still = [];
+    for (const d of pending) {
+      const v = evalConstExpr(d.expr, (n) => constVals.get(n)?.v ?? null);
+      if (v) {
+        constVals.set(d.name, { v, isVar: d.isVar });
+        progressed = true;
+      } else {
+        still.push(d);
+      }
+    }
+    pending = still;
+  }
+  for (const d of consts) {
+    const got = constVals.get(d.name);
+    if (!got) continue;
+    units.push({
+      id: d.name,
+      kind: 'const' as TranslateKind,
+      dstLang: 'ts',
+      name: d.name,
+      value: constToTsLiteral(got.v),
+      isVar: got.isVar,
+      srcSnippet: d.src,
+      skeleton: '',
+      bodyHole: false,
+      constraints: [...DEFAULT_CONSTRAINTS],
+    });
   }
   return { units };
 }
