@@ -25,6 +25,13 @@ export interface TranslateParam {
   type: string;
 }
 
+/** 接口的方法签名（用于 type→interface 单元） */
+export interface TranslateMethod {
+  name: string;
+  params: TranslateParam[];
+  result?: string | null;
+}
+
 /**
  * 一条待译契约。携带"源证据 + 目标骨架 + 待填孔 + 约束"四件套，
  * 让下游（骨架生成机 / LLM prompt / 验证闸 / 语言适配器）各自只认自己
@@ -47,8 +54,14 @@ export interface TransUnit {
   result?: string | null;
 
   // —— type 用 ——
+  /** 具体形态：struct → interface；interface → interface(方法签名)；alias → type 别名 */
+  typeKind?: 'struct' | 'interface' | 'alias';
   /** struct 字段表 */
   fields?: { name: string; type: string }[];
+  /** interface 方法签名表（typeKind='interface'） */
+  methods?: TranslateMethod[];
+  /** alias 的底层类型原文（typeKind='alias'） */
+  aliasType?: string;
 
   // —— 证据与目标 ——
   /** 源文件里该单元的完整原文（给 LLM 做翻译上下文；type 非孔则省略） */

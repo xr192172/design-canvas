@@ -13,7 +13,7 @@
  */
 
 import { parseAstRoot, type SyntaxNodeLike } from '../tools/ts_kernel/index.js';
-import { DEFAULT_CONSTRAINTS, type TransUnit, type TranslateParam, type TranslateKind } from './unit.js';
+import { DEFAULT_CONSTRAINTS, type TransUnit, type TranslateParam, type TranslateKind, type TranslateMethod } from './unit.js';
 
 /** 从 Go AST 节点取字段子节点（tree-sitter 字段名访问，防御 null） */
 function childField(node: SyntaxNodeLike, name: string): SyntaxNodeLike | null {
@@ -84,41 +84,81 @@ function findChildOfType(node: SyntaxNodeLike, childType: string): SyntaxNodeLik
   return null;
 }
 
-/** struct 单元：`type User struct { ... }` → TransUnit(kind='type') */
+/** 单个 method_elem：`Greet(n string) string` → { name, params, result } */
+function methodFromElem(elem: SyntaxNodeLike): TranslateMethod | null {
+  let name = '';
+  let params: TranslateParam[] = [];
+  let result: string | null | undefined;
+  let paramSeen = false;
+  for (let i = 0; i < elem.childCount; i++) {
+    const c = elem.child(i);
+    if (!c) continue;
+    if (c.type === 'field_identifier' && !name) name = c.text;
+    else if (c.type === 'parameter_list') {
+      if (paramSeen) result = c.text; // 第二个参数表 = 多返回值结果
+      else {
+        params = extractParamList(c);
+        paramSeen = true;
+      }
+    } else if (c.type === 'type_identifier' && result === undefined) {
+      result = c.text; // 单返回值
+    }
+  }
+  if (!name) return null;
+  return { name, params, ...(result !== undefined ? { result } : {}) };
+}
+
+/** interface_type 里的方法：方法体是 method_elem 节点（与 interface/花括号平级于 interface_type 下） */
+function extractInterfaceMethods(iface: SyntaxNodeLike): TranslateMethod[] {
+  const methods: TranslateMethod[] = [];
+  for (let i = 0; i < iface.childCount; i++) {
+    const c = iface.child(i);
+    if (c && c.type === 'method_elem') {
+      const m = methodFromElem(c);
+      if (m) methods.push(m);
+    }
+  }
+  return methods;
+}
+
+/** 顶层 type 单元：struct → interface；interface → interface(方法)；其余 → type 别名 */
 function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   const nameNode = childField(spec, 'name');
   const typeNode = childField(spec, 'type');
   if (!nameNode || !typeNode) return null;
-  // 只收 struct_type；interface/别名/数组/指针类型暂交 codegen 或后版本
-  if (typeNode.type !== 'struct_type') return null;
   const name = nameNode.text;
-  const fields: { name: string; type: string }[] = [];
-  const list = childField(typeNode, 'field_declaration_list') || childField(typeNode, 'body') || findChildOfType(typeNode, 'field_declaration_list');
-  if (list) {
-    for (let i = 0; i < list.childCount; i++) {
-      const fd = list.child(i);
-      if (!fd || fd.type !== 'field_declaration') continue;
-      const typeNode2 = childField(fd, 'type');
-      if (!typeNode2) continue; // 嵌入字段无独立 name，切片跳过
-      const type = typeNode2.text;
-      for (let j = 0; j < fd.childCount; j++) {
-        const c = fd.child(j);
-        if (c && c.type === 'field_identifier') fields.push({ name: c.text, type });
+  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
+
+  // struct → TS interface（数据字段）
+  if (typeNode.type === 'struct_type') {
+    const fields: { name: string; type: string }[] = [];
+    const list = childField(typeNode, 'field_declaration_list') || childField(typeNode, 'body') || findChildOfType(typeNode, 'field_declaration_list');
+    if (list) {
+      for (let i = 0; i < list.childCount; i++) {
+        const fd = list.child(i);
+        if (!fd || fd.type !== 'field_declaration') continue;
+        const typeNode2 = childField(fd, 'type');
+        if (!typeNode2) continue; // 嵌入字段无独立 name，切片跳过
+        const type = typeNode2.text;
+        for (let j = 0; j < fd.childCount; j++) {
+          const c = fd.child(j);
+          if (c && c.type === 'field_identifier') fields.push({ name: c.text, type });
+        }
       }
     }
+    if (fields.length === 0) return null; // 空结构体无翻译价值，跳过
+    return { ...base, typeKind: 'struct', fields };
   }
-  if (fields.length === 0) return null; // 空结构体无翻译价值，跳过
-  return {
-    id: name,
-    kind: 'type' as TranslateKind,
-    dstLang: 'ts',
-    name,
-    fields,
-    srcSnippet: spec.text.trim(),
-    skeleton: '',
-    bodyHole: false,
-    constraints: [...DEFAULT_CONSTRAINTS],
-  };
+
+  // interface → TS interface（方法签名契约）
+  if (typeNode.type === 'interface_type') {
+    const methods = extractInterfaceMethods(typeNode);
+    if (methods.length === 0) return null; // 空接口跳过
+    return { ...base, typeKind: 'interface', methods };
+  }
+
+  // 其它（type_identifier / array_type / map_type / pointer_type / func_type…）→ type 别名
+  return { ...base, typeKind: 'alias', aliasType: typeNode.text };
 }
 
 /** 深度遍历 AST，收集目标单元 */

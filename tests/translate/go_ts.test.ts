@@ -199,3 +199,52 @@ describe('多返回值→TS 元组：Go 语义覆盖', () => {
     expect(mapGoType('(int)').degree).toBe('unsupported');
   });
 });
+
+describe('接口 + named 类型别名：Go 语义覆盖', () => {
+  const GO_SRC_TYPES = `package s
+type Greeter interface {
+\tGreet(n string) string
+\tScore(v int) (bool, error)
+}
+type MyInt int
+type Names []string
+`;
+  it('接口萃取方法签名（含单返回与多返回）', async () => {
+    const units = await unitsOf(GO_SRC_TYPES);
+    const g = units.find((u) => u.name === 'Greeter');
+    expect(g?.typeKind).toBe('interface');
+    const names = (g?.methods ?? []).map((m) => m.name);
+    expect(names).toEqual(['Greet', 'Score']);
+    expect(g?.methods?.[0].params).toEqual([{ name: 'n', type: 'string' }]);
+    expect(g?.methods?.[1].result).toBe('(bool, error)');
+  });
+
+  it('接口骨架：方法签名映射为 callable 字段', async () => {
+    const units = await unitsOf(GO_SRC_TYPES);
+    const g = units.find((u) => u.name === 'Greeter')!;
+    renderTsSkeleton(g);
+    expect(g.skeleton).toContain('export interface Greeter');
+    expect(g.skeleton).toContain('  Greet(n: string): string;');
+    expect(g.skeleton).toContain('  Score(v: number): [boolean, Error | null];');
+    const issues = await verifySkeletons([g]);
+    expect(issues).toEqual([]);
+  });
+
+  it('named 别名：type MyInt int → export type MyInt = number', async () => {
+    const units = await unitsOf(GO_SRC_TYPES);
+    const my = units.find((u) => u.name === 'MyInt');
+    expect(my?.typeKind).toBe('alias');
+    expect(my?.aliasType).toBe('int');
+    renderTsSkeleton(my!);
+    expect(my?.skeleton).toBe('export type MyInt = number;');
+  });
+
+  it('named 数组别名：[]string → string[]，且验证闸通过', async () => {
+    const units = await unitsOf(GO_SRC_TYPES);
+    const names = units.find((u) => u.name === 'Names')!;
+    renderTsSkeleton(names);
+    expect(names.skeleton).toBe('export type Names = string[];');
+    const issues = await verifySkeletons([names]);
+    expect(issues).toEqual([]);
+  });
+});

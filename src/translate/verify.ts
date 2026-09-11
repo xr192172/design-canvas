@@ -35,8 +35,12 @@ function structureCheck(u: TransUnit): string | null {
     return null;
   }
   if (u.kind === 'type') {
-    if (!/^export\s+interface\s+/.test(u.skeleton)) return 'type 骨架缺少 export interface 前缀';
-    if (!new RegExp(`^export\\s+interface\\s+${escapeRe(u.name)}\\b`).test(u.skeleton)) return `骨架类型名与单元不一致：${u.name}`;
+    if (u.typeKind === 'alias') {
+      if (!new RegExp(`^export\\s+type\\s+${escapeRe(u.name)}\\s*=`).test(u.skeleton)) return `type 骨架缺少 export type ${u.name} =`;
+    } else {
+      if (!/^export\s+interface\s+/.test(u.skeleton)) return 'type 骨架缺少 export interface 前缀';
+      if (!new RegExp(`^export\\s+interface\\s+${escapeRe(u.name)}\\b`).test(u.skeleton)) return `骨架类型名与单元不一致：${u.name}`;
+    }
     return null;
   }
   return null;

@@ -64,8 +64,8 @@ export function mapGoType(goType: string): MappedType {
     const inner = mapGoType(t.slice(1));
     return { degree: inner.degree, ts: inner.ts, note: inner.note };
   }
-  // map[K]V
-  const mM = /^map\[(.+)\](.+)$/.exec(t);
+  // map[K]V（key 只吃首个顶层 ]，值可含嵌套 []，如 `map[string][]int`)
+  const mM = /^map\[([^\]]+)\](.+)$/.exec(t);
   if (mM) {
     const k = mapGoType(mM[1]).ts;
     const v = mapGoType(mM[2]).ts;
@@ -149,9 +149,35 @@ function renderFuncSkeleton(u: TransUnit): { code: string; notes: string[] } {
   return { code: `export function ${u.name}(${params})${ret} {${hole}\n}`, notes };
 }
 
-/** 渲染结构体单元骨架（完整 interface，非孔） */
+/** 渲染 type 单元骨架（struct/interface → interface；alias → type 别名；均非孔） */
 function renderTypeSkeleton(u: TransUnit): { code: string; notes: string[] } {
   const notes: string[] = [];
+
+  // type 别名：`type MyInt int` → `export type MyInt = number;`
+  if (u.typeKind === 'alias') {
+    const m = mapGoType(u.aliasType ?? '');
+    if (m.note) notes.push(`alias ${u.name}: ${m.note}`);
+    return { code: `export type ${u.name} = ${m.ts};`, notes };
+  }
+
+  // interface：方法签名契约 `export interface Greeter {\n  Greet(n: string): string;\n}`
+  if (u.typeKind === 'interface') {
+    const lines = (u.methods ?? [])
+      .map((mm) => {
+        const params = mm.params.map((p) => mapParam(p, notes)).join(', ');
+        let ret = 'void';
+        if (mm.result) {
+          const m = mapGoType(mm.result);
+          if (m.note) notes.push(`${mm.name}: ${m.note}`);
+          ret = m.ts;
+        }
+        return `  ${mm.name}(${params}): ${ret};`;
+      })
+      .join('\n');
+    return { code: `export interface ${u.name} {\n${lines}\n}`, notes };
+  }
+
+  // struct → interface（数据字段）
   const fields = (u.fields ?? [])
     .map((f) => {
       const m = mapGoType(f.type);
