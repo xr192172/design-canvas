@@ -56,6 +56,8 @@ export interface TransUnit {
   typeParams?: string[];
   /** 各类型参数 → Go 约束原文（如 comparable/any/Ordered）；TS 无等价约束，仅传递提示 */
   typeParamConstraints?: Record<string, string>;
+  /** 各类型参数 → 能表达成 TS 的 `extends` 约束（如 'number' / 'number | string' / 'Uint8Array'）；空串=不设 bound */
+  typeParamBounds?: string[];
 
   // —— const 用 ——
   /** 直译后的 TS 字面量源码（标量 const/var 常量表达式），如 '100' / '"hi"' / 'true' */

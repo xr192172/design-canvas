@@ -189,10 +189,15 @@ function mapParam({ name, type }: TranslateParam, notes: string[]): string {
   return `${name}: ${m.ts}`;
 }
 
-/** 类型参数渲染：`['T','U']` → `<T, U>`（空则空串） */
+/** 类型参数渲染：`['T','U']` + bounds → `<T extends number, U>`（空则空串） */
 function typeParamString(u: TransUnit): string {
   const tps = u.typeParams ?? [];
-  return tps.length ? `<${tps.join(', ')}>` : '';
+  if (!tps.length) return '';
+  const inner = tps.map((name, i) => {
+    const b = (u.typeParamBounds ?? [])[i];
+    return b ? `${name} extends ${b}` : name;
+  });
+  return `<${inner.join(', ')}>`;
 }
 
 /** Go→TS 翻译附带一次性的通道垫片（只要任一片段用到 Channel 就前置这段）。 */
@@ -292,8 +297,13 @@ function renderConstSkeleton(u: TransUnit): { code: string; notes: string[] } {
 export function renderTsSkeleton(u: TransUnit): string {
   const { code, notes } =
     u.kind === 'const' ? renderConstSkeleton(u) : u.kind === 'func' ? renderFuncSkeleton(u) : renderTypeSkeleton(u);
-  // 类型约束传递：非 any/interface{} 的 Go 约束 → 写进约束提醒（TS 无等价约束）
+  // 类型约束传递：能表达成 TS bound（此处已渲染到 <T extends …>）的不用再提示；
+  // 只有"TS 无等价约束"的（comparable/自定义/interface{}等已无 bound）才写进约束提醒
+  const boundByName = new Map<string, string>();
+  (u.typeParams ?? []).forEach((tp, i) => boundByName.set(tp, (u.typeParamBounds ?? [])[i] ?? ''));
   for (const [tp, c] of Object.entries(u.typeParamConstraints ?? {})) {
+    const alreadyBound = (boundByName.get(tp) ?? '') !== '';
+    if (alreadyBound) continue;
     if (c.trim() && !['any', 'interface{}'].includes(c.trim())) {
       notes.push(`类型参数 ${tp} 约束为「${c}」：TS 无等价约束，调用方须保证类型满足（或用 近似值域）`);
     }

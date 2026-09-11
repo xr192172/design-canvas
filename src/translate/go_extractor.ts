@@ -99,6 +99,63 @@ function extractTypeConstraints(node: SyntaxNodeLike): Record<string, string> {
   return out;
 }
 
+/** 单个底层约束项 → 可表达的 TS 标量 bound；`~` 剥去（int/uint/float/string/bool/[]byte 等），不可表达返回 null */
+function scalarConstBound(typeText: string): string | null {
+  const t = typeText.replace(/^~/, '').trim();
+  if (/^(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|byte|rune)$/.test(t)) return 'number';
+  if (t === 'string') return 'string';
+  if (t === 'bool') return 'boolean';
+  if (t === '[]byte') return 'Uint8Array';
+  return null;
+}
+
+/** 约束节点 → TS `extends` bound；含不可表达项（comparable/自定义）返回 ''（不设 bound） */
+function boundFromConstraint(node: SyntaxNodeLike | null): string {
+  if (!node) return '';
+  const terms: string[] = [];
+  const push = (text: string): boolean => {
+    const b = scalarConstBound(text);
+    if (!b) return false;
+    if (!terms.includes(b)) terms.push(b);
+    return true;
+  };
+  if (node.type === 'type_constraint') {
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (!c) continue;
+      if (c.type === 'negated_type' || c.type === 'type_identifier') {
+        if (!push(c.text)) return '';
+      }
+    }
+  } else if (node.type === 'type_identifier') {
+    if (!push(node.text)) return '';
+  } else {
+    return '';
+  }
+  return terms.join(' | ');
+}
+
+/** 各类型参数的 TS `extends` bound（与 typeParams 同序；常约束给空串） */
+function extractTypeParamBounds(node: SyntaxNodeLike): string[] {
+  const list = childField(node, 'type_parameters') || findChildOfType(node, 'type_parameter_list');
+  if (!list) return [];
+  const bounds: string[] = [];
+  for (let i = 0; i < list.childCount; i++) {
+    const c = list.child(i);
+    if (!c || c.type !== 'type_parameter_declaration') continue;
+    let constraintNode: SyntaxNodeLike | null = null;
+    for (let j = 0; j < c.childCount; j++) {
+      const k = c.child(j);
+      if (k && (k.type === 'type_constraint' || k.type === 'type_identifier')) {
+        constraintNode = k;
+        break;
+      }
+    }
+    bounds.push(boundFromConstraint(constraintNode));
+  }
+  return bounds;
+}
+
 /** 函数体里的并发/资源语义 → 给 LLM 的提示（不硬猜，只指导映射方向） */
 function appendBodyHints(snippet: string, constraints: string[]): void {
   if (/\bdefer\b/.test(snippet)) constraints.push('函数体含 defer：建议映射为 try/finally（或显式 close/finally），勿丢清理语义');
@@ -143,15 +200,16 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
   const recv = recvNode ? parseReceiver(recvNode.text) : null;
   const ownTypeParams = extractTypeParams(node);
   const typeParamConstraints = extractTypeConstraints(node);
+  const typeParamBounds = extractTypeParamBounds(node);
   if (recv) {
     // 方法：receiver 作首参（泛型 receiver 用全类型如 Pair<T>）；命名带类型基名前缀防撞名
     params.unshift({ name: recv.name, type: recv.fullType });
     const qn = `${recv.base}_${method}`;
     // 方法自身无类型参数时，继承 receiver 的泛型实参作为自由函数的 <T...>
     const typeParams = ownTypeParams.length ? ownTypeParams : recv.typeArgs;
-    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
   }
-  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */
@@ -206,7 +264,7 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   const typeNode = childField(spec, 'type');
   if (!nameNode || !typeNode) return null;
   const name = nameNode.text;
-  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), typeParamConstraints: extractTypeConstraints(spec), srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
+  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), typeParamConstraints: extractTypeConstraints(spec), typeParamBounds: extractTypeParamBounds(spec), srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
 
   // struct → TS interface（数据字段）
   if (typeNode.type === 'struct_type') {

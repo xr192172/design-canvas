@@ -425,3 +425,50 @@ func Max[T comparable](a, b T) T {
     expect(get.constraints.join(' ')).not.toContain('comparable');
   });
 });
+
+describe('TS 可表达的类型参数 extends 约束', () => {
+  it('T ~[]byte → <T extends Uint8Array>（泛型函数）', async () => {
+    const src = `package s
+func F[T ~[]byte](x T) int { return len(x) }
+`;
+    const units = await unitsOf(src);
+    const f = units.find((u) => u.name === 'F')!;
+    renderTsSkeleton(f);
+    expect(f.skeleton).toContain('export function F<T extends Uint8Array>(x: T): number {');
+    // 约束已表达为 bound → 不再产生"无等价约束"提示
+    expect(f.constraints.join(' ')).not.toContain('无等价约束');
+  });
+
+  it('~int | ~string 联合 → <T extends number | string>（struct）', async () => {
+    const src = `package s
+type S[T ~int | ~string] struct { V T }
+`;
+    const units = await unitsOf(src);
+    const s = units.find((u) => u.name === 'S')!;
+    renderTsSkeleton(s);
+    expect(s.skeleton).toContain('export interface S<T extends number | string> {');
+  });
+
+  it('int | float64（去重）→ <T extends number>（别名）', async () => {
+    const src = `package s
+type N[T int | float64] []T
+`;
+    const units = await unitsOf(src);
+    const n = units.find((u) => u.name === 'N')!;
+    renderTsSkeleton(n);
+    expect(n.skeleton).toBe('export type N<T extends number> = T[];');
+    const issues = await verifySkeletons([n]);
+    expect(issues).toEqual([]);
+  });
+
+  it('comparable 无 TS 等价 → 不设 bound，仍写提示', async () => {
+    const src = `package s
+func M[T comparable](a, b T) T { if a < b { return a }; return b }
+`;
+    const units = await unitsOf(src);
+    const m = units.find((u) => u.name === 'M')!;
+    renderTsSkeleton(m);
+    expect(m.skeleton).toContain('export function M<T>(a: T, b: T): T {');
+    expect(m.constraints.join(' ')).toContain('comparable');
+  });
+});
