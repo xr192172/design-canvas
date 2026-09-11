@@ -190,4 +190,21 @@ describe('批量填充（fillUnitsBatched）', () => {
     expect(served[1]).toEqual(['Abs']);
     expect(served).toHaveLength(2);
   });
+
+  it('自适应分批：源体积超预算 → 拆成多批，避免一次输出被截断', async () => {
+    const units = (await extractGo('/tmp/c.go', 'package calc\nfunc Add(a, b int) int {\n\treturn a + b\n}\nfunc Sub(a, b int) int {\n\treturn a - b\n}\n')).units;
+    for (const u of units) u.skeleton = renderTsSkeleton(u);
+    units[0].srcSnippet = 'x'.repeat(5000); // 大函数体
+    let calls = 0;
+    const sizes: number[] = [];
+    const stub = async (ctxs: any[]): Promise<string> => {
+      sizes.push(ctxs.length);
+      calls++;
+      return ctxs.map((c: any) => `<unit id="${c.unit.id}">\nreturn 0;\n</unit>`).join('\n');
+    };
+    const rs = await fillUnitsBatched(units, stub as any, { batchSize: 5, maxSrcCharsPerBatch: 3000 });
+    expect(calls).toBeGreaterThan(1); // 拆批
+    expect(sizes.some((s) => s === 1)).toBe(true); // 大函数独占一批
+    expect(rs.every((r) => r.ok)).toBe(true);
+  });
 });

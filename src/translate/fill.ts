@@ -165,9 +165,31 @@ export function parseUnitBlocks(raw: string): Map<string, string> {
 }
 
 export interface BatchFillOptions {
+  /** 每批最多单元数（仅上限；实际按 maxSrcCharsPerBatch 自适应收紧） */
   batchSize?: number;
   maxRetries?: number;
   projectNote?: string;
+  /** 一批内"源证据+骨架"总字符上限，防一次调用输出超出 max_tokens 被截断 → 重试放大成本。默认 4000 */
+  maxSrcCharsPerBatch?: number;
+}
+
+/** 自适应分批：按"单元数 + 源字符预算"切，函数体越肥批越小，保输出在 token 预算内 */
+function sliceBatches<T extends { u: TransUnit }>(items: T[], maxUnits: number, maxChars: number): T[][] {
+  const out: T[][] = [];
+  let cur: T[] = [];
+  let chars = 0;
+  for (const it of items) {
+    const size = it.u.srcSnippet.length + it.u.skeleton.length;
+    if (cur.length > 0 && (cur.length >= maxUnits || chars + size > maxChars)) {
+      out.push(cur);
+      cur = [];
+      chars = 0;
+    }
+    cur.push(it);
+    chars += size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
 }
 
 /**
@@ -182,6 +204,7 @@ export async function fillUnitsBatched(
 ): Promise<FillResult[]> {
   const holes = units.filter((u) => u.bodyHole);
   const B = opts.batchSize ?? 5;
+  const maxChars = opts.maxSrcCharsPerBatch ?? 4000;
   const maxRetries = opts.maxRetries ?? 2;
   const out = new Map<string, FillResult>();
   type QueueItem = { u: TransUnit; feedback?: string };
@@ -189,8 +212,8 @@ export async function fillUnitsBatched(
 
   for (let round = 0; round <= maxRetries && queue.length > 0; round++) {
     const next: QueueItem[] = [];
-    for (let i = 0; i < queue.length; i += B) {
-      const chunk = queue.slice(i, i + B);
+    const batches = sliceBatches(queue, B, maxChars);
+    for (const chunk of batches) {
       const ctxs = chunk.map(({ u, feedback }) => buildFillContext(u, feedback, opts.projectNote));
       let raw: string;
       try {

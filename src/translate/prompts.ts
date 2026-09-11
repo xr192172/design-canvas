@@ -10,6 +10,7 @@
  */
 
 import type { TransUnit } from './unit.js';
+import { DEFAULT_CONSTRAINTS } from './unit.js';
 
 /** 单孔翻译指令：只输出函数体，禁止改签名/导出 */
 export function buildHolePrompt(u: TransUnit): string {
@@ -48,26 +49,24 @@ export interface BatchUnitView {
 
 /** 输出标记块的包裹：每条函数体必须包在 `<unit id="...">...</unit>` 里，便于确定性切分 */
 export function buildBatchFillPrompt(views: BatchUnitView[], projectNote?: string): string {
-  const block = (v: BatchUnitView): string =>
-    [
-      `<unit id="${v.unit.id}">`,
-      '【目标签名（锁定，勿改）】',
-      v.skeleton,
-      '',
-      '【待翻译的 Go 源】',
-      v.srcSnippet,
-      '',
-      '【约束】',
-      ...(v.constraints.length ? v.constraints.map((c) => `- ${c}`) : ['- 无']),
-      '</unit>',
-    ].join('\n');
+  const block = (v: BatchUnitView): string => {
+    // 只列该单元的独特约束（全局默认约束抽到头部一次性给，省 N-1 份重复 token）
+    const unique = v.constraints.filter((c) => !DEFAULT_CONSTRAINTS.includes(c));
+    const parts = [`<unit id="${v.unit.id}">`, '【目标签名（锁定，勿改）】', v.skeleton, '', '【待翻译的 Go 源】', v.srcSnippet];
+    if (unique.length) parts.push('', '【该单元特有约束】', ...unique.map((c) => `- ${c}`));
+    parts.push('</unit>');
+    return parts.join('\n');
+  };
   const head = [
-    `把下面的 ${views.length} 个 Go 函数分别翻译为 TypeScript 函数体。`,
-    '要求：',
-    '- 对每个函数都必须输出一个标记块 `<unit id="对应ID">函数体</unit>`，只含函数体，不含 export function 外壳，不改签名/参数名/返回类型；',
-    '- ID 必须与题目里的逐一对应，块间不要插入其它文字；',
+    `把下面 ${views.length} 个 Go 函数分别翻译为 TypeScript 函数体。`,
+    '【输出契约——必须严格遵守】',
+    `- 共 ${views.length} 个函数，就输出 ${views.length} 个块，数量一一对应，不许合并、不许遗漏、不许自创；`,
+    '- 每个块格式：`<unit id="题目里的ID">\n函数体\n</unit>`，只含函数体，不含 export function 外壳，不改签名/参数名/返回类型；',
+    '- 块之间只留空行，不要插入任何解释文字；',
+    '- 全部块输出完毕后，另起一行输出 `__END__` 标记；',
   ];
   if (projectNote) head.push('', projectNote);
-  head.push('', '-----------', '', views.map(block).join('\n\n'));
+  head.push('', '【全局约束（适用于所有函数）】', ...DEFAULT_CONSTRAINTS.map((c) => `- ${c}`));
+  head.push('', '--------------------', '', views.map(block).join('\n\n'));
   return head.join('\n');
 }
