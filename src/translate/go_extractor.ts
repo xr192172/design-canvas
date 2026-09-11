@@ -71,6 +71,14 @@ function extractTypeParams(node: SyntaxNodeLike): string[] {
   return names;
 }
 
+/** 函数体里的并发/资源语义 → 给 LLM 的提示（不硬猜，只指导映射方向） */
+function appendBodyHints(snippet: string, constraints: string[]): void {
+  if (/\bdefer\b/.test(snippet)) constraints.push('函数体含 defer：建议映射为 try/finally（或显式 close/finally），勿丢清理语义');
+  if (/\bgo\s+\w/.test(snippet)) constraints.push('函数体含 go 语句：建议映射为异步 fire-and-forget（Promise），注意并发时序差异');
+  if (/\bselect\b/.test(snippet)) constraints.push('函数体含 select：Go select 的 first-ready 竞态语义 TS 无等价物，需人工或 Promise.race 近似');
+  if (/<-/.test(snippet)) constraints.push('函数体含 <- 通道收发：Channel<T> 垫片为近似，阻塞/竞态语义需人工核');
+}
+
 /** func/方法 单元：`func Add(...)` 或 `func (u *User) Greet(...)` → TransUnit(kind='func')
  *  方法映射为 TS 自由函数：receiver 作首参，名取 `${recvType}_${method}`（防同文件多类型方法撞名）。 */
 function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
@@ -82,6 +90,8 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
   const resultNode = childField(node, 'result');
   const result = resultNode ? resultNode.text.trim() : null;
   const snippet = node.text.trim();
+  const constraints = [...DEFAULT_CONSTRAINTS];
+  appendBodyHints(snippet, constraints);
 
   const recvNode = childField(node, 'receiver');
   const recv = recvNode ? parseReceiver(recvNode.text) : null;
@@ -90,9 +100,9 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
     // 方法：receiver 作首参；命名带类型前缀防撞名
     params.unshift({ name: recv.name, type: recv.type });
     const qn = `${recv.type}_${method}`;
-    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints: [...DEFAULT_CONSTRAINTS] };
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
   }
-  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints: [...DEFAULT_CONSTRAINTS] };
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */

@@ -85,7 +85,13 @@ describe('ts_codegen：typeMap 薄表 + 确定性骨架', () => {
   it('语义不可机械翻译如实标注（error / 多返回值 / chan）', () => {
     expect(mapGoType('error').degree).toBe('unsupported');
     expect(mapGoType('(string, error)').degree).toBe('unsupported');
-    expect(mapGoType('chan int').degree).toBe('unsupported');
+  });
+
+  it('chan → Channel<T>（直译），方向单/双向都可', () => {
+    expect(mapGoType('chan int').degree).toBe('direct');
+    expect(mapGoType('chan int').ts).toBe('Channel<number>');
+    expect(mapGoType('<-chan string').ts).toBe('Channel<string>');
+    expect(mapGoType('chan<- int').ts).toBe('Channel<number>');
   });
 
   it('纯函数骨架：签名锁定，body 留孔', async () => {
@@ -285,5 +291,33 @@ func Max[T comparable](a, b T) T {
     expect(slice.skeleton).toBe('export type Slice<T> = T[];');
     const issues = await verifySkeletons([slice]);
     expect(issues).toEqual([]);
+  });
+});
+
+describe('并发语义：chan/defer/go/select', () => {
+  const GO_SRC_CONC = `package con
+func Produce(ch chan int) {
+\tch <- 42
+\tdefer close(ch)
+\tgo process()
+}
+func process() { select {} }
+`;
+  it('chan 参数 → Channel<number>，translateGoToTs 输出前置通道垫片', async () => {
+    const r = await translateGoToTs('con.go', GO_SRC_CONC);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain('export class Channel<T>');
+    expect(r.output).toContain('Produce(ch: Channel<number>) {');
+  });
+
+  it('函数体含 defer/go/select/<- → 约束里写映射提示（不硬猜语义）', async () => {
+    const units = await unitsOf(GO_SRC_CONC);
+    const produce = units.find((u) => u.name === 'Produce')!;
+    const all = produce.constraints.join(' ');
+    expect(all).toContain('defer');
+    expect(all).toContain('go 语句');
+    expect(all).toContain('通道收发');
+    const process = units.find((u) => u.name === 'process')!;
+    expect(process.constraints.join(' ')).toContain('select');
   });
 });

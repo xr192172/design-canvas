@@ -10,7 +10,7 @@
  */
 
 import { extractGo } from './go_extractor.js';
-import { renderTsSkeleton } from './ts_codegen.js';
+import { renderTsSkeleton, channelShimSource } from './ts_codegen.js';
 import { verifySkeletons, type VerifyIssue } from './verify.js';
 import { buildHolePrompts } from './prompts.js';
 import type { TransUnit } from './unit.js';
@@ -53,7 +53,10 @@ export async function translateGoToTs(filePath: string, source: string): Promise
     u.skeleton = renderTsSkeleton(u);
   }
   const issues = await verifySkeletons(src.units);
-  const output = src.units.map((u) => u.skeleton).join('\n\n') + (src.units.length ? '\n' : '');
+  const body = src.units.map((u) => u.skeleton).join('\n\n') + (src.units.length ? '\n' : '');
+  // 任一片段用到 Channel 就前置一次通道垫片，保证输出自包含可编译
+  const shim = body.includes('Channel<') ? channelShimSource() : '';
+  const output = shim + body;
   const holePrompts = buildHolePrompts(src.units);
   return {
     output,

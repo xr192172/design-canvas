@@ -90,8 +90,15 @@ export function mapGoType(goType: string): MappedType {
   if (t === 'error' || /^error$/.test(t)) {
     return { degree: 'unsupported', ts: 'Error | null', note: 'Go error 值为显式返回语义；TS 无内建对应，需 LLM/人审（映射为 Error | null 或抛异常）' };
   }
-  if (t.startsWith('chan')) {
-    return { degree: 'unsupported', ts: 'unknown', note: 'chan 并发语义不可机械翻译，需 LLM 设计异步代换' };
+  // chan T / <-chan T / chan<- T → Channel<T>（近似垫片，见 channelShimSource）
+  const chanM = /^(?:<-)?chan(?:<-)?\s+(.+)$/.exec(t);
+  if (chanM) {
+    const elem = mapGoType(chanM[1]);
+    return {
+      degree: 'direct',
+      ts: `Channel<${elem.ts}>`,
+      note: elem.degree === 'unsupported' ? `chan 元素: ${elem.note}` : 'chan → Channel<T> 垫片（近似；select/阻塞/竞态语义需人工核）',
+    };
   }
   if (t.startsWith('func')) {
     return { degree: 'unsupported', ts: '(...args: unknown[]) => unknown', note: '函数类型参数语义需 LLM 换算签名' };
@@ -136,6 +143,34 @@ function mapParam({ name, type }: TranslateParam, notes: string[]): string {
 function typeParamString(u: TransUnit): string {
   const tps = u.typeParams ?? [];
   return tps.length ? `<${tps.join(', ')}>` : '';
+}
+
+/** Go→TS 翻译附带一次性的通道垫片（只要任一片段用到 Channel 就前置这段）。 */
+export function channelShimSource(): string {
+  return [
+    '/**',
+    ' * design-canvas Go→TS 翻译自动附加的通道垫片。',
+    ' * 近似实现：用 JS 队列模拟。非 Go 的阻塞/select/缓冲区满语义，并发与竞态需人工核对。',
+    ' */',
+    'export class Channel<T> {',
+    '  private q: T[] = [];',
+    '  private waiters: Array<(v: T) => void> = [];',
+    '',
+    '  send(v: T): Promise<void> {',
+    '    this.q.push(v);',
+    '    const w = this.waiters.shift();',
+    '    if (w && this.q.length) w(this.q.shift() as T);',
+    '    return Promise.resolve();',
+    '  }',
+    '',
+    '  receive(): Promise<T> {',
+    '    const head = this.q.shift();',
+    '    if (head !== undefined) return Promise.resolve(head);',
+    '    return new Promise<T>((res) => this.waiters.push(res));',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
 }
 
 /** 渲染函数单元骨架（签名锁定，body 留孔） */
