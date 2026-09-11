@@ -80,6 +80,8 @@ export interface ProjectOptions {
   maxRetries?: number;
   /** 全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误并入 diagnostics（纯工程应 0 错；stdlib 未解析会如实列出） */
   verify?: boolean;
+  /** 注入翻译器（默认 createPooledHoleTranslator）——测试桩/自建 provider 用，便于确定性实证 */
+  translator?: import('./fill.js').HoleTranslator | null;
 }
 
 function toPosix(abs: string): string {
@@ -208,7 +210,7 @@ function verifyProjectTree(modules: ProjectModule[]): string[] {
 export async function translateGoProject(projectDir: string, opts: ProjectOptions = {}): Promise<ProjectResult> {
   const root = path.resolve(projectDir);
   const files = walkGoFiles(root);
-  const translator = opts.fill ? createPooledHoleTranslator() : null;
+  const translator = opts.fill ? (opts.translator ?? createPooledHoleTranslator()) : null;
   const diagnostics: string[] = [];
 
   // 第一遍：翻译每个文件，收集"名字 → 定义位置"（含类型/函数区分）与调用候选

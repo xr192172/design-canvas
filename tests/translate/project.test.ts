@@ -11,6 +11,23 @@ import os from 'node:os';
 import path from 'node:path';
 import { translateGoProject, walkGoFiles, buildProjectCallNote } from '../../src/translate/project.js';
 
+/** 模拟 LLM 的确定性填孔翻译器：按 unit.id 产出引用"调用约定"里名字的函数体 */
+function deterministicFiller(notesSeen: string[]): (ctx: { unit: { id: string }; prompt: string; projectNote?: string }) => string {
+  return (ctx) => {
+    if (ctx.projectNote) notesSeen.push(ctx.projectNote);
+    switch (ctx.unit.id) {
+      case 'Abs':
+        return 'if (a < 0) {\n  return -a;\n}\nreturn a;';
+      case 'Num_Double':
+        return 'return n.Value * 2;';
+      case 'Total':
+        return 'return Num_Double(n) + Abs(n.Value);'; // 引用本地 Num_Double + 跨文件 import 的 Abs
+      default:
+        return 'return 0;';
+    }
+  };
+}
+
 function tmpProject(files: Record<string, string>): string {
   const root = path.join(os.tmpdir(), `dc-tr-proj-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   for (const [rel, content] of Object.entries(files)) {
@@ -164,5 +181,26 @@ describe('translateGoProject', () => {
     expect(note).toContain('user_GetName'); // 方法约定提示
     expect(note).not.toContain('User'); // 类型不列
     expect(note).not.toContain('noSuch'); // 未定义不列
+  });
+
+  it('fill+verify 填后 release gate：桩翻译器按调用约定填出引用对名的函数体，纯项目过闸', async () => {
+    const root = tmpProject({
+      'calc/num.go':
+        'package calc\ntype Num struct {\n\tValue int\n}\nfunc (n Num) Double() int {\n\treturn n.Value * 2\n}\nfunc Total(n Num) int {\n\treturn n.Double() + Abs(n.Value)\n}\n',
+      'calc/abs.go': 'package calc\nfunc Abs(a int) int {\n\tif a < 0 {\n\t\treturn -a\n\t}\n\treturn a\n}\n',
+    });
+    const notes: string[] = [];
+    const r = await translateGoProject(root, { fill: true, verify: true, translator: deterministicFiller(notes) });
+    const num = r.modules.find((m) => m.rel === 'calc/num.go')!;
+    // 调用约定注入：num 模块的孔 prompt 应含本地 Num_Double + 跨文件 Abs
+    expect(notes.join('\n')).toContain('Num_Double');
+    expect(notes.join('\n')).toContain('Abs');
+    // 跨文件 free func import 落地
+    expect(num.imports).toEqual(["import { Abs } from './abs';"]);
+    // 填后函数体引用了本地 Num_Double + import 的 Abs → 门禁 0 错
+    expect(num.ts).toContain('return Num_Double(n) + Abs(n.Value);');
+    expect(num.ts).not.toContain('TODO(translate)'); // 全部函数体都填上了
+    expect(r.diagnostics.some((d) => d.startsWith('全工程 tsc'))).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });
