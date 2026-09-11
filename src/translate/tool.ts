@@ -8,13 +8,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { translateGoToTs } from './pairs.js';
+import { translateGoToTs, translateGoProject } from './pairs.js';
 import { createPooledHoleTranslator } from './llm.js';
 import { fillUnitsWithRetry } from './fill.js';
 import { checkTranslationParity, generateCasesFor } from './verify_behavior.js';
 
 export interface TranslateGoTsArgs {
-  file: string;
+  file?: string;
+  /** Go 项目目录：一次翻译整个项目（枚举 .go、跨文件 import、镜像落盘） */
+  projectDir?: string;
+  /** 项目模式下落盘根（镜像 source 结构） */
+  outDir?: string;
   /** 用 AGNES key 池 LLM 逐孔填函数体 */
   fill?: boolean;
   /** 对已填的纯函数跑行为对拍（需 go 工具链） */
@@ -24,12 +28,31 @@ export interface TranslateGoTsArgs {
 }
 
 export async function translateGoTsHandler(args: Record<string, unknown>): Promise<{ message: string; data?: unknown }> {
-  const file = String(args.file ?? '');
   const fill = args.fill === true;
   const verify = args.verify === true;
   const maxRetries = typeof args.maxRetries === 'number' ? args.maxRetries : 2;
 
-  if (!file) return { message: '需要 file=<Go 源文件路径>' };
+  // 项目级：一次翻译整个 Go 项目
+  const projectDir = String(args.projectDir ?? '');
+  if (projectDir) {
+    const root = path.resolve(projectDir);
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return { message: `Go 项目目录不存在：${root}` };
+    const outDir = args.outDir ? path.resolve(String(args.outDir)) : undefined;
+    const r = await translateGoProject(root, { outDir, fill, maxRetries });
+    const lines = [`Go 项目翻译：${r.modules.length} 个模块`];
+    for (const m of r.modules) {
+      lines.push(`  ${m.tsRel}  (${m.units.length} 单元${m.imports.length ? `; import ${m.imports.length} 处` : ''})`);
+    }
+    if (r.diagnostics.length) {
+      lines.push('── 诊断（不阻断）──');
+      for (const d of r.diagnostics) lines.push(`  ${d}`);
+    }
+    if (outDir) lines.push(`已落盘到 ${outDir}`);
+    return { message: lines.join('\n'), data: { modules: r.modules.map((m) => ({ rel: m.tsRel, imports: m.imports, units: m.units.length })), diagnostics: r.diagnostics } };
+  }
+
+  const file = String(args.file ?? '');
+  if (!file) return { message: '需要 file=<Go 源文件路径> 或 projectDir=<Go 项目目录>' };
   const abs = path.resolve(file);
   if (!fs.existsSync(abs)) return { message: `Go 源文件不存在：${abs}` };
   const source = fs.readFileSync(abs, 'utf-8');

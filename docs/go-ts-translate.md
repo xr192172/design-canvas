@@ -7,7 +7,8 @@
 ## 如何用
 
 - CLI：`node dist/src/translate/translate_cli.js <file.go> [--out out.ts] [--holes] [--llm]`
-- MCP：`translate_go_ts(file=…, fill, verify, maxRetries)`
+  - 项目级：`translate_cli.js --project <dir> [--out-dir <out>] [--llm]` —— 枚举整个 Go 项目、逐个译成 TS 模块、跨文件 import、按镜像结构落盘
+- MCP：`translate_go_ts(file=…, fill, verify, maxRetries)` / 项目级 `translate_go_ts(projectDir=…, outDir=…, fill)`
   - 默认：机械骨架 + 验证闸
   - `fill=true`：用 AGNES key 池 LLM 逐孔填函数体（支持纠错重试）
   - `verify=true`：对已填纯函数跑 Go↔TS 行为对拍（需 go 工具链）
@@ -26,6 +27,7 @@
 | 容器 | map→`Map<K,V>`、slice、`[]byte→Uint8Array`、`[]rune→number[]`、`[N]T→T[]`、pointer |
 | 常量 | 包级 const/var **编译期常量表达式求值**（含同包引用、算术/移位/位/字符串拼接/比较/逻辑）→ `export const`；var→`export let` |
 | chan（近似） | `chan T`→`Channel<T>`，自动附带一次性 `Channel<T>` 垫片（诚实标注非 Go 阻塞/select 语义） |
+| 项目级（多文件） | `translateGoProject`：枚举项目 `.go`、逐文件译成 TS 模块、**跨文件类型引用自动 `import { X } from './…'`**、按镜像目录结构落盘一棵 TS 工程 |
 | 细节 | 类型表 int/uint/float/byte/rune/string/bool/any、错误传播类型、complex 如实标注 |
 
 **验证 / 闭环**
@@ -42,7 +44,8 @@
 - `struct` 嵌入字段提升语义（不展开，note）
 - `comparable` / 自定义约束（TS 无等价，note）
 - 泛型 receiver 方法体里的 `T`（自由函数形态未绑定）
-- 运行时 / IO / 副作用、项目级多文件翻译——**未做**
+- 运行时 / IO / 副作用
+- **项目级**：只给**类型引用**做跨文件 import（签名可编译）；函数体里的跨文件**函数调用**归 LLM；Go stdlib / 外部类型不硬解、同名顶层符号冲突不 import，均记 diagnostic
 
 ## 三、设计原则：正确性边界（为什么这样切）
 
@@ -59,4 +62,6 @@
 
 ## 下一步候选
 
-- **项目级多文件翻译**（跨文件 import 边 + 目录/模块组织 + 依赖顺序）——把"翻一个文件"升级成"翻一个 Go 项目"，是一个真正的增量工程。
+- **更完整的跨文件 import**：函数体里的跨文件**函数调用**也解析成 import（当前归 LLM）；对 Go stdlib/第三方做类型 stub。
+- **项目级一次性通过 `tsc`**：目前逐文件 tree-sitter 闸 + 签名正确是保证，尚未承诺全工程 `tsc` 零错。
+- 顶层同名符号冲突消歧（当前记 diagnostic，不 import）。

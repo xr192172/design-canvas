@@ -12,6 +12,8 @@
 import { extractGo } from './go_extractor.js';
 import { renderTsSkeleton, channelShimSource } from './ts_codegen.js';
 import { verifySkeletons, type VerifyIssue } from './verify.js';
+// 项目级翻译出口（re-export 便于统一入口）
+export { translateGoProject, walkGoFiles, type ProjectModule, type ProjectResult } from './project.js';
 import { buildHolePrompts } from './prompts.js';
 import type { TransUnit } from './unit.js';
 

@@ -14,7 +14,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { translateGoToTs } from './pairs.js';
+import { translateGoToTs, translateGoProject } from './pairs.js';
 import { createPooledHoleTranslator } from './llm.js';
 import { fillUnitsWithRetry } from './fill.js';
 
@@ -29,8 +29,32 @@ async function main(): Promise<void> {
   const outFile = readArg('--out');
   const wantHoles = process.argv.includes('--holes');
   const wantLlm = process.argv.includes('--llm');
+  const projectDir = readArg('--project');
+  const outDir = readArg('--out-dir');
+
+  // 项目级模式：--project <dir> [--out-dir <out>] [--llm]
+  if (projectDir) {
+    const root = path.resolve(projectDir);
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      console.error(`项目目录不存在: ${root}`);
+      process.exit(1);
+    }
+    const pr = await translateGoProject(root, { outDir: outDir ? path.resolve(outDir) : undefined, fill: wantLlm });
+    console.log(`Go 项目翻译：${pr.modules.length} 个模块`);
+    for (const m of pr.modules) {
+      console.log(`  ${m.tsRel}  (${m.units.length} 单元${m.imports.length ? `; import ${m.imports.length} 处` : ''})`);
+    }
+    if (pr.diagnostics.length) {
+      console.log('── 诊断（不阻断）──');
+      for (const d of pr.diagnostics) console.log(`  ${d}`);
+    }
+    if (outDir) console.log(`已落盘到 ${path.resolve(outDir)}`);
+    return;
+  }
+
   if (!file) {
     console.error('用法: node dist/src/translate/translate_cli.js <file.go> [--out <file.ts>] [--holes] [--llm]');
+    console.error('       node dist/src/translate/translate_cli.js --project <dir> [--out-dir <out>] [--llm]');
     process.exit(1);
   }
   const abs = path.resolve(file);

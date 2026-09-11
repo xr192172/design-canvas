@@ -743,7 +743,9 @@ const TOOL_DEFS: ToolDef[] = [
     description:
       '把 Go 源文件机械生成 TS 骨架 + 验证闸（默认）；fill=true 用 AGNES key 池 LLM 逐孔填函数体（需 AGNES_KEY_POOL 或本地 key-pool-proxy）；verify=true 再对已填的纯函数跑 Go↔TS 行为对拍（需 go 工具链）。跨语言翻译：函数/方法/struct/接口/named 别名/多返回元组/map·slice·指针/泛型/chan(近似)。',
     inputSchema: {
-      file: z.string().describe('Go 源文件路径（绝对或相对 cwd）'),
+      file: z.string().optional().describe('Go 源文件路径（绝对或相对 cwd）；与 projectDir 二选一'),
+      projectDir: z.string().optional().describe('Go 项目目录：一次翻译整个项目（枚举 .go、跨文件 import、镜像落盘）'),
+      outDir: z.string().optional().describe('projectDir 模式下落盘根（镜像 source 结构）'),
       fill: z.boolean().optional().describe('用 AGNES key 池 LLM 逐孔填函数体'),
       verify: z.boolean().optional().describe('对已填纯函数跑 Go↔TS 行为对拍（需 go 工具链）'),
       maxRetries: z.number().int().min(0).max(6).optional().describe('LLM 纠错重试次数，默认 2'),
