@@ -502,7 +502,7 @@ func main() {
 	}
 	results := []map[string]interface{}{}
 	for _, c := range cases {
-		entry := map[string]interface{}{"name": c["name"], "ok": true}
+		entry := map[string]interface{}{"case": c["name"], "ok": true}
 		raw, _ := c["args"].([]interface{})
 		if len(raw) < fnT.NumIn() {
 			entry["ok"] = false
