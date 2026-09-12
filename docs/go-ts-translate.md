@@ -2,7 +2,7 @@
 
 > 一句话定位：设计内一条**端到端可用**的 Go→TS 半自动翻译链路，已注册为 MCP 工具。
 > 分工严格：**机器做"可正确机械化的"，LLM 填"语义函数体"，验证闸兜底**。
-> 代码：`src/translate/`（测试 `tests/translate/`，69 项）。
+> 代码：`src/translate/`（测试 `tests/translate/`，100+ 项）。
 
 ## 如何用
 
@@ -62,6 +62,72 @@
 
 ## 下一步候选
 
-- **更完整的跨文件 import**：函数体里的跨文件**函数调用**也解析成 import（当前归 LLM）；对 Go stdlib/第三方做类型 stub。
-- **项目级一次性通过 `tsc`**：目前逐文件 tree-sitter 闸 + 签名正确是保证，尚未承诺全工程 `tsc` 零错。
-- 顶层同名符号冲突消歧（当前记 diagnostic，不 import）。
+- **跨包 receiver 方法调用机器补齐**：`u.GetName()` 且 `User` 定义在别处时，机器补 import 译好的 `user_GetName`（目前同模块靠调用约定提示，跨包仍交 LLM）。
+- **Go stdlib / 第三方类型 stub**：目前不硬解、由 verify 门禁按根因聚类如实报出 tsc 错误。
+- **产物侧更彻底的 globals 收敛**：当前类型走 import、不落 globals.d.ts；若出现 `class vs function` 撞名由 B1 预检点名。
+
+## 五、Go↔TS 转换约定表（B3，与 `src/translate/ts_codegen.ts` 的 `mapGoType`/渲染逻辑一致）
+
+> 这份表是"机器到底把哪些 Go 写成哪个 TS"的**恒定口径**。翻译产出与这里一一对应；超出下表的就是不机械、交 LLM/note 的边界。
+
+**标量 / 名称 1:1**
+
+| Go | TS | 备注 |
+|---|---|---|
+| `int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr byte rune float32 float64` | `number` | 全部整数族折叠为 JS `number`（精度/溢出需人工按场景核） |
+| `string` | `string` | |
+| `bool` | `boolean` | |
+| `any` / `interface{}` | `unknown` | |
+
+**容器 / 复合**
+
+| Go | TS | 备注 |
+|---|---|---|
+| `[]byte` | `Uint8Array` | 惯用字节串 |
+| `[]rune` | `number[]` | |
+| `[]T` | `T[]` | |
+| `[N]T` | `T[]` | 定长按值近似，`N` 丢失 |
+| `*T` | `T` | 指针按值语义，剥 `*` |
+| `map[K]V` | `Map<K, V>` | key 吃首个顶层 `]` |
+| `complex64` `complex128` | `[number, number]` | 无内建，按 [实,虚] 元组；运算需人工 |
+| `(T1, T2, …)` | `[T1, T2, …]` | 多返回值 → 元组；含 `error` 时分量 `Error\|null` + note |
+
+**语义包裹（近似 / note，不硬猜）**
+
+| Go | TS | 备注 |
+|---|---|---|
+| `error` | `Error \| null` | TS 无内建，返回语义需 LLM/人审（值 or 抛异常） |
+| `chan T` `<-chan T` `chan<- T` | `Channel<T>` | 自动附带一次性 `Channel<T>` 垫片；**非 Go 阻塞/select/竞态语义** |
+| `func(a int) error` | `(a: number) => Error \| null` | 函数类型：逐参/返回映射，名字可省略为 `arg` |
+
+**泛型**
+
+| Go | TS | 备注 |
+|---|---|---|
+| `Name[K, V]` / `Name<K, V>` | `Name<K, V>` | 实参逐位映射；基名 `.`→`_` |
+| `[T int64]` 等标量约束 | `<T extends number>` | 约束降级为 `extends`（`~T` 剥 `~`：int 族→number、string→string、bool→boolean、`[]byte`→Uint8Array） |
+| `[T comparable]` / 自定义约束 | `<T>` | TS 无等价约束，`extends` 不设，另写 note |
+
+**命名 / 形状约定（全局恒定，二选一并一致）**
+
+| Go | TS |
+|---|---|
+| 顶层函数 `func F` | `export function F(...)` |
+| struct `type U struct{...}` | `export interface U { Fld: T; ... }` |
+| 非空接口 `type I interface{...}` | `export interface I { M(...): T; ... }` |
+| named 别名 `type A = ...` | `export type A = ...` |
+| **方法** `func (u *User) Greet(...)` | **独立自由函数** `export function user_Greet(u: User, ...)`（receiver 作首参，名 `← receiver 基类型 + "_" + 方法名`，防同文件多类型方法撞名） |
+| 接收者方法调用 `u.Greet()` | 需译为 `user_Greet(u, ...)`（不写 `u.Greet()`） |
+| 包级 `const X = ...` | `export const X = ...`（编译期常量已求值） |
+| 包级 `var X = ...` | `export let X = ...` |
+| 决策表 `switch(x){ case ...: ... default: ... }` | TS `switch(x){ case L:{...} default:{...} }`，判别式/case 标签机械 1:1 焊死，LLM 只填各分支动作 |
+
+**跨文件 / 声明组织**
+
+| 规则 |
+|---|
+| 类型引用 → `import { X } from './相对路径'`（就近声明，不落 globals.d.ts） |
+| 自由函数调用 → 项目内定义的跨文件 free func 自动 import；方法调用暂不机器补（见候选） |
+| 未用 import → `fixUnusedImports` 幂等移除；同源 import → `squashImports` 合并 |
+| 同名顶层符号（跨文件 / type↔func 混同）→ 不再 import，由 B1 冲突预检点名消歧 |
+| Go stdlib / 外部类型 → 不硬解，verify 门禁如实列出为 tsc 错误（按根因聚类） |
