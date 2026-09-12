@@ -238,11 +238,37 @@ function renderFuncSkeleton(u: TransUnit): { code: string; notes: string[] } {
     if (m.note) notes.push(`return: ${m.note}`);
     ret = `: ${m.ts}`;
   }
-  const hole =
-    u.bodyHole
-      ? '\n  // TODO(translate): 待 LLM 翻译 Go 函数体'
-      : '';
+  // A3 决策表：锁定 switch 判别式 + case/default 分支（机械 1:1），仅分支动作留空待 LLM
+  const hole = u.decision ? '\n' + renderDecisionBody(u) : u.bodyHole ? '\n  // TODO(translate): 待 LLM 翻译 Go 函数体' : '';
   return { code: `export function ${u.name}${typeParamString(u)}(${params})${ret} {${hole}\n}`, notes };
+}
+
+/** Go case 标签 → TS case 标签（字符串/反引号字面量转单引号；数字/布尔/标识符合原） */
+function tsCaseLabel(l: string): string {
+  const s = l.trim();
+  if (/^(["'`])([\s\S]*?)\1$/.test(s)) return `'${s.slice(1, -1)}'`;
+  return s;
+}
+
+/** A3 决策表骨架体：`switch(disc){ case L:{ TODO; break; } default:{...} }`，分支结构焊死 */
+function renderDecisionBody(u: TransUnit): string {
+  const d = u.decision!;
+  const lines: string[] = [`  switch (${d.discriminant}) {`];
+  for (const c of d.cases) {
+    const labels = c.labels.map(tsCaseLabel).join(', ');
+    lines.push(`    case ${labels}: {`);
+    lines.push(`      // TODO(translate) ${c.branchId}：翻译该分支动作`);
+    lines.push(`      break;`);
+    lines.push(`    }`);
+  }
+  if (d.hasDefault) {
+    lines.push(`    default: {`);
+    lines.push(`      // TODO(translate) default：翻译该分支动作`);
+    lines.push(`      break;`);
+    lines.push(`    }`);
+  }
+  lines.push(`  }`);
+  return lines.join('\n');
 }
 
 /** 渲染 type 单元骨架（struct/interface → interface；alias → type 别名；均非孔） */

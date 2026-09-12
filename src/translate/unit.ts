@@ -58,6 +58,8 @@ export interface TransUnit {
   typeParamConstraints?: Record<string, string>;
   /** 各类型参数 → 能表达成 TS 的 `extends` 约束（如 'number' / 'number | string' / 'Uint8Array'）；空串=不设 bound */
   typeParamBounds?: string[];
+  /** A3 决策表：函数体为 switch-on-expression 时，锁定分支结构（判别式 + case 标签 + default），LLM 只填分支内动作 */
+  decision?: DecisionShape;
 
   // —— const 用 ——
   /** 直译后的 TS 字面量源码（标量 const/var 常量表达式），如 '100' / '"hi"' / 'true' */
@@ -86,6 +88,21 @@ export interface TransUnit {
   bodyHole: boolean;
   /** 本单元翻译约束（骨架生成时并入 typeMap 语义 note） */
   constraints: string[];
+}
+
+/** 一条决策分支（A3）：一组 case 标签属同一分支（`case a, b:`），或 default */
+export interface DecisionCase {
+  labels: string[];
+  branchId: string;
+}
+
+/** A3 决策表形状：switch-on-expression 的锁定分支结构 */
+export interface DecisionShape {
+  /** 判别式（Go 原文，如 cfg.Kind / msg.Type；`switch {}` 为 'true'） */
+  discriminant: string;
+  /** 顺序分支（每个一个 TS case 组） */
+  cases: DecisionCase[];
+  hasDefault: boolean;
 }
 
 /** 所有单元共享的硬约束（LLM 不得越界） */

@@ -32,6 +32,16 @@ function structureCheck(u: TransUnit): string | null {
     const head = u.skeleton.slice(u.skeleton.indexOf('(') + 1, u.skeleton.indexOf(')'));
     const nParams = countTopLevelParams(head);
     if (nParams !== n) return `参数个数不一致：源=${n}，骨架=${nParams}`;
+    // A3/A4 决策表：case 分支数与 default 必须与源一一对应（填后仍生效 → 拦"丢分支/改判别式"）
+    if (u.decision) {
+      const nCase = (u.skeleton.match(/\bcase\b/g) || []).length;
+      if (nCase !== u.decision.cases.length) return `决策表分支数不一致：源=${u.decision.cases.length}，骨架=${nCase}`;
+      const hasDef = u.skeleton.includes('default:');
+      if (u.decision.hasDefault !== hasDef) return `决策表 default 分支${u.decision.hasDefault ? '缺失' : '多余'}`;
+      if (!u.skeleton.includes(`switch (${u.decision.discriminant})`) && !u.skeleton.includes(`switch(${u.decision.discriminant})`)) {
+        return `决策表判别式被改动：应为 switch(${u.decision.discriminant})`;
+      }
+    }
     return null;
   }
   if (u.kind === 'const') {

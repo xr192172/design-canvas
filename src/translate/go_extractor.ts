@@ -13,7 +13,7 @@
  */
 
 import { parseAstRoot, type SyntaxNodeLike } from '../tools/ts_kernel/index.js';
-import { DEFAULT_CONSTRAINTS, type TransUnit, type TranslateParam, type TranslateKind, type TranslateMethod } from './unit.js';
+import { DEFAULT_CONSTRAINTS, type TransUnit, type TranslateParam, type TranslateKind, type TranslateMethod, type DecisionShape } from './unit.js';
 import { evalConstExpr, constToTsLiteral, type ConstValue } from './const_eval.js';
 
 /** 从 Go AST 节点取字段子节点（tree-sitter 字段名访问，防御 null） */
@@ -195,6 +195,9 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
   const snippet = node.text.trim();
   const constraints = [...DEFAULT_CONSTRAINTS];
   appendBodyHints(snippet, constraints);
+  // A3：函数体为 switch-on-expression → 锁定决策表结构（分支机械映射，LLM 只填动作）
+  const decision = detectDecision(node);
+  if (decision) constraints.push('决策表：switch 判别式与 case/default 分支已锁定，按给出分支一一翻译动作，不得增删 case、不得改判别式');
 
   const recvNode = childField(node, 'receiver');
   const recv = recvNode ? parseReceiver(recvNode.text) : null;
@@ -208,9 +211,45 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
     const qn = `${recv.base}_${method}`;
     // 方法自身无类型参数时，继承 receiver 的泛型实参作为自由函数的 <T...>
     const typeParams = ownTypeParams.length ? ownTypeParams : recv.typeArgs;
-    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints };
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints, decision };
   }
-  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints };
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints, decision };
+}
+
+/** 取函数体顶层第一个 expression_switch_statement → 判别式 + 分支标签（A3）。无则 undefined */
+function detectDecision(node: SyntaxNodeLike): DecisionShape | undefined {
+  const body = childField(node, 'body');
+  if (!body) return undefined;
+  let sw: SyntaxNodeLike | null = null;
+  for (let i = 0; i < body.childCount; i++) {
+    const c = body.child(i);
+    if (c && c.type === 'expression_switch_statement') {
+      sw = c;
+      break;
+    }
+  }
+  if (!sw) return undefined;
+  // 判别式：`switch <expr> {` → <expr>；`switch {` → 'true'
+  const txt = sw.text;
+  const lbrace = txt.indexOf('{');
+  let disc = lbrace > 0 ? txt.slice('switch'.length, lbrace).trim() : '';
+  if (!disc) disc = 'true';
+  const cases: { labels: string[]; branchId: string }[] = [];
+  let hasDefault = false;
+  let idx = 0;
+  for (let i = 0; i < sw.childCount; i++) {
+    const c = sw.child(i);
+    if (!c) continue;
+    if (c.type === 'expression_case') {
+      const labelNode = childField(c, 'value') || findChildOfType(c, 'expression_list');
+      const labels = (labelNode?.text ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      cases.push({ labels, branchId: `case${idx}` });
+      idx++;
+    } else if (c.type === 'default_case') {
+      hasDefault = true;
+    }
+  }
+  return { discriminant: disc, cases, hasDefault };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */

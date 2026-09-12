@@ -472,3 +472,90 @@ func M[T comparable](a, b T) T { if a < b { return a }; return b }
     expect(m.constraints.join(' ')).toContain('comparable');
   });
 });
+
+describe('A3 决策表确定性翻译：switch-on-expression → 分支 1:1', () => {
+  it('萃取识别判别式 + 分支标签 + default；骨架 switch/case 一一对应', async () => {
+    const src = `package r
+func Resolve(kind string) string {
+\tswitch kind {
+\tcase "request":
+\t\treturn "req"
+\tcase "response":
+\t\treturn "resp"
+\tdefault:
+\t\treturn "???"
+\t}
+}
+`;
+    const units = await unitsOf(src);
+    const f = units.find((u) => u.name === 'Resolve')!;
+    expect(f.decision).toBeTruthy();
+    expect(f.decision!.discriminant).toBe('kind');
+    expect(f.decision!.cases).toHaveLength(2);
+    expect(f.decision!.hasDefault).toBe(true);
+    renderTsSkeleton(f);
+    expect(f.skeleton).toContain('switch (kind)');
+    expect((f.skeleton.match(/\bcase\b/g) || []).length).toBe(2);
+    expect(f.skeleton).toContain("case 'request':");
+    expect(f.skeleton).toContain('default:');
+    expect(f.constraints.join(' ')).toContain('决策表');
+    expect((await verifySkeletons([f]))).toEqual([]);
+  });
+
+  it('多标签分支 case a, b: → 单个 case 组，两标签', async () => {
+    const src = `package r
+func F(k int) string {
+\tswitch k {
+\tcase 1, 2:
+\t\treturn "low"
+\tcase 3:
+\t\treturn "mid"
+\tdefault:
+\t\treturn "high"
+\t}
+}
+`;
+    const units = await unitsOf(src);
+    const f = units.find((u) => u.name === 'F')!;
+    expect(f.decision!.cases).toHaveLength(2);
+    expect(f.decision!.cases[0].labels).toEqual(['1', '2']);
+    renderTsSkeleton(f);
+    expect(f.skeleton).toContain('case 1, 2:');
+    expect((f.skeleton.match(/\bcase\b/g) || []).length).toBe(2);
+  });
+
+  it('A3/A4 分支数断言：填后丢一个 case → verifySkeletons 拦截', async () => {
+    const src = `package r
+func Resolve(kind string) string {
+\tswitch kind {
+\tcase "request":
+\t\treturn "req"
+\tcase "response":
+\t\treturn "resp"
+\tdefault:
+\t\treturn "???"
+\t}
+}
+`;
+    const units = await unitsOf(src);
+    const f = units.find((u) => u.name === 'Resolve')!;
+    renderTsSkeleton(f);
+    // 模拟 LLM 填后把第二个 case 丢掉（只留一个 case）
+    const bad: TransUnit = {
+      ...f,
+      bodyHole: false,
+      skeleton: `export function Resolve(kind: string): string {
+  switch (kind) {
+    case 'request': {
+      return 'req';
+    }
+    default: {
+      return '???';
+    }
+  }
+}`,
+    };
+    const issues = await verifySkeletons([bad]);
+    expect(issues.some((i) => i.detail.includes('分支数不一致'))).toBe(true);
+  });
+});
