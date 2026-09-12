@@ -265,4 +265,25 @@ describe('translateGoProject', () => {
     expect(tsc!).toContain('bytes'); // 示例保留真实标识符可定位
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  it('B2 types-map：声明名→源 Go 文件:行；outDir 落 json/md', async () => {
+    const root = tmpProject({
+      'model/user.go': 'package model\ntype User struct {\n\tName string\n}\n',
+      'svc/app.go': 'package svc\nfunc F(u *User) string { return u.Name }\n',
+    });
+    const out = path.join(os.tmpdir(), `dc-tr-tm-${Date.now()}`);
+    const r = await translateGoProject(root, { outDir: out });
+    const find = (n: string) => r.typesMap.find((e) => e.name === n);
+    expect(find('User')?.file).toBe('model/user.go');
+    expect(find('User')?.line).toBeGreaterThan(0);
+    expect(find('F')?.file).toBe('svc/app.go');
+    expect(find('F')?.kind).toBe('func');
+    // 落盘
+    expect(fs.existsSync(path.join(out, 'types-map.json'))).toBe(true);
+    expect(fs.existsSync(path.join(out, 'types-map.md'))).toBe(true);
+    const md = fs.readFileSync(path.join(out, 'types-map.md'), 'utf-8');
+    expect(md).toContain('User (type) @ model/user.go:2');
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(out, { recursive: true, force: true });
+  });
 });

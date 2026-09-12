@@ -81,12 +81,24 @@ export interface ReportEntry {
   reason?: string;
 }
 
+/** B2 types-map 索引项：名字 → 源 Go 文件:行（知道名字就能定位定义） */
+export interface TypesMapEntry {
+  name: string;
+  kind: string;
+  /** 源 .go 相对路径 */
+  file: string;
+  /** 源 Go 起始行 */
+  line: number;
+}
+
 export interface ProjectResult {
   modules: ProjectModule[];
   /** 冲突 / stdlib 未定义等诊断（不阻断） */
   diagnostics: string[];
   /** A1 显式失败清单：逐单元状态，降级不再被静默吞掉 */
   report: ReportEntry[];
+  /** B2 声明索引：全部导出符号名 → 源 Go 文件:行，替代 grep 定位 */
+  typesMap: TypesMapEntry[];
   ok: boolean;
 }
 
@@ -210,6 +222,33 @@ function writeReport(outDir: string, report: ReportEntry[]): void {
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, 'translation-report.jsonl'), jsonl, 'utf-8');
   fs.writeFileSync(path.join(outDir, 'translation-report.md'), lines.join('\n'), 'utf-8');
+}
+
+/** B2 声明索引：全部顶层导出符号（type/const + 可译 func）→ 源 Go 文件:行 */
+function buildTypesMap(modules: ProjectModule[]): TypesMapEntry[] {
+  const out: TypesMapEntry[] = [];
+  for (const m of modules) {
+    for (const u of m.units) out.push({ name: u.name, kind: u.kind, file: m.rel, line: u.srcLine ?? 0 });
+    for (const s of m.skipped) out.push({ name: s.name, kind: s.kind, file: m.rel, line: s.line });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file));
+}
+
+/** 落 B2 types-map：types-map.json（机器读）+ types-map.md（按文件分组，人读/跳转） */
+function writeTypesMap(outDir: string, map: TypesMapEntry[]): void {
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, 'types-map.json'), JSON.stringify(map, null, 2), 'utf-8');
+  const byFile = new Map<string, TypesMapEntry[]>();
+  for (const e of map) (byFile.get(e.file) ?? byFile.set(e.file, []).get(e.file)!).push(e);
+  const lines: string[] = ['# Go→TS types-map（声明名 → 源 Go 文件:行）', '', `共 ${map.length} 条`, ''];
+  for (const [file, entries] of [...byFile.entries()].sort()) {
+    lines.push(`## ${file}`);
+    for (const e of entries.sort((a, b) => a.line - b.line)) {
+      lines.push(`- ${e.name} (${e.kind}) @ ${file}:${e.line}`);
+    }
+    lines.push('');
+  }
+  fs.writeFileSync(path.join(outDir, 'types-map.md'), lines.join('\n'), 'utf-8');
 }
 
 /**
@@ -460,7 +499,13 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
 
   // A1 显式失败清单：降级不再静默吞掉
   const report = buildReport(modules, opts.fill === true);
-  if (opts.outDir) writeReport(path.resolve(opts.outDir), report);
+  // B2 types-map 声明索引：知道名字就能定位源 Go 定义
+  const typesMap = buildTypesMap(modules);
+  if (opts.outDir) {
+    const outRoot = path.resolve(opts.outDir);
+    writeReport(outRoot, report);
+    writeTypesMap(outRoot, typesMap);
+  }
 
   // 全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误按根因聚类并入诊断（不阻断）
   if (opts.verify && modules.length) {
@@ -482,5 +527,5 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
     }
   }
 
-  return { modules, diagnostics, report, ok: modules.every((m) => m.issues.length === 0) };
+  return { modules, diagnostics, report, typesMap, ok: modules.every((m) => m.issues.length === 0) };
 }
