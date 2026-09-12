@@ -21,6 +21,14 @@ export interface VerifyIssue {
   detail: string;
 }
 
+/** 取函数体文本（首 `{` 之后、末 `}` 之前） */
+function bodyText(code: string): string {
+  const open = code.indexOf('{');
+  const close = code.lastIndexOf('}');
+  if (open < 0 || close <= open) return code;
+  return code.slice(open + 1, close);
+}
+
 /** 结构闸：签名/形状与源证据一致（func 导出+参数计数；type 为 interface） */
 function structureCheck(u: TransUnit): string | null {
   if (u.kind === 'func') {
@@ -40,6 +48,21 @@ function structureCheck(u: TransUnit): string | null {
       if (u.decision.hasDefault !== hasDef) return `决策表 default 分支${u.decision.hasDefault ? '缺失' : '多余'}`;
       if (!u.skeleton.includes(`switch (${u.decision.discriminant})`) && !u.skeleton.includes(`switch(${u.decision.discriminant})`)) {
         return `决策表判别式被改动：应为 switch(${u.decision.discriminant})`;
+      }
+    }
+    // A4 填后结构化断言（仅对已填单元 bodyHole=false）：
+    //   1) 空壳检测——函数体去掉注释/空白为空 → 疑似降级为空壳（如服务被砍成 new Map()）
+    //   2) 入参语义丢失——Go 用过（非占位 argN、非 _）的参数，填后 body 未引用
+    if (u.bodyHole === false) {
+      const body = bodyText(u.skeleton).replace(/(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, '');
+      if (body.trim() === '') return '填后函数体为空（仅注释/空白），疑似降级为空壳';
+      for (const p of u.params ?? []) {
+        if (p.name === '_' || /^arg\d+$/.test(p.name)) continue;
+        if (new RegExp(`\\b${escapeRe(p.name)}\\b`).test(body)) continue;
+        // 参数在 Go 源里出现过（签名即含名）→ 填后 body 未引用，报语义丢失
+        if (u.srcSnippet && new RegExp(`\\b${escapeRe(p.name)}\\b`).test(u.srcSnippet)) {
+          return `填后函数体未使用 Go 用过参数「${p.name}」，疑似丢失该入参语义`;
+        }
       }
     }
     return null;

@@ -159,7 +159,9 @@ describe('批量填充（fillUnitsBatched）', () => {
     for (const u of units) u.skeleton = renderTsSkeleton(u);
     let calls = 0;
     const stub = async (ctxs: any[]): Promise<string> =>
-      ctxs.map((c: any) => `<unit id="${c.unit.id}">\nreturn 0;\n</unit>`).join('\n') + `<!--call#${++calls}-->`;
+      ctxs
+        .map((c: any) => `<unit id="${c.unit.id}">\n${c.unit.id === 'Sub' ? 'return a - b;' : 'return a + b;'}\n</unit>`)
+        .join('\n') + `<!--call#${++calls}-->`;
     const rs = await fillUnitsBatched(units, stub as any, { batchSize: 5 });
     expect(calls).toBe(1); // 单次调用
     expect(rs).toHaveLength(2);
@@ -178,7 +180,8 @@ describe('批量填充（fillUnitsBatched）', () => {
       return ctxs
         .map((c: any) => {
           const bad = failOnce.has(c.unit.id) && failOnce.delete(c.unit.id);
-          return `<unit id="${c.unit.id}">\n${bad ? 'return a +' : 'return 0;'}\n</unit>`;
+          const good = c.unit.id === 'Abs' ? 'return a;' : 'return a + b;';
+          return `<unit id="${c.unit.id}">\n${bad ? 'return a +' : good}\n</unit>`;
         })
         .join('\n');
     };
@@ -200,11 +203,33 @@ describe('批量填充（fillUnitsBatched）', () => {
     const stub = async (ctxs: any[]): Promise<string> => {
       sizes.push(ctxs.length);
       calls++;
-      return ctxs.map((c: any) => `<unit id="${c.unit.id}">\nreturn 0;\n</unit>`).join('\n');
+      return ctxs.map((c: any) => `<unit id="${c.unit.id}">\n${c.unit.id === 'Add' ? 'return a + b;' : 'return a - b;'}\n</unit>`).join('\n');
     };
     const rs = await fillUnitsBatched(units, stub as any, { batchSize: 5, maxSrcCharsPerBatch: 3000 });
     expect(calls).toBeGreaterThan(1); // 拆批
     expect(sizes.some((s) => s === 1)).toBe(true); // 大函数独占一批
     expect(rs.every((r) => r.ok)).toBe(true);
+  });
+});
+
+describe('A4 填后结构化断言', () => {
+  it('函数体仅注释/空白 → 判为空壳，ok=false', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    const r = await fillUnit(add, () => '// nothing useful');
+    expect(r?.ok).toBe(false);
+    expect(r?.issues.some((i) => i.detail.includes('空壳'))).toBe(true);
+  });
+
+  it('Go 用过的参数在填后 body 未引用 → 判入参语义丢失', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!; // Add(a,b) 且 Go 源用到 a
+    const r = await fillUnit(add, () => 'return b;'); // 丢掉 a
+    expect(r?.ok).toBe(false);
+    expect(r?.issues.some((i) => i.detail.includes('参数「a」'))).toBe(true);
+  });
+
+  it('正常函数体（用到全部参数）→ 过闸', async () => {
+    const add = (await unitsOf(GO_SRC)).find((u) => u.name === 'Add')!;
+    const r = await fillUnit(add, () => 'return a + b;');
+    expect(r?.ok).toBe(true);
   });
 });
