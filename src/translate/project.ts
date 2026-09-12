@@ -17,6 +17,7 @@ import { channelShimSource } from './ts_codegen.js';
 import { collectExternalTypeRefs } from './referenced.js';
 import { fillUnitsWithRetry, fillUnitsBatched } from './fill.js';
 import { createPooledBatchTranslator } from './llm.js';
+import type { SkippedDecl } from './go_extractor.js';
 import { parseFileFull } from '../tools/ts_kernel/index.js';
 import type { TransUnit } from './unit.js';
 import type { VerifyIssue } from './verify.js';
@@ -63,12 +64,28 @@ export interface ProjectModule {
   callRefsRaw: string[];
   units: TransUnit[];
   issues: VerifyIssue[];
+  /** 萃取期被跳过的项（A1 失败清单：空结构/空接口/不可求值 const） */
+  skipped: SkippedDecl[];
+  /** 该模块 LLM 填孔失败：unit.id → 原因（A1 失败清单：llm_retry_fail） */
+  fillFailures: Map<string, string>;
+}
+
+/** A1 显式失败清单条目：每个单元/跳过项一条，定位到 Go 源行 */
+export interface ReportEntry {
+  file: string;
+  id: string;
+  kind: string;
+  line: number;
+  status: 'ok' | 'skeleton' | 'llm_retry_fail' | 'skipped';
+  reason?: string;
 }
 
 export interface ProjectResult {
   modules: ProjectModule[];
   /** 冲突 / stdlib 未定义等诊断（不阻断） */
   diagnostics: string[];
+  /** A1 显式失败清单：逐单元状态，降级不再被静默吞掉 */
+  report: ReportEntry[];
   ok: boolean;
 }
 
@@ -135,6 +152,63 @@ function assembleModule(m: ProjectModule): void {
   const body = m.units.map((u) => u.skeleton).join('\n\n') + (m.units.length ? '\n' : '');
   const shim = body.includes('Channel<') ? channelShimSource() : '';
   m.ts = [m.imports.join('\n'), shim, body].filter((s) => s !== '').join('\n');
+}
+
+/**
+ * A1 显式失败清单：把每模块的单元 + 萃取跳过项 → 扁平报告。
+ * 状态判定：
+ *   - id 在 fillFailures → 'llm_retry_fail'（LLM 填孔重试耗尽）
+ *   - bodyHole 且未填过（fill 未 request）→ 'skeleton'（留孔）
+ *   - 其它（type/const 或已填 ok 的 func）→ 'ok'
+ *   - 萃取期跳过项 → 'skipped'
+ * 每条带 Go 源行，供"一键定位到源码"。
+ */
+function buildReport(modules: ProjectModule[], fillRequested: boolean): ReportEntry[] {
+  const out: ReportEntry[] = [];
+  for (const m of modules) {
+    for (const u of m.units) {
+      const failReason = m.fillFailures.get(u.id);
+      let status: ReportEntry['status'];
+      let reason: string | undefined;
+      if (failReason) {
+        status = 'llm_retry_fail';
+        reason = failReason;
+      } else if (u.bodyHole && !fillRequested) {
+        status = 'skeleton';
+        reason = '函数体留孔（未请求 LLM 填充）';
+      } else {
+        status = 'ok';
+      }
+      out.push({ file: m.rel, id: u.id, kind: u.kind, line: u.srcLine ?? 0, status, reason });
+    }
+    for (const s of m.skipped) {
+      out.push({ file: m.rel, id: s.name, kind: s.kind, line: s.line, status: 'skipped', reason: s.reason });
+    }
+  }
+  return out;
+}
+
+/** 落 A1 报告：translation-report.jsonl（逐行 JSON）+ translation-report.md（分组汇总） */
+function writeReport(outDir: string, report: ReportEntry[]): void {
+  const jsonl = report.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const byStatus = new Map<string, number>();
+  for (const r of report) byStatus.set(r.status, (byStatus.get(r.status) ?? 0) + 1);
+  const lines: string[] = [
+    '# Go→TS 翻译报告',
+    '',
+    `共 ${report.length} 条`,
+    '',
+    ...['ok', 'skeleton', 'llm_retry_fail', 'skipped'].map((s) => `- ${s}: ${byStatus.get(s) ?? 0}`),
+    '',
+    '## 明细',
+    '',
+  ];
+  for (const r of report) {
+    lines.push(`- [${r.status}] ${r.file}:${r.line} ${r.id}${r.reason ? ` — ${r.reason}` : ''}`);
+  }
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, 'translation-report.jsonl'), jsonl, 'utf-8');
+  fs.writeFileSync(path.join(outDir, 'translation-report.md'), lines.join('\n'), 'utf-8');
 }
 
 /**
@@ -236,7 +310,7 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
       if (!ex) defined.set(u.name, { file: rel, isFunc: u.kind === 'func' });
       else if (ex.file !== rel) defined.set(u.name, { file: '__multi__', isFunc: ex.isFunc || u.kind === 'func' });
     }
-    modules.push({ fileAbs, rel, tsRel: rel.replace(/\.go$/, '.ts'), ts: '', imports: [], callRefsRaw, units: r.units, issues: r.issues });
+    modules.push({ fileAbs, rel, tsRel: rel.replace(/\.go$/, '.ts'), ts: '', imports: [], callRefsRaw, units: r.units, issues: r.issues, skipped: r.skipped ?? [], fillFailures: new Map() });
   }
 
   // 第二遍：为每个模块算跨文件 import（类型引用 + 自由函数调用）。
@@ -308,6 +382,9 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
         if (f?.ok) u.skeleton = f.filledSource;
       }
       const failed = filled.filter((f) => !f.ok);
+      for (const f of failed) {
+        m.fillFailures.set(f.unit.id, f.error ?? f.issues.map((i) => i.detail).join('；'));
+      }
       if (failed.length) {
         const firstErr = failed[0].error ?? failed[0].issues.map((i) => i.detail).join('；');
         diagnostics.push(`${m.rel}: LLM 填孔失败 ${failed.length}/${filled.length}：${firstErr}`);
@@ -315,6 +392,10 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
     }
   }
   for (const m of modules) assembleModule(m);
+
+  // A1 显式失败清单：降级不再静默吞掉
+  const report = buildReport(modules, opts.fill === true);
+  if (opts.outDir) writeReport(path.resolve(opts.outDir), report);
 
   // 全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误并入诊断（不阻断）
   if (opts.verify && modules.length) {
@@ -331,5 +412,5 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
     }
   }
 
-  return { modules, diagnostics, ok: modules.every((m) => m.issues.length === 0) };
+  return { modules, diagnostics, report, ok: modules.every((m) => m.issues.length === 0) };
 }

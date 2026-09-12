@@ -9,7 +9,7 @@
  * 一页"待 LLM 填的孔"清单（由 prompts 消费）。
  */
 
-import { extractGo } from './go_extractor.js';
+import { extractGo, type SkippedDecl } from './go_extractor.js';
 import { renderTsSkeleton, channelShimSource } from './ts_codegen.js';
 import { verifySkeletons, type VerifyIssue } from './verify.js';
 // 项目级翻译出口（re-export 便于统一入口）
@@ -42,6 +42,8 @@ export interface TranslateResult {
   issues: VerifyIssue[];
   /** 顶层单元明细 */
   units: TransUnit[];
+  /** 萃取期被跳过的项（空结构/空接口/无法求值 const）——A1 显式失败清单 */
+  skipped?: SkippedDecl[];
   ok: boolean;
   error?: string;
 }
@@ -65,6 +67,7 @@ export async function translateGoToTs(filePath: string, source: string): Promise
     holePrompts,
     issues,
     units: src.units,
+    skipped: src.skipped,
     ok: (issues.length === 0 && src.units.length > 0),
   };
 }

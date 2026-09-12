@@ -56,6 +56,9 @@ async function main(): Promise<void> {
       console.log('── 诊断（不阻断）──');
       for (const d of pr.diagnostics) console.log(`  ${d}`);
     }
+    const need = pr.report.filter((e) => e.status === 'llm_retry_fail' || e.status === 'skipped');
+    console.log(`A1 失败清单：共 ${pr.report.length} 条；需处理 ${need.length} 条（llm_retry_fail/skipped）`);
+    for (const e of need) console.log(`  [${e.status}] ${e.file}:${e.line} ${e.id}${e.reason ? ` — ${e.reason}` : ''}`);
     if (outDir) console.log(`已落盘到 ${path.resolve(outDir)}`);
     return;
   }

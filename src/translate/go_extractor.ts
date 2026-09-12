@@ -201,15 +201,16 @@ function unitFromFunc(node: SyntaxNodeLike): TransUnit | null {
   const ownTypeParams = extractTypeParams(node);
   const typeParamConstraints = extractTypeConstraints(node);
   const typeParamBounds = extractTypeParamBounds(node);
+  const srcLine = node.startPosition.row + 1;
   if (recv) {
     // 方法：receiver 作首参（泛型 receiver 用全类型如 Pair<T>）；命名带类型基名前缀防撞名
     params.unshift({ name: recv.name, type: recv.fullType });
     const qn = `${recv.base}_${method}`;
     // 方法自身无类型参数时，继承 receiver 的泛型实参作为自由函数的 <T...>
     const typeParams = ownTypeParams.length ? ownTypeParams : recv.typeArgs;
-    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+    return { id: qn, kind: 'func', dstLang: 'ts', name: qn, params, result, typeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints };
   }
-  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, skeleton: '', bodyHole: true, constraints };
+  return { id: method, kind: 'func', dstLang: 'ts', name: method, params, result, typeParams: ownTypeParams, typeParamConstraints, typeParamBounds, srcSnippet: snippet, srcLine, skeleton: '', bodyHole: true, constraints };
 }
 
 /** 直接子节点里找某类型（字段名兜底；tree-sitter-go 的 struct body 字段名是 body） */
@@ -264,7 +265,8 @@ function unitFromTypeSpec(spec: SyntaxNodeLike): TransUnit | null {
   const typeNode = childField(spec, 'type');
   if (!nameNode || !typeNode) return null;
   const name = nameNode.text;
-  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), typeParamConstraints: extractTypeConstraints(spec), typeParamBounds: extractTypeParamBounds(spec), srcSnippet: spec.text.trim(), skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
+  const srcLine = spec.startPosition.row + 1;
+  const base = { id: name, kind: 'type' as TranslateKind, dstLang: 'ts', name, typeParams: extractTypeParams(spec), typeParamConstraints: extractTypeConstraints(spec), typeParamBounds: extractTypeParamBounds(spec), srcSnippet: spec.text.trim(), srcLine, skeleton: '', bodyHole: false, constraints: [...DEFAULT_CONSTRAINTS] };
 
   // struct → TS interface（数据字段）
   if (typeNode.type === 'struct_type') {
@@ -312,6 +314,15 @@ interface ConstDecl {
   isVar: boolean;
   expr: SyntaxNodeLike;
   src: string;
+  line: number;
+}
+
+/** 萃取期被跳过的项（空结构体/空接口/无法求值的 const 等）——A1 显式失败清单用 */
+export interface SkippedDecl {
+  name: string;
+  kind: string;
+  line: number;
+  reason: string;
 }
 
 /** 在节点里取首个"表达式"子节点（找不到 value 字段时兜底） */
@@ -329,16 +340,20 @@ function constDeclFromSpec(spec: SyntaxNodeLike, isVar: boolean): ConstDecl | nu
   const valNode = childField(spec, 'value') || firstExprChild(spec);
   const name = nameNode?.text;
   if (!name || !valNode) return null;
-  return { name, isVar, expr: valNode, src: valNode.text.trim() };
+  return { name, isVar, expr: valNode, src: valNode.text.trim(), line: spec.startPosition.row + 1 };
 }
 
 /** 深度遍历 AST，收集目标单元。const/var 仅收包级（顶层），把表达式攒进 consts 待求值。 */
-function collect(node: SyntaxNodeLike, units: TransUnit[], consts: ConstDecl[], topLevel: boolean): void {
+function collect(node: SyntaxNodeLike, units: TransUnit[], consts: ConstDecl[], skipped: SkippedDecl[], topLevel: boolean): void {
   const isFunc = node.type === 'function_declaration' || node.type === 'method_declaration';
   const isTypeDecl = node.type === 'type_declaration';
   if (isFunc) {
     const u = unitFromFunc(node);
     if (u) units.push(u);
+    else {
+      const nameN = childField(node, 'name');
+      skipped.push({ name: nameN?.text ?? '<anon>', kind: 'func', line: node.startPosition.row + 1, reason: '无法萃取的函数（缺名字/形状异常）' });
+    }
     return; // 不进函数体（切片只收顶层，避免捕获嵌套 func/func_literal）
   }
   // type_declaration 下逐个子 type_spec
@@ -348,6 +363,10 @@ function collect(node: SyntaxNodeLike, units: TransUnit[], consts: ConstDecl[], 
       if (c && c.type === 'type_spec') {
         const u = unitFromTypeSpec(c);
         if (u) units.push(u);
+        else {
+          const nameN = childField(c, 'name');
+          skipped.push({ name: nameN?.text ?? '<anon>', kind: 'type', line: c.startPosition.row + 1, reason: '空结构体/空接口或无可机译价值' });
+        }
       }
     }
     return; // type_spec 内部不再需要一般遍历
@@ -366,12 +385,14 @@ function collect(node: SyntaxNodeLike, units: TransUnit[], consts: ConstDecl[], 
   }
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i);
-    if (c) collect(c, units, consts, false);
+    if (c) collect(c, units, consts, skipped, false);
   }
 }
 
 export interface ExtractGoResult {
   units: TransUnit[];
+  /** 萃取期被跳过的项（空结构/空接口/无法求值 const 等）——A1 显式失败清单 */
+  skipped: SkippedDecl[];
   /** 萃取失败原因（解析失败时返回空 units + error） */
   error?: string;
 }
@@ -383,14 +404,15 @@ export interface ExtractGoResult {
  */
 export async function extractGo(filePath: string, source: string): Promise<ExtractGoResult> {
   const parsed = await parseAstRoot(filePath, source);
-  if (!parsed?.root) return { units: [], error: `Go 解析失败（可解析性未知）：${filePath}` };
+  if (!parsed?.root) return { units: [], skipped: [], error: `Go 解析失败（可解析性未知）：${filePath}` };
   const units: TransUnit[] = [];
   const consts: ConstDecl[] = [];
+  const skipped: SkippedDecl[] = [];
   for (let i = 0; i < parsed.root.childCount; i++) {
     const c = parsed.root.child(i);
-    if (c) collect(c, units, consts, true); // 顶层声明（包级 const/var 只在这里收）
+    if (c) collect(c, units, consts, skipped, true); // 顶层声明（包级 const/var 只在这里收）
   }
-  // 常量表达式 fixpoint 求值（支持同包常量引用；求不出 = 非编译期常量 → 跳过交 LLM/人工）
+  // 常量表达式 fixpoint 求值（支持同包常量引用；求不出 = 非编译期常量 → 记 skipped 交 LLM/人工）
   const constVals = new Map<string, { v: ConstValue; isVar: boolean }>();
   let pending = consts.slice();
   let progressed = true;
@@ -410,7 +432,10 @@ export async function extractGo(filePath: string, source: string): Promise<Extra
   }
   for (const d of consts) {
     const got = constVals.get(d.name);
-    if (!got) continue;
+    if (!got) {
+      skipped.push({ name: d.name, kind: 'const', line: d.line, reason: '非编译期常量表达式（含函数调用/不可求值），需 LLM/人工' });
+      continue;
+    }
     units.push({
       id: d.name,
       kind: 'const' as TranslateKind,
@@ -419,10 +444,11 @@ export async function extractGo(filePath: string, source: string): Promise<Extra
       value: constToTsLiteral(got.v),
       isVar: got.isVar,
       srcSnippet: d.src,
+      srcLine: d.line,
       skeleton: '',
       bodyHole: false,
       constraints: [...DEFAULT_CONSTRAINTS],
     });
   }
-  return { units };
+  return { units, skipped };
 }

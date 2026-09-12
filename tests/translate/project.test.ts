@@ -203,4 +203,26 @@ describe('translateGoProject', () => {
     expect(r.diagnostics.some((d) => d.startsWith('全工程 tsc'))).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  it('A1 显式失败清单：skeleton/skipped/ok 逐条带 Go 源行；outDir 落报告', async () => {
+    const root = tmpProject({
+      'main.go':
+        'package main\n\ntype User struct {\n\tName string\n}\n\ntype Empty struct {\n}\n\nconst Bad = someFunc()\n\nfunc F(a int) int {\n\treturn a\n}\n',
+    });
+    const out = path.join(os.tmpdir(), `dc-tr-report-${Date.now()}`);
+    const r = await translateGoProject(root, { outDir: out }); // 不 fill → func 为 skeleton
+    const byId = new Map(r.report.map((e) => [e.id, e]));
+    // type User → ok；空 struct Empty → skipped；const Bad（不可求值）→ skipped；func F（未 fill）→ skeleton
+    expect(byId.get('User')?.status).toBe('ok');
+    expect(byId.get('Empty')?.status).toBe('skipped');
+    expect(byId.get('Bad')?.status).toBe('skipped');
+    expect(byId.get('F')?.status).toBe('skeleton');
+    expect(byId.get('F')?.line).toBeGreaterThanOrEqual(9); // 有 Go 源行
+    expect(byId.get('Bad')?.line).toBeGreaterThan(0);
+    // outDir 落 jsonl + md
+    expect(fs.existsSync(path.join(out, 'translation-report.jsonl'))).toBe(true);
+    expect(fs.existsSync(path.join(out, 'translation-report.md'))).toBe(true);
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(out, { recursive: true, force: true });
+  });
 });

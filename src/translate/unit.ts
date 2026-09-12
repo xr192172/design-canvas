@@ -78,6 +78,8 @@ export interface TransUnit {
   // —— 证据与目标 ——
   /** 源文件里该单元的完整原文（给 LLM 做翻译上下文；type 非孔则省略） */
   srcSnippet: string;
+  /** 源 Go 中该单元起始行（1-based，用于失败清单一键定位） */
+  srcLine?: number;
   /** 目标语言骨架：func = 签名外壳（body 留空为孔）；type = 完整 interface */
   skeleton: string;
   /** true = 该单元有孔待 LLM 填（func 恒 true；type 恒 false） */

@@ -53,8 +53,10 @@ export async function translateGoTsHandler(args: Record<string, unknown>): Promi
       lines.push('── 诊断（不阻断）──');
       for (const d of r.diagnostics) lines.push(`  ${d}`);
     }
+    const failCount = r.report.filter((e) => e.status === 'llm_retry_fail' || e.status === 'skipped').length;
+    if (r.report.length) lines.push(`A1 失败清单（translation-report）：${r.report.length} 条，其中需处理 ${failCount} 条（llm_retry_fail/skipped）`);
     if (outDir) lines.push(`已落盘到 ${outDir}`);
-    return { message: lines.join('\n'), data: { modules: r.modules.map((m) => ({ rel: m.tsRel, imports: m.imports, units: m.units.length })), diagnostics: r.diagnostics } };
+    return { message: lines.join('\n'), data: { modules: r.modules.map((m) => ({ rel: m.tsRel, imports: m.imports, units: m.units.length })), diagnostics: r.diagnostics, report: r.report } };
   }
 
   const file = String(args.file ?? '');
