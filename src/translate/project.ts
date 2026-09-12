@@ -263,14 +263,34 @@ export function buildProjectCallNote(m: ProjectModule, defined: Map<string, Symb
   return lines.join('\n');
 }
 
+/** C2 tsc 错误根因聚类：一个簇 = 同一 code + 归一化消息（标识符/数字泛化） */
+export interface TscCluster {
+  label: string;
+  count: number;
+  sample: string;
+}
+
+/** TS diagnostics code → 可读类别名（未收录用 TS<code>） */
+const TS_CODE_LABEL: Record<number, string> = {
+  2304: '未定义的名字/类型', 2307: '找不到模块', 2503: '找不到命名空间', 2339: '对象上不存在属性',
+  2322: '赋值类型不兼容', 2345: '实参类型不兼容', 2554: '实参数目不匹配', 7006: '隐式 any 参数',
+  2709: '隐式 any 返回', 2540: '对只读属性赋值', 7030: '非全部代码路径返回', 6133: '声明未使用',
+};
+
+/** 根因键：code + 消息里把具体标识符/数字泛化的归一形式（同类不同名归并） */
+function clusterKeyFor(code: number, msg: string): string {
+  const norm = msg.replace(/[A-Za-z_$][\w$]*/g, '<id>').replace(/\b\d+(\.\d+)?\b/g, '<num>');
+  return code + '::' + norm;
+}
+
 /**
  * 全工程 tsc 门禁：用 TS compiler API 对「内存模块树」跑 preEmit。
  * 非 strict + 跳 .d.ts，只为抓真实的类型/引用/import 解析错误。
  * 特例：TS 2355（显式非空返回类型却缺 return）是骨架"函数体留孔"固有的，
  * 每颗孔都有——不属于翻译错误，跳过。
- * 纯工程应 0 错；stdlib/外部类型未定义会如实列出。返回诊断行（[tsc] 前缀）。
+ * 纯工程应 0 错；错误按**根因聚类**返回（看类数下降，而非逐条条数）。
  */
-function verifyProjectTree(modules: ProjectModule[]): string[] {
+function verifyProjectTree(modules: ProjectModule[]): TscCluster[] {
   // TS 2355 = 显式非空返回类型缺 return（骨架留孔固有，非翻译错误）
   const SKIP_CODES = new Set([2355]);
   const source = new Map<string, string>();
@@ -294,20 +314,23 @@ function verifyProjectTree(modules: ProjectModule[]): string[] {
   host.directoryExists = (d) => (d.startsWith('/p/') || d === '/p') || (origDirectoryExists ? origDirectoryExists(d) : false);
 
   const program = ts.createProgram({ rootNames, options, host });
-  const out: string[] = [];
+  const clusters = new Map<string, TscCluster>();
   for (const d of ts.getPreEmitDiagnostics(program)) {
     if (!d.file) continue;
     if (SKIP_CODES.has(d.code)) continue;
     const f = d.file.fileName.replace(/^\/p\//, '');
     const msg = ts.flattenDiagnosticMessageText(d.messageText, ' ').replace(/\s+/g, ' ').trim();
-    if (d.start !== undefined && d.file) {
+    let loc = f;
+    if (d.start !== undefined) {
       const { line, character } = d.file.getLineAndCharacterOfPosition(d.start);
-      out.push(`[tsc] ${f}:${line + 1}:${character + 1} ${msg}`);
-    } else {
-      out.push(`[tsc] ${f}: ${msg}`);
+      loc = `${f}:${line + 1}:${character + 1}`;
     }
+    const key = clusterKeyFor(d.code, msg);
+    const hit = clusters.get(key);
+    if (hit) hit.count++;
+    else clusters.set(key, { label: TS_CODE_LABEL[d.code] ?? `TS${d.code}`, count: 1, sample: `${loc} ${msg}` });
   }
-  return out;
+  return [...clusters.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
 
 /**
@@ -439,10 +462,15 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
   const report = buildReport(modules, opts.fill === true);
   if (opts.outDir) writeReport(path.resolve(opts.outDir), report);
 
-  // 全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误并入诊断（不阻断）
+  // 全工程 tsc 门禁：对内存模块树跑 TS preEmit，错误按根因聚类并入诊断（不阻断）
   if (opts.verify && modules.length) {
-    const tscDiags = verifyProjectTree(modules);
-    if (tscDiags.length) diagnostics.push(`全工程 tsc 检查未通过：\n${tscDiags.map((d) => '  ' + d).join('\n')}`);
+    const clusters = verifyProjectTree(modules);
+    if (clusters.length) {
+      const total = clusters.reduce((s, c) => s + c.count, 0);
+      diagnostics.push(
+        `全工程 tsc 检查未通过：${clusters.length} 类 / ${total} 条\n${clusters.map((c) => `  • [${c.label}] ×${c.count}  例: ${c.sample}`).join('\n')}`,
+      );
+    }
   }
 
   // 落盘：镜像相对结构

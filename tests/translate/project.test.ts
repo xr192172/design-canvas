@@ -251,4 +251,18 @@ describe('translateGoProject', () => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(out, { recursive: true, force: true });
   });
+
+  it('C2 verify tsc 错误按根因聚类：同类错误归并为 1 类', async () => {
+    const root = tmpProject({
+      'a.go': 'package a\nimport "bytes"\nfunc Ga(b *bytes.Buffer) int { return b.Len() }\n',
+      'b.go': 'package b\nimport "bytes"\nfunc Gb(b *bytes.Buffer) int { return b.Len() }\n',
+    });
+    const r = await translateGoProject(root, { verify: true });
+    const tsc = r.diagnostics.find((d) => d.startsWith('全工程 tsc'));
+    expect(tsc).toBeTruthy();
+    expect(tsc!).toContain('1 类 / 2 条'); // 两文件 bytes 未定义 = 同一根因
+    expect(tsc!).toContain('找不到命名空间');
+    expect(tsc!).toContain('bytes'); // 示例保留真实标识符可定位
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 });
