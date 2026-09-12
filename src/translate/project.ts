@@ -91,6 +91,14 @@ export interface TypesMapEntry {
   line: number;
 }
 
+/** B1 同类名冲突：同一名字在多处定义（跨文件同名，或 type vs func 混同——TS 同名不可共存） */
+export interface ConflictEntry {
+  name: string;
+  sites: { kind: string; file: string; line: number }[];
+  /** 'cross_file' = 跨文件同名；'mixed_kind' = type 与 func/const 混同 */
+  reason: 'cross_file' | 'mixed_kind';
+}
+
 export interface ProjectResult {
   modules: ProjectModule[];
   /** 冲突 / stdlib 未定义等诊断（不阻断） */
@@ -99,6 +107,8 @@ export interface ProjectResult {
   report: ReportEntry[];
   /** B2 声明索引：全部导出符号名 → 源 Go 文件:行，替代 grep 定位 */
   typesMap: TypesMapEntry[];
+  /** B1 同类名冲突预检：翻译时就列出，避免 fix 阶段才爆 */
+  conflicts: ConflictEntry[];
   ok: boolean;
 }
 
@@ -232,6 +242,26 @@ function buildTypesMap(modules: ProjectModule[]): TypesMapEntry[] {
     for (const s of m.skipped) out.push({ name: s.name, kind: s.kind, file: m.rel, line: s.line });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file));
+}
+
+/** B1 同类名冲突预检：同名多处定义 → 跨文件同名 / type↔func 混同（TS 同名不可共存） */
+function detectConflicts(modules: ProjectModule[]): ConflictEntry[] {
+  const byName = new Map<string, ConflictEntry['sites']>();
+  for (const m of modules) {
+    for (const u of m.units) {
+      const arr = byName.get(u.name) ?? [];
+      arr.push({ kind: u.kind, file: m.rel, line: u.srcLine ?? 0 });
+      byName.set(u.name, arr);
+    }
+  }
+  const out: ConflictEntry[] = [];
+  for (const [name, sites] of byName) {
+    if (sites.length < 2) continue;
+    const kinds = new Set(sites.map((s) => s.kind));
+    const files = new Set(sites.map((s) => s.file));
+    out.push({ name, sites, reason: files.size > 1 && kinds.size > 1 ? 'mixed_kind' : 'cross_file' });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** 落 B2 types-map：types-map.json（机器读）+ types-map.md（按文件分组，人读/跳转） */
@@ -501,6 +531,14 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
   const report = buildReport(modules, opts.fill === true);
   // B2 types-map 声明索引：知道名字就能定位源 Go 定义
   const typesMap = buildTypesMap(modules);
+  // B1 同类名冲突预检：混同形态（type↔func，TS 同名不可共存）额外点名，跨文件同名沿用上方冲突诊断
+  const conflicts = detectConflicts(modules);
+  for (const c of conflicts) {
+    if (c.reason === 'mixed_kind') {
+      const sites = c.sites.map((s) => `${s.file}:${s.line}(${s.kind})`).join(', ');
+      diagnostics.push(`同类名混同冲突「${c.name}」（TS 同名不可共存）：${sites}，需消歧`);
+    }
+  }
   if (opts.outDir) {
     const outRoot = path.resolve(opts.outDir);
     writeReport(outRoot, report);
@@ -527,5 +565,5 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
     }
   }
 
-  return { modules, diagnostics, report, typesMap, ok: modules.every((m) => m.issues.length === 0) };
+  return { modules, diagnostics, report, typesMap, conflicts, ok: modules.every((m) => m.issues.length === 0) };
 }

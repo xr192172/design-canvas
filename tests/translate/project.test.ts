@@ -286,4 +286,18 @@ describe('translateGoProject', () => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(out, { recursive: true, force: true });
   });
+
+  it('B1 同类名冲突预检：type 与 func 混同同名 → 指明两处并点名', async () => {
+    const root = tmpProject({
+      'a/x.go': 'package a\ntype X struct { A int }\n',
+      'b/x.go': 'package b\nfunc X() int { return 0 }\n',
+    });
+    const r = await translateGoProject(root);
+    const c = r.conflicts.find((e) => e.name === 'X');
+    expect(c).toBeTruthy();
+    expect(c!.reason).toBe('mixed_kind');
+    expect(c!.sites).toHaveLength(2);
+    expect(r.diagnostics.some((d) => d.includes('同类名混同冲突「X」'))).toBe(true);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 });
