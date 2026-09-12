@@ -216,8 +216,16 @@ function writeReport(outDir: string, report: ReportEntry[]): void {
  *   - 本模块可直接调用的自由函数（本地定义 + 已 import 的跨文件 free func）；
  *   - receiver 方法须译成 `T_method(recv, ...)` 自由函数调用（勿写 recv.method()）。
  * 让 LLM 填出的函数体引用对名，从而配合 #1 import 使门禁在填后也能过。
+ * A2 增强：ctx 提供全局函数签名 + 类型字段表，把"跨文件语义上下文"（兄弟函数签名、
+ * 被引类型的字段词表，如 Address.broadcast）注入单孔 prompt，让 LLM 保留语义（单播/广播）而非脑补。
  */
-export function buildProjectCallNote(m: ProjectModule, defined: Map<string, SymbolDef>): string {
+export interface ProjectCallContext {
+  /** 全局函数名 → 首行签名（含符号语义）；跨文件兄弟函数给 LLM 看形状 */
+  funcSkel: Map<string, string>;
+  /** 全局类型名 → interface 字段表（给 LLM 看字段语义，如 broadcast/excludeRoles） */
+  typeSkel: Map<string, string>;
+}
+export function buildProjectCallNote(m: ProjectModule, defined: Map<string, SymbolDef>, ctx?: ProjectCallContext): string {
   const local = m.units.filter((u) => u.kind === 'func').map((u) => u.name);
   const imported: string[] = [];
   for (const name of m.callRefsRaw) {
@@ -225,8 +233,29 @@ export function buildProjectCallNote(m: ProjectModule, defined: Map<string, Symb
     if (def && def.isFunc && def.file !== '__multi__' && def.file !== m.rel && !local.includes(name)) imported.push(name);
   }
   const funcs = [...new Set([...local, ...imported])].sort();
-  if (funcs.length === 0) return '';
-  const lines: string[] = ['【项目级调用约定】', ...funcs.map((n) => `- 可直接调用函数：${n}`)];
+  const lines: string[] = ['【项目级调用约定】'];
+  if (funcs.length) lines.push(...funcs.map((n) => `- 可直接调用函数：${n}`));
+  if (lines.length === 1) lines.push('- （无）');
+  // A2：兄弟/跨文件函数签名（形状语义）
+  if (ctx && funcs.length) {
+    const sigLines = [];
+    for (const n of funcs) {
+      const sig = ctx.funcSkel.get(n);
+      if (sig) sigLines.push(`- ${n} ${sig}`);
+    }
+    if (sigLines.length) lines.push('【可直接调用函数的签名（调用约定看形状）】', ...sigLines);
+  }
+  // A2：本模块引用的类型及其字段（字段语义，如 Address.broadcast 决定单播/广播）
+  if (ctx) {
+    const refTypes = new Set<string>();
+    for (const u of m.units) for (const ref of collectExternalTypeRefs(u)) refTypes.add(ref);
+    const fieldLines: string[] = [];
+    for (const name of [...refTypes].sort()) {
+      const sk = ctx.typeSkel.get(name);
+      if (sk) fieldLines.push(`- ${name} ${sk}`);
+    }
+    if (fieldLines.length) lines.push('【本模块引用到的类型字段（保留其语义，勿丢）】', ...fieldLines);
+  }
   if (local.some((n) => /_\w/.test(n))) {
     lines.push('- receiver 方法调用请译成自由函数，形如 user_GetName(recv, ...)，不要写成 recv.GetName(...)');
   }
@@ -359,11 +388,23 @@ export async function translateGoProject(projectDir: string, opts: ProjectOption
   if (stdlibUndefined.size) diagnostics.push(`项目内未定义的导出类型（Go stdlib/外部，需 LLM/人工）：${[...stdlibUndefined].sort().join(', ')}`);
   if (conflicted.size) diagnostics.push(`同名顶层符号多文件冲突（未 import，需人工消歧）：${[...conflicted].sort().join(', ')}`);
 
+  // A2 语义上下文：全局函数签名 + 类型字段表，注入 fill 让 LLM 保留跨文件语义
+  const pctx: ProjectCallContext = { funcSkel: new Map(), typeSkel: new Map() };
+  for (const mm of modules) {
+    for (const u of mm.units) {
+      if (u.kind === 'func' && u.skeleton && !pctx.funcSkel.has(u.name)) {
+        pctx.funcSkel.set(u.name, u.skeleton.split('\n')[0].replace(/\{\s*$/, '').trim());
+      } else if (u.kind === 'type' && u.skeleton && !pctx.typeSkel.has(u.name)) {
+        pctx.typeSkel.set(u.name, u.skeleton.replace(/\s+/g, ' ').trim());
+      }
+    }
+  }
+
   // 第三遍（fill）：在 import 已算定的前提下逐模块注入「项目级调用约定」再填孔，
   // 让函数体引用对名；填完重建每个模块的 m.ts（门禁在填后输出上跑 = 填后 release gate）。
   if (opts.fill) {
     for (const m of modules) {
-      const note = buildProjectCallNote(m, defined) || undefined;
+      const note = buildProjectCallNote(m, defined, pctx) || undefined;
       let filled: Awaited<ReturnType<typeof fillUnitsWithRetry>>;
       if (useBatch) {
         filled = await fillUnitsBatched(m.units, createPooledBatchTranslator(), {

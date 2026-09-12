@@ -183,6 +183,32 @@ describe('translateGoProject', () => {
     expect(note).not.toContain('noSuch'); // 未定义不列
   });
 
+  it('A2 buildProjectCallNote ctx：注入兄弟函数签名 + 引用类型的字段语义', () => {
+    const m = {
+      rel: 'svc/app.go',
+      callRefsRaw: ['Resolve'],
+      units: [
+        { name: 'Find', kind: 'func', params: [{ name: 'addr', type: 'Address' }] } as any,
+        { name: 'Addr', kind: 'type' } as any,
+      ],
+    };
+    const ctx = {
+      funcSkel: new Map([
+        ['Find', 'export function Find(addr: Address): number'],
+        ['Resolve', 'export function Resolve(k: string): string'],
+      ]),
+      typeSkel: new Map([['Address', 'export interface Address { broadcast: boolean; excludeRoles: string[] }']]),
+    };
+    const def2 = new Map<string, { file: string; isFunc: boolean }>([
+      ['Resolve', { file: 'util/r.go', isFunc: true }],
+    ]);
+    const note = buildProjectCallNote(m as any, def2 as any, ctx as any);
+    expect(note).toContain('export function Find'); // 兄弟函数签名
+    expect(note).toContain('export function Resolve'); // 跨文件调用签名
+    expect(note).toContain('broadcast'); // 字段语义语境注入（单播/广播）
+    expect(note).toContain('excludeRoles');
+  });
+
   it('fill+verify 填后 release gate：桩翻译器按调用约定填出引用对名的函数体，纯项目过闸', async () => {
     const root = tmpProject({
       'calc/num.go':
