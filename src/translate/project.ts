@@ -17,6 +17,7 @@ import { channelShimSource } from './ts_codegen.js';
 import { collectExternalTypeRefs } from './referenced.js';
 import { fillUnitsWithRetry, fillUnitsBatched } from './fill.js';
 import { createPooledBatchTranslator } from './llm.js';
+import { applyDeterministicFixers } from './fixers.js';
 import type { SkippedDecl } from './go_extractor.js';
 import { parseFileFull } from '../tools/ts_kernel/index.js';
 import type { TransUnit } from './unit.js';
@@ -147,11 +148,11 @@ export interface SymbolDef {
   isFunc: boolean;
 }
 
-/** 组装模块内容：import 头 + Channel 垫片（如需） + 各单元骨架。 */
+/** 组装模块内容：import 头 + Channel 垫片（如需） + 各单元骨架；随后跑 C1 确定性 fixer 去未用 import/合 import。 */
 function assembleModule(m: ProjectModule): void {
   const body = m.units.map((u) => u.skeleton).join('\n\n') + (m.units.length ? '\n' : '');
   const shim = body.includes('Channel<') ? channelShimSource() : '';
-  m.ts = [m.imports.join('\n'), shim, body].filter((s) => s !== '').join('\n');
+  m.ts = applyDeterministicFixers([m.imports.join('\n'), shim, body].filter((s) => s !== '').join('\n'));
 }
 
 /**
