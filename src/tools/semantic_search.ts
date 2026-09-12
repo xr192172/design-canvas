@@ -270,6 +270,8 @@ export interface SemanticSearchResult {
   indexed: number;
   hits: SemanticHit[];
   message: string;
+  /** true = 未走语义向量（FTS 降级），调用方应提示 warning，勿装正常（B2 摩擦点） */
+  degraded?: boolean;
 }
 
 /** query 形如符号名（标识符 / 点限定名如 Calc.reset）→ 精确符号索引可解，无需向量 */
@@ -292,7 +294,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
   const minScore = input.min_score ?? 0.3;
 
   if (!query) {
-    return { query, provider: 'fts', indexed: 0, hits: [], message: '查询为空' };
+    return { query, provider: 'fts', indexed: 0, hits: [], message: '查询为空', degraded: false };
   }
 
   // project_dir 必填：缺失时抛可行动错误（而非静默空结果，LLM 会误判为"索引不存在"）
@@ -354,6 +356,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
       return {
         query, provider: 'exact', indexed: rows.length, hits,
         message: `精确符号命中 ${hits.length} 个（标识符查询未走向量，零 embedding 开销）。${freshNote}`,
+        degraded: false,
       };
     }
   }
@@ -381,6 +384,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     return {
       query, provider: 'semantic', indexed: rows.length, hits,
       message: `语义搜索完成，索引 ${rows.length} 个符号（缓存命中 ${dHits}，API 调用 ${dApi} 次${dApi === 0 ? '，全量来自持久向量表' : ''}）。${freshNote}`,
+      degraded: false,
     };
   } catch (e) {
     // embedding 失败（网络/限流/模型错误）→ 降级 FTS
@@ -398,7 +402,7 @@ function ftsFallback(
     score: 0,
   }));
   return {
-    query, provider: 'fts', indexed, hits,
+    query, provider: 'fts', indexed, hits, degraded: true,
     message: reason
       ? `语义搜索失败（${reason}），已降级为关键词全文检索。${freshNote}`
       : `未配置 embedding（config.json 缺 embedding 段），已用关键词全文检索。${freshNote}`,

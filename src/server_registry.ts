@@ -440,10 +440,21 @@ const detectDriftHandler = wrapData(async (a) => {
   });
 });
 
-/** explore_code：参数化代码理解（用 wrapData：data 不丢弃，杜绝「有结果却静默空输出」） */
+/** explore_code：参数化代码理解（用 wrapData：data 不丢弃，杜绝「有结果却静默空输出」）
+ * 兼容两种入参形态：`{ action, args:{...} }`（嵌套，规范）或平铺 `{ action, query, ... }`——
+ * 缺 action 时从平铺参数反推（query→search / file→read），消除"习惯平铺传参 → -32602 invalid action"的摩擦。 */
+function resolveExploreAction(a: Record<string, unknown>, args: Record<string, unknown>): string {
+  if (typeof a['action'] === 'string') return a['action'] as string;
+  if ('query' in args) return 'search';
+  if ('file' in args) return 'read';
+  const msg = `explore_code 缺顶层 action。可用: ${EXPLORE_ACTIONS.join(' / ')}。search 传 {query, project_dir}，read 传 {file, project_dir}；其余路径请显式给 action[+args]。`;
+  throw new Error(msg);
+}
 const exploreCodeHandler = wrapData(async (a) => {
-  const action = a.action as never;
-  const result = await exploreCode({ action, args: (a.args ?? {}) as Record<string, unknown> });
+  const hasNested = typeof a.args === 'object' && a.args !== null && !Array.isArray(a.args);
+  const args = (hasNested ? a.args : a) as Record<string, unknown>;
+  const action = resolveExploreAction(a as Record<string, unknown>, args) as never;
+  const result = await exploreCode({ action, args });
   return { message: result.message, data: result.data };
 });
 

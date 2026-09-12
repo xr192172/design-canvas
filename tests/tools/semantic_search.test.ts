@@ -188,6 +188,7 @@ describe('semantic_search FTS 降级（无 embedding 配置）', () => {
     const root = await makeProject('sem_a');
     const r = await semanticSearch({ project_dir: root, query: 'zzzNoSuchSymbol', limit: 5 });
     expect(r.provider).toBe('fts');
+    expect(r.degraded).toBe(true); // 结构化降级标记，调用方勿装正常
     expect(r.indexed).toBeGreaterThan(0);
     expect(r.hits).toEqual([]); // 未命中 exact → 落 fts；无配置 → 无向量；FTS 也无此串 → 空
   });
