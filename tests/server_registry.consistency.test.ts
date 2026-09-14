@@ -63,6 +63,32 @@ describe('server_registry 一致性', () => {
     expect(missing).toEqual([]);
   });
 
+  it('★ edit_code 的 op 枚举必须覆盖实现的全部 op（防"实现支持但 schema 不暴露"的死代码）', () => {
+    // 背景（2026-09-14 实测发现）：edit_code 实现早就支持 op='replace_text'
+    // （「不需要符号索引/行号」的唯一文本替换，恰好是零前置场景下最好用的安全小改），
+    // 但注册 schema 的 op 枚举只有 replace/insert/delete/range ⇒ 该分支从 MCP 面**不可达**。
+    // 这条用例把这个缺口钉住：改实现加了新 op 就必须同步枚举，否则这里红。
+    const def = TOOL_DEFS.find((d) => d.name === 'edit_code');
+    expect(def, 'edit_code 未注册').toBeTruthy();
+    const opSchema = (def!.inputSchema as Record<string, unknown>)['op'] as {
+      options?: unknown;
+      _def?: { entries?: unknown };
+      _zod?: { def?: { entries?: unknown } };
+    };
+    const raw = opSchema.options ?? opSchema._def?.entries ?? opSchema._zod?.def?.entries;
+    const values: string[] = Array.isArray(raw)
+      ? (raw as string[])
+      : raw instanceof Set
+        ? [...(raw as Set<string>)]
+        : Object.keys((raw ?? {}) as Record<string, unknown>);
+    expect(values.length, 'op 枚举解析失败（zod 内部结构变了？）').toBeGreaterThan(0);
+
+    // 实现侧的 op 联合（与 src/tools/edit_code.ts 的 EditCodeOp 保持一致）
+    const implOps = ['replace', 'insert', 'delete', 'range', 'replace_text'];
+    const missing = implOps.filter((o) => !values.includes(o));
+    expect(missing, `实现支持但 schema 未暴露（从 MCP 面不可达）：${missing.join(', ')}`).toEqual([]);
+  });
+
   it('src/tools 下主函数名=文件名 camelCase 的工具文件必须已注册（漏注册检测，摩擦 E）', () => {
     const files = fs
       .readdirSync(TOOLS_DIR)
