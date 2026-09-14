@@ -134,6 +134,8 @@ export const LANE_OF: Readonly<Record<string, LaneAssign>> = {
   suggest_renames: { lane: 'refactor', when: '生成改名建议（就近相似名/命名规范）；混淆/压缩代码的短名还原可读也走这里——建议先由格式化梳理结构，再经 rename_symbols 应用，意图复原留人/LLM' },
   find_similar_names: { lane: 'refactor', when: '找相似命名（撞名/歧义排查）' },
   refactor_judge: { lane: 'refactor', when: '重构后裁判：校验是否符合契约/无回归' },
+  list_snapshots: { lane: 'refactor', when: '列代码快照（每次 edit_code/rename_files/move_symbol 落盘前自动存一份）——先看能不能撤回' },
+  rollback_snapshot: { lane: 'refactor', when: '把代码回滚到某份快照（省略=最近一份）；快照时新建的文件会被删掉，是这些改动工具的撤回通道' },
   diff_views: { lane: 'refactor', when: '多视图/多版本差异对比' },
   // ── observe · 观测 / 验证 ──
   observe_log: { lane: 'observe', when: '读运行日志/观测产物' },

@@ -33,6 +33,7 @@ import { parseAstRoot } from './ts_kernel/index.js';
 import { syncFile } from '../db/symbols.js';
 import { getProjectCacheDb } from '../db/db.js';
 import { splitKeepEnds, detectEol, isBlankLine } from './line_utils.js';
+import { snapshotBeforeWrite } from './file_snapshot.js';
 
 // ─────────────────────────────────────────────
 // 类型
@@ -394,6 +395,16 @@ export async function moveSymbol(input: MoveSymbolInput): Promise<MoveSymbolResu
   }
 
   const affectedFiles = [sourceAbs, toAbs, ...importerEdits.keys()];
+
+  // ★ 可撤回：落盘前把受影响文件（源+目标+各 importer）各存一份。
+  // affectedFiles 正是本次会改到的完整集合（dry_run 时也算了，但只在真落盘前快照）。
+  if (!dryRun) {
+    snapshotBeforeWrite(
+      resolvedRoot,
+      `move_symbol:${input.symbol}→${path.basename(toAbs)}`,
+      affectedFiles.map((f) => (path.relative(resolvedRoot, f) || f).replace(/\\/g, '/')),
+    );
+  }
 
   // 7. dry_run / 落盘
   if (dryRun) {

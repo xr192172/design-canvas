@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { makeCapabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
 import { ensureProjectIndex } from './tools/index_freshness.js';
 import { unknownArgHints, renderArgHints } from './tools/arg_suggest.js';
+import { listFileSnapshots, rollbackFileSnapshot } from './tools/file_snapshot.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -2819,6 +2820,47 @@ const TOOL_DEFS: ToolDef[] = [
           docs: man.docs.map((d) => ({ id: d.id, title: d.title, lines: d.lines, tagged: d.tagged, tags: d.tags })),
         },
       };
+    }),
+  },
+  {
+    name: 'list_snapshots',
+    title: 'List code snapshots (undo points)',
+    description:
+      '列出本项目的代码快照（每次 edit_code / rename_files / move_symbol 落盘前自动生成一份）。' +
+      '用来回答"我能不能撤回刚才那一步"：返回 id / 时间 / 原因 / 涉及文件数。回滚走 rollback_snapshot。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录'),
+      limit: z.number().optional().describe('最多返回几条（默认 10）'),
+    },
+    handler: wrapData(async (a) => {
+      const input = a as unknown as { project_dir: string; limit?: number };
+      const list = listFileSnapshots(input.project_dir).slice(0, input.limit ?? 10);
+      const body = list.length
+        ? list.map((m) => `  ${m.id}  ${m.createdAt}  ${m.reason}（${m.files.length} 文件）`).join('\n')
+        : '（暂无快照：任何 edit_code / rename_files / move_symbol 落盘前都会自动存一份）';
+      return { message: `代码快照 ${list.length} 条：\n${body}`, data: { snapshots: list } };
+    }),
+  },
+  {
+    name: 'rollback_snapshot',
+    title: 'Rollback code to a snapshot',
+    description:
+      '把代码回滚到某份快照（省略 snapshot = 最近一份）：快照里存在的文件写回原内容；' +
+      '快照时"还不存在"的文件（= 这次改动新建的）会被删除。传 file 可只回滚单个文件。' +
+      '这是 edit_code / rename_files / move_symbol 的"撤回"通道（快照在落盘前自动生成）。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录'),
+      snapshot: z.string().optional().describe('快照 id，或 "latest"（缺省 = 最近一份）'),
+      file: z.string().optional().describe('只回滚该文件（相对项目根或绝对路径）'),
+    },
+    handler: wrapData(async (a) => {
+      const input = a as unknown as { project_dir: string; snapshot?: string; file?: string };
+      const r = rollbackFileSnapshot(
+        input.project_dir,
+        input.snapshot,
+        input.file ? { file: input.file } : undefined,
+      );
+      return { message: r.message + (r.failed.length ? `\n未恢复：${r.failed.join(', ')}` : ''), data: r };
     }),
   },
   {

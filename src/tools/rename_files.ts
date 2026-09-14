@@ -16,6 +16,7 @@
 
 import { renameFile, type RenameFileResult } from './rename_file.js';
 import { resolveProjectRoot } from './project_root.js';
+import { snapshotBeforeWrite } from './file_snapshot.js';
 
 export interface FileRenameItem {
   /** 源文件：相对 project_dir 或绝对路径 */
@@ -93,6 +94,17 @@ export async function renameFiles(input: {
   if (dry_run === true) return { ok: true, dryRun: true, previews, applied: [], filesWritten: 0 };
 
   // 阶段 2：全部通过 → 逐条真落盘（串行；前面改动导致后续阻断则中止并据实报告）
+  // ★ 可撤回：落盘前把"本次会改到的全部文件"（每个条目的 from/to + 各 importer）各存一份。
+  // 清单取自阶段 1 的 dry_run 预览（references 已列出会被改的引用方文件）。
+  {
+    const touched = new Set<string>();
+    for (const p of previews) {
+      if (p.from) touched.add(p.from);
+      if (p.to) touched.add(p.to);
+      for (const r of p.result?.references ?? []) if (r?.file) touched.add(r.file);
+    }
+    snapshotBeforeWrite(projectDir, `rename_files:${renames.length} 条`, [...touched]);
+  }
   const applied: RenameFilesResult['applied'] = [];
   let filesWritten = 0;
   for (let i = 0; i < renames.length; i++) {

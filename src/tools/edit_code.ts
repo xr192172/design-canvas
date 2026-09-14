@@ -20,6 +20,7 @@ import { parseFileFull, parseAstRoot, type ParsedSymbol } from './ts_kernel/inde
 import { syncFile } from '../db/symbols.js';
 import { getProjectCacheDb } from '../db/db.js';
 import { splitKeepEnds, detectEol, isBlankLine } from './line_utils.js';
+import { snapshotBeforeWrite } from './file_snapshot.js';
 
 export type EditCodeOp = 'replace' | 'insert' | 'delete' | 'range' | 'replace_text';
 
@@ -293,6 +294,12 @@ export async function editCode(args: EditCodeArgs): Promise<{ message: string }>
   const fileExists = fs.existsSync(absPath);
   if (!fileExists && op !== 'insert') {
     throw new Error(`文件不存在: ${absPath}（insert 可创建新文件，replace/delete 不行）`);
+  }
+
+  // ★ 可撤回：任何会落盘的编辑，先把目标文件原样存一份（dry_run 不快照）。
+  // 之后可用 rollback_snapshot 一键回到这一刻（含"本次新建的文件"会被删掉）。
+  if (args.dry_run !== true) {
+    snapshotBeforeWrite(projectRoot, `edit_code:${op}:${relPath}`, [relPath]);
   }
 
   // ── insert 新文件：直接写入 + 索引 ──
