@@ -16,6 +16,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { makeCapabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
 import { ensureProjectIndex } from './tools/index_freshness.js';
+import { unknownArgHints, renderArgHints } from './tools/arg_suggest.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -2952,10 +2953,28 @@ const TOOL_DEFS: ToolDef[] = [
 // ─────────────────────────────────────────────────────────────
 
 /** 注册全部主工具到 McpServer（旧工具名别名已于 2026-08-17 全部移除） */
+/**
+ * 输入 schema 用 **loose object**：保留未知键，好让参数纠错（Did you mean）能看见写错的键。
+ *
+ * 为什么必须这样：SDK 会把 raw shape 包成**严格 object**（zod 4 mini / zod 3），
+ * 而严格 object 解析时**静默丢弃**未知键 —— 参数写错就变成"结果莫名其妙"，
+ * 参数纠错代码永远看不到那个错键（实测：不改这里，提示不出现）。
+ * zod v4 → `z.looseObject`；zod v3 → `.passthrough()` 回退。
+ */
+function looseInputSchema(shape: Record<string, unknown>): unknown {
+  const anyZ = z as unknown as { looseObject?: (s: Record<string, unknown>) => unknown };
+  if (typeof anyZ.looseObject === 'function') return anyZ.looseObject(shape);
+  return (z.object(shape as never) as unknown as { passthrough: () => unknown }).passthrough();
+}
+
 export function registerAllTools(server: McpServer): void {
   for (const def of TOOL_DEFS) {
-    server.registerTool(def.name, { title: def.title, description: def.description, inputSchema: def.inputSchema }, async (args) => {
+    server.registerTool(def.name, { title: def.title, description: def.description, inputSchema: looseInputSchema(def.inputSchema) as unknown as z.ZodRawShape }, async (args) => {
       const a = (args ?? {}) as Record<string, unknown>;
+      // ★ 参数纠错（Did you mean）：zod object 会**静默丢弃**未知键（错参数 = 结果莫名其妙），
+      // 这里对"够像"的未知键给一条建议；只提示不阻断，不够像则静默（避免噪音）。
+      const knownArgs = Object.keys(def.inputSchema ?? {});
+      const argHints = renderArgHints(unknownArgHints(a, knownArgs), knownArgs);
       // 狗食正式统计：记录每次工具调用的成败与子动作（失败静默，不阻断主流程）
       const t0 = Date.now();
       const r = await def.handler(a);
@@ -2971,10 +2990,12 @@ export function registerAllTools(server: McpServer): void {
         ms: Date.now() - t0,
         err: r.isError ? (r.text ?? '').slice(0, 200) : undefined,
       });
-      // 响应注入：① 陈旧构建警告（dist 重建后进程仍跑旧代码 → 明确提示重启，防误信旧结果）
-      //          ② watch 产出的未读影响提醒借力本次响应自动送达（MCP 无服务端推送的替代通道）。
-      //            方向 E：本地 inbox（降级路径）+ daemon 游标拉取（权威路径）合并注入
-      return textOut(r.text + staleBuildWarning() + staleSourceWarning() + await collectPendingAlertText(def.name), r.isError);
+      // 响应注入：① 参数纠错（Did you mean）② 陈旧构建警告（dist 重建后进程仍跑旧代码 →
+      //          明确提示重启，防误信旧结果）③ watch 产出的未读影响提醒借力本次响应自动送达。
+      return textOut(
+        r.text + argHints + staleBuildWarning() + staleSourceWarning() + await collectPendingAlertText(def.name),
+        r.isError,
+      );
     });
   }
 }
