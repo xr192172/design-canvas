@@ -29,6 +29,43 @@ const { DatabaseSync } = nodeRequire('node:sqlite') as {
 /** 统一 re-export，调用方从本模块取类型，绕不开 Vite 的静态 import 问题 */
 export type Database = DatabaseSyncType;
 
+// ─────────────────────────────────────────────────────────────
+// 批量事务（嵌套安全）
+//
+// 为什么需要：`syncFile` 内部自带 BEGIN/COMMIT（单文件原子），对"逐个文件增量"是对的；
+// 但**冷启 bootstrap 要写几百个文件** ⇒ 几百次 COMMIT（每次都 fsync）——实测占冷启动 88% 的时间
+// （解析只占 17.8ms/文件；296 文件冷启 44.9s，其中解析≈5.3s）。
+// 这里给"批量写"提供一个外层事务：外层开了，内层的 BEGIN/COMMIT 自动降级为 no-op。
+// 用 WeakMap 记深度，避免动 DatabaseSync 内部状态。
+// ─────────────────────────────────────────────────────────────
+
+const txDepth = new WeakMap<object, number>();
+
+/** 当前是否已在批量事务里（供 syncFile 判断"要不要自己开事务"） */
+export function inTransaction(db: Database): boolean {
+  return (txDepth.get(db as unknown as object) ?? 0) > 0;
+}
+
+/** 开一层批量事务（最外层真正 BEGIN，嵌套只加深度） */
+export function beginBatch(db: Database): void {
+  const key = db as unknown as object;
+  const d = txDepth.get(key) ?? 0;
+  if (d === 0) db.exec('BEGIN');
+  txDepth.set(key, d + 1);
+}
+
+/** 收一层批量事务；`rollback=true` 时最外层整批回滚 */
+export function endBatch(db: Database, rollback = false): void {
+  const key = db as unknown as object;
+  const d = txDepth.get(key) ?? 0;
+  if (d <= 1) {
+    if (d === 1) db.exec(rollback ? 'ROLLBACK' : 'COMMIT');
+    txDepth.set(key, 0);
+    return;
+  }
+  txDepth.set(key, d - 1);
+}
+
 export const SCHEMA_VERSION = 8;
 
 /** 默认 db 文件路径：<dataHome>/.design-canvas/cache.db */

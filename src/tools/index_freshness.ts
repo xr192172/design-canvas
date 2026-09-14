@@ -27,7 +27,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getProjectCacheDb, type Database } from '../db/db.js';
+import { getProjectCacheDb, beginBatch, endBatch, type Database } from '../db/db.js';
 import { syncFile, removeFile, resolveCrossFileCalls, syncProject } from '../db/symbols.js';
 import { walkFiles } from './import_project.js';
 
@@ -160,7 +160,18 @@ export async function ensureFreshIndex(
       if (!bootstrap) return emptyReport();
       const absFiles = walkFiles(root, false, false);
       const take = absFiles.slice(0, maxFiles);
-      const r = await syncProject(db, root, take);
+      // ★ 整批放进**一个事务**：实测这是冷启动的大头 —— 解析只占 ~17.8ms/文件，
+      //   而 296 文件冷启 44.9s ⇒ 88% 花在"每文件一次 COMMIT（带 fsync）+ 触发器维护 FTS"。
+      //   外层开会后 syncFile 内部的 BEGIN/COMMIT 自动降级为 no-op（见 db.beginBatch）。
+      beginBatch(db);
+      let r;
+      try {
+        r = await syncProject(db, root, take);
+        endBatch(db);
+      } catch (e) {
+        endBatch(db, true);
+        throw e;
+      }
       const truncated = absFiles.length > take.length;
       const built = r.updated;
       const report = emptyReport();

@@ -17,6 +17,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Database } from './db.js';
 import { parseFileFull, isSupported } from '../tools/ts_kernel/index.js';
+import { inTransaction } from './db.js';
 
 // ─────────────────────────────────────────────────────────────
 // 类型
@@ -259,7 +260,9 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
     return { from, added: by('added'), removed: by('removed'), changed: by('changed'), normFrom, normTo: normHash };
   })();
 
-  db.exec('BEGIN');
+  // 批量事务（冷启 bootstrap 会开外层事务）时不再自己 BEGIN/COMMIT —— 见 db.ts beginBatch 注释
+  const ownTx = !inTransaction(db);
+  if (ownTx) db.exec('BEGIN');
   try {
     // 1. 文件节点：UPSERT 不删除（保护指向它的 import 边不被级联带走）
     db.prepare(
@@ -413,7 +416,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
        VALUES ($path, $hash, $lang, $size, $mtime, $ts, $nc, NULL, $nh)`,
     ).run({ path: rel, hash, lang: ext, size: stat.size, mtime: Math.round(stat.mtimeMs), ts: now, nc: parsed.symbols.length, nh: normHash });
 
-    db.exec('COMMIT');
+    if (ownTx) db.exec('COMMIT');
     return {
       path: rel, status: 'updated', node_count: parsed.symbols.length, edge_count: edgeCount, call_count: callCount,
       symbol_diff: symbolDiff
@@ -421,7 +424,7 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
         : undefined,
     };
   } catch (e) {
-    db.exec('ROLLBACK');
+    if (ownTx) db.exec('ROLLBACK');
     return fail((e as Error).message);
   }
 }
@@ -682,12 +685,13 @@ export function pruneDeletedFiles(db: Database, projectRoot: string, absPaths: s
     .map((r) => r.path)
     .filter((rel) => isSupported(path.posix.extname(rel)) && !alive.has(rel));
   if (dead.length === 0) return [];
-  db.exec('BEGIN');
+  const ownTx = !inTransaction(db);
+  if (ownTx) db.exec('BEGIN');
   try {
     for (const rel of dead) removeFileRel(db, rel);
-    db.exec('COMMIT');
+    if (ownTx) db.exec('COMMIT');
   } catch (e) {
-    db.exec('ROLLBACK');
+    if (ownTx) db.exec('ROLLBACK');
     throw e;
   }
   return dead;
