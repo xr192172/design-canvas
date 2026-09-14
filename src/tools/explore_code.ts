@@ -17,6 +17,7 @@
 
 import { semanticSearch } from './semantic_search.js';
 import { ensureProjectIndex, ensureIndexAroundSeed } from './index_freshness.js';
+import { scheduleBackfill, backfillState, backfillSummary } from './index_backfill.js';
 import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
 import type { LayerDef } from './layer_detect.js';
@@ -122,21 +123,38 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
       const readFileRaw = args['file'];
       if (typeof readRootRaw === 'string' && readRootRaw.trim() && typeof readFileRaw === 'string' && readFileRaw.trim()) {
         try {
-          // 读一个文件只需要"它 + 直接协作者"：depth=1（出边一跳）+ 最多 6 个文本引用方。
-          // 实测（296 文件项目）：多数文件 ~1s 内；hub 模块（被大量文件 import）也控制在几秒。
-          // 更宽的网（depth=2 / 更多引用方）留给显式的 prewarm/后台续建场景，不给"读一下"加负担。
-          const tile = await ensureIndexAroundSeed(path.resolve(readRootRaw), [readFileRaw], {
+          const readRoot = path.resolve(readRootRaw);
+          // 读一个文件只需要"它 + 直接协作者"：depth=1（出边一跳）+ 最多 6 个文本引用方 + 4s 时长上限。
+          // ★ 硬纪律：**首次读绝不允许长时间空转**（读不到最打击使用感受）——
+          //   超时即停、如实标 partial(time)；剩下的交给下面的后台续建慢慢补。
+          const tile = await ensureIndexAroundSeed(readRoot, [readFileRaw], {
             depth: 1,
             maxFiles: 80,
             maxTextImporters: 6,
+            maxMs: 4000,
           });
-          if (tile.newFiles > 0 || tile.stitched > 0) {
-            tileNote = tile.partial
-              ? `\n（按需建索引：围绕该文件扩展 ${tile.visited} 个文件，新建 ${tile.newFiles}，缝合 ${tile.stitched}；**本轮覆盖不完整**（${tile.stopReason}），未覆盖区域的引用可能看不到）`
-              : `\n（按需建索引：围绕该文件扩展 ${tile.visited} 个文件，新建 ${tile.newFiles}，缝合 ${tile.stitched}）`;
+          // ★ 后台续建：没有其他任务时持续把剩下的拼图补全（幂等单飞；每批让出事件循环）
+          let bf = backfillState(readRoot);
+          if (tile.partial || !bf || !bf.running) {
+            try {
+              bf = scheduleBackfill(readRoot, { batch: 20, intervalMs: 200 });
+            } catch {
+              /* 后台起不来不影响本次读 */
+            }
           }
+          const parts: string[] = [];
+          if (tile.newFiles > 0 || tile.stitched > 0) {
+            parts.push(
+              `按需建索引：围绕该文件扩展 ${tile.visited} 个文件，新建 ${tile.newFiles}，缝合 ${tile.stitched}`,
+            );
+          }
+          if (tile.partial) {
+            parts.push(`**本轮覆盖不完整**（${tile.stopReason}），未覆盖区域的引用可能看不到`);
+          }
+          if (bf) parts.push(backfillSummary(bf));
+          if (parts.length) tileNote = `\n（${parts.join('；')}）`;
         } catch {
-          /* 拼图失败不阻断读取（索引是增强，不是前提） */
+          /* 拼图/后台失败不阻断读取（索引是增强，不是前提） */
         }
       }
       const r = await readCode(args);

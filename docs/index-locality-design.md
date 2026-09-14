@@ -143,8 +143,32 @@ ensureIndexAround(db, root, seeds, { depth = 2, maxFiles = 200, directions = 'bo
 （**实测：不加限制时第一块 112~169 文件 / 22~35s，比全量冷启还慢**）。
 语义上也对：「谁引用**我**」只需对种子成立，不需要对每个邻居都成立。
 
-**仍待做（S2 的"后台续建"部分）**：读路径的几秒延迟主要来自"协作者里有大文件"；
-真正把它压到 <1s 的办法是**按文件大小设预算 + 空闲时后台续建**（先返回、慢慢补块）。
+**仍待做（S2 剩余）**：**✅ 已完成（见下）**。
+
+### S2 已落地：首次读（前台，有上限）+ 后台续建（空闲补齐）
+
+**分工**（对齐用户意图"读是为了冷启动；选定好读了之后，没有其他任务时就持续跑补件"）：
+
+| | 前台 `ensureIndexAround` / `explore_code(read)` | 后台 `index_backfill.scheduleBackfill` |
+|---|---|---|
+| 目标 | **第一次读立刻有东西**（读不到最伤使用感受） | 空闲时把整仓补齐 |
+| 边界 | `depth:1` + `maxTextImporters:6` + **`maxMs:4000`**（超时即停，标 `partial('time')`） | `batch:20` / `intervalMs:200`，每批 `setImmediate` 让出事件循环；单飞；`unref()` 不阻进程退出 |
+| 进度 | 结果里附注覆盖度（partial/stopReason） | `backfillState()` 可查（running/done/total/synced/failed/lastError），读结果里也带一行 |
+
+**实测（298 文件项目，`probe-dc-locality.mjs --flow`）**：
+
+```
+① 首次读建块（seed=observe/instrument.ts，上限 4000ms）
+   新建 8 ｜ 缝合 0 ｜ 状态 partial(depth) ｜ ★ 耗时 2695ms
+② 后台续建（batch=20 / 50ms 间隔）
+   总数 298 ｜ 完成 298 ｜ 本轮新建 290 ｜ 失败 0 ｜ ★ 补齐用时 42559ms（空闲时跑，不阻塞读）
+```
+
+⇒ **第一次读 ~2.7s 拿得到东西**（最坏 4s 封顶）；整仓在**后台 42s** 内补齐。
+单元测试：`index_backfill.test.ts` 4 项（分批/单飞/跑完/无剩余不空转 + `maxMs=1` 立刻停并标 `partial('time')`）。
+
+**仍未做**：① 读路径那几秒的主因是"协作者里有大文件"（hub 引用方常是 3000 行文件）——
+进一步压到 <1s 需要**按文件大小设预算**（大文件延后到后台）；② watch 收窄到已索引区 + 边界扩展。
 
 ---
 

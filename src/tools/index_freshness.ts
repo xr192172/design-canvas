@@ -164,6 +164,12 @@ export interface TileOptions {
    * 一个 hub 模块的 20 个引用方可能比 20 个普通文件贵得多。
    */
   maxTextImporters?: number;
+  /**
+   * ★ 建块**时长上限**（默认 4000ms）——"首次读绝不允许长时间空转"。
+   * 超时即停、如实标 `partial('time')`：**读得到东西**比"索引更全"重要得多
+   * （读不到会打击使用感受；剩下的交给后台续建 `index_backfill`）。
+   */
+  maxMs?: number;
 }
 
 export interface TileReport {
@@ -184,7 +190,7 @@ export interface TileReport {
   /** 是否因预算/深度停下（= 覆盖不完整，调用方**必须**标注） */
   partial: boolean;
   /** 停止原因（人读） */
-  stopReason: 'queue-empty' | 'budget' | 'depth' | 'no-seed';
+  stopReason: 'queue-empty' | 'budget' | 'depth' | 'no-seed' | 'time';
   ms: number;
 }
 
@@ -207,6 +213,7 @@ export async function ensureIndexAround(
   const maxFiles = opts.maxFiles ?? 200;
   const dirs = opts.directions ?? 'both';
   const maxTextImporters = opts.maxTextImporters ?? MAX_TEXT_IMPORTERS_PER_SEED;
+  const maxMs = opts.maxMs ?? 4000;
 
   const relSeeds = seeds
     .filter(Boolean)
@@ -289,9 +296,20 @@ export async function ensureIndexAround(
 
   // 轮 0 = 种子本身（**永远处理**，depth=0 即"只建种子们"）；轮 k = 第 k 跳邻居
   for (; hop <= depth; hop++) {
+    // ★ 时长上限：首次读绝不允许长时间空转（超时即停、如实标 partial(time)）
+    if (Date.now() - t0 > maxMs) {
+      report.partial = true;
+      report.stopReason = 'time';
+      break;
+    }
     const next: string[] = [];
     for (const rel of frontier) {
       const abs = path.join(root, rel);
+      if (Date.now() - t0 > maxMs) {
+        report.partial = true;
+        report.stopReason = 'time';
+        break;
+      }
       if (isIndexed(rel)) {
         report.stitched++; // 缝合点：不重新解析
       } else {
