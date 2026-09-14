@@ -2,12 +2,19 @@
  * 索引自动保鲜测试：外部改动（git pull / 手动编辑 / 其他 agent）后，
  * 查询前懒校验增量重同步——search 永远基于最新代码。
  *
+ * ★ 2026-09-14 语义变更（agent IO 层的「零前置」）：**空库改为就地冷启 bootstrap**。
+ * 旧契约是「空库不 bootstrap，查询层抛可行动错误」——那正是"改个符号前要先 import_project"
+ * 这一前置成本的代码级根因。现在空库 → 有界静默建索引（上限 / 诚实标注 state·truncated）。
+ *
  * 覆盖：
  *   - 外部修改文件 → 新符号立即可查（exact 命中），message 带自刷新注记
  *   - 外部删除文件 → 其符号从索引消失
  *   - 外部新增文件 → 新文件符号可查
  *   - 无变更 → 零重同步，message 无注记（不惊扰）
- *   - 空库（从未 import）→ 保鲜不 bootstrap，查询层抛可行动错误
+ *   - ★ 空库 → 冷启建索引，semanticSearch 无需先 import_project 即命中
+ *   - ★ 空库 + bootstrap:false → 恢复老语义（不建）
+ *   - ★ 冷启上限截断 → state='partial' + truncated=true（诚实，不假装完整）
+ *   - 目录下没有可索引文件 → 查询层仍抛可行动错误
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -149,15 +156,62 @@ describe('索引自动保鲜（ensureFreshIndex）', () => {
     }
   });
 
-  it('空库（从未 import）→ 保鲜不 bootstrap，符号缓存为空错误仍由查询层抛出', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-empty-'));
+  it('★ 空库（从未 import）→ 冷启 bootstrap，semanticSearch 零前置命中', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-boot-'));
+    roots.push(root);
+    put(root, 'src/a.ts', `export function bootSymbol(): number { return 1; }\n`);
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    try {
+      const rep = await ensureFreshIndex(db, root);
+      expect(rep.state).toBe('ready');
+      expect(rep.bootstrapped).toBeGreaterThan(0);
+      expect(rep.truncated).toBe(false);
+      expect(hasChanges(rep)).toBe(true); // 冷启也算"有变更"，调用方据此提示
+    } finally {
+      db.close();
+    }
+    // 关键：没有跑过 import_project，直接查也能命中
+    const r = await semanticSearch({ project_dir: root, query: 'bootSymbol' });
+    expect(r.provider).toBe('exact');
+    expect(r.hits.some((h) => h.name === 'bootSymbol' && h.file_path === 'src/a.ts')).toBe(true);
+  });
+
+  it('空库 + bootstrap:false → 恢复老语义（只保鲜不冷启）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-noboot-'));
     roots.push(root);
     put(root, 'src/a.ts', `export function a(): void {}\n`);
     const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
-    const rep = await ensureFreshIndex(db, root);
-    expect(hasChanges(rep)).toBe(false);
-    expect(rep.added).toBe(0); // 不替用户做全量导入
-    db.close();
-    await expect(semanticSearch({ project_dir: root, query: 'a' })).rejects.toThrow(/符号缓存为空/);
+    try {
+      const rep = await ensureFreshIndex(db, root, { bootstrap: false });
+      expect(rep.bootstrapped).toBe(0);
+      expect(rep.state).toBe('empty');
+      expect(hasChanges(rep)).toBe(false);
+      const n = db.prepare('SELECT COUNT(*) c FROM files').get() as { c: number };
+      expect(n.c).toBe(0); // 确实没建
+    } finally {
+      db.close();
+    }
+  });
+
+  it('★ 冷启上限截断 → state=partial + truncated（诚实标注，不假装完整）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-trunc-'));
+    roots.push(root);
+    for (let i = 0; i < 5; i++) put(root, `src/m${i}.ts`, `export function m${i}(): void {}\n`);
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    try {
+      const rep = await ensureFreshIndex(db, root, { maxFiles: 2 });
+      expect(rep.state).toBe('partial');
+      expect(rep.truncated).toBe(true);
+      expect(rep.bootstrapped).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('目录里没有可索引源码 → 查询层仍抛可行动错误（冷启也建不出符号）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-nosrc-'));
+    roots.push(root);
+    put(root, 'notes.txt', 'not code\n');
+    await expect(semanticSearch({ project_dir: root, query: 'a' })).rejects.toThrow(/索引为空/);
   });
 });

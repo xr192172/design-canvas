@@ -227,14 +227,32 @@ describe('semantic_search FTS 降级（无 embedding 配置）', () => {
     expect(r.message).toContain('查询为空');
   });
 
-  it('符号缓存为空 → 抛可行动错误（提示先 import_project）', async () => {
+  it('★ 空缓存但目录里有源码 → 冷启动建索引，无需先 import_project', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sem-boot-'));
+    roots.push(root);
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'src', 'only.ts'),
+      'export function zeroSetupSymbol(): number { return 7; }\n',
+      'utf-8',
+    );
+    // 只建库、不导入：旧语义这里会抛"符号缓存为空"，新语义应自己建好并命中
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    db.close();
+    const r = await semanticSearch({ project_dir: root, query: 'zeroSetupSymbol' });
+    expect(r.provider).toBe('exact');
+    expect(r.hits.some((h) => h.name === 'zeroSetupSymbol')).toBe(true);
+    expect(r.message).toContain('冷启动建索引');
+  });
+
+  it('空目录（无可索引源码）→ 抛可行动错误（冷启动也建不出符号）', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sem-empty-'));
     roots.push(root);
     // 建空缓存（无符号）
     const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
     db.close();
     await expect(semanticSearch({ project_dir: root, query: 'anything' })).rejects.toThrow(
-      /符号缓存为空.*import_project/,
+      /索引为空.*import_project/,
     );
   });
 

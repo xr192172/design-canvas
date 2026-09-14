@@ -21,7 +21,7 @@ import path from 'node:path';
 import { configFileReadPath } from './llm_focus.js';
 import { getProjectCacheDb, type Database } from '../db/db.js';
 import { searchSymbols, type SymbolHit } from '../db/symbols.js';
-import { ensureFreshIndex, hasChanges } from './index_freshness.js';
+import { ensureFreshIndex } from './index_freshness.js';
 
 // ─────────────────────────────────────────────────────────────
 // 配置
@@ -304,22 +304,33 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
     );
   }
 
-  // 打开缓存：打不开 = 索引未建立，抛可行动错误（callTool 层会标 isError）
+  // 打开缓存：打不开（权限/路径）才抛 —— 正常情况 getProjectCacheDb 会就地建库，
+  // 随后由 ensureFreshIndex 冷启动填充（零前置：调用方不必先 import_project）
   let db: Database;
   try {
     db = getProjectCacheDb(path.resolve(input.project_dir));
   } catch (e) {
     throw new Error(
-      `无法打开符号缓存：${(e as Error).message}。请先对该项目运行 import_project 建缓存。`,
+      `无法打开/创建符号缓存：${(e as Error).message}。请确认 project_dir 存在且可写。`,
     );
   }
 
-  // 索引自动保鲜：外部改动（git pull / 手动编辑 / 其他 agent）懒校验增量重同步——
-  // 查询永远基于最新代码，不报已删符号、不漏新符号。失败不阻断查询。
+  // 索引自动保鲜 + ★ 冷启：外部改动（git pull / 手改 / 其他 agent）懒校验增量重同步；
+  // **空库则就地静默建索引**（零前置：调用方不再需要先跑 import_project）。失败不阻断查询。
   const fresh = await ensureFreshIndex(db, path.resolve(input.project_dir));
-  const freshNote = (hasChanges(fresh) || fresh.skipped_adds > 0)
-    ? `（索引自刷新 ${fresh.ms}ms：重同步 ${fresh.resynced} / 新增 ${fresh.added} / 删除 ${fresh.removed}${fresh.failed ? ` / 解析失败 ${fresh.failed}` : ''}${fresh.skipped_adds > 0 ? `；另有 ${fresh.skipped_adds} 个新文件超出保鲜补全上限未纳入，建议重新 import_project` : ''}）`
-    : '';
+  const parts: string[] = [];
+  if (fresh.bootstrapped > 0) {
+    parts.push(`冷启动建索引 ${fresh.bootstrapped} 文件`);
+  }
+  if (fresh.resynced || fresh.added || fresh.removed) {
+    parts.push(`重同步 ${fresh.resynced} / 新增 ${fresh.added} / 删除 ${fresh.removed}`);
+  }
+  if (fresh.failed) parts.push(`解析失败 ${fresh.failed}`);
+  if (fresh.truncated) parts.push('已达冷启文件上限，仅覆盖部分文件（如需全量请跑 import_project）');
+  if (fresh.skipped_adds > 0) {
+    parts.push(`另有 ${fresh.skipped_adds} 个新文件超出保鲜补全上限未纳入，建议重新 import_project`);
+  }
+  const freshNote = parts.length ? `（索引自刷新 ${fresh.ms}ms：${parts.join('；')}）` : '';
 
   const rows = db
     .prepare(
@@ -338,7 +349,8 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
 
   if (rows.length === 0) {
     throw new Error(
-      `项目 "${input.project_dir}" 的符号缓存为空（尚未建立索引）。请先运行 import_project 导入该项目后再搜索。`,
+      `项目 "${input.project_dir}" 索引为空，且冷启动也没建出符号 —— 通常是该目录下没有可解析的源码文件（或解析器缺失）。` +
+        `请确认 project_dir 指向代码根目录；需要指定收录范围时再跑 import_project。`,
     );
   }
 
