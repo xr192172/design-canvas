@@ -92,6 +92,7 @@ import { recordDogfoodUsage } from './tools/dogfood_stats.js';
 import { queryObserveLog } from './observe/log_query.js';
 import { memoryObserveHandler, memoryTargetsHandler } from './tools/memory_observe.js';
 import { translateGoTsHandler } from './translate/tool.js';
+import { extractGo } from './translate/go_extractor.js';
 import { observeTrace } from './tools/observe_trace.js';
 import { normalizeEvents, judgeEvents, judgeEventsWithLLM, renderJudgeReport } from './observe/judge_service.js';
 import { TSComparator, renderTSDiffReport, type TSDLDecl, type TSDiffReport } from './observe/contract.js';
@@ -763,7 +764,31 @@ const TOOL_DEFS: ToolDef[] = [
     },
     handler: wrapData(async (a) => translateGoTsHandler(a)),
   },
-
+  {
+    name: 'go_originals',
+    title: '读取 Go 源文件每个顶层符号的原文片段（ground-truth 即取即读）',
+    description:
+      '解析单个 Go 源码文件，返回其中每个顶层符号(func/const/var/type)的 Go 原文片段(srcSnippet)与起始行(srcLine)。' +
+      '文件级直接解析（复用共享 tree-sitter-go，无需 import_project 建全工程索引）。' +
+      '用途：语义修复/评审时拿 Go 原文当 ground truth，不再对着翻译后的 TS 壳猜；可选 symbol 过滤只取指定符号。',
+    inputSchema: {
+      file: z.string().describe('Go 源文件路径（绝对或相对 cwd）'),
+      symbol: z.string().optional().describe('可选：只返回该符号名的原文'),
+    },
+    handler: wrapData(async (a) => {
+      const file = a.file ? path.resolve(String(a.file)) : '';
+      if (!file || !existsSync(file)) return { message: 'Go 文件不存在: ' + (file || '(未提供 file)') };
+      const source = readFileSync(file, 'utf8');
+      const r = await extractGo(file, source);
+      if (r.error) return { message: 'Go 解析失败: ' + r.error };
+      let units = r.units ?? [];
+      if (a.symbol) { const want = String(a.symbol); units = units.filter((u) => u.name === want); }
+      const symbols = units.map((u) => ({ name: u.name, kind: u.kind, line: u.srcLine, snippet: u.srcSnippet }));
+      const skipped = (r.skipped ?? []).map((s) => s.name + '[' + s.kind + ']:' + s.reason);
+      const msg = '共 ' + symbols.length + ' 个符号' + (skipped.length ? '；跳过 ' + skipped.length + '：' + skipped.join('; ') : '') + (a.symbol ? '（过滤 symbol=' + a.symbol + '）' : '');
+      return { message: msg, data: { file, symbols, skipped } };
+    }),
+  },
   {
     name: 'get_dsl',
     title: 'Query feature data',

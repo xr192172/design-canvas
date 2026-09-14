@@ -21,6 +21,19 @@ const failedPks = new Set<string>();
 const failedWarned = new Set<string>();
 
 /**
+ * 自愈配置（修复"同一 tree-sitter，进程分叉"的根因）：
+ * failedPks 不再进程级永久——"import 模块不存在/瞬时环境失败"这类失败打上
+ * 失败时间戳，超过 FAIL_RETRY_MS 后允许重试，让"依赖后装即自愈"。
+ * 解析/加载类持久错误仍保持缓存（不无限重试刷日志）。仍可用 clearLoaderCache() 强制重置。
+ */
+const FAIL_RETRY_MS = 30_000;
+const failAt = new Map<string, number>(); // lang.pkg -> 首次失败时间戳
+// import 模块找不到 → 判定为"瞬时/环境类"，走自愈重试；其它（解析/结构）错误保持缓存。
+const isTransient = (e: unknown): boolean =>
+  (e as { code?: string })?.code === 'ERR_MODULE_NOT_FOUND' ||
+  /Cannot find module|Failed to resolve|ERR_MODULE_NOT_FOUND/.test((e as Error)?.message ?? '');
+
+/**
  * 动态加载 tree-sitter 语言包。
  * 返回 Parser.Language，失败返回 null。
  *
@@ -30,7 +43,12 @@ const failedWarned = new Set<string>();
  *   - 同一包只记录一次 warning
  */
 export async function loadLanguage(lang: LanguageEntry): Promise<Language | null> {
-  if (failedPks.has(lang.pkg)) return null;
+  if (failedPks.has(lang.pkg)) {
+    const at = failAt.get(lang.pkg);
+    if (!at || Date.now() - at < FAIL_RETRY_MS) return null;
+    failedPks.delete(lang.pkg);
+    console.warn(`[ts_kernel] retry load tree-sitter-${lang.pkg} after transient failure (${Date.now() - at}ms)`);
+  }
 
   // 尝试动态 import
   try {
@@ -61,6 +79,10 @@ export async function loadLanguage(lang: LanguageEntry): Promise<Language | null
     if (!failedWarned.has(lang.pkg)) {
       console.warn(`[ts_kernel] load tree-sitter-${lang.pkg} failed: ${(e as Error).message}`);
       failedWarned.add(lang.pkg);
+    }
+    if (isTransient(e)) {
+      if (!failAt.has(lang.pkg)) failAt.set(lang.pkg, Date.now());
+      return null;
     }
     failedPks.add(lang.pkg);
     return null;
@@ -97,5 +119,7 @@ export async function getParser(ext: string, lang: LanguageEntry): Promise<Parse
 export function clearLoaderCache(): void {
   parserCache.clear();
   failedPks.clear();
+  failAt.clear();
   failedWarned.clear();
 }
+
