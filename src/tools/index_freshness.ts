@@ -28,8 +28,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getProjectCacheDb, beginBatch, endBatch, type Database } from '../db/db.js';
-import { syncFile, removeFile, resolveCrossFileCalls, syncProject } from '../db/symbols.js';
+import {
+  syncFile,
+  removeFile,
+  resolveCrossFileCalls,
+  syncProject,
+  reopenRefsTo,
+  changedSymbolNames,
+} from '../db/symbols.js';
 import { walkFiles } from './import_project.js';
+import { walkSourceFiles, buildTextImportIndex, importLookupKeys } from './refs_text.js';
 
 /** 索引可用性状态（诚实口径：不假装完整） */
 export type IndexState =
@@ -53,6 +61,9 @@ export interface FreshnessReport {
   failed: number;
   /** 因超出补全上限而跳过的新增文件数（索引基线失效，建议重新 import_project） */
   skipped_adds: number;
+  /** ★ 本轮**重新打开**（resolved→pending）待重解析的引用条数 —— 手工改名/删符号后，
+   *  引用方的边会被 FK 级联删掉且不会自己重建（漏报）；这里把它们放回待解析队列。 */
+  refsReopened: number;
   /** ★ 冷启 bootstrap 本次新索引的文件数（0 = 本轮未冷启） */
   bootstrapped: number;
   /** ★ 冷启是否被上限截断（true 时 state='partial'） */
@@ -71,6 +82,7 @@ function emptyReport(): FreshnessReport {
     removed: 0,
     failed: 0,
     skipped_adds: 0,
+    refsReopened: 0,
     bootstrapped: 0,
     truncated: false,
     state: 'empty',
@@ -92,6 +104,9 @@ const MAX_ADDS_PER_REFRESH = 100;
  * 为什么设上限：零前置不能变成"大仓第一次查询卡死"，与 import_project 的 max_files 守卫同一条纪律。
  */
 export const MAX_BOOTSTRAP_FILES = 2000;
+
+/** 文本反查（入边）每个种子最多并入多少个引用方（防核心模块一步摊开整个仓库） */
+const MAX_TEXT_IMPORTERS_PER_SEED = 20;
 
 export interface FreshnessOptions {
   /** 空库时是否就地 bootstrap（默认 true = 零前置）。显式 false 可恢复"只保鲜不冷启"的老语义。 */
@@ -135,6 +150,20 @@ export interface TileOptions {
   maxFiles?: number;
   /** 扩展方向：both=出边+入边（默认，互相引用都算一块拼图） */
   directions?: 'both' | 'out' | 'in';
+  /**
+   * ★ 入边方向是否启用**文本级反查**（默认 true）。
+   * 为什么必需：入边的信息不在本文件里 —— 未索引的引用方还没有边，只靠图就看不见它（S1 的如实边界）。
+   * 而文本反查极便宜（实测 0.02–0.16ms/文件）：一遍扫全仓建"import 反查表"后，
+   * 任意目标的入边候选都是 O(1) 查表（见 tools/refs_text.ts）。
+   */
+  textScan?: boolean;
+  /**
+   * 每个种子最多并入多少个**文本引用方**（默认 20）。
+   * 调小 = 更"只读这一个文件"；调大 = 更"连带看谁在用我"。
+   * 注意代价不对称：**引用方可能是大文件**（如 3000 行的 server_registry.ts），
+   * 一个 hub 模块的 20 个引用方可能比 20 个普通文件贵得多。
+   */
+  maxTextImporters?: number;
 }
 
 export interface TileReport {
@@ -148,6 +177,10 @@ export interface TileReport {
   stitched: number;
   /** BFS 访问过的文件总数（含缝合的） */
   visited: number;
+  /** 文本层扫过的文件数（0 = 未启用 textScan） */
+  textScanned: number;
+  /** 文本反查贡献的入边候选数（这些文件是"未索引的引用方"，靠图看不见） */
+  textCandidates: number;
   /** 是否因预算/深度停下（= 覆盖不完整，调用方**必须**标注） */
   partial: boolean;
   /** 停止原因（人读） */
@@ -173,6 +206,7 @@ export async function ensureIndexAround(
   const depth = opts.depth ?? 2;
   const maxFiles = opts.maxFiles ?? 200;
   const dirs = opts.directions ?? 'both';
+  const maxTextImporters = opts.maxTextImporters ?? MAX_TEXT_IMPORTERS_PER_SEED;
 
   const relSeeds = seeds
     .filter(Boolean)
@@ -188,6 +222,8 @@ export async function ensureIndexAround(
     failed: 0,
     stitched: 0,
     visited: 0,
+    textScanned: 0,
+    textCandidates: 0,
     partial: false,
     stopReason: 'queue-empty',
     ms: 0,
@@ -225,8 +261,32 @@ export async function ensureIndexAround(
   };
 
   const seen = new Set<string>(relSeeds);
+  /**
+   * "终点节点"：文本反查进来的**引用方**。
+   * 它们要进块（这样"谁引用我"的边可见），但**不再作为摊开的起点** ——
+   * 入边方向是"传递不收敛"的（谁都可能间接引用核心模块），继续摊开会一步铺满整仓
+   * （实测：不设终点时第一块 112~169 文件、22~35s，比全量冷启还慢）。
+   */
+  const noExpand = new Set<string>();
   let frontier = [...relSeeds];
   let hop = 0;
+
+  // ── 粗层（文本反查）懒加载：一遍扫全仓建 import 反查表，之后入边候选 O(1) 查表 ──
+  const textEnabled = opts.textScan !== false && dirs !== 'out';
+  let textImporters: Map<string, string[]> | null = null;
+  const importersByText = (rel: string): string[] => {
+    if (!textEnabled) return [];
+    if (!textImporters) {
+      const files = walkSourceFiles(root);
+      const built = buildTextImportIndex(root, files);
+      textImporters = built.importers;
+      report.textScanned = built.scanned;
+    }
+    const out = new Set<string>();
+    for (const k of importLookupKeys(rel)) for (const f of textImporters.get(k) ?? []) out.add(f);
+    return [...out];
+  };
+
   // 轮 0 = 种子本身（**永远处理**，depth=0 即"只建种子们"）；轮 k = 第 k 跳邻居
   for (; hop <= depth; hop++) {
     const next: string[] = [];
@@ -250,7 +310,26 @@ export async function ensureIndexAround(
         }
       }
       report.visited++;
-      if (isIndexed(rel)) for (const nb of neighbors(rel)) if (!seen.has(nb)) (seen.add(nb), next.push(nb));
+      if (isIndexed(rel) && !noExpand.has(rel)) {
+        for (const nb of neighbors(rel)) if (!seen.has(nb)) (seen.add(nb), next.push(nb));
+        // ★ 入边方向补粗层：文本上 import 了本文件、但**还没被索引**的引用方（图里看不见它们）。
+        //   ⚠️ 只在**种子那一跳**（hop===0）做，且并入者标记为"终点、不再摊开" ——
+        //   入边是传递不收敛的（核心模块几乎被所有文件 import），逐跳递归会一步铺满整仓
+        //   （实测：不加限制，第一块 112~169 文件 / 22~35s，比全量冷启还慢）。
+        //   语义上也对："谁引用**我**"只需对种子成立，不需要对每个邻居都成立。
+        if (hop === 0) {
+          let added = 0;
+          for (const nb of importersByText(rel)) {
+            if (added >= maxTextImporters) break;
+            if (seen.has(nb)) continue;
+            report.textCandidates++;
+            added++;
+            seen.add(nb);
+            noExpand.add(nb);
+            next.push(nb);
+          }
+        }
+      }
     }
     if (report.stopReason === 'budget') break;
     if (!next.length) break;
@@ -418,6 +497,31 @@ export async function ensureFreshIndex(
         resolveCrossFileCalls(db, root);
       } catch {
         /* 解析失败不阻断：pending 留待下轮 */
+      }
+    }
+    // ★ 引用方重解析（实测修正后的真缺口）：
+    //   有人在编辑器里（不经工具）把 B 的符号改名/删掉时 ——
+    //   ① B 的旧符号节点被删 ⇒ `edges` 的 FK `ON DELETE CASCADE` **自动删掉** A 指向它的边
+    //      ⇒ **不会出现"悬空边"**（早先以为会，实测证伪）；
+    //   ② 但 A 没变、不会被重解析 ⇒ 它的边被删后**不会重建** ⇒ find_references/impact 在 A 方向**漏报**。
+    //   正解：把"指向本轮变更/删除符号名"的已解析引用**重新打开**，交给随后的
+    //   resolveCrossFileCalls 重解析（连得上就连到新符号，连不上就明确标 failed）。
+    if (dirty) {
+      try {
+        const names = new Set<string>();
+        for (const p of pending) {
+          if (p.kind !== 'resync') continue;
+          for (const nm of changedSymbolNames(db, path.relative(root, p.abs).split(path.sep).join('/'))) names.add(nm);
+        }
+        if (names.size) report.refsReopened = reopenRefsTo(db, [...names]);
+      } catch {
+        /* 重开失败不阻断 */
+      }
+      // 收尾再解析一次（把刚重开的 pending 处理掉）
+      try {
+        resolveCrossFileCalls(db, root);
+      } catch {
+        /* 解析失败不阻断 */
       }
     }
     report.state = report.skipped_adds > 0 ? 'partial' : 'ready';

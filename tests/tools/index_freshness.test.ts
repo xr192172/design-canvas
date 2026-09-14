@@ -215,3 +215,43 @@ describe('索引自动保鲜（ensureFreshIndex）', () => {
     await expect(semanticSearch({ project_dir: root, query: 'a' })).rejects.toThrow(/索引为空/);
   });
 });
+
+describe('★ 引用方重解析（手工改名/删符号后，引用方的边不会自己重建）', () => {
+  it('编辑器中把被引用符号改名 → 刷新时重开引用并重解析（不漏报、也不留悬空）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-dangle-'));
+    roots.push(root);
+    put(root, 'src/b.ts', 'export function foo(): number {\n  return 1;\n}\n');
+    put(root, 'src/a.ts', "import { foo } from './b';\nexport function useA(): number {\n  return foo();\n}\n");
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    try {
+      await importProject({ project_dir: root, feature: 'fresh_dangle', cache_db: db });
+      const dangling = (): number =>
+        (db
+          .prepare("SELECT COUNT(*) c FROM edges e WHERE e.kind='call' AND e.target NOT IN (SELECT id FROM nodes)")
+          .get() as { c: number }).c;
+      const callEdges = (): number =>
+        (db.prepare("SELECT COUNT(*) c FROM edges WHERE kind='call'").get() as { c: number }).c;
+      expect(dangling()).toBe(0);
+      expect(callEdges()).toBeGreaterThanOrEqual(1); // A→B#foo 已连上
+
+      // ★ 模拟"在编辑器里"把 b.ts 的 foo 改名成 bar（不走 rename_symbols 工具）
+      put(root, 'src/b.ts', 'export function bar(): number {\n  return 1;\n}\n');
+      const rep = await ensureFreshIndex(db, root);
+      expect(rep.resynced).toBeGreaterThanOrEqual(1); // b 被重同步
+      // ① 不会留悬空边（FK 级联已删；实测证伪了"会悬空"的早先判断）
+      expect(dangling()).toBe(0);
+      // ② 引用被重新打开并重解析：A 的 foo 现在无处可连 ⇒ 明确记为 failed（而不是静默消失）
+      expect(rep.refsReopened).toBeGreaterThanOrEqual(1);
+      const row = db
+        .prepare("SELECT status FROM unresolved_refs WHERE from_node_id = 'src/a.ts#useA' AND reference_name = 'foo'")
+        .get() as { status: string } | undefined;
+      expect(row?.status).toBe('failed');
+      // ③ 换回原名后应能重新连上（重开是幂等可重跑的）
+      put(root, 'src/b.ts', 'export function foo(): number {\n  return 1;\n}\n');
+      await ensureFreshIndex(db, root);
+      expect(callEdges()).toBeGreaterThanOrEqual(1);
+    } finally {
+      db.close();
+    }
+  });
+});

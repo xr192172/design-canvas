@@ -430,6 +430,80 @@ export async function syncFile(db: Database, projectRoot: string, absPath: strin
 }
 
 // ─────────────────────────────────────────────────────────────
+// 引用方重解析（2026-09-14 实测修正）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 把"指向某些符号名"的已解析引用**重新打开**（`resolved` → `pending`），交给
+ * `resolveCrossFileCalls` 重新解析一遍。
+ *
+ * 为什么需要（修正后的准确描述）：
+ *   有人**在编辑器里**（不经 `rename_symbols`）把 B 的符号改名/删掉时：
+ *   - B 的旧符号节点被删 ⇒ `edges` 的 `FOREIGN KEY … ON DELETE CASCADE` **自动删掉**
+ *     引用方 A 指向它的边 ⇒ **不会出现"悬空边"**（早先的判断有误，实测证伪）；
+ *   - 但 A 没变、不会被重解析 ⇒ **它的边被删掉后不会重建** ⇒ `find_references`/`impact`
+ *     在 A 这个方向上**漏报**（静默少一条引用）。
+ *   ⇒ 正解不是"清悬空边"，而是**把 A 的这条引用重新打开、让它重解析**：
+ *     要么连到新符号（同名仍在），要么明确标 `failed`（A 的文本确实失效了）。
+ *
+ * 只动 `unresolved_refs` 的 status（纯 SQL，不解析任何文件）。
+ */
+export function reopenRefsTo(db: Database, names: readonly string[]): number {
+  const wanted = [...new Set(names.filter(Boolean))];
+  if (!wanted.length) return 0;
+  // 该名字现在**在索引里还存在**吗？（决定要不要把 failed 的也一并重试 ——
+  // 符号改名后又改回来 / 搬到别的文件时，之前标 failed 的引用应该有机会重连；
+  // 名字彻底消失了就别每轮空转，尊重"failed 不再重试"的原设计。）
+  const exists = db.prepare('SELECT 1 x FROM nodes WHERE name = ? LIMIT 1');
+  const upd = db.prepare(
+    `UPDATE unresolved_refs SET status = 'pending'
+     WHERE reference_name = $nm
+       AND (status = 'resolved' OR (status = 'failed' AND $retryFailed))`,
+  );
+  let n = 0;
+  db.exec('BEGIN');
+  try {
+    for (const nm of wanted) {
+      const back = !!exists.get(nm);
+      // ⚠️ node:sqlite 的命名参数键不能是纯数字（曾用 `{1: nm}` → Unknown named parameter '1'，
+      //    而外层 try/catch 把它吞成了 refsReopened=0 ⇒ 静默失效。教训：被吞的异常要能看见。）
+      n += Number(upd.run({ nm, retryFailed: back ? 1 : 0 }).changes ?? 0);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return n;
+}
+
+/**
+ * 读取某文件最近一次同步记录里"存在性有变动"的符号名：
+ * `added`（新出现/搬进来）+ `removed`（消失）+ `changed`（改了）。
+ * 三个都收：`added` 用来让"符号改名又改回来 / 搬到别的文件"的**失败引用有机会重连**
+ * （`reopenRefsTo` 里用"名字现在是否还在索引里"决定要不要重试 failed）—— 见该函数注释。
+ */
+export function changedSymbolNames(db: Database, rel: string): string[] {
+  try {
+    const row = db.prepare('SELECT added, removed, changed FROM symbol_diffs WHERE file_path = $p').get({ p: rel }) as
+      | { added: string; removed: string; changed: string }
+      | undefined;
+    if (!row) return [];
+    const out: string[] = [];
+    for (const col of [row.added, row.removed, row.changed]) {
+      try {
+        for (const nm of JSON.parse(col) as string[]) out.push(nm.split('.').pop() ?? nm); // qualified_name → 短名
+      } catch {
+        /* 单列坏数据不影响整体 */
+      }
+    }
+    return [...new Set(out)];
+  } catch {
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // 项目级批量同步 / 移除
 // ─────────────────────────────────────────────────────────────
 

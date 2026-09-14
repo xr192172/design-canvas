@@ -72,16 +72,33 @@ describe('ensureIndexAround 拼图式局部索引', () => {
     }
   });
 
-  it('★ 已知边界：**未索引的引用方在入边方向不可见**（S1 不做磁盘反查）', async () => {
+  it('★ 文本反查补入边：**未索引的引用方也能被发现**（S1 的边界已被粗层补上）', async () => {
     const root = makeChain();
     const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
     try {
-      // 只从 b 进：a/e 还没被索引 ⇒ 它们的 import 边不存在 ⇒ 发现不了
-      await ensureIndexAround(db, root, ['src/b.ts'], { depth: 3, maxFiles: 100 });
+      // 只从 b 进：a/e 还没被索引（图里没有它们的边）——靠文本反查发现
+      const r = await ensureIndexAround(db, root, ['src/b.ts'], { depth: 3, maxFiles: 100 });
+      const idx = new Set((db.prepare('SELECT path FROM files').all() as Array<{ path: string }>).map((x) => x.path));
+      expect(idx.has('src/c.ts')).toBe(true); // 出边：自发现
+      expect(idx.has('src/a.ts')).toBe(true); // 入边：文本反查（a import ./b）
+      expect(idx.has('src/e.ts')).toBe(true); // 入边：文本反查
+      expect(r.textCandidates).toBeGreaterThanOrEqual(2);
+      expect(r.textScanned).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('关掉 textScan → 回到"只靠图"的 S1 行为（未索引引用方看不见），如实标注', async () => {
+    const root = makeChain();
+    const db = openDb(path.join(root, '.design-canvas', 'cache.db'));
+    try {
+      const r = await ensureIndexAround(db, root, ['src/b.ts'], { depth: 3, maxFiles: 100, textScan: false });
       const idx = new Set((db.prepare('SELECT path FROM files').all() as Array<{ path: string }>).map((x) => x.path));
       expect(idx.has('src/c.ts')).toBe(true);
-      expect(idx.has('src/a.ts')).toBe(false); // ← 如实记载的边界（要"谁引用我"完整须全量或磁盘反查，留 S2/S3）
-      expect(idx.has('src/e.ts')).toBe(false);
+      expect(idx.has('src/a.ts')).toBe(false); // 图里没有 ⇒ 看不见（这就是必须补粗层的原因）
+      expect(r.textScanned).toBe(0);
+      expect(r.textCandidates).toBe(0);
     } finally {
       db.close();
     }
