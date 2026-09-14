@@ -25,6 +25,7 @@ import { camelToSnake, scanLiteralOccurrences, type RawLiteralMatch } from './re
 import { collectFieldRefs, collectTypeConstructCandidates, type FieldRefFile, type TypeConstructCandidate } from './field_refs.js';
 import { parseFileFull } from './ts_kernel/index.js';
 import { getProjectCacheDb } from '../db/db.js';
+import { ensureProjectIndex } from './index_freshness.js';
 import { buildImportGraph } from './import_graph.js';
 
 /** 候选引用文件：优先走已建 cache.db 的 import 图（反向闭包 = 谁（直接/间接）import 定义模块）。
@@ -202,8 +203,13 @@ export async function findReferences(input: {
 
   // 闭包内引用点收集（import + usage + export_list）
   // 闭包内引用点收集（import + usage + export_list）。候选集只走持久索引的 import 反闭包；
-  // 索引缺失时拒绝并请先建索引，绝不再回退"全闭包逐文件即时解析"（仓库大时打满 CPU/内存）。
-  const candidates = await indexCandidateFiles(resolvedRoot, fileAbs);
+  // 索引缺失时**先就地冷启建索引再重试一次**（零前置），仍为空才拒绝——
+  // 绝不再回退"全闭包逐文件即时解析"（仓库大时打满 CPU/内存）。
+  let candidates = await indexCandidateFiles(resolvedRoot, fileAbs);
+  if (candidates === null) {
+    const { state } = await ensureProjectIndex(resolvedRoot);
+    if (state !== 'empty') candidates = await indexCandidateFiles(resolvedRoot, fileAbs);
+  }
   if (candidates === null) {
     return {
       ok: false,
@@ -211,8 +217,9 @@ export async function findReferences(input: {
       mode,
       importerCount: 0,
       blocked: [
-        `未建索引：${resolvedRoot} 尚无符号/import 索引。为避免全仓 import 闭包逐文件即时解析导致的卡顿与内存暴涨，` +
-        `find_references / safe_rename 不再回退到时即扫描。请先 import_project（或 design_canvas_prewarm）建索引后再调用。`,
+        `索引建不出来：${resolvedRoot} 下没有可解析的源码（或解析器缺失），因此拿不到 import 反闭包。` +
+          `为避免全仓逐文件即时解析导致的卡顿与内存暴涨，find_references / safe_rename 不回退到时即扫描——` +
+          `请确认 project_dir 指向代码根目录。`,
       ],
     };
   }

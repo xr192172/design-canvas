@@ -203,8 +203,8 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
   } catch (e) {
     return emptyResult(
       feature ?? path.basename(root), root, changedRels, direction, max_depth,
-      [`无法打开缓存 ${path.join(root, '.design-canvas', 'cache.db')}：${(e as Error).message}。请先对该项目运行 import_project 建缓存。`],
-      `变更影响分析失败：无法打开符号缓存。请先对该项目运行 import_project。`,
+      [`无法打开/创建缓存 ${path.join(root, '.design-canvas', 'cache.db')}：${(e as Error).message}。请确认该目录存在且可写。`],
+      `变更影响分析失败：无法打开符号缓存（目录不存在或不可写）。`,
     );
   }
 
@@ -213,7 +213,10 @@ export function diffImpact(input: DiffImpactInput): DiffImpactResult {
     (db.prepare('SELECT COUNT(*) c FROM edges WHERE kind = ?').get(kind) as { c: number }).c;
   const edge_counts = { call: countOf('call'), type_ref: countOf('type_ref'), import: countOf('import') };
   if (edge_counts.call === 0 && edge_counts.type_ref === 0 && edge_counts.import === 0) {
-    warnings.push('缓存中没有任何边（call/type_ref/import）。请先对该项目运行 import_project 建立符号缓存。');
+    warnings.push(
+      '缓存中没有任何边（call/type_ref/import）：该目录下可能没有可解析的源码（或解析器缺失）。' +
+        '经 explore_code(action=diff_impact) 调用时会自动冷启建索引；其它入口请先确保索引已建立。',
+    );
   }
 
   // 缓存路径直探：历史库可能与当前 project_dir 基准不一致（如以 src/ 为根建的库），

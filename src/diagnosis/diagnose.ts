@@ -8,6 +8,7 @@
 
 import path from 'node:path';
 import { getProjectCacheDb } from '../db/db.js';
+import { ensureFreshIndex } from '../tools/index_freshness.js';
 import { parseSymptom } from './symptom_parser.js';
 import { locateCandidates } from './candidate_locator.js';
 import { traceChain } from './chain_tracer.js';
@@ -30,6 +31,17 @@ export async function runDiagnosis(input: DiagnoseInput): Promise<DiagnoseOutput
     db = getProjectCacheDb(path.resolve(project_dir));
   } catch {
     db = undefined;
+  }
+
+  // ★ 零前置（2026-09-14）：缓存为空就地冷启建索引。
+  // 此前诊断链的实际门槛就是"你得先跑 import_project"，现在这一步自己完成；
+  // 失败不阻断——后续各步按"无符号证据"诚实降级（limitations 里说明）。
+  if (db) {
+    try {
+      await ensureFreshIndex(db, path.resolve(project_dir));
+    } catch {
+      /* 冷启失败不阻断：各步已有"无符号证据"降级路径 */
+    }
   }
 
   // 第 2 步：候选定位

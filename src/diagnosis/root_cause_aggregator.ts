@@ -250,7 +250,7 @@ export function aggregateRule(input: AggregateInput): AggregateResult {
     });
   }
 
-  if (candidates.length === 0) limitations.push('未建立符号缓存：症状解析得到的符号在缓存中无命中。请先运行 import_project。');
+  if (candidates.length === 0) limitations.push('症状解析得到的符号在缓存中无命中（快速失败）：可能是该符号不在已索引文件里，或该项目没有可解析源码。');
   if (evidence_chain.every((s) => s.type === 'rule' || s.type === 'symbol_hit'))
     limitations.push('证据链未能沿 call/type_ref/import 边展开，仅给出文件级线索（该符号可能孤立/仅锚点到文件，或缓存该部分不完整，而非缓存整体缺失）。');
   if (impact.affected_files.length === 1) limitations.push('影响面仅根因文件本身，未发现上层调用方——缓存可能不完整或该文件确实孤立。');

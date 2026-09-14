@@ -204,7 +204,7 @@ function withCacheDb<T>(
 ): { ok: boolean; note?: string; data: T } {
   const dbFile = resolveFunctionCacheDb(feature, sourceRoot);
   if (!dbFile) {
-    return { ok: false, note: '未找到项目缓存（cache.db / import_cache_*.db），请先运行 import_project 建立符号缓存', data: undefined as unknown as T };
+    return { ok: false, note: '未找到函数索引（cache.db / import_cache_*.db）——本视图按 feature 取索引：对本项目跑一次带 feature 的 import_project（或任一读入口）即可建立。', data: undefined as unknown as T };
   }
   let db;
   try {

@@ -15,6 +15,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { makeCapabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
+import { ensureProjectIndex } from './tools/index_freshness.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -1154,7 +1155,7 @@ const TOOL_DEFS: ToolDef[] = [
       'include_callers=true 时连调用方一起端走（拎服务层带生态）。前置：项目需先跑 import_project 建符号缓存。' +
       '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md。',
     inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      project_dir: z.string().describe('目标项目根目录（其下 .design-canvas/cache.db 是符号缓存，为空则自动冷启建索引）'),
       files: z.array(z.string()).describe('种子文件（相对项目根或绝对路径，可多个）'),
       feature: z.string().optional().describe('可选 feature 名：提供时为闭包文件附加 DSL 文件节点 id'),
       include_callers: z
@@ -1164,7 +1165,10 @@ const TOOL_DEFS: ToolDef[] = [
       max_depth: z.number().optional().describe('BFS 深度上限（默认 30，传递闭包天然有界）'),
     },
     handler: wrapData(async (a) => {
-      const r = harvestClosure(a as unknown as HarvestClosureInput);
+      const input = a as unknown as HarvestClosureInput;
+      // ★ 零前置：闭包沿 import 边算，空缓存先就地冷启
+      await ensureProjectIndex(path.resolve(input.project_dir));
+      const r = harvestClosure(input);
       return { message: r.message, data: r };
     }),
   },
@@ -1181,7 +1185,7 @@ const TOOL_DEFS: ToolDef[] = [
       'LLM 不产生事实：结构化字段只接受 AST/observe 源。' +
       '规划见 docs/plans/2026-08-19-cross-project-brick-harvest.md Phase 2.5/2.7。',
     inputSchema: {
-      project_dir: z.string().describe('目标项目根目录（须先 import_project 建缓存）'),
+      project_dir: z.string().describe('目标项目根目录（缓存为空时会自动冷启建索引，无需先 import_project）'),
       feature: z.string().optional().describe('提供时把 contract 写回该 feature 的 DSL（SemanticFile.contract）'),
       files: z
         .array(z.string())
@@ -1190,7 +1194,10 @@ const TOOL_DEFS: ToolDef[] = [
       write_dsl: z.boolean().optional().describe('false=只读预演不写回，默认 true'),
     },
     handler: wrapData(async (a) => {
-      const r = extractContracts(a as unknown as ExtractContractsInput);
+      const input = a as unknown as ExtractContractsInput;
+      // ★ 零前置：空缓存就地冷启（契约提取建立在符号/AST 索引之上）
+      await ensureProjectIndex(path.resolve(input.project_dir));
+      const r = extractContracts(input);
       return { message: r.message, data: r };
     }),
   },
@@ -2603,10 +2610,10 @@ const TOOL_DEFS: ToolDef[] = [
       '六步流水线：症状解析（正则提取 错误类型/文件:行/符号）→ 候选定位（查 .design-canvas/cache.db 符号缓存，' +
       'exact/file/FTS/anchor 四路）→ 调用链追溯（沿 call/type_ref/import 三类边双向 BFS）→ 影响面分析（复用 diff_impact）→ ' +
       '根因聚合（规则引擎先跑，LLM 可选把证据翻成人话根因，未配置自动降级）→ 验证建议（按项目类型给命令，只建议不执行）。' +
-      '前置：目标项目需先运行 import_project 建立符号缓存，否则只能给文件级线索。' +
+      '前置：无需任何准备——缓存为空时会自动冷启建索引；仅在目标目录没有可解析源码时退化为文件级线索。' +
       'anchor 可选：用户已知的线索（文件路径或函数名）帮助聚焦。',
     inputSchema: {
-      project_dir: z.string().describe('被诊断项目根目录（其下 .design-canvas/cache.db 是符号缓存，需先 import_project）'),
+      project_dir: z.string().describe('被诊断项目根目录（其下 .design-canvas/cache.db 是符号缓存，为空则自动冷启建索引）'),
       symptom: z.string().describe('症状：报错信息 / stack trace / 测试失败输出 / 行为异常描述'),
       symptom_type: z.enum(['error', 'test_failure', 'behavior']).optional().describe('症状类型，缺省 auto 自动识别'),
       anchor: z.string().optional().describe('可选线索：文件路径或函数名，帮助聚焦定位'),

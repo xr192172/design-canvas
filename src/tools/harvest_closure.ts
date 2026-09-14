@@ -159,8 +159,8 @@ export function harvestClosure(input: HarvestClosureInput): HarvestClosureResult
     db = getProjectCacheDb(root);
   } catch (e) {
     throw new Error(
-      `无法打开缓存 ${path.join(root, '.design-canvas', 'cache.db')}：${(e as Error).message}。` +
-        '请先对该项目运行 import_project 建立符号缓存。',
+      `无法打开/创建缓存 ${path.join(root, '.design-canvas', 'cache.db')}：${(e as Error).message}。` +
+        '（工具入口已在调用前自动冷启建索引，此处多为目录不存在或不可写。）',
     );
   }
 

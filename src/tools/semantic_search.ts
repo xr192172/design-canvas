@@ -300,7 +300,7 @@ export async function semanticSearch(input: SemanticSearchInput): Promise<Semant
   // project_dir 必填：缺失时抛可行动错误（而非静默空结果，LLM 会误判为"索引不存在"）
   if (!input.project_dir || !String(input.project_dir).trim()) {
     throw new Error(
-      '缺参数 "project_dir"：语义搜索需要指定要搜索的项目根目录（该项目需先运行 import_project 建立符号索引）。',
+      '缺参数 "project_dir"：语义搜索需要指定要搜索的项目根目录（空库会自动冷启建索引，无需先 import_project）。',
     );
   }
 

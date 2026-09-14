@@ -73,7 +73,9 @@ export function traceChain(db: Database, input: ChainTraceInput): ChainTraceResu
   }
 
   if (edgeRows.length === 0) {
-    warnings.push('缓存中没有 call/type_ref 边——调用链无法追溯。请先对该项目运行 import_project 建立符号缓存。');
+    warnings.push(
+      '缓存中没有 call/type_ref 边 —— 调用链无法追溯：该目录下可能没有可解析源码，或索引不含跨符号边（诊断入口会自动冷启建索引）。',
+    );
   }
 
   const labelOf = (id: string): string => {

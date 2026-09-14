@@ -123,7 +123,7 @@ export function locateCandidates(db: Database, input: LocateInput): LocateResult
   }
   if (!cacheAlive) {
     warnings.push(
-      `目标项目尚未建立符号缓存（${root}/.design-canvas/cache.db）。请先对该项目运行 import_project 建立缓存，诊断定位才能精确到符号。`,
+      `符号缓存为空（${root}/.design-canvas/cache.db）：该目录下可能没有可解析源码，或冷启动建索引失败。诊断本轮只能给文件级线索。`,
     );
     return { candidates: [], warnings };
   }

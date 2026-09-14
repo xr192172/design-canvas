@@ -16,6 +16,7 @@
  */
 
 import { semanticSearch } from './semantic_search.js';
+import { ensureProjectIndex } from './index_freshness.js';
 import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
 import type { LayerDef } from './layer_detect.js';
@@ -117,6 +118,10 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
       return { message: r.message, data: r.data };
     }
     case 'diff_impact': {
+      // ★ 零前置：影响面分析依赖符号边（call/type_ref/import）。空库先就地冷启建索引，
+      // 而不是让调用方先去跑 import_project（旧行为：返回"缓存中没有任何边，请先 import_project"）。
+      const impactRoot = path.resolve(requireStr(args, 'project_dir'));
+      await ensureProjectIndex(impactRoot);
       const r = await diffImpact({
         project_dir: requireStr(args, 'project_dir'),
         feature: requireStr(args, 'feature'),

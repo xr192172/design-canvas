@@ -27,7 +27,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Database } from '../db/db.js';
+import { getProjectCacheDb, type Database } from '../db/db.js';
 import { syncFile, removeFile, resolveCrossFileCalls, syncProject } from '../db/symbols.js';
 import { walkFiles } from './import_project.js';
 
@@ -103,6 +103,36 @@ export interface FreshnessOptions {
 /** 是否发生了任何索引变更（供调用方决定是否在结果中提示） */
 export function hasChanges(r: FreshnessReport | null): boolean {
   return !!r && (r.resynced + r.added + r.removed + r.bootstrapped) > 0;
+}
+
+export interface ProjectIndex {
+  /** 打开（必要时新建）的 <projectRoot>/.design-canvas/cache.db 连接（连接池管理，不要 close） */
+  db: Database;
+  /** 本轮保鲜/冷启的报表 */
+  report: FreshnessReport;
+  /** 索引状态：ready=可用 / partial=被上限截断 / empty=建不出（无可索引源码或失败） */
+  state: IndexState;
+}
+
+/**
+ * ★ 零前置统一入口：**拿到"已就绪"的项目索引库**。
+ *
+ * 各工具在"需要索引"的地方调它，而**不是**提示用户先跑 import_project：
+ *   打开（必要时新建）→ 空库就地冷启（见 ensureFreshIndex）→ 返回 { db, report, state }。
+ * 沿用保鲜的"尽力而为"纪律：内部异常不抛（state='empty'），由调用方按 state 决定降级提示。
+ *
+ * 用法（异步边界，如 MCP handler / explore_code 分支）：
+ *   const { db, state } = await ensureProjectIndex(root);
+ *   if (state === 'empty') return 诚实降级提示();
+ */
+export async function ensureProjectIndex(
+  projectRoot: string,
+  opts: FreshnessOptions = {},
+): Promise<ProjectIndex> {
+  const root = path.resolve(projectRoot);
+  const db = getProjectCacheDb(root);
+  const report = await ensureFreshIndex(db, root, opts);
+  return { db, report, state: report.state };
 }
 
 /**
