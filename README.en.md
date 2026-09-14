@@ -104,7 +104,7 @@ Your browser opens `http://localhost:3000/workbench`: the left canvas is an inte
 
 ## MCP Tool Reference
 
-A total of **54 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job.
+A total of **60 MCP tools** are registered, organized into "capability navigation + primary tools + specialized tools": `capability_map` provides layered capability-lane navigation, primary tools provide unified entry points, specialized tools each do one job. The tables below are a curated subset, not the full list — the authoritative count comes from `TOOL_DEFS` in `src/server_registry.ts`.
 
 ### Capability navigation (1)
 
@@ -131,6 +131,8 @@ A total of **54 MCP tools** are registered, organized into "capability navigatio
 ```
 
 > Note: `capability_map` is a read-only navigation with no side effects. The return is a three-level map "lane → in-lane tools → when to use each"; the agent picks a tool from it, then enters the concrete tool. High-frequency tools (`get_dsl` / `edit_dsl` / `explore_code` / `rename_symbols` / `rename_files` / `find_references`) work directly without going through it first.
+>
+> The catalogue is **derived automatically from the tool registry**: `LANE_OF` in `src/tools/capability_map.ts` only declares the tool → lane membership, and `when` defaults to the first sentence of the registered description. A newly registered tool needs just one membership line and can never silently disappear from navigation (unmapped tools are listed explicitly under "unmapped"). Consistency is enforced by `tests/tools/capability_map.test.ts` against the real `TOOL_DEFS`.
 
 ### Primary tools (8)
 

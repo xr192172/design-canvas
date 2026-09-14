@@ -14,7 +14,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { capabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
+import { makeCapabilityMapHandler, LANE_IDS, type LaneId } from './tools/capability_map.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -2827,7 +2827,7 @@ const TOOL_DEFS: ToolDef[] = [
         .optional()
         .describe('只看指定能力线；省略返回全部 6 线'),
     },
-    handler: capabilityMapHandler,
+    handler: makeCapabilityMapHandler(() => TOOL_DEFS),
   },
   {
     name: 'set_design_intent',

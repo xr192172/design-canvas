@@ -105,7 +105,7 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 
 ## MCP 工具参考
 
-共注册 **59 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
+共注册 **60 个 MCP 工具**，按「主工具 + 专项工具」组织：主工具承担统一入口，专项工具各司其职。
 
 ### 能力导航（1 个）
 
@@ -132,6 +132,8 @@ npm run demo -- --prepare   # 只准备示例（构建+渲染+注册），不起
 ```
 
 > 用法提示：`capability_map` 是只读导航，无副作用。返回内容即「线 → 线内工具 → 何时用它」的三级地图，agent 据此选工具后再进入具体工具。高频工具（`get_dsl` / `edit_dsl` / `explore_code` / `rename_symbols` / `rename_files` / `find_references`）直接可用，无需先经本工具。
+>
+> 目录**由工具注册表自动派生**（`src/tools/capability_map.ts` 的 `LANE_OF` 只写「工具 → 线」归属，`when` 缺省取注册描述首句）：新增工具只需补一行归属，不会与注册表脱节；漏标的工具会在输出里单列「未归线」段显式暴露，不会静默消失。一致性由 `tests/tools/capability_map.test.ts` 对真实 `TOOL_DEFS` 断言兜底。
 
 ### 主工具（8 个）
 
