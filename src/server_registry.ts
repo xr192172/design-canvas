@@ -18,6 +18,7 @@ import { makeCapabilityMapHandler, LANE_IDS, type LaneId } from './tools/capabil
 import { ensureProjectIndex } from './tools/index_freshness.js';
 import { unknownArgHints, renderArgHints } from './tools/arg_suggest.js';
 import { listFileSnapshots, rollbackFileSnapshot } from './tools/file_snapshot.js';
+import { recommendObservePoints } from './tools/observe_points.js';
 import { collectPendingAlertText, dispatchDslEdit } from './daemon/dispatch.js';
 import { renderDesign } from './tools/render_design.js';
 import { exportSvg, exportMarkdown } from './tools/export.js';
@@ -1507,6 +1508,52 @@ const TOOL_DEFS: ToolDef[] = [
       scope: z.boolean().optional().describe('仅 TS：开启 scope 模式（try/finally 包裹函数体注入 enterScope/exitScope，录带帧调用树），默认 false（captureProbe 点探针）'),
     },
     handler: observeInstrumentHandler,
+  },
+  {
+    name: 'recommend_observe_points',
+    title: 'Recommend where to instrument (observe points)',
+    description:
+      '★ 观测点推荐器：**不做全量插桩**，而是先用索引/图 + AST 语义算出「该在哪打日志」，只在推荐点上插。' +
+      '信号：高被引用（call 入度）/ 最近真改过的符号（symbol_diffs）/ 副作用边界（span 内 IO 调用，启发式）/' +
+      '静默吞错（catch 块内无 throw/日志，启发式）/ 复杂度高地（行数）/ 文件热点（24h 内改动）。' +
+      '每个点给出 score 与 reasons（为什么推荐它——这份「理由」本身就是整理日志的骨架）。' +
+      'key 取自**插桩器自身的 dry-run 站点清单**（`<mod>.<fn>.enter/.exit/.catch/.io.<op>`），' +
+      '与 contractProbes 精确匹配 ⇒ 推荐出来的点一定插得出来，不会漂移。' +
+      '输出清单落 `<project_dir>/.design-canvas/observe-points.json`（可人工增删/改 level），' +
+      '再把 contractProbes 交给 observe_instrument 即可只插这些点。' +
+      '预算按分数裁剪（max_points），被截断的如实列出——不搞环形缓冲那套事后策略。',
+    inputSchema: {
+      project_dir: z.string().describe('目标项目根目录（空库会自动冷启建索引，无需先 import_project）'),
+      focus: z
+        .string()
+        .optional()
+        .describe('★ 任务定向：只关心某个子系统/主题时传它（正则，如 `conveyor|spill|cache`）—— 命中的符号优先扫描并加分。不传 = 按全局信号排序'),
+      focus_paths: z.array(z.string()).optional().describe('路径前缀白名单（posix 分隔，如 packages/conveyor-context）'),
+      max_points: z.number().int().min(1).optional().describe('最多保留多少个观测点（默认 40，超出按分数截断）'),
+      max_files: z.number().int().min(1).optional().describe('最多对多少个候选文件跑 dry-run 插桩（默认 20，控制耗时）'),
+      write: z.boolean().optional().describe('false=只返回不落盘（默认 true，写 observe-points.json）'),
+    },
+    handler: wrapData(async (a) => {
+      const input = a as unknown as {
+        project_dir: string;
+        focus?: string;
+        focus_paths?: string[];
+        max_points?: number;
+        max_files?: number;
+        write?: boolean;
+      };
+      const root = path.resolve(input.project_dir);
+      // ★ 零前置：索引为空就地冷启（推荐器建立在索引之上）
+      const { db } = await ensureProjectIndex(root);
+      const r = await recommendObservePoints(db, root, {
+        maxPoints: input.max_points,
+        maxFiles: input.max_files,
+        write: input.write,
+        focus: input.focus,
+        focusPaths: input.focus_paths,
+      });
+      return { message: r.summary, data: r };
+    }),
   },
   {
     name: 'edit_code',

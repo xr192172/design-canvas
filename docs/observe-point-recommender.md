@@ -10,6 +10,41 @@
 
 ---
 
+## 0. ★ v1 已实现（2026-09-14），实测数据与途中修掉的三个真 bug
+
+**代码**：`src/tools/observe_points.ts` + 工具 `recommend_observe_points`
+（入 `capability_map` 的 observe 线）；探针 `dsh-brain/scripts/probe-dc-observe-points.mjs`。
+
+**真项目实测（`D:\project_develop\dsh-brain`，冷启索引后 546ms）**：
+181 符号打分 / 20 文件 dry-run 插桩 / 746 站点 → 去重 307 → 按预算取 20（core 8 / event 12）。
+
+| 场景 | 结果 | 结论 |
+|---|---|---|
+| **不传 focus（全局）** | 前 20 全是 `switchboard`（热 + 高被引用 + 有 IO/吞错）；**与"缓存/压缩"相关 = 0 条** | ❌ 全局信号会被"最热的那块"吃满 → **看不出你真正关心的机理** |
+| **`focus='conveyor\|spill\|cache\|compact\|context\|prefix'`** | **前 8 条全是 `packages/conveyor-context/src/index.ts`**（`apply` / `execute` / `buildRecallHits` / `blocksToText` 的 enter/exit） | ✅ **任务定向之后，直接命中用户当初想看的那套系统** |
+
+**★ 途中修掉三个真 bug（都是"把推荐器跑起来"才暴露的）**：
+
+1. **插桩器的原型链误判（真源码注入 bug）**：`IO_CALLS[callee]` 是普通对象字面量查表 ⇒
+   `x.toString()`、`new Foo()`（callee=`constructor`）会命中**原型上的** `toString`/`constructor`，
+   于是把它当 IO 调用并注入名为 `mod.fn.function toString() { [native code] }` 的垃圾探针
+   ——**全量插桩会把这种坏探针写进用户代码，且永远匹配不上任何契约清单**。
+   修法：`hasOwnProperty` 判存在。**这条是"抄 Serena 式自动化"最有价值的副产品。**
+2. **推荐点重复**：探针名**不含行号**，同一符号内多个同类站点名字相同 ⇒ 必须**按 key 去重**
+   （并把出现次数记成理由"同符号内 N 处"，契约清单仍只需一项）。
+3. **理由数组别名**：`reasons` 是符号级共享数组，按站点 push 会把「聚焦命中」重复累积成几十条
+   ⇒ 必须新建数组/去重。（测试里加了防复发断言。）
+
+**另有两条设计补强**：
+- **多样性配额**（每符号 ≤3、每文件 ≤8）：否则一个热点文件吃满 40 个名额。
+- **`focus` / `focusPaths`（任务定向）**：命中者**加分 + 优先扫描 + 在预算里优先**，
+  否则"看某个机理"这件事根本做不到（见上表对比）。
+
+**同源保证**：推荐点的 key 取自**插桩器自己的 dry-run 站点**（`InstrumentedSite.probe`，
+本次给站点结构补了这个字段）⇒ 推荐出来的点**一定插得出来**，不会与 `contractProbes` 漂移。
+
+---
+
 ## 1. ★ 体检结论：现有资产已覆盖 5/6，只缺"谁来自动生成清单"
 
 | 环节 | 现状 | 位置 |

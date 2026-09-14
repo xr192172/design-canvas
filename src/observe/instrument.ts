@@ -63,6 +63,9 @@ export interface InstrumentedSite {
   line: number;
   kind: 'enter' | 'exit' | 'catch' | 'io' | 'deep';
   level: ProbeLevel;
+  /** ★ 探针名（与 contractProbes 精确匹配的 key，如 `mod.fn.enter`）；
+   *  由插桩器自己产出 —— 推荐器/台账都据此取 key，避免各处自己拼字符串导致漂移。 */
+  probe: string;
   // 注入的探针源码（用于报告）
   injected: string;
 }
@@ -568,12 +571,12 @@ function collectSites(
           while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
           const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
           const scopeEnter = `((globalThis as any).__probeScope?.enter ?? (()=>{}))(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj} });\ntry {\n`;
-          insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: scopeEnter } });
+          insertions.push({ index: entryIdx, site: { probe: probeName + '.enter', file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: scopeEnter } });
         }
         if (matchContract(probeName + '.exit', probes)) {
           const tailIdx = body.endIndex - 1; // 指向函数体 '}'
           const scopeExit = `\n} finally { ((globalThis as any).__probeScope?.exit ?? (()=>{}))(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)} }); }`;
-          insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: scopeExit } });
+          insertions.push({ index: tailIdx, site: { probe: probeName + '.exit', file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: scopeExit } });
         }
         return; // scope 模式下该函数不再注入逐点 captureProbe/return 探针
       }
@@ -586,7 +589,7 @@ function collectSites(
         while (entryIdx < content.length && /\s/.test(content[entryIdx])) entryIdx++;
         const argsObj = params.length ? `{ ${params.map((p) => `${p}: ${p}`).join(', ')} }` : '{}';
         const enterProbe = `captureProbe(${JSON.stringify(probeName + '.enter')}, { file: ${JSON.stringify(fileRel)}, args: ${argsObj}, level: 'core' });\n`;
-        insertions.push({ index: entryIdx, site: { file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: enterProbe } });
+        insertions.push({ index: entryIdx, site: { probe: probeName + '.enter', file, line: n.startPosition.row + 1, kind: 'enter', level: 'core', injected: enterProbe } });
       }
 
       // 出口：若函数体无 return，则在末尾补末尾出口探针（有 return 的由 return 分支负责）
@@ -597,7 +600,7 @@ function collectSites(
           // 在函数体最后一个 `}` 之前插入出口探针（保持函数体语法完整）
           const tailIdx = body.endIndex - 1; // 指向 '}'
           const exitProbe = `;captureProbe(${JSON.stringify(probeName + '.exit')}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
-          insertions.push({ index: tailIdx, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: exitProbe } });
+          insertions.push({ index: tailIdx, site: { probe: probeName + '.exit', file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: exitProbe } });
         }
       }
     }
@@ -620,7 +623,7 @@ function collectSites(
         const probeName = `${path.basename(file).replace('.ts', '')}.${fn}.catch`;
         if (matchContract(probeName, probes)) {
           const injected = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: 'catch', err: (e as Error)?.message ?? '', level: 'event' });\n`;
-          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'catch', level: 'event', injected } });
+          insertions.push({ index: idx, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'catch', level: 'event', injected } });
         }
       }
     }
@@ -629,13 +632,18 @@ function collectSites(
     if (n.type === 'call_expression') {
       const calleeNode = n.childForFieldName?.('function');
       const callee = calleeNode ? calleeNode.text.split('.').pop() || calleeNode.text : '';
-      if (IO_CALLS[callee]) {
+      // ★ 必须 hasOwnProperty 判存在：`IO_CALLS` 是普通对象字面量，原型上有 toString/constructor/
+      //   valueOf 等 —— 直接 `IO_CALLS[callee]` 会让 `x.toString()`、`new Foo()`（callee='constructor'）
+      //   这类调用**误判成 IO 探针**，并注入名为 `mod.fn.function toString() { [native code] }` 的垃圾探针
+      //   （2026-09-14 由观测点推荐器 dogfood 发现：全量插桩会往用户代码里插这种坏探针，且永远匹配不上契约清单）。
+      const ioOp = Object.prototype.hasOwnProperty.call(IO_CALLS, callee) ? IO_CALLS[callee] : undefined;
+      if (ioOp) {
         const idx = n.endIndex;
         const fnName = detectEnclosingFunction(root, n.startIndex);
-        const probeName = `${path.basename(file).replace('.ts', '')}.${fnName}.${IO_CALLS[callee]}`;
+        const probeName = `${path.basename(file).replace('.ts', '')}.${fnName}.${ioOp}`;
         if (matchContract(probeName, probes)) {
-          const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(IO_CALLS[callee])}, level: 'event' });`;
-          insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
+          const injected = `;captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, op: ${JSON.stringify(ioOp)}, level: 'event' });`;
+          insertions.push({ index: idx, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'io', level: 'event', injected } });
         }
       }
     }
@@ -734,7 +742,7 @@ function collectDeepSites(
           // 契约门：deep 探针名统一为 `mod.fn.deep`
           if (!matchContract(probeName, probes)) continue;
           const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(name)}, value: ${name}`);
-          insertions.push({ index: d.endIndex, site: { file, line: d.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+          insertions.push({ index: d.endIndex, site: { probe: probeName, file, line: d.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
         }
       }
     }
@@ -746,7 +754,7 @@ function collectDeepSites(
         const probeName = deepProbeName(root, file, n.startIndex);
         if (matchContract(probeName, probes)) {
           const injected = deepProbeInjected(probeName, fileRel, `name: ${JSON.stringify(left.text)}, value: ${left.text}`);
-          insertions.push({ index: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+          insertions.push({ index: n.endIndex, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
         }
       }
     }
@@ -766,7 +774,7 @@ function collectDeepSites(
             let idx = body.startIndex;
             if (content[idx] === '{') idx++;
             while (idx < content.length && /\s/.test(content[idx])) idx++;
-            insertions.push({ index: idx, site: { file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
+            insertions.push({ index: idx, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'deep', level: 'deep', injected } });
           }
         }
       }
@@ -802,7 +810,7 @@ function handleReturn(
   // 若做值捕获替换会破坏语法（`if (x) const T=null;` 非法），降级为仅返回标记。
   if (isBracelessGuardReturn(parent)) {
     const marker = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
-    insertions.push({ index: n.startIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
+    insertions.push({ index: n.startIndex, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
     return;
   }
 
@@ -811,11 +819,11 @@ function handleReturn(
     const tempVar = `__cam_ret${lineSuffix}`;
     // 替换整个 return 语句：`return <expr>;` → `const T=<expr>; probe; return T;`
     const replacement = `const ${tempVar} = ${expr.text};captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: ${tempVar}, level: 'core' });return ${tempVar};`;
-    insertions.push({ index: n.startIndex, removeTo: n.endIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: replacement } });
+    insertions.push({ index: n.startIndex, removeTo: n.endIndex, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: replacement } });
   } else {
     // 复杂表达式或裸 return：仅记录返回路径（不捕获值，避免双求值/冲突）
     const marker = `captureProbe(${JSON.stringify(probeName)}, { file: ${JSON.stringify(fileRel)}, ret: undefined, level: 'core' });`;
-    insertions.push({ index: n.startIndex, site: { file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
+    insertions.push({ index: n.startIndex, site: { probe: probeName, file, line: n.startPosition.row + 1, kind: 'exit', level: 'core', injected: marker } });
   }
 }
 

@@ -150,6 +150,7 @@ export const LANE_OF: Readonly<Record<string, LaneAssign>> = {
   reconcile_effects: { lane: 'observe', when: '对账函数/模块的实际效应与契约' },
   memory_targets: { lane: 'observe', when: '列出本机带 --inspect 的 node 进程（含 DSH gen），供 memory_observe 选 target' },
   memory_observe: { lane: 'observe', when: '外部进程内存观测（CDP 外连，不插目标进程）：status/baseline/track/gc，定位 JS 堆 vs native 泄漏方向' },
+  recommend_observe_points: { lane: 'observe', when: '★ 推荐该在哪打观测点（索引/图 + AST 语义打分，不做全量插桩）；输出可编辑清单 + 每条的理由' },
   // ── harvest · 契约 / 闭包采集 ──
   harvest_decisions: { lane: 'harvest', when: '从 docs/git log/注释粗提决策卡候选' },
   harvest_closure: { lane: 'harvest', when: '扫描闭包出产入盒三件套' },
