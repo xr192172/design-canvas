@@ -16,7 +16,7 @@
  */
 
 import { semanticSearch } from './semantic_search.js';
-import { ensureProjectIndex } from './index_freshness.js';
+import { ensureProjectIndex, ensureIndexAroundSeed } from './index_freshness.js';
 import { diffImpact } from './diff_impact.js';
 import { archLayer } from './arch_layer.js';
 import type { LayerDef } from './layer_detect.js';
@@ -114,8 +114,26 @@ export async function exploreCode(params: { action: ExploreAction; args: Record<
       return { message: lines.filter(Boolean).join('\n'), data: r };
     }
     case 'read': {
+      // ★ 拼图式局部索引（S1）：以"正在读的这个文件"为种子，按需建它周围的索引块 ——
+      //   不触发全量冷启（大仓首调会 12s+），也不假装完整：**覆盖度写进结果**。
+      //   只读路径可以用局部索引；编辑类工具仍必须先扩到闭合（见 docs/index-locality-design.md §4）。
+      let tileNote = '';
+      const readRootRaw = args['project_dir'];
+      const readFileRaw = args['file'];
+      if (typeof readRootRaw === 'string' && readRootRaw.trim() && typeof readFileRaw === 'string' && readFileRaw.trim()) {
+        try {
+          const tile = await ensureIndexAroundSeed(path.resolve(readRootRaw), [readFileRaw], { depth: 2, maxFiles: 200 });
+          if (tile.newFiles > 0 || tile.stitched > 0) {
+            tileNote = tile.partial
+              ? `\n（按需建索引：围绕该文件扩展 ${tile.visited} 个文件，新建 ${tile.newFiles}，缝合 ${tile.stitched}；**本轮覆盖不完整**（${tile.stopReason}），未覆盖区域的引用可能看不到）`
+              : `\n（按需建索引：围绕该文件扩展 ${tile.visited} 个文件，新建 ${tile.newFiles}，缝合 ${tile.stitched}）`;
+          }
+        } catch {
+          /* 拼图失败不阻断读取（索引是增强，不是前提） */
+        }
+      }
       const r = await readCode(args);
-      return { message: r.message, data: r.data };
+      return { message: r.message + tileNote, data: r.data };
     }
     case 'diff_impact': {
       // ★ 零前置：影响面分析依赖符号边（call/type_ref/import）。空库先就地冷启建索引，

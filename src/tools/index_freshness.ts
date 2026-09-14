@@ -114,6 +114,181 @@ export interface ProjectIndex {
   state: IndexState;
 }
 
+// ─────────────────────────────────────────────────────────────
+// ★ 拼图式局部索引（S1）：种子驱动 BFS + 缝合 + 预算
+//
+// 用户想法（2026-09-14）：「不用预建立，而是**及时建立**：从选中的文件为起点向周围拓展，
+// 直到撞上**已建立的索引**，然后连通在一起。」
+//
+// 实测收益（probe-dc-locality，296 文件项目，41.1ms/文件）：双向 2 跳闭包 17~122 文件
+// ⇒ 0.7~4.6s；而全量冷启 12.1s（省 62~94%）。
+//
+// ★ 纪律（不可让步）：**局部索引服务"读"，不服务"改"** —— 读少了只是"诚实地不完整"，
+// 改漏了是"静默改错"。所以编辑类工具必须先把闭包扩到闭合（S3），或拒绝。
+// 本函数只负责"读"侧：把种子周围建成拼图，并**如实返回覆盖度**。
+// ─────────────────────────────────────────────────────────────
+
+export interface TileOptions {
+  /** 扩展跳数（默认 2） */
+  depth?: number;
+  /** 本轮最多新建多少个文件（默认 200，防止一次扩展把大仓拖死） */
+  maxFiles?: number;
+  /** 扩展方向：both=出边+入边（默认，互相引用都算一块拼图） */
+  directions?: 'both' | 'out' | 'in';
+}
+
+export interface TileReport {
+  /** 种子（相对项目根） */
+  seeds: string[];
+  /** 本轮真正新建/更新的文件数 */
+  newFiles: number;
+  /** 同步失败的文件数（诚实上报：路径不在项目内/解析失败等） */
+  failed: number;
+  /** 撞上"已在索引里"的文件数（缝合点；这些不重新解析） */
+  stitched: number;
+  /** BFS 访问过的文件总数（含缝合的） */
+  visited: number;
+  /** 是否因预算/深度停下（= 覆盖不完整，调用方**必须**标注） */
+  partial: boolean;
+  /** 停止原因（人读） */
+  stopReason: 'queue-empty' | 'budget' | 'depth' | 'no-seed';
+  ms: number;
+}
+
+/** 节点 id → 文件相对路径 */
+const fileOfNode = (id: string): string => id.split('#')[0];
+
+/**
+ * 从种子出发、沿 import/call/type_ref 边双向扩展，把种子周围的"拼图"建进索引。
+ * 已在 `files` 表里的文件**不重新解析**（缝合点）；新文件走 `syncFile`（本身幂等增量）。
+ */
+export async function ensureIndexAround(
+  db: Database,
+  projectRoot: string,
+  seeds: readonly string[],
+  opts: TileOptions = {},
+): Promise<TileReport> {
+  const t0 = Date.now();
+  const root = path.resolve(projectRoot);
+  const depth = opts.depth ?? 2;
+  const maxFiles = opts.maxFiles ?? 200;
+  const dirs = opts.directions ?? 'both';
+
+  const relSeeds = seeds
+    .filter(Boolean)
+    .map((s) => {
+      const abs = path.isAbsolute(s) ? s : path.resolve(root, s);
+      return path.relative(root, abs).split(path.sep).join('/');
+    })
+    .filter((r) => r && !r.startsWith('..'));
+
+  const report: TileReport = {
+    seeds: relSeeds,
+    newFiles: 0,
+    failed: 0,
+    stitched: 0,
+    visited: 0,
+    partial: false,
+    stopReason: 'queue-empty',
+    ms: 0,
+  };
+  if (!relSeeds.length) {
+    report.stopReason = 'no-seed';
+    report.ms = Date.now() - t0;
+    return report;
+  }
+
+  const isIndexed = (rel: string): boolean =>
+    !!db.prepare('SELECT 1 x FROM files WHERE path = $p').get({ p: rel });
+
+  /** 已索引文件在图里的邻居（纯 DB 计算，不解析） */
+  const neighbors = (rel: string): string[] => {
+    // ⚠️ 两种节点 id 形式都要覆盖：
+    //   - import 边：source/target 是**文件节点 id**（`src/a.ts`，无 #）
+    //   - call/type_ref 边：source/target 是**符号节点 id**（`src/a.ts#fn`）
+    //   只写 `LIKE 'rel#%'` 会漏掉 import 边（初次实现就踩了，测试逮住）。
+    const out = db
+      .prepare(
+        "SELECT DISTINCT target FROM edges WHERE (source = $f OR source LIKE $fp) AND kind IN ('import','call','type_ref')",
+      )
+      .all({ f: rel, fp: `${rel}#%` }) as Array<{ target: string }>;
+    const outFiles = new Set(out.map((r) => fileOfNode(r.target)).filter((f) => f && f !== rel));
+    if (dirs === 'out') return [...outFiles];
+    const inRows = db
+      .prepare(
+        "SELECT DISTINCT source FROM edges WHERE (target = $f OR target LIKE $fp) AND kind IN ('import','call','type_ref')",
+      )
+      .all({ f: rel, fp: `${rel}#%` }) as Array<{ source: string }>;
+    const inFiles = new Set(inRows.map((r) => fileOfNode(r.source)).filter((f) => f && f !== rel));
+    for (const f of inFiles) outFiles.add(f);
+    return [...outFiles];
+  };
+
+  const seen = new Set<string>(relSeeds);
+  let frontier = [...relSeeds];
+  let hop = 0;
+  // 轮 0 = 种子本身（**永远处理**，depth=0 即"只建种子们"）；轮 k = 第 k 跳邻居
+  for (; hop <= depth; hop++) {
+    const next: string[] = [];
+    for (const rel of frontier) {
+      const abs = path.join(root, rel);
+      if (isIndexed(rel)) {
+        report.stitched++; // 缝合点：不重新解析
+      } else {
+        if (report.newFiles >= maxFiles) {
+          report.partial = true;
+          report.stopReason = 'budget';
+          break;
+        }
+        try {
+          const sr = await syncFile(db, root, abs);
+          // 只把"真写进去的"算新建；failed/skipped 如实分开计（否则会把失败当成果）
+          if (sr.status === 'updated') report.newFiles++;
+          else if (sr.status === 'failed') report.failed++;
+        } catch {
+          report.failed++;
+        }
+      }
+      report.visited++;
+      if (isIndexed(rel)) for (const nb of neighbors(rel)) if (!seen.has(nb)) (seen.add(nb), next.push(nb));
+    }
+    if (report.stopReason === 'budget') break;
+    if (!next.length) break;
+    frontier = next;
+  }
+  if (report.stopReason !== 'budget' && hop > depth && frontier.length) {
+    report.partial = true;
+    report.stopReason = 'depth';
+  }
+  // ★ 收尾：把本块新产生的**未决跨文件引用**解析掉（否则"谁引用我"方向看不到边）。
+  //   与 syncProject 的收尾同一件事；只在真新建了文件时才做。
+  if (report.newFiles > 0) {
+    try {
+      resolveCrossFileCalls(db, root);
+    } catch {
+      /* 解析失败不阻断：pending 留待下轮 */
+    }
+  }
+  report.ms = Date.now() - t0;
+  return report;
+}
+
+/**
+ * 便捷包装（给只拿到 projectRoot 的调用方）：打开/新建索引库 → 建种子拼图。
+ * **注意**：它**不会**触发全量冷启——索引为空时只建种子周围的块（这正是"及时建立"的语义）。
+ */
+export async function ensureIndexAroundSeed(
+  projectRoot: string,
+  seeds: readonly string[],
+  opts: TileOptions = {},
+): Promise<TileReport & { db: Database }> {
+  const root = path.resolve(projectRoot);
+  const db = getProjectCacheDb(root);
+  const report = await ensureIndexAround(db, root, seeds, opts);
+  return { ...report, db };
+}
+
+
 /**
  * ★ 零前置统一入口：**拿到"已就绪"的项目索引库**。
  *

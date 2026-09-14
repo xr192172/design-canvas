@@ -112,16 +112,72 @@ ensureIndexAround(db, root, seeds, { depth = 2, maxFiles = 200, directions = 'bo
 
 ---
 
-## 7. 落地顺序（待拍板）
+## 7. 落地进度
 
-| 步 | 内容 | 收益 |
+| 步 | 内容 | 状态 |
 |---|---|---|
-| **S1** | `ensureIndexAround()` + 只读路径接线 + `coverage` 标注 | 首调用 12s → **~1–2s** |
-| **S2** | 后台续建（先返回 `state=indexing`，空闲补齐）+ 与 S1 缝合 | 全局类查询可用 |
-| **S3** | 编辑路径"扩到闭合或拒绝"（把 §4 纪律写成测试） | 安全底线 |
-| **S4** | （可选）bootstrap 期间推迟 FTS 维护 | 单文件成本 41 → 预计 ~25ms |
+| **S1** | `ensureIndexAround()` + 只读路径接线 + `coverage` 标注 | ✅ **已实现（2026-09-14）** 见下表 |
+| **S2** | 后台续建 + 与 S1 缝合（含"入边方向"的磁盘反查） | ⏳ |
+| **S3** | 编辑路径"扩到闭合或拒绝"（把 §4 纪律写成测试） | ⏳ |
+| **S4** | bootstrap 期间推迟 FTS 维护（41 → ~25ms/文件） | ⏳ |
 
-**判据（可执行）**：S1 完成后，跑 `probe-dc-locality.mjs` 与 `probe-dc-cold-start.mjs`：
-- 首调用（种子=1 文件，深度 2）**< 2s**；
-- 且 `coverage.partial` 在结果里可见；
-- 编辑类工具在 `partial` 下**拒绝执行**（而不是给半份答案）。
+### S1 实测（`probe-dc-locality.mjs --tile`，296 文件项目，种子=1 文件、双向 2 跳、预算 200）
+
+| 种子 | 新建 | 缝合 | 访问 | **耗时** |
+|---|---|---|---|---|
+| `tools/edit_code.ts` | 10 | 0 | 10 | **1770ms** |
+| `db/symbols.ts` | 0 | **10** | 10 | **2ms** ← 全缝合（该块已由前一个种子顺带建过） |
+| `observe/instrument.ts` | 3 | 3 | 6 | 422ms |
+| `tools/import_project.ts` | 9 | 7 | 16 | 2150ms |
+| （参考）**全量冷启 296 文件** | 296 | — | — | **12151ms** |
+
+⇒ 平均 **~1.1s，省 91%**；"撞上已建好的块 ⇒ 2ms 零成本缝合"也实测到了。
+接线点：`explore_code(action=read)`（以正在读的文件为种子；结果里附覆盖度注记）。
+
+**S1 的如实边界（重要）**：**入边方向（"谁引用我"）只能看见"已在索引里的引用方"** ——
+因为引用方未索引时，它的 import/call 边还不存在（表格里的边是解析产物）。
+所以 `partial` 会如实置位；要"谁引用我"完整，需要 S2 的磁盘反查或全量索引。
+（单元测试里有一条专门**钉住这个边界**，防止它被悄悄当成"完整"。）
+
+---
+
+## 8. 增量更新逻辑（回答"看门狗触发更新后，AST 这部分怎么算"）
+
+### 8.1 结论：**不是重算全仓，也不只是"重算引用"；分四档，各司其职**
+
+| 档 | 触发 | 做什么 | 代价 |
+|---|---|---|---|
+| **① mtime/size** | 文件被碰过 | `files.modified_at/size` 比对；**没变就直接跳过（连读内容都不读）** | ≈0 |
+| **② content_hash** | 碰过但可能没真改（git checkout / 编辑器 touch） | 读内容算 hash；与 `files.content_hash` **相同 ⇒ skipped，不解析 AST** | 读文件 |
+| **③ 真变了 → 重解析这个文件** | 内容 hash 不同 | `parseFileFull(file)`（AST）→ 重写**该文件自己的** nodes/edges/imports/未决引用；同时用 `symbolSpanHash` 逐符号算 span 归一化 hash，产出 `symbol_diffs`（added/removed/changed），并用 `norm_hash`（剔注释+去空白）区分"符号外变更" | 17.8ms/文件 + DB |
+| **④ 跨文件引用解析** | 上一步产生了**未决引用**（`unresolved_refs` 里同文件内没命中的 call/type_ref） | `resolveCrossFileCalls()` **只查索引里已有的符号表**（`SELECT name, file_path FROM nodes`）+ 本文件的 import 边定位目标文件 → 写 `edges(kind='call', metadata.cross=true)`。**不重解析任何其它文件** | 纯 DB |
+
+⇒ **你的直觉对了一半**：确实"不需要重算全仓"，而且**跨文件引用解析确实不重解析对方**（只查符号表）。
+但**AST 的重算粒度是"文件"而不是"引用"**：一个文件内容变了，它的整棵 AST 会重新解析一遍
+（`parseFileFull` 是文件级 API）；引用只是解析产物之一。也就是说：
+
+- **改 A 文件** ⇒ 重解析 A（AST）→ A 的边/未决项重写 → ④ 把 A 的跨文件引用解析到 B/C…（B/C 不动）；
+- **改 B 文件的注释/格式** ⇒ ② 或 `norm_hash` 判为"符号外变更" ⇒ 可以不重写符号表（避免无谓波及）。
+
+### 8.2 ★ 今天发现的一个真缺口：**被改符号的"引用方"不会自动重算**
+
+`syncFile` 清边是**按 source** 清的（`DELETE FROM edges WHERE source = <本文件>…`，import/call/type_ref 三处）。
+于是：
+
+- **走工具改名**（`rename_symbols`）：工具自己会把引用方文本改掉 → 引用方被重解析 → 边跟着更新 ✅
+- **在编辑器里手工把 B 的函数改名/删掉**：B 的旧符号节点没了，但 **A 里指向 `B#oldName` 的边仍在**
+  → 索引里出现**悬空边**（`find_references`/`impact_analysis` 会因此误报或漏报）❌
+
+**修法方向（S2/S3 一起做）**：符号 removed/changed 时，先用 `edges WHERE target IN (变更前符号)` 找出
+**引用方文件**，把它们标记为"需重解析"（只重解析这些引用方，不重解析全仓）——
+这才是"只重算引用部分"的**完整版**：不是只重算"被改文件的引用"，还要重算"指向它的文件"。
+
+### 8.3 看门狗（watch）：已有，但需要"拼图化"
+
+- 现状：`watch_project`（`explore_code action=watch`）已有 `fs.watch` + **周期 reconcile 兜底**
+  （fs.watch 会丢事件）+ `drift_on_change`；reconcile 会把**变更文件**透出（`changed_files`）。
+- 拼图化之后要补的两点：
+  1. **watch 范围收窄到"已索引区域"**（现在 watch 整个项目根）——拼图只对已建块负责；
+  2. **边界扩展**：边界处出现**新文件**时，把它并入相邻块（否则新文件要等下一次种子扩展才可见）。
+- 这两点都属于 S2（后台续建）的自然延伸：**前台按需建块 → 后台 watch 维护块**。
+
